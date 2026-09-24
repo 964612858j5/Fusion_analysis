@@ -423,6 +423,23 @@ def test_load_state_shows_the_same_in_the_strip_and_in_the_menu(win, state, glyp
     assert win._patch_menu_actions[11].text() == f"P12{glyph}"
 
 
+@pytest.mark.parametrize("state", ["idle", "loading", "ready", "error"])
+def test_every_patch_button_wears_its_patch_colour_in_every_state(win, state):
+    # User ruling 2026-09-24: Step1's buttons were grey until a patch was
+    # preloaded, which the whole-slide viewer never does. They now look
+    # exactly like Step0's, in the patch's colour -- the same colour as its
+    # tile in the Pre-segmentation strip; the state is the label's glyph.
+    from block01.ui.step0.roi_context_model import patch_color
+    from block01.ui.step0.step0_page import patch_button_qss
+    win._on_patches(_patches(5))
+    for i in range(5):
+        win._set_patch_btn_state(i, state)
+        color = patch_color(win._all_patches[i], i)
+        assert win._patch_sel_btns[i].styleSheet() == patch_button_qss(color)
+        assert "#666" not in win._patch_sel_btns[i].styleSheet()
+        assert win._preseg_patches.tiles()[i]._color == color
+
+
 def test_a_rebuild_restores_the_state_of_menu_only_patches(win):
     win._on_patches(_patches(20))
     win._patch_load_ready.add(11)

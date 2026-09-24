@@ -38,7 +38,7 @@ from ...core.channel_remap import apply_channel_remap
 from ...utils import dataset_trace
 from ...utils import tissue_log
 from ...utils import perf_trace
-from .roi_context_model import Patch, default_patch_name, patch_id
+from .roi_context_model import Patch, default_patch_name, patch_color_for_id, patch_id
 
 class TileSelectDialog(QDialog):
     """
@@ -2742,7 +2742,7 @@ class OverviewPanel(QWidget):
 
         for i, pd in enumerate(self._patches):
             x, y, w, h = self._patch_display_rect(i)
-            color = PATCH_COLORS[i % len(PATCH_COLORS)]
+            color = patch_color_for_id(pd.get("id"), i)
             selected = (i == self._selected_patch_idx)
             # A plain rect item, not an interactive pyqtgraph ROI: every patch
             # but the selected one is pure decoration, and the selected one is
@@ -2825,7 +2825,7 @@ class OverviewPanel(QWidget):
         if self._patches:
             lines.append("<span style='color:#bbb'>Patches: "
                          + "  ".join(
-                             f"<span style='color:{PATCH_COLORS[i%len(PATCH_COLORS)]}'>"
+                             f"<span style='color:{patch_color_for_id(self._patches[i].get('id'), i)}'>"
                              f"{self.patch_name(i)}</span>"
                              for i in range(len(self._patches))
                          ) + "</span>")

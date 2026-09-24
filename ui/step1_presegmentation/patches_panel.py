@@ -20,8 +20,7 @@ import time
 from PyQt5 import QtWidgets
 from PyQt5.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
 
-from ...config import PATCH_COLORS
-from ..step0.roi_context_model import patch_id, patch_name
+from ..step0.roi_context_model import patch_color, patch_id, patch_name
 
 TILE_H = 24
 TILE_MIN_W = 44
@@ -286,7 +285,7 @@ class PatchesPanel(QtWidgets.QWidget):
             if pid is None:
                 pid = i + 1
             live.add(pid)
-            color = PATCH_COLORS[i % len(PATCH_COLORS)]
+            color = patch_color(p, i)
             tile = PatchTile(pid, patch_name(p, i), color,
                              checked=pid not in self._unticked, parent=self._tile_host)
             tile.toggled.connect(self._on_tile_toggled)

@@ -70,9 +70,10 @@ from ..utils.roi_project import (
 from ..workers.cellpose_worker import PreviewLoaderThread, run_cellpose_process
 from ..workers.preview_compose_worker import PreviewComposeWorker
 from ..workers.mesmer_worker import run_mesmer_patch_preview
-from .step0.step0_page import Step0Page
+from .step0.step0_page import Step0Page, patch_button_qss
 from .step0.roi_context_model import (
-    Patch, patch_from_record, patch_id as _patch_id_of, patch_name as _patch_name_of,
+    Patch, patch_color as _patch_color_of, patch_from_record, patch_id as _patch_id_of,
+    patch_name as _patch_name_of,
     with_patch_ids)
 from .block01_display import (
     Block01DisplayServices, STEP0 as _CTX_STEP0, STEP1 as _CTX_STEP1,
@@ -4794,33 +4795,14 @@ class MainWindow(QMainWindow):
             actions[idx].setText(label)
         if idx >= len(self._patch_sel_btns):
             return
-        btn   = self._patch_sel_btns[idx]
-        color = PATCH_COLORS[idx % len(PATCH_COLORS)]
-        styles = {
-            'idle': (
-                f"QPushButton{{color:#666;border:1px solid #444;"
-                f"border-radius:3px;font-size:10px;font-weight:bold;background:#1a1a1a;}}"
-                f"QPushButton:checked{{background:#333;color:#aaa;}}"
-            ),
-            'loading': (
-                f"QPushButton{{color:#fa8;border:1px solid #fa8;"
-                f"border-radius:3px;font-size:10px;font-weight:bold;background:#1a1a1a;}}"
-                f"QPushButton:checked{{background:#321;color:#fa8;}}"
-            ),
-            'ready': (
-                f"QPushButton{{color:{color};border:1px solid {color};"
-                f"border-radius:3px;font-size:10px;font-weight:bold;background:#1a1a1a;}}"
-                f"QPushButton:checked{{background:{color};color:#111;}}"
-                f"QPushButton:hover{{background:#2a2a2a;}}"
-            ),
-            'error': (
-                f"QPushButton{{color:#f44;border:1px solid #f44;"
-                f"border-radius:3px;font-size:10px;font-weight:bold;background:#1a1a1a;}}"
-                f"QPushButton:checked{{background:#311;color:#f88;}}"
-            ),
-        }
+        btn = self._patch_sel_btns[idx]
         btn.setText(label)
-        btn.setStyleSheet(styles.get(state, styles['idle']))
+        # Always the patch's own colour, exactly Step0's button (user ruling,
+        # 2026-09-24): the grey "not preloaded" look left every button grey
+        # under the whole-slide viewer, which preloads nothing. The state is
+        # the glyph in the label (⟳ ✓ ✗).
+        patch = self._all_patches[idx] if idx < len(self._all_patches) else None
+        btn.setStyleSheet(patch_button_qss(_patch_color_of(patch, idx)))
 
     # ── ROI changes ─────────────────────────────────────────────────
 

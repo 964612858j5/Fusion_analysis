@@ -95,7 +95,21 @@ from ..widgets.channel_dock import template as channel_template
 from ..block01_display import (
     Block01DisplayServices, STEP0 as _CTX_STEP0, _to_hex as _color_hex,
 )
-from .roi_context_model import RoiContextModel, patch_name
+from .roi_context_model import RoiContextModel, patch_color, patch_name
+
+
+def patch_button_qss(color):
+    """The patch selector button's look, in the patch's own colour.
+
+    ONE definition for Step0's and Step1's patch buttons (user ruling,
+    2026-09-24: Step1's buttons were grey until a patch had been preloaded,
+    which the whole-slide viewer never does). Load state is the label's
+    glyph, not the colour.
+    """
+    return (f"QPushButton{{color:{color};border:1px solid {color};"
+            f"border-radius:3px;font-size:10px;font-weight:bold;background:#1a1a1a;}}"
+            f"QPushButton:checked{{background:{color};color:#111;}}"
+            f"QPushButton:hover{{background:#2a2a2a;}}")
 from ...utils.channel_remap_config import (
     save_channel_remap_config,
     load_channel_remap_config,
@@ -9175,14 +9189,7 @@ class Step0Page(QWidget):
                 btn.setProperty("patch_index", i)
                 btn.setCheckable(True)
                 btn.setFixedSize(PATCH_BTN_W, PATCH_BTN_H)
-                color = PATCH_COLORS[i % len(PATCH_COLORS)]
-                # Step1's style for a patch that is ready to show.
-                btn.setStyleSheet(
-                    f"QPushButton{{color:{color};border:1px solid {color};"
-                    f"border-radius:3px;font-size:10px;font-weight:bold;background:#1a1a1a;}}"
-                    f"QPushButton:checked{{background:{color};color:#111;}}"
-                    f"QPushButton:hover{{background:#2a2a2a;}}"
-                )
+                btn.setStyleSheet(patch_button_qss(patch_color(self.patches[i], i)))
                 btn.clicked.connect(lambda _checked, idx=i: self._select_patch(idx))
                 btn.setChecked(i == self.current_patch_idx)
                 row.addWidget(btn)

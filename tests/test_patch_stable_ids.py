@@ -195,6 +195,44 @@ def test_deleting_p2_leaves_p3_and_a_new_patch_is_p4_everywhere(app, tmp_path):
         w.close()
 
 
+def test_a_patch_keeps_its_colour_in_every_view_when_another_is_deleted(app, tmp_path):
+    # User ruling 2026-09-24: colour follows the permanent id, not the
+    # position -- deleting P2 must not hand P3 the colour P2 had.
+    from block01.config import PATCH_COLORS
+    w, _ = _window(app, tmp_path)
+    try:
+        w._show_tissue_navigator()
+        nav = w._step0._tissue_navigator_popup.overview
+        nav.add_patch_rect(16, 32, 16, 32, roi_idx=0)
+        _settle(w)
+        nav.add_patch_rect(32, 48, 32, 48, roi_idx=0)
+        _settle(w)
+        p3 = PATCH_COLORS[2]
+        nav._remove_patch(1)                                   # delete P2
+        assert _settle(w) == "published"
+
+        def canvas_colour(panel, i):
+            return panel._patch_artists[i][0].pen().color().name()
+
+        for panel in (nav, w._step0.overview):
+            assert _names(panel) == ["P1", "P3"]
+            assert canvas_colour(panel, 1) == p3.lower()
+        s0_btn = [b for row in w._step0._all_patch_rows()
+                  for b in (row.itemAt(k).widget() for k in range(row.count()))
+                  if isinstance(b, QtWidgets.QPushButton) and b.property("patch_index") == 1][0]
+        assert f"color:{p3}" in s0_btn.styleSheet()
+        assert f"color:{p3}" in w._patch_sel_btns[1].styleSheet()
+        assert w._preseg_patches.tiles()[1]._color == p3
+        page15 = w._step1_5
+        page15.set_context(w.loader, str(tmp_path / "s15"), list(w._all_patches), "DAPI")
+        b15 = [page15._patch_buttons_row.itemAt(k).widget()
+               for k in range(page15._patch_buttons_row.count())
+               if isinstance(page15._patch_buttons_row.itemAt(k).widget(), QtWidgets.QPushButton)]
+        assert f"color:{p3}" in b15[1].styleSheet()
+    finally:
+        w.close()
+
+
 # ── rename ──────────────────────────────────────────────────────────────────
 def test_a_double_click_rename_reaches_every_view_and_is_published(app, tmp_path, monkeypatch):
     from block01.ui.step0 import step0_page as sp

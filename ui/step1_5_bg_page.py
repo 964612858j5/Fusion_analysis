@@ -32,7 +32,7 @@ from ..core.bg_correction import (
     _apply_background_method_tiled, _compute_bg_metrics,
 )
 from ..core.io_loader import OMETIFFLoader
-from .step0.roi_context_model import patch_name
+from .step0.roi_context_model import patch_color, patch_name
 from .step0.search_ctrl import (
     BatchProcessWorker, WsiCorrectionWorker, _WsiCorrectionProgressDialog,
 )
@@ -540,7 +540,7 @@ class Step15BackgroundCorrectionPage(QWidget):
             btn.setProperty('patch_index', i)
             btn.setCheckable(True)
             btn.setFixedSize(44, 22)
-            color = PATCH_COLORS[i % len(PATCH_COLORS)]
+            color = patch_color(self.patches[i], i)
             btn.setStyleSheet(
                 f'QPushButton{{color:{color};border:1px solid {color};border-radius:3px;background:#1a1a1a;font-size:10px;font-weight:bold;}}'
                 f'QPushButton:checked{{background:{color};color:#111;}}'

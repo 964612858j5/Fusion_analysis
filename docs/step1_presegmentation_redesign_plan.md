@@ -9,6 +9,7 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.17：Step1 patch 按钮统一用 patch 色（与 Step0 共用样式）。
 - v3.16：左栏标签页 Channels 改名为 Fusion。
 - v3.15：A2 后续：Delete（删除勾选的 patch）、标签页改名为 Pre-segmentation。
 - v3.14：A2 已执行（实测、用户裁定层级为固定 16×、实现、测试）。
@@ -474,6 +475,25 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
 - 左栏第一个标签页从 `Channels` 改名为 **`Fusion`**。原因：标签页里的框标题 `Channels` 与 Step0 保持一致，标签页再叫 Channels 就重复了。这个页面定义的是 fusion（勾选、权重、Save Fusion Settings），与 `Pre-segmentation` 放在一起，正好对应 Step1 标题的前后两半。
 - 框标题 `Channels` 和 Step0 都**不改**。
 - 按用户要求只跑相关测试，**不做全量回归**：`test_step1_layout_block_a`、`test_ui_surface_contract`、`test_step1_channel_panel`、`test_step1_patches_panel`、`test_global_channel_dock`、`test_step0_step1_surface_details` 全部通过。
+
+**Step1 patch 按钮配色**（2026-09-24，用户裁定；上一批改动已提交为 `0cf9f04`）：
+- **原因**：Step1 viewer 顶部的 patch 按钮按预载状态上色，只有 ready 才显示 patch 色，其余状态是灰色；而整张切片 viewer 从不预载，所以按钮一直是灰的。
+- **改为**：
+  - 按钮一律用 patch 自己的颜色，样式与 Step0 按钮**完全相同**。
+  - 样式由同一个 `patch_button_qss(color)`（`ui/step0/step0_page.py`）生成，Step0 和 Step1 共用，符合 R14「一套轮子」。
+  - 加载状态只由标签上的 ⟳ / ✓ / ✗ 表示。
+- **取色方式**：与 Step0 按钮、Pre-segmentation 条带、Navigator 画布一样，按 patch 在列表中的位置取 `PATCH_COLORS`，所以四处颜色一致。
+  - **已按用户裁定修改（2026-09-24）**：改为按 patch 的**永久编号**取色，`P<n>` 用第 n-1 号颜色，所以删掉 P2 之后 P3 仍保持原来的颜色。从没编辑过的列表，编号与位置一致，颜色和改之前完全相同。
+    - 取色统一用 `patch_color` / `patch_color_for_id`（`ui/step0/roi_context_model.py`）。
+    - 使用这两个函数的地方：Navigator 画布与 Step0 画布（标签框和信息行）、Step0 按钮、Step1 按钮、Pre-segmentation tile、Step1.5 按钮。
+    - 旧的结果网格 `result_grid.py` 仍按行号取色，它会在块 E 退场。
+    - 新增 `test_a_patch_keeps_its_colour_in_every_view_when_another_is_deleted`。把取色反向注入为按位置后，这条测试会失败。
+    - 相关模块全部通过。`test_step0_channel_conditioning` 第一次运行多出 1 条失败，重跑整个模块后只剩基线的 6 条；相关测试单独跑 3 次都通过，属于附录记录过的偶发失败。
+    - 按用户要求**没有做全量回归**。
+- **测试**：
+  - 新增 `test_every_patch_button_wears_its_patch_colour_in_every_state`：四种状态下，按钮样式都等于 Step0 样式，且与条带 tile 同色。
+  - 在旧代码上，idle、loading、error 三种状态会失败。
+  - 相关模块通过：patch selector、Step0/Step1 surface、patches 条带、稳定编号、几何同步。`test_step0_channel_conditioning` 的 6 条失败与基线相同。
 
 ### 块 B — Methods 区、`+` 弹窗、方案的保存和加载
 - **白名单**：

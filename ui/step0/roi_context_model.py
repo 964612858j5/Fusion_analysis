@@ -69,6 +69,21 @@ def patch_name(patch, index):
     return name or default_patch_name(index + 1)
 
 
+def patch_color_for_id(pid, index):
+    """A patch's colour, fixed by its permanent id (user ruling, 2026-09-24):
+    P3 keeps its colour when P2 is deleted. `P<n>` takes the (n-1)th colour,
+    so a list that was never edited looks exactly as it did by position.
+    `index` is only the fallback for a bare rectangle without an id."""
+    from ...config import PATCH_COLORS
+    key = int(pid) - 1 if pid is not None else int(index)
+    return PATCH_COLORS[key % len(PATCH_COLORS)]
+
+
+def patch_color(patch, index):
+    """`patch_color_for_id` for a Patch (or a bare rectangle at `index`)."""
+    return patch_color_for_id(patch_id(patch), index)
+
+
 def same_patches(a, b):
     """Same rectangles AND the same identities, in the same order."""
     a, b = list(a or []), list(b or [])

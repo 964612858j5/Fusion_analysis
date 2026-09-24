@@ -133,6 +133,8 @@ class MontageOverlay(QtWidgets.QWidget):
         tr = self.canvas_transform()
         scale = abs(tr.m11())
         self.drawn_paths = 0
+        self._bucket = mask_layers.lod_bucket(scale)
+        self._wanted = []
         for i, patch in enumerate(view.layout_table.patches):
             r = self.widget_rect(view.layout_table.rect(i))
             if r.intersects(area):
@@ -152,6 +154,10 @@ class MontageOverlay(QtWidgets.QWidget):
                 p.setPen(QtGui.QColor(MontageView.LABEL_COLOR))
                 p.drawText(box, QtCore.Qt.AlignCenter, name)
         p.end()
+        if self._wanted:
+            # after this paint: the supply builds them, the page adds them
+            wanted, self._wanted = list(self._wanted), []
+            QtCore.QTimer.singleShot(0, lambda: view.paths_wanted.emit(wanted))
 
     def _paint_results(self, p, i, patch, r, tr, scale, metrics):
         """This patch's outlines, then its `failed` / `0 cells` tags, for
@@ -179,12 +185,18 @@ class MontageOverlay(QtWidgets.QWidget):
                     continue
                 if out["median_d"] * scale < mask_layers.MIN_CELL_SCREEN_PX:
                     continue                      # too small to see: frames only
-                path = view.path_for(cid, bbox, kind)
+                path, exact = view.path_at(cid, bbox, kind, self._bucket)
+                if not exact and out.get("key") is not None:
+                    self._wanted.append((out["key"], self._bucket))
+                if path is None:
+                    continue                      # its first path is on its way
                 pen = MontageView._pen(QtGui.QColor(st["color"]), st["width"])
                 if dashed:
                     pen.setStyle(QtCore.Qt.DashLine)
+                y, x, _, _ = view.layout_table.rect(i)
                 p.save()
-                p.setTransform(tr)
+                # the path is in the patch's own pixels: moved to its place
+                p.setTransform(QtGui.QTransform.fromTranslate(x, y) * tr)
                 p.setPen(pen)
                 p.setBrush(QtCore.Qt.NoBrush)
                 p.drawPath(path)
@@ -211,6 +223,7 @@ class MontageView(QtWidgets.QWidget):
     patch_clicked = QtCore.pyqtSignal(object)        # patch id, or None
     mode_requested = QtCore.pyqtSignal(str)          # "overlay" | "fusion"
     layers_changed = QtCore.pyqtSignal()             # the Fusion-mode signal / nucleus toggles
+    paths_wanted = QtCore.pyqtSignal(object)         # [(outline key, detail bucket)] to build
 
     LABEL_COLOR = "#ffffff"
     SEPARATOR = QtGui.QColor(110, 110, 110)
@@ -267,7 +280,7 @@ class MontageView(QtWidgets.QWidget):
         self._images = []
         self._images_shown = True               # False while the GPU layer draws the picture
         # outlines (block D step 2): results per (combo, bbox), styles per combo
-        self.combo_order, self.styles, self.results, self._paths = [], {}, {}, {}
+        self.combo_order, self.styles, self.results = [], {}, {}
         self._downsamples = [1.0]
         self.level = 0
         self.stride = 1
@@ -299,7 +312,6 @@ class MontageView(QtWidgets.QWidget):
         self.selected = None
         self.focused = None
         self._on_screen = None
-        self._paths = {}                             # built for a layout: rebuild
         for i, p in enumerate(self.layout_table.patches):
             y, x, h, w = self.layout_table.rect(i)
             img = pg.ImageItem(axisOrder="row-major")
@@ -445,7 +457,7 @@ class MontageView(QtWidgets.QWidget):
         """A new run: no results yet, these combinations in this order."""
         self.combo_order = list(combo_order)
         self.styles = dict(styles or {})
-        self.results, self._paths = {}, {}
+        self.results = {}
         self.overlay.update()
 
     def set_style(self, combo_id, style):
@@ -453,26 +465,49 @@ class MontageView(QtWidgets.QWidget):
         self.overlay.update()
 
     def set_result(self, combo_id, bbox, status, count, cell=None, nucleus=None):
-        """One task's result: `cell` / `nucleus` = (polygons, median d) or None."""
+        """One task's result. `cell` / `nucleus`: None, or {"key", "median_d"}
+        with paths added by `set_path` as the supply builds them, or (for a
+        caller holding them) (polygons, median d) -- built here at once."""
         bbox = tuple(int(v) for v in bbox)
+        old = self.results.get((combo_id, bbox)) or {}
         res = {"status": status, "count": int(count or 0)}
         for kind, out in (("cell", cell), ("nucleus", nucleus)):
-            res[kind] = None if out is None else {"polys": out[0], "median_d": float(out[1])}
-            self._paths.pop((combo_id, bbox, kind), None)
+            if out is None:
+                res[kind] = None
+            elif isinstance(out, dict):
+                prev = old.get(kind) or {}
+                keep = prev.get("paths", {}) if prev.get("key") == out.get("key") else {}
+                res[kind] = {"key": out.get("key"), "median_d": float(out["median_d"]),
+                             "paths": dict(keep)}
+            else:
+                res[kind] = {"key": None, "median_d": float(out[1]),
+                             "paths": {None: mask_layers.qpath(out[0], 0.0, 0.0)}}
         self.results[(combo_id, bbox)] = res
         self.overlay.update()
 
+    def set_path(self, combo_id, bbox, kind, bucket, path):
+        out = (self.results.get((combo_id, tuple(int(v) for v in bbox))) or {}).get(kind)
+        if out is not None:
+            out["paths"][bucket] = path
+            self.overlay.update()
+
+    def path_at(self, combo_id, bbox, kind, bucket):
+        """(path, exact): the path at `bucket`, else the nearest there is --
+        finer first -- until that one is built (None when there is none)."""
+        out = self.results[(combo_id, bbox)][kind]
+        paths = out["paths"]
+        if bucket in paths:
+            return paths[bucket], True
+        if not paths:
+            return None, False
+        order = sorted(paths, key=lambda b: (-1 if b is None else b))
+        target = -1 if bucket is None else bucket
+        finer = [b for b in order if (-1 if b is None else b) < target]
+        return paths[finer[-1] if finer else order[0]], False
+
     def path_for(self, combo_id, bbox, kind):
-        """The outlines as one path on the canvas, built once per layout."""
-        key = (combo_id, bbox, kind)
-        path = self._paths.get(key)
-        if path is None:
-            i = self._index_of(bbox)
-            y, x, _, _ = self.layout_table.rect(i)
-            out = self.results[(combo_id, bbox)][kind]
-            path = mask_layers.qpath(out["polys"], x, y)
-            self._paths[key] = path
-        return path
+        """The full-detail path (or the nearest there is), for tests."""
+        return self.path_at(combo_id, bbox, kind, None)[0]
 
     def show_images(self, shown):
         """The CPU picture on (no GPU layer) or off (the GPU layer draws it)."""

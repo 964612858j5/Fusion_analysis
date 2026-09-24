@@ -155,7 +155,11 @@ row, and the duplicate Tissue Preview button in the step bar.
   step 2, user ruling 2026-09-25): `Cells` / `Nuclei` (greyed where the
   method makes no such mask), a colour swatch, and a `▾` menu with the line
   width (1 / 1.5 / 2 / 3 px) and dashed cell / nucleus outlines; under the
-  `Results` caption, `All` / `None` for cells and for nuclei. Outlines start
+  `Results` caption, one `Cells` and one `Nuclei` tick (user ruling
+  2026-09-25, replacing All / None): ticked shows that kind for every box,
+  unticked for none, off at first; half-ticked when the boxes disagree, and
+  a click from there shows them all. Each row is framed like a Methods block
+  (the same grey border; green while it is in use). Outlines start
   off, in a fixed palette; they are left out while cells are smaller than
   about 3 screen pixels; a failed patch is tagged `failed`, a patch with no
   cell `0 cells`. Many rows scroll rather than squeeze.

@@ -244,9 +244,12 @@ def test_results_reach_the_montage_as_they_arrive_and_a_new_run_clears_them(
         assert view.results[("c1", (400, 1200, 0, 600))]["status"] == "failed"   # at once
         assert _pump(lambda: (view.results.get(("c1", (0, 400, 0, 400))) or {}).get("nucleus"))
         res = view.results[("c1", (0, 400, 0, 400))]
-        assert res["count"] == 2 and len(res["nucleus"]["polys"]) == 2
+        assert res["count"] == 2 and res["nucleus"]["key"] == ("r1", "t1", "nucleus")
+        assert len(w._preseg_montage_supply.outlines[("r1", "t1", "nucleus")][0]) == 2
         w._preseg_results.rows()[0].chk_nuclei.setChecked(True)               # the box
         assert view.styles["c1"]["nuclei"] is True
+        view.overlay.grab()                        # asks for the path at this zoom ...
+        assert _pump(lambda: res["nucleus"]["paths"])  # ... built in the supply
         view.overlay.grab()
         assert view.overlay.drawn_paths == 1
         assert view.overlay.last_tags[(400, 1200, 0, 600)] == ["failed"]
@@ -299,3 +302,107 @@ def test_many_combinations_scroll_instead_of_being_squeezed(app):
     assert all(r.height() == r.sizeHint().height() for r in rows)          # full height
     assert panel.scroll.verticalScrollBar().maximum() > 0                  # it scrolls
     panel.close()
+
+
+
+# ── detail that follows the zoom, paths built off the GUI thread ────────────
+def test_simplified_outlines_stay_within_half_a_screen_pixel():
+    polys, _, _ = mask_layers.outlines(_mask())
+    assert mask_layers.lod_bucket(1.0) is None and mask_layers.lod_bucket(2.0) is None
+    assert mask_layers.lod_bucket(0.5) == 1 and mask_layers.lod_bucket(0.3) == 1
+    assert mask_layers.lod_bucket(0.2) == 2
+    for bucket in (0, 1, 2, 3):
+        simple = mask_layers.simplify(polys, bucket)
+        eps = 0.5 * 2 ** bucket
+        assert sum(map(len, simple)) <= sum(map(len, polys))
+        import cv2
+        for p, q in zip(polys, simple):
+            contour = q.reshape(-1, 1, 2).astype(np.float32)
+            worst = max(abs(cv2.pointPolygonTest(contour, (float(x), float(y)), True))
+                        for x, y in p)
+            assert worst <= eps + 1e-3
+    assert mask_layers.simplify(polys, None) is polys
+
+
+def test_paths_are_built_in_the_supply_not_on_the_gui_thread(app, monkeypatch, tmp_path):
+    import threading
+    from test_step1_montage_view import _Provider
+    from block01.ui.step1_presegmentation.montage_supply import MontageSupply
+    supply = MontageSupply(_Provider(), "pk")
+    threads = []
+    real = mask_layers.qpath
+    monkeypatch.setattr(mask_layers, "qpath",
+                        lambda *a: (threads.append(threading.current_thread().name), real(*a))[1])
+    path = tmp_path / "m.npy"
+    np.save(path, _mask())
+    got = []
+    supply.outlines_ready.connect(got.append)
+    supply.request_outlines(("r", "t", "nucleus"), str(path))
+    assert _pump(lambda: got)
+    ready = []
+    supply.path_ready.connect(lambda k, b: ready.append((k, b)))
+    supply.request_path(("r", "t", "nucleus"), 2)
+    assert _pump(lambda: ready)
+    assert ready == [(("r", "t", "nucleus"), 2)]
+    assert threads and all(t.startswith("montage-supply") for t in threads)
+    raw = mask_layers.qpath(supply.outlines[("r", "t", "nucleus")][0], 0, 0)
+    assert supply.paths[(("r", "t", "nucleus"), 2)].elementCount() < raw.elementCount()
+    supply.close()
+
+
+def test_zoomed_out_the_view_asks_for_simpler_paths_and_uses_the_nearest_meanwhile(app):
+    view = _view(app)
+    polys, n, d = mask_layers.outlines(_mask())
+    view.clear_outlines(["c1"], {"c1": _style(nuclei=True)})
+    view.set_result("c1", (0, 60, 0, 80), "ok", n,
+                    nucleus={"key": ("r", "t", "nucleus"), "median_d": d})
+    wanted = []
+    view.paths_wanted.connect(wanted.extend)
+    view.overlay.grab()
+    assert view.overlay.drawn_paths == 0                                     # nothing yet
+    _pump(lambda: wanted, timeout=1)
+    scale = abs(view.overlay.canvas_transform().m11())
+    assert wanted == [(("r", "t", "nucleus"), mask_layers.lod_bucket(scale))]
+    view.set_path("c1", (0, 60, 0, 80), "nucleus", None, mask_layers.qpath(polys, 0, 0))
+    view.overlay.grab()
+    assert view.overlay.drawn_paths == 1                                     # the nearest
+    view.close()
+
+
+def test_one_tick_shows_every_combinations_cells_and_says_when_they_disagree(app):
+    from PyQt5 import QtCore
+    panel = ResultsPanel()
+    panel.set_combos(_combos(), outputs_of=_outputs)
+    panel.show()
+    cells, nuclei = panel.chk_all["cells"], panel.chk_all["nuclei"]
+    assert cells.checkState() == QtCore.Qt.Unchecked                        # off at first
+    assert nuclei.checkState() == QtCore.Qt.Unchecked
+    nuc, both, cell = panel.rows()
+    cells.click()                                                           # all cells on
+    assert cells.checkState() == QtCore.Qt.Checked
+    assert both.style["cells"] and cell.style["cells"] and not nuc.style["cells"]  # greyed stays
+    both.chk_cells.setChecked(False)                                        # one box off
+    assert cells.checkState() == QtCore.Qt.PartiallyChecked
+    cells.click()                                                           # from half: all on
+    assert cells.checkState() == QtCore.Qt.Checked and both.style["cells"]
+    cells.click()                                                           # all off
+    assert cells.checkState() == QtCore.Qt.Unchecked
+    assert not any(r.style["cells"] for r in panel.rows())
+    only_nuclei = [c for c in _combos() if c["method"] == "stardist_nuclei_dapi"]
+    panel.set_combos(only_nuclei, outputs_of=_outputs)                      # a new run
+    assert not panel.chk_all["cells"].isEnabled()                           # nothing to show
+    assert panel.chk_all["nuclei"].checkState() == QtCore.Qt.Unchecked
+    panel.close()
+
+
+def test_each_results_box_has_the_methods_blocks_grey_frame(app):
+    from block01.ui.step1_presegmentation.method_blocks import MethodBlock, block_frame_qss
+    panel = ResultsPanel()
+    panel.set_combos(_combos()[:2], outputs_of=_outputs)
+    a, b = panel.rows()
+    assert a.styleSheet() == b.styleSheet() == block_frame_qss("resultBlock")
+    assert "border:1px solid #555" in a.styleSheet() and "border-radius:4px" in a.styleSheet()
+    m = MethodBlock("stardist_nuclei_dapi", ps.default_values("stardist_nuclei_dapi"))
+    assert m.styleSheet() == block_frame_qss("methodBlock")              # the same frame
+    panel.show_state(a.combo_id, "1/1 patches", "", True, True)          # in use: green
+    assert "#6fcf97" in a.styleSheet() and b.styleSheet() == block_frame_qss("resultBlock")

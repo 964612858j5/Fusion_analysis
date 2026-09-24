@@ -69,6 +69,29 @@ def path_arrays(polys, ox, oy):
     return np.concatenate(xs), np.concatenate(ys), np.concatenate(conn)
 
 
+def lod_bucket(scale):
+    """The simplification step for a zoom of `scale` screen px per canvas px:
+    None (full detail) at 1:1 or closer, else k with 2**k <= 1 / scale, so a
+    tolerance of 0.5 * 2**k canvas px is at most half a screen pixel."""
+    import math
+    if scale >= 1.0 or scale <= 0:
+        return None
+    return int(math.floor(math.log2(1.0 / scale)))
+
+
+def simplify(polys, bucket):
+    """`polys` within 0.5 * 2**bucket px (Douglas-Peucker); None: as they are."""
+    if bucket is None:
+        return polys
+    import cv2
+    eps = 0.5 * (2 ** bucket)
+    out = []
+    for p in polys:
+        q = cv2.approxPolyDP(p.reshape(-1, 1, 2), eps, True).reshape(-1, 2)
+        out.append(q.astype(np.float32) if len(q) >= 3 else p)
+    return out
+
+
 def qpath(polys, ox, oy):
     import pyqtgraph as pg
     x, y, connect = path_arrays(polys, ox, oy)

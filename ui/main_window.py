@@ -1327,6 +1327,7 @@ class MainWindow(QMainWindow):
             lambda _lvl, _stride: self._request_montage_images())
         self._preseg_montage.mode_requested.connect(self.set_preview_mode)
         self._preseg_montage.layers_changed.connect(lambda: self._schedule_montage())
+        self._preseg_montage.paths_wanted.connect(self._on_montage_paths_wanted)
         right_tabs.currentChanged.connect(lambda _i: self._request_montage_images())
         # NOT A DEBOUNCE (user report 2026-09-25: Intensity drew only when the
         # drag paused -- a restarted timer never fires while the slider moves).
@@ -4880,6 +4881,7 @@ class MainWindow(QMainWindow):
             supply.finished.connect(self._on_montage_finished)
             supply.plane_ready.connect(self._on_montage_plane_ready)
             supply.outlines_ready.connect(self._on_montage_outlines)
+            supply.path_ready.connect(self._on_montage_path)
             self._preseg_montage_supply = supply
             self._preseg_montage.set_downsamples(
                 [provider.level_downsample(level) for level in range(provider.num_levels)])
@@ -4931,9 +4933,29 @@ class MainWindow(QMainWindow):
         run = self._preseg_run
         if supply is None or run is None or key[0] != run["run_id"]:
             return                                # another run's
-        polys, count, median_d = supply.outlines.get(key, ([], 0, 0.0))
-        self._montage_outlined.setdefault(key[:2], {})[key[2]] = (polys, median_d)
+        _polys, _count, median_d = supply.outlines.get(key, ([], 0, 0.0))
+        # the view holds the key and the size; its paths are built in the
+        # supply at the detail the zoom needs, as the view asks for them
+        self._montage_outlined.setdefault(key[:2], {})[key[2]] = {"key": key,
+                                                                  "median_d": median_d}
         self._montage_show_record(key[:2])
+
+    def _on_montage_paths_wanted(self, wanted):
+        supply = self.__dict__.get("_preseg_montage_supply")
+        if supply is None:
+            return
+        for key, bucket in wanted:
+            supply.request_path(key, bucket)
+
+    def _on_montage_path(self, key, bucket):
+        supply = self._preseg_montage_supply
+        run = self._preseg_run
+        if supply is None or run is None or key[0] != run["run_id"]:
+            return
+        rec = self._preseg_records.get(key[1])
+        path = supply.paths.get((key, bucket))
+        if rec is not None and path is not None:
+            self._preseg_montage.set_path(rec["combo_id"], rec["patch_bbox"], key[2], bucket, path)
 
     def _montage_show_record(self, key):
         rec = self._preseg_records.get(key[1])

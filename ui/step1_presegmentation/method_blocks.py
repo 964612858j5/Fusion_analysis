@@ -23,6 +23,12 @@ from ...utils import segmentation_param_schema as ps
 from .method_editor import MethodEditorDialog
 
 
+def block_frame_qss(name, color="#555"):
+    """The grey frame round each block -- a Methods block and a Results box
+    alike (user ruling 2026-09-25: the boxes show their edges the same way)."""
+    return f"QFrame#{name}{{border:1px solid {color};border-radius:4px;}}"
+
+
 class MethodBlock(QtWidgets.QFrame):
     edit_clicked = pyqtSignal(int)            # block uid
     remove_clicked = pyqtSignal(int)          # block uid
@@ -34,7 +40,7 @@ class MethodBlock(QtWidgets.QFrame):
         MethodBlock._next_uid += 1
         self.method = method
         self.setObjectName("methodBlock")
-        self.setStyleSheet("QFrame#methodBlock{border:1px solid #555;border-radius:4px;}")
+        self.setStyleSheet(block_frame_qss("methodBlock"))
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(6, 4, 6, 4)
         lay.setSpacing(2)

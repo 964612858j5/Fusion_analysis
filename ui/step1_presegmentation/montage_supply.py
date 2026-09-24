@@ -127,6 +127,7 @@ class MontageSupply(QtCore.QObject):
     finished = QtCore.pyqtSignal(int)                # generation, every patch reported
     plane_ready = QtCore.pyqtSignal(int)             # plane generation: one more plane in
     outlines_ready = QtCore.pyqtSignal(object)       # key of a result mask's outlines
+    path_ready = QtCore.pyqtSignal(object, object)   # key, detail bucket: a path is built
 
     def __init__(self, provider, pixel_key="", parent=None,
                  channel_budget=CHANNEL_CACHE_BYTES, composed_budget=COMPOSED_CACHE_BYTES):
@@ -139,6 +140,10 @@ class MontageSupply(QtCore.QObject):
         self._plane_pending = collections.OrderedDict()   # identity -> PlaneSpec (GPU path)
         self._outline_pending = collections.OrderedDict()  # key -> mask path (step 2)
         self.outlines = {}                                 # key -> (polygons, count, median d)
+        # (key, bucket) -> QPainterPath in the patch's own pixels, built here
+        # rather than on the GUI thread (18 ms a path, measured, 2026-09-25)
+        self._path_pending = collections.OrderedDict()
+        self.paths = {}
         self.plane_generation = 0
         self._cv = threading.Condition()
         self._closed = False
@@ -201,11 +206,24 @@ class MontageSupply(QtCore.QObject):
             self._cv.notify_all()
             return True
 
+    def request_path(self, key, bucket):
+        """Build the path of `key`'s outlines at detail `bucket` once
+        (`mask_layers.lod_bucket`); `path_ready(key, bucket)`."""
+        with self._cv:
+            if (self._closed or (key, bucket) in self.paths or (key, bucket) in self._path_pending
+                    or key not in self.outlines):
+                return False
+            self._path_pending[(key, bucket)] = True
+            self._cv.notify_all()
+            return True
+
     def forget_outlines(self):
         """A new run: its outlines are other results."""
         with self._cv:
             self._outline_pending.clear()
+            self._path_pending.clear()
             self.outlines = {}
+            self.paths = {}
 
     def plane(self, spec):
         """The values of a plane if it has arrived, else None."""
@@ -240,7 +258,9 @@ class MontageSupply(QtCore.QObject):
             self._pending.clear()
             self._plane_pending.clear()
             self._outline_pending.clear()
+            self._path_pending.clear()
             self.outlines = {}
+            self.paths = {}
             self._cv.notify_all()
         for t in self._threads:
             t.join(timeout)
@@ -255,22 +275,29 @@ class MontageSupply(QtCore.QObject):
         while True:
             with self._cv:
                 while (not self._pending and not self._plane_pending
-                       and not self._outline_pending and not self._closed):
+                       and not self._outline_pending and not self._path_pending
+                       and not self._closed):
                     self._cv.wait()
                 if self._closed:
                     return
-                outline = None
+                outline = path = None
                 if self._plane_pending:              # the picture first
                     _, spec = self._plane_pending.popitem(last=False)
                     gen = self.plane_generation
                     req = None
-                elif self._outline_pending:          # then the outlines
+                elif self._path_pending:             # paths of what is on screen
+                    path, _ = self._path_pending.popitem(last=False)
+                    req = None
+                elif self._outline_pending:          # then new outlines
                     outline = self._outline_pending.popitem(last=False)
                     req = None
                 else:
                     _, req = self._pending.popitem(last=False)
             if outline is not None:
                 self._extract_outlines(*outline)
+                continue
+            if path is not None:
+                self._build_path(*path)
                 continue
             if req is None:
                 self._read_plane(spec, gen)
@@ -302,6 +329,19 @@ class MontageSupply(QtCore.QObject):
                 return
             self.outlines[key] = result
         self.outlines_ready.emit(key)
+
+    def _build_path(self, key, bucket):
+        from . import mask_layers
+        with self._cv:
+            found = self.outlines.get(key)
+        if found is None:
+            return
+        path = mask_layers.qpath(mask_layers.simplify(found[0], bucket), 0.0, 0.0)
+        with self._cv:
+            if self._closed or key not in self.outlines:
+                return
+            self.paths[(key, bucket)] = path
+        self.path_ready.emit(key, bucket)
 
     def _read_plane(self, spec, gen):
         key = self._plane_key(spec)

@@ -12,6 +12,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from ...utils import segmentation_param_schema as ps
 from . import mask_layers
+from .method_blocks import block_frame_qss
 
 _GREY = "color:#999;font-size:10px;"
 _WARN = "color:#ffd166;font-size:10px;"
@@ -27,6 +28,8 @@ class ResultRow(QtWidgets.QFrame):
         self.combo_id = combo["combo_id"]
         self.style = mask_layers.default_style(index)
         self.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.setObjectName("resultBlock")
+        self.setStyleSheet(block_frame_qss("resultBlock"))       # as a Methods block
         # never squeezed: many combinations scroll instead (the list below)
         self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         lay = QtWidgets.QVBoxLayout(self)
@@ -136,7 +139,21 @@ class ResultRow(QtWidgets.QFrame):
         self.status.setStyleSheet({"bad": _BAD, "warn": _WARN}.get(level, _GREY))
         self.btn_use.setText("In use" if in_use else "Use")
         self.btn_use.setEnabled(bool(can_use) and not in_use)
-        self.setStyleSheet("ResultRow{border:1px solid #6fcf97;}" if in_use else "")
+        self.setStyleSheet(block_frame_qss("resultBlock", "#6fcf97" if in_use else "#555"))
+
+
+class _AllCheck(QtWidgets.QCheckBox):
+    """Ticked: every box shows this kind; unticked: none does (user ruling,
+    2026-09-25). Half-ticked only SAYS the boxes disagree; a click from
+    there shows them all."""
+
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setTristate(True)
+
+    def nextCheckState(self):  # noqa: N802
+        self.setCheckState(QtCore.Qt.Unchecked if self.checkState() == QtCore.Qt.Checked
+                           else QtCore.Qt.Checked)
 
 
 class ResultsPanel(QtWidgets.QWidget):
@@ -152,24 +169,19 @@ class ResultsPanel(QtWidgets.QWidget):
         head = QtWidgets.QLabel("Results", self)
         head.setStyleSheet("font-weight:bold;color:#ccc;font-size:11px;")
         lay.addWidget(head)
-        # All / None for every combination's cells and nuclei at once
-        self._all_buttons = {}
+        # One tick for every combination's cells, one for their nuclei
+        # (user ruling 2026-09-25, instead of All / None buttons); off at first.
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(8)
+        self.chk_all = {}
         for kind, label in (("cells", "Cells"), ("nuclei", "Nuclei")):
-            row = QtWidgets.QHBoxLayout()
-            row.setSpacing(3)
-            cap = QtWidgets.QLabel(label, self)
-            cap.setStyleSheet("font-size:10px;color:#bbb;")
-            cap.setMinimumWidth(34)
-            row.addWidget(cap)
-            for text, on in (("All", True), ("None", False)):
-                b = QtWidgets.QPushButton(text, self)
-                b.setStyleSheet("font-size:10px;")
-                b.setMinimumWidth(36)
-                b.clicked.connect(lambda _c, k=kind, v=on: self.set_all(k, v))
-                row.addWidget(b)
-                self._all_buttons[(kind, on)] = b
-            row.addStretch(1)
-            lay.addLayout(row)
+            chk = _AllCheck(label, self)
+            chk.setStyleSheet("font-size:10px;")
+            chk.clicked.connect(lambda _c, k=kind: self._on_all_clicked(k))
+            row.addWidget(chk)
+            self.chk_all[kind] = chk
+        row.addStretch(1)
+        lay.addLayout(row)
         self.summary = QtWidgets.QLabel("No run yet.", self)
         self.summary.setWordWrap(True)
         self.summary.setStyleSheet(_GREY)
@@ -204,9 +216,11 @@ class ResultsPanel(QtWidgets.QWidget):
             row = ResultRow(combo, self._rows_host, index=i, outputs=outputs)
             row.use_clicked.connect(self.use_requested)
             row.style_changed.connect(self.style_changed)
+            row.style_changed.connect(lambda *_a: self._show_all_state())
             self._rows.insertWidget(self._rows.count() - 1, row)
             self._by_combo[combo["combo_id"]] = row
         self._fit_scroll()
+        self._show_all_state()
 
     def _fit_scroll(self):
         """As tall as its boxes (none: nothing), scrolling beyond that."""
@@ -225,6 +239,23 @@ class ResultsPanel(QtWidgets.QWidget):
         """Cells or nuclei of every combination on or off (greyed ones stay)."""
         for row in self._by_combo.values():
             row.set_style(**{kind: bool(on)})
+        self._show_all_state()
+
+    def _on_all_clicked(self, kind):
+        self.set_all(kind, self.chk_all[kind].checkState() == QtCore.Qt.Checked)
+
+    def _show_all_state(self):
+        """Each tick says what the boxes say: all on, none on, or some."""
+        for kind, chk in getattr(self, "chk_all", {}).items():
+            box = {"cells": "chk_cells", "nuclei": "chk_nuclei"}[kind]
+            able = [r for r in self._by_combo.values() if getattr(r, box).isEnabled()]
+            on = sum(1 for r in able if r.style[kind])
+            state = (QtCore.Qt.Checked if able and on == len(able)
+                     else QtCore.Qt.Unchecked if on == 0 else QtCore.Qt.PartiallyChecked)
+            chk.blockSignals(True)
+            chk.setCheckState(state)
+            chk.blockSignals(False)
+            chk.setEnabled(bool(able))
 
     def styles(self):
         return {cid: dict(row.style) for cid, row in self._by_combo.items()}

@@ -55,7 +55,7 @@ row, and the duplicate Tissue Preview button in the step bar.
   channel column, measured from Step0 at runtime rather than copied as a
   number. (Step0's share is not one-to-two: its column starts at 4/3 of its
   minimum and works out near 0.28 of the work area. A hard 1:2 looked wider
-  than Step0 and was rejected on the real machine.) The left column is two tabs, `Channels` and `Method & Parameters`;
+  than Step0 and was rejected on the real machine.) The left column is two tabs, `Channels` and `Pre-segmentation` (named `Method & Parameters` until 2026-09-24);
   the right column is two tabs, `Viewer` and `Patch Results`. Patch Results is
   a TAB beside the picture, never a strip stacked over it. The title line
   reads `Step 1 — Channel Fusion + Preliminary Segmentation` and carries the
@@ -93,7 +93,7 @@ row, and the duplicate Tissue Preview button in the step bar.
   end -- there is no row above it for the mode buttons -- and no status row
   under it: `Loading patch…`, `Loading channels…`, warnings and errors go to
   the terminal, and the height goes to the viewer.
-* **Step1's `Method & Parameters` tab** opens with the PATCHES strip (user
+* **Step1's `Pre-segmentation` tab** opens with the PATCHES strip (user
   ruling, 2026-09-24; `docs/step1_presegmentation_redesign_plan.md` block
   A1): one tile per patch, showing the patch's name and nothing else, all
   ticked by default -- the ticks say which patches a pre-segmentation run
@@ -107,6 +107,9 @@ row, and the duplicate Tissue Preview button in the step bar.
   in a small dialog; the patches are drawn inside the ROI polygon, or in the
   tissue without an ROI, never more than 40 % blank and never overlapping, and
   join the patch list as drawn ones do. Only a shortfall is announced.
+  `Delete` beside it deletes the TICKED patches after one confirmation
+  (user ruling, 2026-09-24): with `Select all` that is every patch; with no
+  tick it is disabled. There is no separate "Delete all".
 * **Patch names** (user ruling, 2026-09-24; plan block P) -- a patch keeps
   its id for life and every view shows its NAME: `P<id>` until the user
   renames it (double-click its row in the Tissue Navigator's patch list, or

@@ -1,4 +1,4 @@
-"""The Patches strip at the top of Step1's Method & Parameters tab (block A1).
+"""The Patches strip at the top of Step1's Pre-segmentation tab (block A1).
 
 All patches ticked by default; ticks remembered by patch id through adds,
 deletes and moves; `Select all` / `Select none`; a hint when there is no
@@ -148,6 +148,30 @@ def test_a_double_click_asks_for_a_rename_and_leaves_the_tick_alone(app, monkeyp
                             staticmethod(lambda *a, **k: ("P3", True)))
         _double_click(panel.tiles()[0])
         assert asked == [(1, "edge")] and len(warned) == 1
+    finally:
+        panel.close()
+
+
+def test_delete_asks_once_and_names_only_the_ticked_patches(app, monkeypatch):
+    panel = _panel(app)
+    asked = []
+    panel.delete_selected_requested.connect(asked.append)
+    try:
+        QTest.mouseClick(panel._btn_none, Qt.LeftButton)
+        assert not panel._btn_delete.isEnabled()                 # nothing ticked
+        QTest.mouseClick(panel.tiles()[0], Qt.LeftButton)
+        QTest.mouseClick(panel.tiles()[2], Qt.LeftButton)
+        assert panel._btn_delete.isEnabled()
+        questions = []
+        monkeypatch.setattr(pp.QtWidgets.QMessageBox, "question",
+                            staticmethod(lambda *a, **k: (questions.append(a[2]),
+                                                          pp.QtWidgets.QMessageBox.No)[1]))
+        QTest.mouseClick(panel._btn_delete, Qt.LeftButton)
+        assert asked == [] and questions == ["Delete 2 selected patches?"]
+        monkeypatch.setattr(pp.QtWidgets.QMessageBox, "question",
+                            staticmethod(lambda *a, **k: pp.QtWidgets.QMessageBox.Yes))
+        QTest.mouseClick(panel._btn_delete, Qt.LeftButton)
+        assert asked == [[1, 3]]
     finally:
         panel.close()
 
@@ -354,6 +378,41 @@ def test_on_screen_the_strip_is_no_taller_than_it_needs_and_shows_its_count(app,
         assert strip.height() <= strip.sizeHint().height()
         assert strip._count.isVisible() and strip._count.width() > 0
         assert strip._count.text() == "3/3 selected"
+    finally:
+        w.close()
+
+
+def test_delete_removes_the_ticked_patches_in_one_edit(app, tmp_path, monkeypatch):
+    w, step0_dir = _window(app, tmp_path)
+    try:
+        w._show_tissue_navigator()
+        nav = w._step0._tissue_navigator_popup.overview
+        monkeypatch.setattr(pp.QtWidgets.QMessageBox, "question",
+                            staticmethod(lambda *a, **k: pp.QtWidgets.QMessageBox.Yes))
+        strip = w._preseg_patches
+        emitted = []
+        w._step0.overview.patches_changed.connect(lambda *_: emitted.append(1))
+        QTest.mouseClick(strip.tiles()[1], Qt.LeftButton)          # untick P2
+        QTest.mouseClick(strip._btn_delete, Qt.LeftButton)         # delete P1, P3
+        assert _settle(w) == "published"
+        assert len(emitted) == 1                                    # one edit, not two
+        assert _names(strip) == ["P2"]
+        assert [nav.patch_name(i) for i in range(len(nav._patches))] == ["P2"]
+        assert _published(step0_dir) == [(2, "P2")]
+        QTest.mouseClick(strip._btn_all, Qt.LeftButton)
+        QTest.mouseClick(strip._btn_delete, Qt.LeftButton)         # select all + delete
+        assert _settle(w) == "published"
+        assert strip.tiles() == [] and not strip._empty.isHidden()   # the hint is back
+        assert _published(step0_dir) == []
+    finally:
+        w.close()
+
+
+def test_the_tab_is_called_pre_segmentation(app, tmp_path):
+    w, _ = _window(app, tmp_path)
+    try:
+        tabs = w.method_params_tab.parentWidget().parentWidget()
+        assert tabs.tabText(tabs.indexOf(w.method_params_tab)) == "Pre-segmentation"
     finally:
         w.close()
 

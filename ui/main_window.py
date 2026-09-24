@@ -174,7 +174,7 @@ STEP1_PREVIEW_OVERLAY = "overlay"
 STEP1_PREVIEW_FUSION = "fusion"
 
 # One tab look for Step1's two tab widgets -- the left column (Channels /
-# Method & Parameters) and the right one (Viewer / Patch Results) -- so the
+# Pre-segmentation) and the right one (Viewer / Patch Results) -- so the
 # page reads as one surface rather than two.
 _STEP1_TAB_QSS = (
     "QTabWidget::pane{border:1px solid #444;border-radius:5px;}"
@@ -1213,6 +1213,7 @@ class MainWindow(QMainWindow):
         self._preseg_patches.delete_requested.connect(self._on_preseg_patch_delete)
         self._preseg_patches.rename_requested.connect(self._on_preseg_patch_rename)
         self._preseg_patches.random_requested.connect(self._on_random_patches_requested)
+        self._preseg_patches.delete_selected_requested.connect(self._on_preseg_patches_delete)
         self._random_patch_job = RandomPatchJob(self)
         self._random_patch_job.finished.connect(self._on_random_patches_done)
         method_params_lay.addWidget(self._preseg_patches)
@@ -1232,7 +1233,9 @@ class MainWindow(QMainWindow):
 
         # The segmentation settings live in the LEFT column now; the right
         # column is the picture and the results of running on it.
-        left_tabs.addTab(method_params_tab, "Method & Parameters")
+        # "Pre-segmentation" (user ruling, 2026-09-24): patches, methods and
+        # a trial run before the full segmentation. Was "Method & Parameters".
+        left_tabs.addTab(method_params_tab, "Pre-segmentation")
         right_tabs.addTab(pw, "Viewer")
         right_tabs.addTab(patch_results_tab, "Patch Results")
         # There is no second channel view here any more.  The mirrored
@@ -1335,7 +1338,7 @@ class MainWindow(QMainWindow):
         # NO outer QScrollArea. It sized the page by its content's size hint,
         # so the two columns were laid out for the hint and the picture never
         # got the width the window actually had. The page fills the stack
-        # directly; the panels that need to scroll (Method & Parameters) carry
+        # directly; the panels that need to scroll (Pre-segmentation) carry
         # their own scroll area.
         self._step1_page_widget = page1_w
         self._step1_scroll = None
@@ -1578,7 +1581,7 @@ class MainWindow(QMainWindow):
         tabs = getattr(self, "_step1_left_tabs", None)
         if tabs is not None and tab is not None and tabs.indexOf(tab) >= 0:
             tabs.setCurrentWidget(tab)
-            print(f"[Step1-Tabs] switched to Method & Parameters due to {reason}")
+            print(f"[Step1-Tabs] switched to Pre-segmentation due to {reason}")
 
     def _log_step1_layout(self, where):
         try:
@@ -4564,6 +4567,12 @@ class MainWindow(QMainWindow):
         page = self.__dict__.get("_step0")
         if page is not None and hasattr(page, "delete_patch"):
             page.delete_patch(int(pid))
+
+    def _on_preseg_patches_delete(self, pids):
+        """`Delete`: every ticked patch, through Step0, as one edit."""
+        page = self.__dict__.get("_step0")
+        if page is not None and hasattr(page, "delete_patches"):
+            page.delete_patches([int(p) for p in pids])
 
     def _on_preseg_patch_rename(self, pid, name):
         page = self.__dict__.get("_step0")

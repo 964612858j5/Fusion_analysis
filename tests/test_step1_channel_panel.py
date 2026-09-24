@@ -107,7 +107,7 @@ def test_the_right_column_no_longer_offers_a_channels_tab(app):
         assert w.right_tabs.currentWidget() is w.viewer_tab
         left = w._step1_left_tabs
         assert [left.tabText(i) for i in range(left.count())] == [
-            "Channels", "Method & Parameters"]
+            "Channels", "Pre-segmentation"]
     finally:
         w.close()
 

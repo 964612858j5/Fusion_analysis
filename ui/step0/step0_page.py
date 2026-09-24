@@ -6749,6 +6749,13 @@ class Step0Page(QWidget):
             return []
         return self.overview.add_patch_rects(rects)
 
+    def delete_patches(self, pids):
+        """Delete the patches with these ids as one edit (one publication)."""
+        if self.overview is None or not getattr(self.overview, "_patch_edit_allowed", True):
+            return 0
+        idx = [self._patch_index_of(pid) for pid in pids]
+        return self.overview.remove_patches([i for i in idx if i >= 0])
+
     def rename_patch(self, pid, name):
         """Rename the patch with id `pid`; refused for an empty or taken name."""
         idx = self._patch_index_of(pid)

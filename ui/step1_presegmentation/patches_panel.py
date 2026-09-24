@@ -1,4 +1,4 @@
-"""The Patches strip at the top of Step1's `Method & Parameters` tab (block A1).
+"""The Patches strip at the top of Step1's `Pre-segmentation` tab (block A1).
 
 Which of the existing patches take part in a pre-segmentation run: one
 tickable tile per patch, all ticked by default. The panel does not own the
@@ -202,6 +202,7 @@ class PatchesPanel(QtWidgets.QWidget):
     delete_requested = pyqtSignal(int)        # patch id
     rename_requested = pyqtSignal(int, str)   # patch id, new name
     random_requested = pyqtSignal(int, int, int)   # count, height, width (level-0 px)
+    delete_selected_requested = pyqtSignal(list)   # ids of the ticked patches
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -257,6 +258,12 @@ class PatchesPanel(QtWidgets.QWidget):
         self._btn_random.setStyleSheet("font-size:11px;")
         self._btn_random.clicked.connect(self._ask_random)
         row2.addWidget(self._btn_random)
+        # Deletes the TICKED patches (user ruling, 2026-09-24): with
+        # `Select all` that is every patch, or just the few ticked.
+        self._btn_delete = QtWidgets.QPushButton("Delete", self)
+        self._btn_delete.setStyleSheet("font-size:11px;")
+        self._btn_delete.clicked.connect(self._ask_delete_selected)
+        row2.addWidget(self._btn_delete)
         row2.addStretch(1)
         outer.addLayout(row2)
 
@@ -323,6 +330,18 @@ class PatchesPanel(QtWidgets.QWidget):
         self._btn_random.setEnabled(not busy)
         self._btn_random.setText("Generating…" if busy else "Random…")
 
+    def _ask_delete_selected(self):
+        ids = self.selected_ids()
+        if not ids:
+            return
+        names = [t.name() for t in self._tiles if t.pid in ids]
+        what = names[0] if len(names) == 1 else f"{len(names)} selected patches"
+        answer = QtWidgets.QMessageBox.question(
+            self, "Delete patches", f"Delete {what}?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+        if answer == QtWidgets.QMessageBox.Yes:
+            self.delete_selected_requested.emit(list(ids))
+
     def _ask_random(self):
         dlg = RandomPatchesDialog(self)
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
@@ -365,6 +384,7 @@ class PatchesPanel(QtWidgets.QWidget):
         self._empty.setVisible(not has)
         self._btn_all.setEnabled(has)
         self._btn_none.setEnabled(has)
+        self._btn_delete.setEnabled(bool(self.selected_ids()))
         self._count.setText(f"{len(self.selected_ids())}/{n} selected" if has else "")
 
 

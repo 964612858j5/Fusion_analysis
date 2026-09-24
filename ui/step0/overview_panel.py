@@ -2407,6 +2407,32 @@ class OverviewPanel(QWidget):
             self.patches_changed.emit(self._patch_coords())
         return added
 
+    def remove_patches(self, indices):
+        """Remove several patches as ONE edit -- one `patches_changed`, one
+        publication (Step1's `Delete` on the ticked patches). Ids of the
+        others do not change. Returns how many were removed."""
+        if not self._patch_edit_allowed:
+            return 0
+        dead = {int(i) for i in indices if 0 <= int(i) < len(self._patches)}
+        if not dead:
+            return 0
+        self._patches = [p for i, p in enumerate(self._patches) if i not in dead]
+        for roi in self._rois:
+            roi["patch_indices"] = []
+        for i, patch in enumerate(self._patches):
+            ri = patch.get("roi_idx")
+            if ri is not None and 0 <= ri < len(self._rois):
+                self._rois[ri].setdefault("patch_indices", []).append(i)
+        was_adjusting = self._selected_patch_idx >= 0
+        self._selected_patch_idx = -1
+        self._rebuild_patch_artists()
+        self._update_info()
+        self._refresh_hint()
+        if was_adjusting:
+            self.patch_selection_changed.emit(-1)
+        self.patches_changed.emit(self._patch_coords())
+        return len(dead)
+
     def _remove_last_patch(self):
         if not self._patch_edit_allowed:
             return

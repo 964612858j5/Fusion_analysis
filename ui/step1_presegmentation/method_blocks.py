@@ -134,12 +134,10 @@ class MethodsPanel(QtWidgets.QWidget):
         self._n_patches = 0
         self._running = False
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(6, 4, 6, 4)
+        outer.setContentsMargins(3, 2, 3, 2)          # inside its section frame
         outer.setSpacing(4)
 
-        title = QtWidgets.QLabel("Methods", self)
-        title.setStyleSheet("font-weight:bold;color:#ccc;font-size:11px;")
-        outer.addWidget(title)
+        # the title is the section frame's ("Methods"), not a label in here
         self._list = QtWidgets.QVBoxLayout()
         self._list.setSpacing(4)
         outer.addLayout(self._list)

@@ -93,7 +93,7 @@ from .step1_presegmentation.montage_view import MontageView
 from .step1_presegmentation.montage_supply import MontageSupply, spec_channels as _montage_spec_channels
 from .step1_presegmentation import montage_gpu
 from . import step1_draft_spec
-from .step1_button_styles import MODE_BUTTON_QSS
+from .step1_button_styles import MODE_BUTTON_QSS, SECTION_BOX_QSS
 from .step1_presegmentation.run_job import PresegRunJob, open_loader, summary_line
 from ..core import preseg_input, preseg_run
 from ..seg_runner.engines import METHOD_OUTPUTS
@@ -1265,7 +1265,7 @@ class MainWindow(QMainWindow):
         self._preseg_patches.delete_selected_requested.connect(self._on_preseg_patches_delete)
         self._random_patch_job = RandomPatchJob(self)
         self._random_patch_job.finished.connect(self._on_random_patches_done)
-        method_params_lay.addWidget(self._preseg_patches)
+        method_params_lay.addWidget(self._section_box("Patches", self._preseg_patches))
         # The Methods part under it (plan block B): methods and their
         # parameter lists, the task total, plans saved and loaded. It runs
         # nothing -- that is block C.
@@ -1276,7 +1276,7 @@ class MainWindow(QMainWindow):
             lambda _ids: self._show_montage_patches())
         self._preseg_methods.save_plan_requested.connect(self._on_save_preseg_plan_clicked)
         self._preseg_methods.load_plan_requested.connect(self._on_load_preseg_plan)
-        method_params_lay.addWidget(self._preseg_methods)
+        method_params_lay.addWidget(self._section_box("Methods", self._preseg_methods))
         # Run / Stop and the Results list (plan block C, step 4): a list, no
         # images -- the outlines come with block D. Nothing is chosen until
         # the user presses Use.
@@ -1295,7 +1295,7 @@ class MainWindow(QMainWindow):
         self._preseg_results.style_changed.connect(
             lambda cid, style: self._preseg_montage.set_style(cid, style))
         self._montage_outlined = {}             # (run_id, task_id) -> {kind: outlines}
-        method_params_lay.addWidget(self._preseg_results)
+        method_params_lay.addWidget(self._section_box("Results", self._preseg_results), 1)
         method_params_lay.addWidget(method_params_scroll)
 
         patch_results_tab = QWidget()
@@ -4696,6 +4696,20 @@ class MainWindow(QMainWindow):
         page = self.__dict__.get("_step0")
         if page is not None and hasattr(page, "delete_patches"):
             page.delete_patches([int(p) for p in pids])
+
+    def _section_box(self, title, panel):
+        """A titled frame round one part of the Pre-segmentation tab (user
+        ruling 2026-09-25, design A): the look of the controls' own boxes,
+        margins kept small so the column is no wider."""
+        box = QtWidgets.QGroupBox(title)
+        box.setStyleSheet(SECTION_BOX_QSS)
+        box.setSizePolicy(QSizePolicy.Preferred, panel.sizePolicy().verticalPolicy())
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(3, 4, 3, 3)
+        lay.setSpacing(0)
+        lay.addWidget(panel)
+        panel.section_box = box
+        return box
 
     def _preseg_step1_dir(self):
         return (self.step0_output or {}).get("step1_dir") or OUTPUT_DIR

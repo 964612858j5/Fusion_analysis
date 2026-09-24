@@ -110,6 +110,9 @@ row, and the duplicate Tissue Preview button in the step bar.
   end -- there is no row above it for the mode buttons -- and no status row
   under it: `Loading patch…`, `Loading channels…`, warnings and errors go to
   the terminal, and the height goes to the viewer.
+* **Step1's `Pre-segmentation` tab** is three titled frames, `Patches`,
+  `Methods` and `Results` (user ruling 2026-09-25), in the look of the
+  controls' own boxes below them, then those controls.
 * **Step1's `Pre-segmentation` tab** opens with the PATCHES strip (user
   ruling, 2026-09-24; `docs/step1_presegmentation_redesign_plan.md` block
   A1): one tile per patch, showing the patch's name and nothing else, all

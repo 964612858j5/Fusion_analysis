@@ -164,11 +164,9 @@ class ResultsPanel(QtWidgets.QWidget):
         super().__init__(parent)
         self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
         lay = QtWidgets.QVBoxLayout(self)
-        lay.setContentsMargins(0, 4, 0, 0)
+        lay.setContentsMargins(3, 2, 3, 2)            # inside its section frame
         lay.setSpacing(3)
-        head = QtWidgets.QLabel("Results", self)
-        head.setStyleSheet("font-weight:bold;color:#ccc;font-size:11px;")
-        lay.addWidget(head)
+        # the title is the section frame's ("Results"), not a label in here
         # One tick for every combination's cells, one for their nuclei
         # (user ruling 2026-09-25, instead of All / None buttons); off at first.
         row = QtWidgets.QHBoxLayout()

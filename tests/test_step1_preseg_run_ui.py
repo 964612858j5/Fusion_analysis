@@ -151,7 +151,7 @@ def test_run_and_stop_sit_under_the_total_and_follow_the_task_count(app, tmp_pat
         w._preseg_patches.set_selected_ids([])
         assert not m.btn_run.isEnabled()                                      # no patch ticked
         lay = w.method_params_tab.layout()
-        assert lay.itemAt(2).widget() is w._preseg_results
+        assert lay.itemAt(2).widget() is w._preseg_results.section_box
         tabs = w.method_params_tab.parentWidget().parentWidget()
         QtWidgets.QApplication.processEvents()
         shown = tabs.minimumSizeHint().width()

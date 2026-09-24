@@ -726,6 +726,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - **真机验收通过（2026-09-25）后的修改**：Results 标题下的 All / None 按钮改为 `Cells`、`Nuclei` 两个勾选框（用户裁定）：勾选＝所有框都显示这一种，不勾＝都不显示，默认不勾；各框不一致时显示半勾，从半勾点一下变为全部显示；没有任何组合能产生这种 mask 时置灰。新增 1 条测试，两处反向注入都变红。
   - 结果列表每个组合框加上与 Methods 方法块相同的灰色矩形边框（用户 2026-09-25）：边框样式抽成 `method_blocks.block_frame_qss`，两处共用；「In use」时该框边框为绿色。新增 1 条测试。
   - **块 D 验收通过（2026-09-25）**。
+  - **分区（用户 2026-09-25，方案 A）**：Pre-segmentation 标签页的三部分各装进一个带标题的框——`Patches`（新加的标题）、`Methods`、`Results`——样式与下方旧控件的「Segmentation Method」框相同（`ui/step1_button_styles.SECTION_BOX_QSS`，测试核对与 `search_ctrl.py` 的字符串一致）；Methods、Results 原来写在里面的标题去掉；面板内边距相应缩小，每侧总边距不变，左栏宽度门通过。布局顺序测试改为检查三个框。
   - **块 D 收尾全量回归**（2026-09-25，180 个模块，并行 4 组，代码冻结并核对哈希与 HEAD）：3897 passed / 17 failed / 3 skipped。16 条与基线逐条相同；第 17 条 `test_step0_channel_conditioning::test_loaded_channel_switch_is_cache_hit`（基线记录的偶发项）：单独各跑 10 次，当前 8/10、块 D 之前的 `dcf6244` 同样 8/10 通过——既有的偶发失败，与块 D 无关（它测的是 Step0 通道调节，块 D 没有触及）。
 
 ### 块 E — 完整交接验收与旧界面退场

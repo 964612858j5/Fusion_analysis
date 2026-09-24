@@ -27,3 +27,14 @@ def layer_button_qss(layer):
         "padding:2px 10px;font-size:10px;}"
         f"QPushButton:checked{{background:{lit};color:#fff;font-weight:bold;"
         f"border:1px solid {lit};}}")
+
+
+#: The titled frame of a section of the Pre-segmentation tab -- Patches,
+#: Methods, Results (user ruling 2026-09-25, design A) -- the very look of
+#: the "Segmentation Method" box of the controls below them
+#: (`ui/step0/search_ctrl.py`; a test holds the two equal).
+SECTION_BOX_QSS = (
+    "QGroupBox{border:1px solid #666;border-radius:4px;margin-top:16px;"
+    "font-weight:bold;color:#ccc;font-size:11px;}"
+    "QGroupBox::title{subcontrol-origin:margin;subcontrol-position:"
+    "top left;left:8px;padding:0 4px;}")

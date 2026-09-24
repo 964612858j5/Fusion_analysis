@@ -212,7 +212,7 @@ class PatchesPanel(QtWidgets.QWidget):
         self._unticked = set()                # ids the user has unticked
 
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(6, 6, 6, 4)
+        outer.setContentsMargins(3, 2, 3, 2)          # inside its section frame
         outer.setSpacing(4)
 
         self._scroll = QtWidgets.QScrollArea(self)

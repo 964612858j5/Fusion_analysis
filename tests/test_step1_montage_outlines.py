@@ -406,3 +406,27 @@ def test_each_results_box_has_the_methods_blocks_grey_frame(app):
     assert m.styleSheet() == block_frame_qss("methodBlock")              # the same frame
     panel.show_state(a.combo_id, "1/1 patches", "", True, True)          # in use: green
     assert "#6fcf97" in a.styleSheet() and b.styleSheet() == block_frame_qss("resultBlock")
+
+
+
+def test_the_three_parts_are_titled_frames_like_the_controls_below(app, tmp_path, monkeypatch):
+    from block01.ui.step1_button_styles import SECTION_BOX_QSS
+    from block01.ui.step0 import search_ctrl
+    import inspect
+    # the same look as the "Segmentation Method" box of the old controls
+    src = inspect.getsource(search_ctrl)
+    flat = "".join(part.strip().strip('"') for part in
+                   src.split('method_box.setStyleSheet(')[1].split(')')[0].splitlines())
+    assert flat == SECTION_BOX_QSS
+    w = _page(app, tmp_path, monkeypatch)
+    try:
+        boxes = [w._preseg_patches.section_box, w._preseg_methods.section_box,
+                 w._preseg_results.section_box]
+        assert [b.title() for b in boxes] == ["Patches", "Methods", "Results"]
+        assert all(b.styleSheet() == SECTION_BOX_QSS for b in boxes)
+        # no second title inside a frame
+        for panel in (w._preseg_methods, w._preseg_results):
+            assert not [lab for lab in panel.findChildren(QtWidgets.QLabel)
+                        if lab.text() in ("Methods", "Results")]
+    finally:
+        w.close()

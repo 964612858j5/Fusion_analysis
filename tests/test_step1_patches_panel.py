@@ -309,10 +309,12 @@ def test_the_strip_heads_the_method_and_parameters_tab(app, tmp_path):
     w, _ = _window(app, tmp_path)
     try:
         lay = w.method_params_tab.layout()
-        assert lay.itemAt(0).widget() is w._preseg_patches
-        # Block B put the Methods part between the strip and the old controls.
-        assert lay.itemAt(1).widget() is w._preseg_methods
-        assert lay.itemAt(2).widget() is w._preseg_results
+        # Each part in its titled section frame (design A, 2026-09-25):
+        # Patches, Methods, Results, then the old controls.
+        assert lay.itemAt(0).widget() is w._preseg_patches.section_box
+        assert w._preseg_patches.section_box.title() == "Patches"
+        assert lay.itemAt(1).widget() is w._preseg_methods.section_box
+        assert lay.itemAt(2).widget() is w._preseg_results.section_box
         assert lay.itemAt(3).widget() is w._step1_method_params_scroll
         assert _names(w._preseg_patches) == ["P1", "P2", "P3"]
         assert w._preseg_patches.selected_ids() == [1, 2, 3]

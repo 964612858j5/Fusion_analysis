@@ -137,9 +137,9 @@ def test_mesmer_in_subprocess_equals_direct_call(tmp_path):
     pytest.importorskip("deepcell")
     import tensorflow as tf
     from deepcell.applications import Mesmer
-    from block01.seg_runner.engines import MESMER_MODEL_DEFAULT
+    from block01.seg_runner.engines import mesmer_model_path
     img = synthetic.mesmer_pair()
-    app = Mesmer(model=tf.keras.models.load_model(MESMER_MODEL_DEFAULT))
+    app = Mesmer(model=tf.keras.models.load_model(mesmer_model_path()))
     cell = np.squeeze(app.predict(img[None], image_mpp=0.5, compartment="whole-cell"))
     nuc = np.squeeze(app.predict(img[None], image_mpp=0.5, compartment="nuclear"))
     ep = EngineProcess("mesmer", log_path=str(tmp_path / "e.log"))

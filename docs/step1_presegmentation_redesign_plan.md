@@ -585,6 +585,31 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 所有结果带正确的来源和 hash；
   - 真机上跑一个小方案（不超过 10 个任务）。
 
+**C 申请与批准**（2026-09-24 用户批准；和 V1 合并执行，新流程走 `seg_runner` 子进程，旧 worker 不改）：
+- **分四步，每步单独测试、验收、提交**：
+  1. **抽共用零件（纯搬迁，不改行为）**：把 Step2 生效的归属与重编号内联代码（`segment_merge_worker.py:2538-2575`）原样抽成 `core/label_ownership.py`；门：同一张 label 图、同一个 own_bbox 上，与内联代码的保留集合和新标签完全一致。Step2 改为调用放到 V2。
+  2. **补全引擎**：`seg_runner` 加 expansion（保留扩张前的核）、Mesmer `postprocess_mask`、nuclear-guided 回传核；Mesmer 模型路径改为读模型清单，缺失时明确报错、不退回本机绝对路径；门：与同环境直接调用逐像素相同。
+  3. **后台运行流程（无界面）**：按 7.3、7.4 冻结 `run.json`（patch、组合、fusion 快照、来源和 pixel_key、HALO，HALO 与 Step2 overlap 同值，默认 200）；按 7.10 的归属表构造输入；引擎串行；按 7.3 原子发布；Stop 记 cancelled、崩溃记 failed、关闭无残留；核权重为 0 或 DAPI 无 committed 窗口时拒绝运行。
+  4. **界面接入**：Methods 区总任务数下方放 Run / Stop 和进度；超过 10 个任务先提示（R4）；结果列表（每个组合一行：状态、细胞数、失败数、「选用」），过期可看不可选（7.7）；修掉结果到达自动设为当前参数（现有缺陷 1）；选定后按现有格式写参数文件。
+- **用户裁定（a）**：块 C 不做图像结果视图，只有结果列表；轮廓显示留给块 D。旧结果网格不改造。
+- **新增可见界面已授权**：Run、Stop、进度、结果列表、选用按钮，都在 Pre-segmentation 页。
+- **拟新增**：`core/label_ownership.py`、`core/preseg_input.py`、`core/preseg_run.py`、`ui/step1_presegmentation/run_job.py`、`ui/step1_presegmentation/results_panel.py` 及测试。**拟修改**：`seg_runner/engines.py`、`runner.py`、`client.py`、`envs/fusion_mesmer/models.json`、`ui/main_window.py`、`method_blocks.py`、`UI_SURFACE_RULES.md`、本文档。
+- **不改**：Step2 全部代码、`workers/cellpose_worker.py`、`workers/mesmer_worker.py`、fusion 算法、viewer / 调度器 / 缓存。
+- **测试环境**：默认环境没有 deepcell，Mesmer 相关测试另用 `fusion_mesmer` 跑。
+
+**C 执行记录**（2026-09-24 启动）：
+- **第 1 步：抽共用零件（完成，待提交）**
+  - `core/label_ownership.py`：`centroids`、`kept_labels`、`ownership_lut`、`apply_ownership`（共享标签的第二张 mask 走同一张 LUT，超出主输出最大标签的置 0），从 Step2 生效的内联代码原样搬出；Step2 没改。
+  - 门：`tests/test_label_ownership.py` 让 **Step2 真实的 `_segment_one_zarr`** 在合成 fused.zarr 上跑（模型换成固定的标注函数），它写出的全局 mask 与用本模块逐块归属、按 Step2 同样方式粘贴的结果逐像素相同（4 种切块和 overlap）；质心与 `_centroids_vectorised` 逐元素相同。8 条测试；把半开区间改成闭区间，3 条变红。
+- **第 2 步：补全引擎（完成，待提交）**
+  - `seg_runner/engines.py`：
+    - expansion 两个方法输出细胞和核：核是扩张前的预测，细胞是 `expand_labels(核, expand_distance)`，距离 0 时细胞等于核；
+    - Mesmer：列表阈值按 P2 进入主输出的 `postprocess_kwargs_*`（whole-cell、nuclear-guided 的细胞；nuclei 的核），nuclear-guided 的副核用库默认值；`postprocess_min_size` 只作用于主输出，和现有 Step1 worker 一致；不传 `preprocess_kwargs`；
+    - Mesmer 模型路径改为读模型清单（可被清单里写明的环境变量覆盖），逐个核对文件存在和大小，缺失或不符明确报错，不再退回写死的路径；
+    - `postprocess_mask` 在 runner 里有一份拷贝（runner 不导入主程序），测试保证与 `utils/mesmer_utils.postprocess_mask` 相同，Step2 改用 runner（V2）后只剩一份。
+  - `tests/test_seg_runner_engines.py` 共 10 条：两种 expansion 在子进程里与直接调用逐像素相同；阈值到达 `app.predict` 的 kwargs（不需要 DeepCell 的替身测试）；真实 Mesmer 上阈值改变了结果，且子进程与直接调用相同；模型清单的路径与核对。`fusion_test2` 20 passed / 3 skipped（Mesmer），`fusion_mesmer` 23 passed（含原 `test_seg_runner.py`）。四处反向注入都变红：核被扩张结果覆盖、阈值不传、副核也做后处理、清单路径失效时退回别处。
+  - **与 P1 裁定的出入（2026-09-24 用户同意）**：P1 原写「块 C 在 `mesmer_utils.run_mesmer_prediction` 和 `mesmer_worker` 的 Step1、Step2 两条路径里透传阈值」。按本块批准的范围（不改 Step2、不改旧 worker），新流程的阈值在 runner 里透传；Step2 的透传随 Step2 改用同一个 runner（V2）一起做，旧路径不加。
+
 ### 块 D — montage 结果视图（包含显示供给）
 - **白名单**：
   - 新文件 `ui/step1_presegmentation/montage_view.py`、`mask_layers.py`、patch 底图缓存（归结果视图所有）；

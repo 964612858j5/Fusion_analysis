@@ -609,6 +609,15 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
     - `postprocess_mask` 在 runner 里有一份拷贝（runner 不导入主程序），测试保证与 `utils/mesmer_utils.postprocess_mask` 相同，Step2 改用 runner（V2）后只剩一份。
   - `tests/test_seg_runner_engines.py` 共 10 条：两种 expansion 在子进程里与直接调用逐像素相同；阈值到达 `app.predict` 的 kwargs（不需要 DeepCell 的替身测试）；真实 Mesmer 上阈值改变了结果，且子进程与直接调用相同；模型清单的路径与核对。`fusion_test2` 20 passed / 3 skipped（Mesmer），`fusion_mesmer` 23 passed（含原 `test_seg_runner.py`）。四处反向注入都变红：核被扩张结果覆盖、阈值不传、副核也做后处理、清单路径失效时退回别处。
   - **与 P1 裁定的出入（2026-09-24 用户同意）**：P1 原写「块 C 在 `mesmer_utils.run_mesmer_prediction` 和 `mesmer_worker` 的 Step1、Step2 两条路径里透传阈值」。按本块批准的范围（不改 Step2、不改旧 worker），新流程的阈值在 runner 里透传；Step2 的透传随 Step2 改用同一个 runner（V2）一起做，旧路径不加。
+- **第 3 步：后台运行流程（完成，待提交）**
+  - `core/config_hash.py`：规范化哈希从 `MainWindow._step1_config_hash` 搬出，窗口改为调用它；测试用搬迁前算出的 6 个摘要把两者钉住。
+  - `core/preseg_input.py`：读取范围（patch ± HALO，与分析区域取交集，不补边）、`fuse_fullres` 融合成 uint16、多边形置 0、÷65535、按方法组装输入（7.11.4 的表）；核通道没设、核权重为 0、核通道没有已确认的显示窗口时拒绝。
+    - **实测发现**：`cv2.fillPoly` 在画布边缘会裁剪多边形，逐个窗口栅格化时边缘有少量像素和 Step2 不同（测试里 53 个像素）。改为 `RoiMask`：和 Step2 一样在整个 ROI bbox 上栅格化一次，存成按位压缩的数组，再按窗口切出；测试与 Step2 的 `_poly_mask` 逐像素相同。内存和 Step2 写 fused.zarr 时相同（短暂地每个 ROI 像素 1 字节）。
+  - `core/preseg_run.py`：`run_id`、任务展开（组合 × patch）、`run.json`、结果记录（先 mask 后记录，原子替换）、`pixel_key`（结构化身份，7.4 的「必须变 / 必须不变」各项都有测试）、选定资格（7.7 的五条）和过期判断。
+    - **设计选择**：两个方法块列出了同一个组合时，每个 patch 只跑一次（同样的方法、参数和像素，结果文件名也相同），按第一次出现的顺序。
+  - `ui/step1_presegmentation/run_job.py`：普通线程，不依赖 Qt。引擎按 Cellpose → StarDist → Mesmer 串行；同一 patch 同一种输入只准备一次，各组合共用；每个任务收到结果后按共用归属函数保留中央区域（expansion 的核跟随细胞用同一张 LUT，nuclear-guided 各自归属、`paired: false`），裁成 patch 大小再发布；每个任务正好一条记录。Stop：正在跑和后面的任务记为已取消，后面的引擎不再启动；引擎起不来：它的任务记为失败并写明原因，其他引擎照常；patch 在分析区域外：只有这个 patch 失败。
+  - `tests/test_preseg_run.py` 共 17 条，其中端到端用真实 StarDist 进程，与手工逐步计算逐像素相同。`fusion_test2`、`fusion_mesmer` 都 17 passed。另在 `fusion_mesmer` 里实跑 Cellpose whole-cell + Mesmer nuclear-guided（两个阈值）×2 个 patch：全部 ok，Cellpose 用 GPU、Mesmer 用 CPU，run 目录只剩 run.json、records、masks 和引擎日志。
+  - 反向注入：HALO 置 0、跳过归属、expansion 不共用 LUT、Stop 不设停止标记（第一次没测出，已加强测试：Stop 后下一个引擎不得启动）、pixel_key 混入 patch 数、忽略已取消、Mesmer nuclei 第二通道不为 0，都会变红。
 
 ### 块 D — montage 结果视图（包含显示供给）
 - **白名单**：

@@ -44,6 +44,7 @@ from ..core.channel_remap import (
     compute_qupath_auto_minmax,
 )
 from ..core.io_loader import OMETIFFLoader
+from ..core import config_hash as _config_hash
 from ..utils import perf_trace
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
@@ -7479,32 +7480,12 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _canonical_step1_config_value(value):
-        transient = {
-            "generated_at", "created_at", "saved_at", "last_used",
-            "runtime_seconds", "avg_tile_s", "tile_seconds",
-            "preview_path", "config_hash", "old_hash", "new_hash",
-        }
-        if isinstance(value, dict):
-            return {
-                str(k): MainWindow._canonical_step1_config_value(v)
-                for k, v in sorted(value.items(), key=lambda item: str(item[0]))
-                if str(k) not in transient
-            }
-        if isinstance(value, (list, tuple)):
-            return [MainWindow._canonical_step1_config_value(v) for v in value]
-        if isinstance(value, float):
-            return round(value, 6)
-        if isinstance(value, np.floating):
-            return round(float(value), 6)
-        if isinstance(value, np.integer):
-            return int(value)
-        return value
+        return _config_hash.canonical_value(value)
 
     @classmethod
     def _step1_config_hash(cls, value):
-        canonical = cls._canonical_step1_config_value(value)
-        payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str)
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        # One implementation, shared with the pre-segmentation run records.
+        return _config_hash.config_hash(value)
 
     def _expected_fused_zarr_meta(self, worker_fcfg, selected_method):
         active_roi = self._active_roi or (self._rois[0] if self._rois else None)

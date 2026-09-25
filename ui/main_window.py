@@ -1465,15 +1465,15 @@ class MainWindow(QMainWindow):
         # is what a real session saw as a 1:1 split.
         self._stack.currentChanged.connect(
             lambda _i: self._fix_step1_split_ratio())
-        # ONE handle, two places to grab it: a drag on either page writes the
-        # shared share and the other page follows.
-        self._wire_channel_column_sync()
-
         self._step2 = Step2Page()
         self._step2.go_back.connect(self._go_to_step1)
         self._step2.segmentation_done.connect(self._on_step2_complete)
         self._step2.open_qc_requested.connect(self._go_to_step3)
         self._stack.addWidget(self._step2)
+        # ONE share, three places to grab it (Step0, Step1, and Step2's
+        # controls column, block L2): a drag on any page writes the shared
+        # share and the others follow. Wired once Step2 exists.
+        self._wire_channel_column_sync()
 
         self._step3 = Step3Page()
         # Step3 CONSUMES the public display answers -- which markers are
@@ -1557,9 +1557,12 @@ class MainWindow(QMainWindow):
     _CHANNEL_COLUMN_FRACTION_FALLBACK = 0.278
 
     def _channel_column_splitters(self):
-        """The two handles that mean the same thing, Step0's first."""
+        """The handles that mean the same thing, Step0's first; Step2's
+        controls column is the third (block L2, user ruling 2026-09-25)."""
+        step2 = getattr(self, "_step2", None)
         return [getattr(getattr(self, "_step0", None), "_bg_c_split", None),
-                getattr(self, "_step1_main_split", None)]
+                getattr(self, "_step1_main_split", None),
+                getattr(step2, "channel_column_splitter", lambda: None)()]
 
     @staticmethod
     def _fraction_of(split):
@@ -1654,8 +1657,9 @@ class MainWindow(QMainWindow):
                         fraction = settled
                         self._channel_column_fraction = settled
 
-            split = getattr(self, "_step1_main_split", None)
-            if split is not None and split.count() == 2 and split.width() > 10:
+            for split in self._channel_column_splitters()[1:]:
+                if split is None or split.count() != 2 or split.width() <= 10:
+                    continue
                 usable = max(1, split.width() - split.handleWidth())
                 left = max(1, int(round(usable * fraction)))
                 right = max(1, usable - left)

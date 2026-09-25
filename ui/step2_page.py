@@ -55,6 +55,84 @@ from ..core.io_loader import OMETIFFLoader
 #  Step 2 Page  (Segmentation & Merge)
 # ══════════════════════════════════════════════════════════════════════
 
+class _CompactCombo(QComboBox):
+    """Sized by a short minimum instead of its longest item (block L2): the
+    box shows the choice elided when narrow; the list still opens as wide as
+    its items."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.setMinimumContentsLength(3)
+        self.view().setTextElideMode(Qt.ElideNone)
+
+    def showPopup(self):
+        view = self.view()
+        view.setMinimumWidth(max(self.width(), view.sizeHintForColumn(0) + 24))
+        super().showPopup()
+
+
+#: The narrowest a row's control gets (block L2).
+_CONTROL_MIN_W = 48
+
+
+def _let_shrink(widget):
+    """Let a row's control give way to its label (block L2): a drop-down
+    shows its choice elided, a number or text box narrows, a check box's own
+    text is cut. Its value and meaning are unchanged."""
+    if isinstance(widget, QComboBox):
+        widget.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        widget.setMinimumContentsLength(3)
+        # ...while its list still opens as wide as its items.
+        view = widget.view()
+        view.setTextElideMode(Qt.ElideNone)
+
+        def fit_list(*_a, combo=widget):
+            combo.view().setMinimumWidth(combo.view().sizeHintForColumn(0) + 24)
+        fit_list()
+        widget.model().rowsInserted.connect(fit_list)
+        widget.model().modelReset.connect(fit_list)
+    if isinstance(widget, (QComboBox, QtWidgets.QAbstractSpinBox, QtWidgets.QLineEdit,
+                           QCheckBox, QLabel)):
+        widget.setMinimumWidth(_CONTROL_MIN_W)
+        policy = widget.sizePolicy()
+        policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Expanding
+                                   if not isinstance(widget, (QCheckBox, QLabel))
+                                   else QtWidgets.QSizePolicy.Preferred)
+        widget.setSizePolicy(policy)
+
+
+class _ElidedLabel(QLabel):
+    """A one-line label that elides to its width; the whole text is the
+    tooltip (block L2)."""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._full = text
+        self.setToolTip(text)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+
+    def setText(self, text):
+        self._full = text
+        self.setToolTip(text)
+        self._elide()
+
+    def text(self):
+        return self._full
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(40, super().minimumSizeHint().height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self):
+        m = self.contentsMargins()
+        width = max(0, self.width() - m.left() - m.right() - 10)
+        QLabel.setText(self, self.fontMetrics().elidedText(self._full, Qt.ElideRight, width))
+
+
 class Step2Page(QWidget):
     """Full Step 2 UI: zarr input, tile grid, segmentation params, progress."""
 
@@ -213,8 +291,10 @@ class Step2Page(QWidget):
         self._channels_host.setContentsMargins(4, 4, 4, 4)
         self._channels_host.setSpacing(4)
         ll.addWidget(self._channels_box, stretch=1)
-
-        split.addWidget(left)
+        # Not on screen in Step2 (block L2, user ruling 2026-09-25): the
+        # frame and the ONE dock mounted into it are kept, only hidden.
+        self._channels_box.setVisible(False)
+        self._overview_panel = left
 
         # ── RIGHT: all controls ───────────────────────────────────────
         right_scroll = QScrollArea()
@@ -242,7 +322,7 @@ class Step2Page(QWidget):
         inl.addLayout(zr)
 
         pr = QHBoxLayout()
-        pr.addWidget(QLabel('Segmentation Index:'))
+        pr.addWidget(QLabel('Index:'))       # was 'Segmentation Index:' (block L2)
         self._seg_params_edit = QtWidgets.QLineEdit()
         self._seg_params_edit.setPlaceholderText('segmentation_params/ or segmentation_params_index.json')
         self._seg_params_edit.setStyleSheet('font-size:11px;')
@@ -327,26 +407,30 @@ class Step2Page(QWidget):
         def _param_row(label, widget):
             r = QHBoxLayout()
             l = QLabel(label)
-            l.setFixedWidth(160)
+            # Block L2 (user ruling 2026-09-25): the label is exactly as wide
+            # as its text and never cut; the control after it is what gives
+            # way when the shared channel column is narrow.
+            l.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
             r.addWidget(l)
-            r.addWidget(widget)
+            r.addWidget(widget, 1)
+            _let_shrink(widget)
             return r, l, widget
 
-        self._param_source_combo = QComboBox()
+        self._param_source_combo = _CompactCombo()
         self._param_source_combo.addItem('None / Manual default', 'manual')
         self._param_source_combo.addItem('From segmentation_params index', 'index')
         self._param_source_combo.currentIndexChanged.connect(self._on_param_source_changed)
-        r, self._param_source_label, _ = _param_row('Parameter Source:', self._param_source_combo)
+        r, self._param_source_label, _ = _param_row('Source:', self._param_source_combo)
         cpl.addLayout(r)
 
         self._index_method_combo = QComboBox()
         self._index_method_combo.currentIndexChanged.connect(self._on_index_method_changed)
-        r, self._index_method_label, _ = _param_row('Index method:', self._index_method_combo)
+        r, self._index_method_label, _ = _param_row('Method:', self._index_method_combo)
         cpl.addLayout(r)
 
         self._history_combo = QComboBox()
         self._history_combo.currentIndexChanged.connect(self._on_history_changed)
-        r, self._history_label, _ = _param_row('Parameter version:', self._history_combo)
+        r, self._history_label, _ = _param_row('Version:', self._history_combo)
         cpl.addLayout(r)
 
         self._apply_index_btn = QPushButton('Apply Selected Params')
@@ -364,8 +448,7 @@ class Step2Page(QWidget):
         r, self._resolved_param_label, _ = _param_row('Resolved path:', self._resolved_param_edit)
         cpl.addLayout(r)
 
-        self._method_combo = QComboBox()
-        self._method_combo.setMinimumWidth(260)
+        self._method_combo = _CompactCombo()
         self._method_combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         for method in available_segmentation_methods():
             cfg = get_segmentation_method_config(method)
@@ -378,7 +461,7 @@ class Step2Page(QWidget):
         cpl.addLayout(r)
 
         # Cellpose 4.0.1+: model_type is ignored — only cpsam is used
-        self._cp_model_lbl = QLabel('cpsam  (Cellpose 4.0.1+: only model, model_type ignored)')
+        self._cp_model_lbl = _ElidedLabel('cpsam  (Cellpose 4.0.1+: only model, model_type ignored)')
         self._cp_model_lbl.setStyleSheet(
             'color:#fa8;font-size:11px;padding:2px 4px;'
             'background:#221;border-radius:3px;'
@@ -911,11 +994,14 @@ class Step2Page(QWidget):
             'Per-tile: tile_masks/tile_r*_c*_dapi.ome.tiff | tile_r*_c*_raw_mask.ome.tiff'
         )
         out_info.setStyleSheet('color:#888;font-size:10px;')
+        out_info.setWordWrap(True)      # block L2: fits the shared column
         outl.addWidget(out_info)
         rl.addWidget(out_box)
 
         # Recovery mode (collapsed by default)
-        rec_box = QGroupBox('Recovery Mode (merge from saved .npy files)')
+        # Block L2 (user ruling 2026-09-25): a short title; the long one is its tooltip.
+        rec_box = QGroupBox('Recovery from .npy')
+        rec_box.setToolTip('Recovery Mode (merge from saved .npy files)')
         rec_box.setStyleSheet(self._box_style('#e06c75'))
         rec_box.setCheckable(True)
         rec_box.setChecked(False)
@@ -926,6 +1012,7 @@ class Step2Page(QWidget):
             'Select the directory containing tile_r_c.npy files.'
         )
         rec_info.setStyleSheet('color:#aaa;font-size:10px;')
+        rec_info.setWordWrap(True)      # block L2: fits the shared column
         recl.addWidget(rec_info)
 
         rr = QHBoxLayout()
@@ -946,10 +1033,17 @@ class Step2Page(QWidget):
 
         rl.addStretch()
         right_scroll.setWidget(right_w)
+        # Block L2 (user ruling 2026-09-25): the controls take the LEFT
+        # column, as wide as Step0's and Step1's channel column (one share,
+        # kept by the main window), and the tile overview the rest. A
+        # horizontal scroll bar appears only when the column is dragged
+        # narrower than the controls.
         split.addWidget(right_scroll)
-
-        split.setStretchFactor(0, 2)
+        split.addWidget(self._overview_panel)
+        split.setChildrenCollapsible(False)
+        split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
+        self._main_split = split
         root.addWidget(split, stretch=1)
 
         # ── Bottom navigation ─────────────────────────────────────────
@@ -989,6 +1083,10 @@ class Step2Page(QWidget):
         root.addLayout(nav)
 
     # ── utilities ─────────────────────────────────────────────────────
+
+    def channel_column_splitter(self):
+        """The handle that shares Step0's and Step1's channel-column width."""
+        return getattr(self, "_main_split", None)
 
     def channels_host(self):
         """Where the ONE public channel panel goes in this page."""
@@ -1344,6 +1442,11 @@ class Step2Page(QWidget):
             self._resolved_param_label, self._resolved_param_edit,
         ):
             w.setVisible(is_index)
+        # One `Method:` row on screen (block L2, user ruling 2026-09-25): from
+        # the index, the index's method (above) is the one shown; Step2's own
+        # method box is kept, hidden -- it still holds the applied method.
+        for w in (self._method_label, self._method_combo):
+            w.setVisible(not is_index)
 
     def _update_resolved_param_path(self):
         method = self._index_method_combo.currentData()
@@ -1442,12 +1545,11 @@ class Step2Page(QWidget):
         nc  = self._cols_spin.value()
         th  = -(-self._full_h // nr)
         tw  = -(-self._full_w // nc)
-        # RAM estimate: tile_h × tile_w × 2 channels × 4 bytes float32 × 2 (accum)
-        ram = th * tw * 2 * 4 * 2 / 1e9
+        # No VRAM estimate (block L2, user ruling 2026-09-25: it was not
+        # accurate).
         self._tile_ram_lbl.setText(
             f'{nr}×{nc} = {nr*nc} tiles  |  '
-            f'tile size: {th:,}×{tw:,} px  |  '
-            f'est. VRAM/tile: {ram:.1f} GB'
+            f'tile size: {th:,}×{tw:,} px'
         )
         self._draw_tile_grid()
 

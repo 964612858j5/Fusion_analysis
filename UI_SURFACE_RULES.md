@@ -207,6 +207,23 @@ row, and the duplicate Tissue Preview button in the step bar.
   together because the share is normalised. Step0 is written through its own
   left-column mechanism so its hidden peer splitter stays at the same width.
 * **Step2 / Step3 rows** -- tick, swatch, name. Nothing else.
+* **Step2's page** (block L2, user ruling 2026-09-25) -- TWO columns: the
+  parameter panel on the LEFT, as wide as Step0's and Step1's channel column
+  (the same one share: dragging any of the three handles moves all three),
+  and the Tile Status Overview with the progress on the right. Each
+  parameter row's label is exactly as wide as its text and is never cut;
+  the control after it gives way (a drop-down shows its choice elided and
+  still opens as wide as its items, a box narrows). A horizontal scroll bar
+  appears only when the column is dragged narrower than the panel. Short
+  names, so the panel fits the column on a fresh start: `Index:` (was
+  `Segmentation Index:`), `Source:`, `Method:` and `Version:` (were
+  `Parameter Source:`, `Index method:`, `Parameter version:`); ONE `Method:`
+  row is on screen -- from the index it is the index's method, and Step2's
+  own method box is kept, hidden; the box `Recovery from .npy` (its old
+  title is the tooltip); the hints wrap; the tile line has no VRAM estimate
+  (it was not accurate). The
+  public `Channels` panel is NOT shown in Step2: its frame and the dock
+  mounted in it are kept, hidden, not deleted; Step2's own ticks are kept.
 * **Step1's Save progress** (block L1, user ruling 2026-09-25) -- the modal
   progress dialog alone (with Cancel). The bar that used to sit at the
   bottom of the page is kept, hidden, and never shown; its words go to the

@@ -21,7 +21,7 @@ import zarr
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from ..core import label_ownership
+from ..core import label_ownership, preseg_contract
 from ..core.io_loader import OMETIFFLoader
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
@@ -2872,6 +2872,14 @@ class SegmentMergeWorker(QThread):
             self._logger, log_path = self._setup_logger()
             log = self._logger
             log.info("=== Segmentation started ===")
+            # Step2 hook-up, step 2 (user ruling A, 2026-09-25): a Step1
+            # pre-segmentation contract needs the new path, which is not
+            # connected yet. Refused -- never run on the old path. A malformed
+            # contract raises ContractError here as well.
+            if preseg_contract.validate(self.seg_config) is not None:
+                raise RuntimeError(
+                    "this parameter file is a Step1 pre-segmentation hand-over; "
+                    "its way of running is not connected yet")
             register_legacy_result(self.project_output_dir)
             config_path = self._write_run_segmentation_config()
             log.info(f"run_segmentation_params.json -> {config_path}")

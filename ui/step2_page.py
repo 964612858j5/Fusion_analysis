@@ -48,6 +48,7 @@ from ..workers.hq_marker_segmentation import (
     validate_hq_channels,
 )
 from ..workers.segment_merge_worker import SegmentMergeWorker
+from ..core import preseg_contract
 from ..core.io_loader import OMETIFFLoader
 
 # ══════════════════════════════════════════════════════════════════════
@@ -853,6 +854,9 @@ class Step2Page(QWidget):
         self._mesmer_batch_size.setRange(1, 32)
         self._mesmer_batch_size.setValue(1)
         self._mesmer_mpp = _mesmer_row('image_mpp:', QDoubleSpinBox())
+        # 3 decimals like Step1's method editor (0.325 at 20x), so a chosen
+        # value is not rounded on its way through this box.
+        self._mesmer_mpp.setDecimals(3)
         self._mesmer_mpp.setRange(0.01, 10)
         self._mesmer_mpp.setSingleStep(0.05)
         self._mesmer_mpp.setValue(0.5)
@@ -1281,6 +1285,8 @@ class Step2Page(QWidget):
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 cfg = normalize_segmentation_config(json.load(f))
+            # A new-format file is checked by its version, never guessed at.
+            preseg_contract.validate(cfg)
             self._apply_seg_config_to_ui(cfg)
             self._seg_config = cfg
             self._seg_param_file = os.path.abspath(path)
@@ -2241,6 +2247,36 @@ class Step2Page(QWidget):
 
     # ── run / stop ────────────────────────────────────────────────────
 
+    def _check_preseg_contract(self, seg_config):
+        """True when `seg_config` may run. A Step1 pre-segmentation hand-over
+        must reach the engine unchanged, and its path is not connected yet
+        (Step2 hook-up, step 2; user ruling A, 2026-09-25): it is refused,
+        never run on the old path."""
+        try:
+            block = preseg_contract.validate(seg_config)
+        except preseg_contract.ContractError as exc:
+            QMessageBox.warning(self, 'Segmentation params', f'{exc}.')
+            return False
+        if block is None:
+            return True
+        # What the worker reads: the normalised config, whose top level mirrors
+        # `params` (params win) and keeps keys Step2 has no control for
+        # (Mesmer's thresholds).
+        effective = normalize_segmentation_config(seg_config)
+        diff = preseg_contract.mismatches(block, effective)
+        if diff:
+            lines = "\n".join(f"  {k}: Step1 {want!r}, Step2 {got!r}" for k, want, got in diff)
+            QMessageBox.warning(
+                self, 'Segmentation params',
+                "The parameters in Step2 are not the ones chosen in Step1:\n"
+                f"{lines}\n\nReload the saved parameters, or choose again in Step1.")
+            return False
+        QMessageBox.information(
+            self, 'Segmentation params',
+            "This parameter file needs the new way of running a pre-segmentation "
+            "result, which is not connected yet. It can be used once that step is done.")
+        return False
+
     def _run(self):
         if not self._zarr_path or not os.path.exists(self._zarr_path):
             QMessageBox.warning(self, 'No data',
@@ -2266,6 +2302,12 @@ class Step2Page(QWidget):
                 if not self._apply_selected_index_params():
                     return
         seg_config = self.get_seg_config()
+        if source == "index":
+            if not self._check_preseg_contract(seg_config):
+                return
+        else:
+            # Manual parameters are the user's own, not a Step1 hand-over.
+            seg_config.pop(preseg_contract.CONTRACT_KEY, None)
         if seg_config.get("method") in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             channels = seg_config.get("hq_channels") or []
             try:

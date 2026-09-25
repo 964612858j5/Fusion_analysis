@@ -95,7 +95,7 @@ from .step1_presegmentation import montage_gpu
 from . import step1_draft_spec
 from .step1_button_styles import MODE_BUTTON_QSS, SECTION_BOX_QSS
 from .step1_presegmentation.run_job import PresegRunJob, open_loader, summary_line
-from ..core import preseg_input, preseg_run
+from ..core import preseg_contract, preseg_input, preseg_run
 from ..seg_runner.engines import METHOD_OUTPUTS
 from ..utils.calibration_source import open_corrected_channel_array
 from .step0 import overview_panel
@@ -5237,6 +5237,31 @@ class MainWindow(QMainWindow):
         ok, why = preseg_run.selectable(run, records, sel["combo_id"], key, fhash)
         return ok, why
 
+    def _preseg_segmentation_config(self):
+        """The params file for the chosen result: ONLY the combination's own
+        parameters (no Cellpose defaults, no fixed min size) plus the contract
+        block Step2 checks (Step2 hook-up, step 2). Raises ContractError."""
+        sel = self._preseg_selected
+        rdir = preseg_run.run_dir(self._preseg_step1_dir(), sel["run"]["run_id"])
+        # run.json on disk: the frozen snapshot plus the engines it started.
+        with open(os.path.join(rdir, "run.json"), encoding="utf-8") as f:
+            run = json.load(f)
+        block = preseg_contract.build(run, sel["combo_id"], preseg_run.load_records(rdir))
+        chosen = self._p2_params or {}
+        if chosen.get("method") != block["method"]:
+            raise preseg_contract.ContractError("the chosen method is not the run's")
+        if dict(chosen.get("params") or {}) != block["params"]:
+            raise preseg_contract.ContractError("the chosen parameters are not the run's")
+        # `chosen["params"]` = the combination's plus the method's fixed
+        # rules (set at Use), the same as the contract's.
+        return normalize_segmentation_config({
+            "method":        block["method"],
+            "params":        dict(chosen.get("params") or {}),
+            "params_source": PRESEG_SOURCE,
+            "saved_at":      time.strftime("%Y-%m-%d %H:%M:%S"),
+            preseg_contract.CONTRACT_KEY: block,
+        })
+
     def _drop_preseg_selection(self):
         self._preseg_selected = None
         if self._params_source == PRESEG_SOURCE:
@@ -5260,11 +5285,9 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.Yes:
                 return False
         combo = next(c for c in run["combos"] if c["combo_id"] == combo_id)
-        params = dict(combo["params"])
-        if combo["method"].startswith("mesmer_"):
-            params["normalize_input"] = False     # DeepCell's own preprocessing only
-            params["threshold_target"] = "nuclear" if combo["method"] == "mesmer_nuclei" \
-                else "whole_cell"
+        # Mesmer: DeepCell's own preprocessing only, and the output its
+        # thresholds act on -- one definition with the contract Save writes.
+        params = dict(combo["params"], **preseg_contract.fixed_rules(combo["method"]))
         chosen = {"method": combo["method"], "params": params,
                   "fusion_settings_hash": run["fusion"]["hash"],
                   "pixel_key": run["source"]["pixel_key"],
@@ -8906,12 +8929,21 @@ class MainWindow(QMainWindow):
             )
             return
 
+        preseg_cfg = None
         if self._params_source == PRESEG_SOURCE:
             ok, why = self._preseg_selection_valid()
             if not ok:
                 self._drop_preseg_selection()
                 QMessageBox.warning(self, "Pre-segmentation result",
                                     f"The chosen result can no longer be used: {why}.")
+                return
+            # Built before anything is written, so a result that cannot hand
+            # over its contract leaves no half-saved state behind.
+            try:
+                preseg_cfg = self._preseg_segmentation_config()
+            except preseg_contract.ContractError as exc:
+                QMessageBox.warning(self, "Pre-segmentation result",
+                                    f"The chosen result cannot be saved for Step2: {exc}.")
                 return
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         if self._corrected_zarr_mode == "roi_only" and not self._rois:
@@ -9002,23 +9034,23 @@ class MainWindow(QMainWindow):
             or method_cfg.get("method")
             or CELLPOSE_WHOLECELL_FUSION
         )
-        params_block = dict(method_cfg.get("params") or {})
-        if self._params_source == PRESEG_SOURCE:
-            # The old panel's method has nothing to do with a chosen result.
-            params_block = {}
-        params_block.update(dict(self._p2_params.get("params") or {}))
-        cpcfg = normalize_segmentation_config({
-            "method":             selected_method,
-            "params":             params_block,
-            "model_type":         "cpsam",
-            "diameter":           self._p2_params.get("diameter"),
-            "flow_threshold":     self._p2_params.get("flow_threshold", 0.4),
-            "cellprob_threshold": self._p2_params.get("cellprob_threshold", 0.0),
-            "min_size":           15,
-            "phase1_diameter":    self._p1_diam,
-            "params_source":      self._params_source or "unknown",
-            "saved_at":           time.strftime("%Y-%m-%d %H:%M:%S"),
-        })
+        if preseg_cfg is not None:
+            cpcfg = preseg_cfg
+        else:
+            params_block = dict(method_cfg.get("params") or {})
+            params_block.update(dict(self._p2_params.get("params") or {}))
+            cpcfg = normalize_segmentation_config({
+                "method":             selected_method,
+                "params":             params_block,
+                "model_type":         "cpsam",
+                "diameter":           self._p2_params.get("diameter"),
+                "flow_threshold":     self._p2_params.get("flow_threshold", 0.4),
+                "cellprob_threshold": self._p2_params.get("cellprob_threshold", 0.0),
+                "min_size":           15,
+                "phase1_diameter":    self._p1_diam,
+                "params_source":      self._params_source or "unknown",
+                "saved_at":           time.strftime("%Y-%m-%d %H:%M:%S"),
+            })
         if selected_method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             step1_weights = {}
             for gdata in (fcfg.get("groups") or {}).values():

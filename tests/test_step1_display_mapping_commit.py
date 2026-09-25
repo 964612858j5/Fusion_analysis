@@ -27,6 +27,26 @@ pytest.importorskip("zarr")
 from PyQt5 import QtWidgets  # noqa: E402
 
 
+
+def _chosen(w):
+    """A pre-segmentation result chosen with Use -- the one thing Save takes
+    since block E (user ruling 2026-09-25). The guards these tests are about
+    (unsaved settings, the mapping commit, what the run writes) come after."""
+    from block01.ui import main_window as mw
+    # Of the pixels and saved settings now current, so it is not stale --
+    # the fields `_on_preseg_use` gives a real choice.
+    key, fhash = w._preseg_current()
+    w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30,
+                    "params": {"diameter": 30}, "fusion_settings_hash": fhash,
+                    "pixel_key": key, "preseg_run_id": "r", "combo_id": "c"}
+    w._params_source = mw.PRESEG_SOURCE
+    w._preseg_selected = {"run": {"run_id": "r", "source": {"pixel_key": key},
+                                  "fusion": {"hash": fhash}}, "combo_id": "c"}
+    w._preseg_selection_valid = lambda: (True, "")
+    w._preseg_segmentation_config = lambda: mw.normalize_segmentation_config({
+        "method": "cellpose_wholecell_fusion", "params": {"diameter": 30},
+        "params_source": mw.PRESEG_SOURCE})
+
 @pytest.fixture(scope="module")
 def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -237,14 +257,13 @@ def test_a_save_whose_mapping_cannot_be_committed_fuses_nothing(app, tmp_path, m
             def exec_(self):
                 return QtWidgets.QDialog.Rejected
         monkeypatch.setattr(mwmod, "TileSelectDialog", _NoDialog)
-        w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30}
-        # Typed in, not searched: params from a search have to name the
-        # settings they were found on, and this test is not about that gate.
-        w._params_source = "manual"
         # The fusion settings are a separate commit point, and Save refuses
         # while they are unsaved; this test is about the mapping commit that
         # comes after that gate.
         assert w._commit_fusion_settings() is True
+        # A pre-segmentation result chosen on those settings (block E: Save
+        # takes nothing else).
+        _chosen(w)
 
         w._save()
 

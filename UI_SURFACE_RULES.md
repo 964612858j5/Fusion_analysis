@@ -56,9 +56,10 @@ row, and the duplicate Tissue Preview button in the step bar.
   number. (Step0's share is not one-to-two: its column starts at 4/3 of its
   minimum and works out near 0.28 of the work area. A hard 1:2 looked wider
   than Step0 and was rejected on the real machine.) The left column is two tabs, `Fusion` and `Pre-segmentation` (named `Channels` and `Method & Parameters` until 2026-09-24; the FRAME inside `Fusion` is still titled `Channels`, as in Step0);
-  the right column is three tabs, `Viewer`, `Patch Results` and
+  the right column is two tabs on screen, `Viewer` and
   `Pre-seg Results` (the montage of a pre-segmentation run, plan block D,
-  user ruling 2026-09-24; the old Patch Results stays until block E). Patch
+  user ruling 2026-09-24). The old `Patch Results` tab is kept but not
+  shown since block E (user ruling 2026-09-25). Patch
   Results is a TAB beside the picture, never a strip stacked over it; so is
   Pre-seg Results: one canvas with every patch of the run (packed in rows,
   its name at its corner, one camera, F fits all, a click selects without
@@ -112,7 +113,10 @@ row, and the duplicate Tissue Preview button in the step bar.
   the terminal, and the height goes to the viewer.
 * **Step1's `Pre-segmentation` tab** is three titled frames, `Patches`,
   `Methods` and `Results` (user ruling 2026-09-25), in the look of the
-  controls' own boxes below them, then those controls.
+  old controls' boxes. The old Phase1 / Phase2 controls that followed them
+  are kept but not shown since block E (user ruling 2026-09-25), and Save
+  takes a pre-segmentation result chosen with `Use`, nothing else: old
+  Phase 2 parameters, an old session's included, leave it locked.
 * **Step1's `Pre-segmentation` tab** opens with the PATCHES strip (user
   ruling, 2026-09-24; `docs/step1_presegmentation_redesign_plan.md` block
   A1): one tile per patch, showing the patch's name and nothing else, all

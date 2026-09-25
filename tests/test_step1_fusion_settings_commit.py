@@ -25,6 +25,26 @@ pytest.importorskip("PyQt5")
 from PyQt5 import QtWidgets  # noqa: E402
 
 
+
+def _chosen(w):
+    """A pre-segmentation result chosen with Use -- the one thing Save takes
+    since block E (user ruling 2026-09-25). The guards these tests are about
+    (unsaved settings, the mapping commit, what the run writes) come after."""
+    from block01.ui import main_window as mw
+    # Of the pixels and saved settings now current, so it is not stale --
+    # the fields `_on_preseg_use` gives a real choice.
+    key, fhash = w._preseg_current()
+    w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30,
+                    "params": {"diameter": 30}, "fusion_settings_hash": fhash,
+                    "pixel_key": key, "preseg_run_id": "r", "combo_id": "c"}
+    w._params_source = mw.PRESEG_SOURCE
+    w._preseg_selected = {"run": {"run_id": "r", "source": {"pixel_key": key},
+                                  "fusion": {"hash": fhash}}, "combo_id": "c"}
+    w._preseg_selection_valid = lambda: (True, "")
+    w._preseg_segmentation_config = lambda: mw.normalize_segmentation_config({
+        "method": "cellpose_wholecell_fusion", "params": {"diameter": 30},
+        "params_source": mw.PRESEG_SOURCE})
+
 @pytest.fixture(scope="module")
 def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -168,6 +188,7 @@ def test_every_job_refuses_while_the_settings_are_unsaved(app, tmp_path,
         elif what == "patch_preview":
             w._run_direct_patch_preview({"method": "mesmer_whole_cell"})
         else:
+            _chosen(w)
             w._save()
 
         assert "args" not in seen and started == []
@@ -482,7 +503,9 @@ def test_params_searched_on_other_settings_are_refused(app, tmp_path,
         assert w._params_match_committed_settings() is False
         w._save()
         assert started == []
-        assert any("other settings" in str(a).lower() for a in _no_modal_dialogs)
+        # Block E: a Phase 2 pick no longer reaches Save at all.
+        assert any("choose a pre-segmentation result first" in str(a).lower()
+                   for a in _no_modal_dialogs)
     finally:
         w.close()
 
@@ -646,8 +669,7 @@ def test_the_saved_run_writes_the_snapshots_mapping(app, tmp_path, monkeypatch):
         _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
-        w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30}
-        w._params_source = "manual"
+        _chosen(w)
 
         w._save()
 
@@ -758,6 +780,7 @@ def test_a_save_keeps_the_settings_restorable_after_it_republishes(app, tmp_path
         monkeypatch.setattr(type(w), "_commit_display_mapping_for_save",
                             _commit_and_republish)
 
+        _chosen(w)          # block E: Save takes a chosen result only
         w._save()
 
         # The hash is untouched, so the search result is still valid...
@@ -802,8 +825,7 @@ def test_a_rebind_that_cannot_be_written_fuses_nothing(app, tmp_path,
         _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
-        w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30}
-        w._params_source = "manual"
+        _chosen(w)
 
         def _commit_and_republish(self):
             _publish_manifest(tmp_path, self.loader, remap_hash="remap-2")

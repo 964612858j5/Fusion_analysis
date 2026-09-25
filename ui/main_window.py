@@ -1297,6 +1297,9 @@ class MainWindow(QMainWindow):
         self._montage_outlined = {}             # (run_id, task_id) -> {kind: outlines}
         method_params_lay.addWidget(self._section_box("Results", self._preseg_results), 1)
         method_params_lay.addWidget(method_params_scroll)
+        # Block E (plan 5; user ruling 2026-09-25): the old Phase1 / Phase2
+        # panel is kept, off the screen.
+        method_params_scroll.setVisible(False)
 
         patch_results_tab = QWidget()
         patch_results_tab.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -1317,6 +1320,9 @@ class MainWindow(QMainWindow):
         left_tabs.addTab(method_params_tab, "Pre-segmentation")
         right_tabs.addTab(pw, "Viewer")
         right_tabs.addTab(patch_results_tab, "Patch Results")
+        # Block E: the old Patch Results tab is kept, not shown (Pre-seg
+        # Results replaces it).
+        right_tabs.setTabVisible(right_tabs.indexOf(patch_results_tab), False)
         # The montage of a pre-segmentation run (plan block D, user ruling
         # 2026-09-24): a tab of its own; the old Patch Results stays as it is
         # until block E retires it.
@@ -1689,6 +1695,8 @@ class MainWindow(QMainWindow):
     def _show_step1_patch_results_tab(self, reason):
         tabs = getattr(self, "right_tabs", None)
         tab = getattr(self, "patch_results_tab", None)
+        if tabs is not None and tab is not None and not tabs.isTabVisible(tabs.indexOf(tab)):
+            return                       # block E: the old tab is off the screen
         if tabs is not None and tab is not None:
             tabs.setCurrentWidget(tab)
             print(f"[Step1-Tabs] switched to Patch Results due to {reason}")
@@ -8023,8 +8031,20 @@ class MainWindow(QMainWindow):
         print(f"[Step1] {what} refused: fusion settings are unsaved")
         return False
 
+    def _save_allowed(self):
+        """Save takes a pre-segmentation result chosen with Use, and nothing
+        else (block E, plan 4.7; user ruling 2026-09-25): the old Phase1 /
+        Phase2 panel is off the screen, and parameters an old session carries
+        do not unlock it."""
+        return (self._p2_params is not None
+                and self._params_source == PRESEG_SOURCE
+                and getattr(self, "_preseg_selected", None) is not None)
+
     def _check_save_unlock(self):
-        """Unlock the Save button whenever valid params are available."""
+        """Unlock the Save button when a chosen result is there to save."""
+        if not self._save_allowed():
+            self.btn_save.setEnabled(False)
+            return
         if self._p2_params is not None:
             self.btn_save.setEnabled(True)
             src = self._params_source or "phase2"
@@ -8084,8 +8104,8 @@ class MainWindow(QMainWindow):
         self.config.setEnabled(True)
         self.search.setEnabled(True)
         self._btn_back_to_step0.setEnabled(True)
-        # Only re-enable save if we still have valid params
-        if self._p2_params is not None:
+        # Only re-enable save if a chosen result is still there to save
+        if self._save_allowed():
             self.btn_save.setEnabled(True)
 
     # ── Fusion worker callbacks ───────────────────────────────────────
@@ -8974,6 +8994,12 @@ class MainWindow(QMainWindow):
         return {}, ""
 
     def _save(self):
+        if not self._save_allowed():
+            QMessageBox.warning(
+                self, "Nothing chosen",
+                "Choose a pre-segmentation result first: Pre-segmentation tab → "
+                "Results → Use.")
+            return
         current_method = self.search._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
         if self._p2_params is None and current_method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
             self._p2_params = self.search.get_current_params()

@@ -461,11 +461,8 @@ def test_a_720p_window_still_reaches_the_settings_and_the_commit_row(app):
         left.setCurrentWidget(w.method_params_tab)
         _settle(app)
         scroll = w._step1_method_params_scroll
-        assert scroll.isVisible()
-        # Reachable means scrollable when it does not fit, not "fits".
-        assert scroll.widget() is w.search
-        assert scroll.widgetResizable()
-        assert scroll.verticalScrollBar() is not None
+        # Block E: the old panel's scroll is kept, off the screen.
+        assert scroll.widget() is w.search and not scroll.isVisible()
         assert w.btn_save.isVisible()
         assert w._btn_save_fusion_settings is not None
     finally:
@@ -489,15 +486,16 @@ def test_the_two_columns_carry_the_tabs_the_user_asked_for(app):
 
 
 def test_patch_results_is_a_tab_beside_the_viewer_not_a_strip_over_it(app):
+    """Still a tab (kept), but off the screen since block E; Pre-seg Results,
+    also a tab beside the viewer, replaces it."""
     w = _window(app)
     try:
         _left, right = _columns(w)
         assert right.indexOf(w.patch_results_tab) >= 0
+        assert not right.isTabVisible(right.indexOf(w.patch_results_tab))
         assert right.indexOf(w.viewer_tab) >= 0
-        # Switching is what shows it: the two are never on screen together.
-        w._show_step1_patch_results_tab("test")
+        right.setCurrentWidget(w._preseg_montage)
         _settle(app)
-        assert right.currentWidget() is w.patch_results_tab
         assert not w.prev_gv.isVisible()
         w._show_step1_viewer_tab("test")
         _settle(app)

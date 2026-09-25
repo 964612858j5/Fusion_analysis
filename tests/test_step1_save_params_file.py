@@ -6,7 +6,8 @@ choice (the combination's parameters plus the contract), nothing added on
 the way. A Phase 2 / manual choice keeps its old file -- the fixed min size
 15 and the Cellpose keys included -- and no contract (old files keep the old
 path, user ruling 2026-09-25); the expected file is the one the code before
-the change wrote (captured from HEAD 54e825d). Own module: one real window,
+the change wrote (captured from HEAD 54e825d); since block E such a choice
+no longer reaches Save at all. Own module: one real window,
 as in test_step1_preseg_run_ui.
 """
 import json
@@ -66,6 +67,7 @@ def test_a_chosen_result_saves_exactly_its_own_config(app, tmp_path, monkeypatch
             "preseg_contract": {"version": 1, "combo_id": "c1"}})
         w._p2_params = {"method": "cellpose_wholecell_fusion", "params": dict(built["params"])}
         w._params_source = mw.PRESEG_SOURCE
+        w._preseg_selected = {"run": {"run_id": "r"}, "combo_id": "c1"}
         w._preseg_selection_valid = lambda: (True, "")
         w._preseg_segmentation_config = lambda: json.loads(json.dumps(built))
         with pytest.raises(_Stop):
@@ -77,7 +79,10 @@ def test_a_chosen_result_saves_exactly_its_own_config(app, tmp_path, monkeypatch
         w.close()
 
 
-def test_the_old_panel_save_writes_the_same_file(app, tmp_path, monkeypatch):  # noqa: F811
+def test_the_old_panel_save_is_refused(app, tmp_path, monkeypatch):  # noqa: F811
+    """Block E (plan 4.7, user ruling 2026-09-25): Phase 2 parameters -- the
+    old panel's, or an old session's -- no longer reach Save; no file is
+    written. (Until block E this test pinned the file they wrote: BEFORE.)"""
     w, got, said = _saving_window(app, tmp_path, monkeypatch)
     try:
         w._p1_diam = 22.0
@@ -85,11 +90,8 @@ def test_the_old_panel_save_writes_the_same_file(app, tmp_path, monkeypatch):  #
                         "flow_threshold": 0.7, "cellprob_threshold": -0.5,
                         "params": {"min_size": 44}}
         w._params_source = "phase2_grid"
-        with pytest.raises(_Stop):
-            w._save()
-        assert "cfg" in got, said
-        cfg = got["cfg"]
-        cfg.pop("saved_at")
-        assert cfg == BEFORE
+        w._save()
+        assert "cfg" not in got
+        assert "Choose a pre-segmentation result first" in said[-1]
     finally:
         w.close()

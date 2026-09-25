@@ -288,6 +288,7 @@ def test_a_refused_save_writes_nothing(app, tmp_path, monkeypatch):
         _preseg_step1_dir=lambda: str(tmp_path / "step1"),
         search=types.SimpleNamespace(_method_combo=types.SimpleNamespace(currentData=lambda: None)))
     w._preseg_segmentation_config = lambda: mw.MainWindow._preseg_segmentation_config(w)
+    w._save_allowed = lambda: mw.MainWindow._save_allowed(w)
     mw.MainWindow._save(w)
     assert "cannot be saved for Step2: the engine identity is missing" in said[-1][1]
     assert not os.path.exists(tmp_path / "out")

@@ -743,6 +743,19 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 旧的 Phase1/Phase2 控件不再上屏；
   - 用户在真机上完成一次「预分割 → 选定 → 全量分割」全流程。
 
+**E 申请与批准**（2026-09-25 用户批准第 1–3 项）：
+1. 旧的 Phase1/Phase2 面板（`self.search`）和右侧「Patch Results」标签页**不再显示、不删除**（与 R2 处理 HQ/HQ2/CDS 的方式一致）；
+2. **Save 只认预分割「Use」选定的结果**（4.7「未选则 Save 禁用」）：旧面板和旧会话里的旧参数都不能解锁 Save，要重新预分割再选定；
+3. 交接验收：真实窗口的 Use → `_save` → `_go_to_step2` → `get_seg_config()`，8 个方法各一次（只核对参数，不需要引擎，Mesmer 也覆盖）。
+- 白名单：`ui/main_window.py`（旧面板和 Patch Results 的可见性、Save 的解锁条件和 `_save` 入口的拒绝）、`UI_SURFACE_RULES.md`、测试、本文档。`search_ctrl.py`、`result_grid.py` 不需要改（在容器层隐藏）；Step2 装载实测一致，`step2_page.py` 不需要改。
+
+**E 执行记录**（2026-09-25，待真机全流程验收）：
+- `ui/main_window.py`：新增 `_save_allowed()`（有 `Use` 选定的结果才为真），`_check_save_unlock`、`_unlock_ui` 和 `_save` 入口都只认它；`_save` 被拒时提示「Choose a pre-segmentation result first: Pre-segmentation tab → Results → Use.」。旧面板的滚动区 `setVisible(False)`；Patch Results 标签页 `setTabVisible(False)`；旧的 `_show_step1_patch_results_tab` 调用在标签页隐藏时不做任何事。
+- 新增 `tests/test_step1_step2_handoff_e2e.py` 10 条：8 个方法走真实的 Use → `_save`（写出真实参数文件，fusion 作业开始前停下）→ `_go_to_step2`，Step2 不作编辑时 `get_seg_config()` 通过契约核对、没有不一致，`runner_params` 正好是所选组合加方法的固定规则；旧 Phase 2 参数不能解锁 Save；旧面板和 Patch Results 标签页不再显示、仍保留。
+- 更新因旧界面退场而失效的 12 条测试：Save 相关的 guard 测试（未保存设置、显示映射提交、重绑、运行写入的快照）改为经「选定的结果」到达 Save，原有断言不变；「Phase 2 参数在别的设置上搜出来」那条改为断言 Save 直接拒绝；旧面板 Save 的文件钉住测试改为断言拒绝、不写文件；两条 Patch Results 标签页测试和一条 720p 布局测试改为断言标签页和旧面板不显示。
+- 回归（Step1 全部 55 个模块 + 契约 + 界面约定，逐模块单独进程）：与已提交的 HEAD 逐条对比，没有新增失败。仍失败的都在 HEAD 上同样失败：`test_step1_channel_panel.py::test_the_weight_row_and_the_buttons_kept_their_look`（字体差异）；`test_step1_montage_view.py` 在第 27 条后 Qt 异常中止（本机 WSL 的 GPU/EGL，HEAD 同样）；5 个 GPU 模块在本机不收集测试。
+- **真机**：待用户完成一次「预分割 → 选定 → Save → Step2 全量分割」（Mesmer 除外）。
+
 ### 块 L — Step1 Save 进度框与 Step2 布局（计划外；用户 2026-09-25 提出并批准）
 - **L1**：Step1 的 Save 生成 fused.zarr 时，模态进度弹窗和页面底部的旧进度条同时出现。用户裁定只保留弹窗（它有 Cancel）；底部进度条保留但不再显示，它的文字改为打到终端（前缀 `[Step1-Fusion]`），完成和出错仍各有消息框。
 - **L2**：Step2 的参数面板放到左栏，宽度与 Step0、Step1 的通道列共用一份（三页的分隔条联动）；Tile Status Overview 和进度放到右栏；Step2 不显示全局 Channels 组件（框和组件保留，只是隐藏）。

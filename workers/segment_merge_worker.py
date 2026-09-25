@@ -21,6 +21,7 @@ import zarr
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
+from ..core import label_ownership
 from ..core.io_loader import OMETIFFLoader
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
@@ -1439,7 +1440,7 @@ class SegmentMergeWorker(QThread):
             **dict(self._tile_strategy_info or {}),
             "channel_cache": cache,
             "merge_policy": {
-                "shadow_compare_enabled": self._config_bool("enable_merge_policy_shadow_compare", True),
+                "shadow_compare_enabled": False,
                 "primary_enabled": self._config_bool("enable_merge_policy_primary", False),
                 "shadow_compare_count": int(self._merge_shadow_compare_count),
                 "shadow_mismatch_count": int(self._merge_shadow_mismatch_count),
@@ -2243,8 +2244,6 @@ class SegmentMergeWorker(QThread):
             tiles = list(scheduler.iter_tiles())
         n_tiles = len(scheduler)
         self._record_tile_grid_metrics(tiles, full_h, full_w, scheduler=scheduler)
-        if self._config_bool("enable_merge_policy_shadow_compare", True):
-            log.info("[MergePolicy] shadow_compare=enabled")
 
         mmap_path = os.path.join(
             self.output_dir, f'global_mask_{out_prefix}.dat'
@@ -2516,16 +2515,6 @@ class SegmentMergeWorker(QThread):
 
             n_raw = int(local_mask.max())
             if n_raw == 0:
-                self._merge_policy_shadow_compare(
-                    scheduler,
-                    local_mask,
-                    None,
-                    [],
-                    global_id_offset,
-                    tile,
-                    profile_tile_id,
-                    log,
-                )
                 self.step2_profiler.record_tile_metadata(profile_tile_id, labels_count=0, output_path=self._abs(raw_mask_tile_path))
                 stage_seconds["_profile_tile_id"] = profile_tile_id
                 self._profile_tile_line(i, n_tiles, stage_seconds, 0, tile_shape)
@@ -2537,24 +2526,16 @@ class SegmentMergeWorker(QThread):
 
             _t = time.perf_counter()
             with self.step2_profiler.time_stage("postprocess", labels_count=n_raw, **tile_profile_base):
-                cy, cx = self._centroids_vectorised(local_mask)
+                keep_labels = label_ownership.kept_labels(
+                    local_mask, (local_oy0, local_oy1, local_ox0, local_ox1))
             stage_seconds["postprocess"] = stage_seconds.get("postprocess", 0.0) + (time.perf_counter() - _t)
 
-            keep_labels = []
             _t = time.perf_counter()
             with self.step2_profiler.time_stage("relabel", labels_count=n_raw, **tile_profile_base):
-                for label_idx in range(n_raw):
-                    lcy, lcx = cy[label_idx], cx[label_idx]
-                    if (lcy >= local_oy0 and lcy < local_oy1 and
-                            lcx >= local_ox0 and lcx < local_ox1):
-                        keep_labels.append(label_idx + 1)
-
                 if not keep_labels:
                     pass
                 else:
-                    lut = np.zeros(n_raw + 1, dtype=np.uint32)
-                    for new_id, lab in enumerate(keep_labels, start=1):
-                        lut[lab] = new_id + global_id_offset
+                    lut = label_ownership.ownership_lut(local_mask, keep_labels, global_id_offset)
 
                     remapped = lut[local_mask]
                     remapped_nuclei = None
@@ -2581,28 +2562,17 @@ class SegmentMergeWorker(QThread):
                         tile_meta.update({"row": row, "col": col, "out_prefix": out_prefix})
                         self._hq2_tile_metadata.append(tile_meta)
             stage_seconds["relabel"] = stage_seconds.get("relabel", 0.0) + (time.perf_counter() - _t)
-            # MERGE POLICY PATH: shadow compare only; legacy remains authoritative.
-            self._merge_policy_shadow_compare(
-                scheduler,
-                local_mask,
-                remapped if keep_labels else None,
-                keep_labels,
-                global_id_offset,
-                tile,
-                profile_tile_id,
-                log,
-            )
 
             if not keep_labels:
                 self.step2_profiler.record_tile_metadata(profile_tile_id, labels_count=0, output_path=self._abs(raw_mask_tile_path))
                 stage_seconds["_profile_tile_id"] = profile_tile_id
                 self._profile_tile_line(i, n_tiles, stage_seconds, 0, tile_shape)
                 self.tile_done.emit(i, n_tiles, 0)
-                del local_mask, cy, cx
+                del local_mask
                 gc.collect()
                 self._drop_caches()
                 continue
-            del local_mask, cy, cx
+            del local_mask
 
             # LEGACY MERGE PATH: authoritative Step2 merge behavior.
             _t = time.perf_counter()
@@ -3122,8 +3092,6 @@ class SegmentMergeWorker(QThread):
                 tiles = list(scheduler.iter_tiles())
             n_tiles = len(scheduler)
             self._record_tile_grid_metrics(tiles, full_h, full_w, scheduler=scheduler)
-            if self._config_bool("enable_merge_policy_shadow_compare", True):
-                log.info("[MergePolicy] shadow_compare=enabled")
 
             os.makedirs(self.output_dir, exist_ok=True)
 
@@ -3375,16 +3343,6 @@ class SegmentMergeWorker(QThread):
 
                 n_raw = int(local_mask.max())
                 if n_raw == 0:
-                    self._merge_policy_shadow_compare(
-                        scheduler,
-                        local_mask,
-                        None,
-                        [],
-                        global_id_offset,
-                        tile,
-                        profile_tile_id,
-                        log,
-                    )
                     self.step2_profiler.record_tile_metadata(profile_tile_id, labels_count=0, output_path=self._abs(raw_mask_tile_path))
                     stage_seconds["_profile_tile_id"] = profile_tile_id
                     self._profile_tile_line(i, n_tiles, stage_seconds, 0, tile_shape)
@@ -3396,45 +3354,23 @@ class SegmentMergeWorker(QThread):
 
                 _t = time.perf_counter()
                 with self.step2_profiler.time_stage("postprocess", labels_count=n_raw, **tile_profile_base):
-                    cy, cx = self._centroids_vectorised(local_mask)
+                    keep_labels = label_ownership.kept_labels(
+                        local_mask, (local_oy0, local_oy1, local_ox0, local_ox1))
                 stage_seconds["postprocess"] = stage_seconds.get("postprocess", 0.0) + (time.perf_counter() - _t)
 
-                keep_labels = []
-                _t = time.perf_counter()
-                with self.step2_profiler.time_stage("relabel", labels_count=n_raw, **tile_profile_base):
-                    for label_idx in range(n_raw):
-                        lcy = cy[label_idx]
-                        lcx = cx[label_idx]
-                        if (lcy >= local_oy0 and lcy < local_oy1 and
-                                lcx >= local_ox0 and lcx < local_ox1):
-                            keep_labels.append(label_idx + 1)
-                stage_seconds["relabel"] = stage_seconds.get("relabel", 0.0) + (time.perf_counter() - _t)
-
                 if not keep_labels:
-                    self._merge_policy_shadow_compare(
-                        scheduler,
-                        local_mask,
-                        None,
-                        keep_labels,
-                        global_id_offset,
-                        tile,
-                        profile_tile_id,
-                        log,
-                    )
                     self.step2_profiler.record_tile_metadata(profile_tile_id, labels_count=0, output_path=self._abs(raw_mask_tile_path))
                     stage_seconds["_profile_tile_id"] = profile_tile_id
                     self._profile_tile_line(i, n_tiles, stage_seconds, 0, tile_shape)
                     self.tile_done.emit(i, n_tiles, 0)
-                    del local_mask, cy, cx
+                    del local_mask
                     gc.collect()
                     self._drop_caches()
                     continue
 
                 _t = time.perf_counter()
                 with self.step2_profiler.time_stage("relabel", labels_count=len(keep_labels), **tile_profile_base):
-                    lut = np.zeros(n_raw + 1, dtype=np.uint32)
-                    for new_id, lab in enumerate(keep_labels, start=1):
-                        lut[lab] = new_id + global_id_offset
+                    lut = label_ownership.ownership_lut(local_mask, keep_labels, global_id_offset)
 
                     remapped = lut[local_mask]
                     remapped_nuclei = None
@@ -3461,18 +3397,7 @@ class SegmentMergeWorker(QThread):
                         tile_meta.update({"row": row, "col": col, "out_prefix": ""})
                         self._hq2_tile_metadata.append(tile_meta)
                 stage_seconds["relabel"] = stage_seconds.get("relabel", 0.0) + (time.perf_counter() - _t)
-                # MERGE POLICY PATH: shadow compare only; legacy remains authoritative.
-                self._merge_policy_shadow_compare(
-                    scheduler,
-                    local_mask,
-                    remapped,
-                    keep_labels,
-                    global_id_offset,
-                    tile,
-                    profile_tile_id,
-                    log,
-                )
-                del local_mask, lut, cy, cx
+                del local_mask, lut
 
                 # LEGACY MERGE PATH: authoritative Step2 merge behavior.
                 _t = time.perf_counter()

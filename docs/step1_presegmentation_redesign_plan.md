@@ -1462,6 +1462,27 @@ v3.1 起，各条的裁定结果标在原位，汇总见 7.9。「设计选择�
     9. 交付时写明：块 E 之前没有验证 fused 数据来源一致（见 Q2 核实）。
   - **说明**：父进程意外退出时 runner 读到 stdin EOF，会在当前任务返回后退出；这不保证立即无残留，不作为验收依据。
   - **Advisory（不在本块处理）**：旧路径 ROI 模式中途 Stop 同样会汇总并登记成功——现有行为，等用户裁定。
+  - **实施中的扩围（用户 2026-09-25 批准）**：Mesmer whole-cell 和 nuclear-guided 的契约文件经 normalize 后 `input_mode` 为默认的 `selected_channels`（离屏实测），worker 会去打开 corrected 通道组并逐块读取。按批准，在 `_validate_mesmer_config` 开头加一个分支：契约路径直接记 `mesmer_input_source="fused_zarr"` 并返回，不打开通道组；旧路径不变。
+  - **第 3 步执行记录（2026-09-25，待用户真机验收；代码未提交）**：
+    - `workers/segment_merge_worker.py`：
+      - `run()`：用 `preseg_contract.validate` 取得契约（裁定 A 的拒绝去掉）；HALO 与 overlap 不同即报错；`finally` 里 `_close_contract_engine()`（正常结束先 shutdown，Stop 或出错时结束进程组；删除 `runner_io/`）；`except` 里 `_ContractStopped` 发 `error('Stopped by user.')`，不写汇总、不登记、不发 `finished`。
+      - `_start_contract_engine`：按方法启动 `EngineProcess`，hello 里的引擎身份必须与契约的 `engine_identity` 完全相同，否则报错并写明不同的键；加载期间被 Stop 时按用户停止处理。
+      - `_segment_tile_contract`：`INPUT_KIND` + `model_input` 构造输入 → `runner_params` → runner；`cancelled` 抛 `_ContractStopped`，其他非 ok 状态抛错；主输出按 Q1 映射，nuclear-guided 另交回 `nuclei`；输入、mask 和记录读完即删。任务 ID 为 `tile_` + Step2 的 `tile_id`（`{ROI 名}:{序号}` 或序号，非字母数字换成 `_`），每次运行内唯一——与申请里写的 `{out_prefix}_r{r}_c{c}` 字面不同，唯一性要求相同。
+      - 两个切块循环的 `except`：契约路径关 scheduler 后向外抛；ROI 外层循环之后：契约路径被 Stop 时抛 `_ContractStopped`。
+      - `stop()`：只置标志、调 `ep.stop()`；hello 未到时对进程组发 SIGKILL，不等待。`__init__` 加 `_contract`、`_engine`、`_runner_io` 三个默认值。
+    - `ui/step2_page.py`：`_check_preseg_contract` 去掉「未接通」拒绝、加 HALO 核对；新增 `stop_background_jobs()`。
+    - `ui/main_window.py`：`closeEvent` 在「close is CERTAIN」之前加 Step2 分支（暂缓关闭、状态栏提示、500 ms 后重试）。
+    - 测试：`tests/test_preseg_contract.py` 两条临时拒绝测试改为「放行」「worker 启动契约的引擎进程」；新增 `tests/test_step2_runner_path.py`（36 条）。
+  - **第 3 步验收结果**（WSL2、RTX 3060 Laptop、`fusion_mesmer`，离屏）：
+    - 门 1 旧路径：不带契约时，HEAD（`6049fe9`，`git archive` 导出到 scratchpad）与改动后，Cellpose whole-cell、Cellpose expansion、StarDist nuclei、StarDist expansion × ROI / 全图共 16 项 mask 和细胞数逐像素相同；HQ/HQ2 的合并由 `test_step2_ownership_move.py` 覆盖。Mesmer 旧路径没有测（缺模型）。
+    - 门 2 等价：Cellpose 3 个、StarDist 2 个方法 × 两个循环，全局 mask 与「同一 runner 逐块跑 + 共用归属函数按 Step2 方式粘贴」逐像素相同；**Mesmer 3 个方法 × 2 = 6 条未验收**（本机无 Mesmer 模型，测试显式跳过并注明）。
+    - 门 3 输入：8 个方法送进 runner 的数组与测试里按 7.11.4 表独立写出的构造逐元素相同（这条测试替换了引擎进程，只查输入）；Mesmer 契约不打开通道组。
+    - 门 4 拒绝：引擎身份不符（真实 StarDist 进程）、worker 和页面的 HALO 不一致都拒绝并写明原因；参数不一致由 `test_preseg_contract.py` 覆盖。
+    - 门 5、6 生命周期与取消：加载期间 / 推理期间 Stop（ROI 与全图）、两个 ROI 之间 Stop、kill -9 引擎子进程、运行中关主窗口——Stop 调用 < 50 ms，加载期间 Stop 后 2 s 内结束；没有 `finished`、结果索引里没有本次运行、进程组已不存在、`runner_io/` 已删；关窗第一次被暂缓并登记 500 ms 重试，worker 结束后关闭。
+    - 门 7：反向注入 10 处都变红（不核对引擎身份、worker 不核对 HALO、输入种类用错、失败被吞掉、ROI 外层仍登记、加载期间不发信号、Mesmer 仍打开通道组、关窗不暂缓、页面不核对 HALO、结束不关引擎）。「加载期间 Stop 后 2 s 内结束」这条门是为了让「不发信号」能被测出而加的。
+    - 相关模块回归（23 个模块）：420 passed / 3 failed / 6 skipped；3 条失败都在附录基线清单里，HEAD 上同样失败。`cufile.log` 不变。没有跑全量回归。
+    - 门 8 真机：待用户在原机器上完成（含 Mesmer 3 个方法）。
+    - 门 9：块 E 之前**没有**验证 fused 数据来源一致（Q2）。
 
 
 #### 7.10.8 V0 执行结果（2026-09-23，待用户验收）

@@ -5,7 +5,9 @@ block01/workers/segment_merge_worker.py — Tile-based segmentation + merge work
 import os
 import gc
 import json
+import re
 import shutil
+import signal
 import traceback
 import logging
 import threading
@@ -21,7 +23,7 @@ import zarr
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from ..core import label_ownership, preseg_contract
+from ..core import label_ownership, preseg_contract, preseg_input
 from ..core.io_loader import OMETIFFLoader
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
@@ -62,6 +64,9 @@ from ..utils.tile_scheduler import TileScheduler
 from ..utils.tile_strategy import suggest_tile_strategy
 from .cellpose_worker import load_stardist_model
 from .mesmer_worker import run_mesmer_on_channel_source, run_mesmer_on_fused_tile
+from ..seg_runner import protocol as runner_protocol
+from ..seg_runner.client import EngineProcess, EngineStartError
+from ..seg_runner.engines import METHOD_ENGINE, METHOD_OUTPUTS
 from ..utils.mesmer_utils import get_mesmer_device_status, load_mesmer_application, mesmer_metadata
 from .hq_marker_segmentation import (
     parse_hq_channels,
@@ -88,6 +93,11 @@ from .constrained_donut_segmentation import (
     run_constrained_donut_segmentation,
     write_csd_qc_table,
 )
+
+
+class _ContractStopped(Exception):
+    """A Step1 hand-over run stopped by the user (Step2 hook-up, step 3):
+    the run ends here -- no summary, no registered result, no `finished`."""
 
 
 class SegmentMergeWorker(QThread):
@@ -142,6 +152,11 @@ class SegmentMergeWorker(QThread):
         self.param_file       = self._abs(param_file) if param_file else ""
         self.parameter_source = "index" if self.param_file and parameter_source == "index" else "manual"
         self._stop            = False
+        # Step2 hook-up, step 3: the Step1 hand-over this run executes (set in
+        # run()), and its engine process. None on every other path.
+        self._contract        = None
+        self._engine          = None
+        self._runner_io       = ""
         self._logger          = None
         self._mem_timer       = None
         self._mem_log_active  = False
@@ -774,7 +789,21 @@ class SegmentMergeWorker(QThread):
             first["zarr_path"] = zarr_alias
 
     def stop(self):
+        """Called on the GUI thread: sets flags and sends a signal, never waits.
+        The worker thread settles the engine (the client checks the flag every
+        0.2 s and ends the process itself)."""
         self._stop = True
+        ep = self._engine
+        if ep is not None:
+            ep.stop()
+            proc = ep.proc
+            if ep.hello is None and proc is not None and proc.poll() is None:
+                # Still loading its model: nothing to lose, and `start()` would
+                # otherwise wait for its hello. The read ends at EOF.
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
 
     # ── helpers ───────────────────────────────────────────────────────
 
@@ -1721,6 +1750,11 @@ class SegmentMergeWorker(QThread):
         }
 
     def _validate_mesmer_config(self, roi_name=None):
+        if self._contract is not None:
+            # A Step1 hand-over reads the fused tile only (plan 7.11.1); its
+            # file's input_mode is the normaliser's default, not a choice.
+            self.seg_config["mesmer_input_source"] = "fused_zarr"
+            return None
         if not self._mesmer_uses_selected_channels():
             self.seg_config["mesmer_input_source"] = "fused_zarr"
             return None
@@ -1943,6 +1977,8 @@ class SegmentMergeWorker(QThread):
 
     def _init_segmentation_backend(self, use_gpu, device):
         method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
+        if self._contract is not None:
+            return self._start_contract_engine(method)
         if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             if device is None:
                 raise RuntimeError("PyTorch is required for Cellpose/HQ segmentation but is not available.")
@@ -1995,10 +2031,99 @@ class SegmentMergeWorker(QThread):
             return {"mesmer": app, "mesmer_device_status": status}
         raise ValueError(f"Unknown segmentation method: {method}")
 
+    def _start_contract_engine(self, method):
+        """The Step1 hand-over's engine, in its own process (Step2 hook-up,
+        step 3). It must be the engine of the Step1 run, or nothing runs."""
+        engine = METHOD_ENGINE[method]
+        self._runner_io = os.path.join(self.output_dir, "runner_io")
+        os.makedirs(self._runner_io, exist_ok=True)
+        ep = EngineProcess(engine, log_path=os.path.join(self.output_dir, f"engine_{engine}.log"))
+        self._engine = ep
+        if self._stop:
+            raise _ContractStopped()
+        try:
+            hello = ep.start()
+        except (EngineStartError, OSError) as exc:
+            if self._stop:
+                raise _ContractStopped() from exc
+            raise RuntimeError(f"the {engine} engine did not start: {exc}") from exc
+        if self._stop:
+            raise _ContractStopped()
+        want = self._contract["engine_identity"]
+        got = hello.get("identity") or {}
+        if got != want:
+            keys = sorted(k for k in set(want) | set(got) if want.get(k) != got.get(k))
+            raise RuntimeError(
+                "the engine here is not the one the Step1 result ran on "
+                f"(differs in: {', '.join(keys)}); run the pre-segmentation again here")
+        if self._logger:
+            self._logger.info(f"[Step2] {engine} engine process started, device={hello.get('device')}")
+        return {"runner": ep}
+
+    def _segment_tile_contract(self, tile_data, backend, profile_tile_id):
+        """One read tile through the engine process: the input built as Step1
+        builds it (plan 7.11.4), the combination's parameters, the mask Step2
+        expects back. A failure raises; a Stop raises _ContractStopped."""
+        method = self.method
+        ep = backend["runner"]
+        tid = "tile_" + re.sub(r"[^A-Za-z0-9_-]", "_", str(profile_tile_id))
+        inp = os.path.join(self._runner_io, f"{tid}.input.npy")
+        rec_path = os.path.join(self._runner_io, f"{tid}.record.json")
+        leftovers = [inp, rec_path] + [os.path.join(self._runner_io, f"{tid}.{k}.npy")
+                                       for k in ("cell", "nucleus")]
+        try:
+            with self.step2_profiler.time_stage("preprocess", tile_id=profile_tile_id, method=method):
+                np.save(inp, preseg_input.model_input(preseg_input.INPUT_KIND[method], tile_data))
+            self._set_runtime_stage("model_inference")
+            with self.step2_profiler.time_stage("model_inference", tile_id=profile_tile_id, method=method):
+                states = ep.run([{"task_id": tid, "input": inp, "out_dir": self._runner_io,
+                                  "params": preseg_contract.runner_params(self.seg_config)}])
+            state = states[tid]
+            detail = ep.states[tid]["detail"]
+            if state == runner_protocol.CANCELLED:
+                raise _ContractStopped()
+            if state != runner_protocol.OK:
+                raise RuntimeError(f"the engine failed on {tid}: {detail}")
+            with open(detail, encoding="utf-8") as f:
+                rec = json.load(f)
+            masks = {k: (np.load(rec[k]["path"]) if (rec.get(k) or {}).get("status") == runner_protocol.OK
+                         else None) for k in ("cell", "nucleus")}
+        finally:
+            for path in leftovers:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        primary = "cell" if "cell" in METHOD_OUTPUTS[method] else "nucleus"
+        if masks[primary] is None:
+            raise RuntimeError(f"the engine returned no {primary} mask for {tid}")
+        mask = masks[primary].astype(np.uint32, copy=False)
+        if method == MESMER_NUCLEAR_GUIDED:
+            # Its nuclear output, as the old path hands it over.
+            return {"mask": mask, "nuclei": masks["nucleus"], "qc_rows": []}
+        return mask          # expansion: the expanded cells only, as before
+
+    def _close_contract_engine(self):
+        """Worker thread, at the end of every run: no engine process and no
+        runner files are left behind."""
+        ep, self._engine = self._engine, None
+        if ep is not None:
+            try:
+                if ep.proc is not None and ep.proc.poll() is None and not self._stop:
+                    ep.close()
+                else:
+                    ep.terminate()
+            except Exception:  # noqa: BLE001 -- the process group is ended either way
+                ep.terminate()
+        if self._runner_io:
+            shutil.rmtree(self._runner_io, ignore_errors=True)
+
     def _segment_tile(self, tile_data, backend, hq_marker_channels=None, mesmer_channel_source=None,
                       profile_tile_id=None, hq_block_loader=None, output_labels=None):
         """Return a uint32 label mask for one read tile."""
         method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
+        if self._contract is not None:
+            return self._segment_tile_contract(tile_data, backend, profile_tile_id)
         self._set_runtime_stage("preprocess")
         with self.step2_profiler.time_stage("preprocess", tile_id=profile_tile_id, method=method):
             tile_f32 = tile_data.astype(np.float32) / 65535.0
@@ -2440,6 +2565,11 @@ class SegmentMergeWorker(QThread):
                     else:
                         local_mask = local_result
                 except Exception as e:
+                    if self._contract is not None:
+                        # A hand-over tile that failed or was stopped is never
+                        # stored as an empty result: the run ends here.
+                        self._close_tile_scheduler(scheduler)
+                        raise
                     log.error(f"  Tile [{row},{col}] failed: {traceback.format_exc()}")
                     local_mask = np.zeros((ry1-ry0, rx1-rx0), dtype=np.uint32)
                     local_nuclei = None
@@ -2872,14 +3002,18 @@ class SegmentMergeWorker(QThread):
             self._logger, log_path = self._setup_logger()
             log = self._logger
             log.info("=== Segmentation started ===")
-            # Step2 hook-up, step 2 (user ruling A, 2026-09-25): a Step1
-            # pre-segmentation contract needs the new path, which is not
-            # connected yet. Refused -- never run on the old path. A malformed
-            # contract raises ContractError here as well.
-            if preseg_contract.validate(self.seg_config) is not None:
-                raise RuntimeError(
-                    "this parameter file is a Step1 pre-segmentation hand-over; "
-                    "its way of running is not connected yet")
+            # Step2 hook-up, step 3: a Step1 pre-segmentation hand-over runs
+            # through the engine process (`_segment_tile_contract`). A malformed
+            # contract raises ContractError here.
+            self._contract = preseg_contract.validate(self.seg_config)
+            if self._contract is not None:
+                if int(self._contract["halo_px"]) != int(self.overlap_px):
+                    raise RuntimeError(
+                        f"the Step1 result was computed with a HALO of "
+                        f"{self._contract['halo_px']} px, but the Tile Grid overlap is "
+                        f"{self.overlap_px} px; set the overlap to {self._contract['halo_px']}")
+                log.info(f"[Step2] Step1 hand-over: method={self._contract['method']} "
+                         f"run={self._contract['preseg_run_id']} combo={self._contract['combo_id']}")
             register_legacy_result(self.project_output_dir)
             config_path = self._write_run_segmentation_config()
             log.info(f"run_segmentation_params.json -> {config_path}")
@@ -2975,6 +3109,10 @@ class SegmentMergeWorker(QThread):
                         f"✓ ROI {roi_name}: {n_cells:,} cells  "
                         f"(cumulative: {total_cells_all:,})"
                     )
+
+                if self._contract is not None and self._stop:
+                    # A stopped hand-over: no summary, no registered result.
+                    raise _ContractStopped()
 
                 if model is not None:
                     del model
@@ -3287,6 +3425,10 @@ class SegmentMergeWorker(QThread):
                         else:
                             local_mask = local_result
                     except Exception as e:
+                        if self._contract is not None:
+                            # As in the ROI loop: failed or stopped, the run ends.
+                            self._close_tile_scheduler(scheduler)
+                            raise
                         log.error(f'Tile [{row},{col}] inference failed:\n{traceback.format_exc()}')
                         self.error.emit(f'Tile [{row},{col}] inference failed: {e}')
                         local_mask = np.zeros((ry1-ry0, rx1-rx0), dtype=np.uint32)
@@ -3708,13 +3850,18 @@ class SegmentMergeWorker(QThread):
                 self._channel_store.close()
             self.finished.emit(self.output_dir, total_cells)
 
-        except Exception:
+        except Exception as exc:
             self._finish_runtime_monitor()
             self._record_engine_metrics()
             profile_summary = self.step2_profiler.finalize()
             self._profile_summary(profile_summary)
             if getattr(self, "_channel_store", None) is not None:
                 self._channel_store.close()
+            if isinstance(exc, _ContractStopped):
+                if self._logger:
+                    self._logger.info("Stopped by user (Step1 hand-over); nothing registered.")
+                self.error.emit('Stopped by user.')
+                return
             tb = traceback.format_exc()
             if self._logger:
                 self._logger.critical("FATAL ERROR:\n" + tb)
@@ -3725,3 +3872,5 @@ class SegmentMergeWorker(QThread):
                 except Exception:
                     pass
             self.error.emit(tb)
+        finally:
+            self._close_contract_engine()

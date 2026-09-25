@@ -6209,6 +6209,16 @@ class MainWindow(QMainWindow):
                 f"finish…")
             QtCore.QTimer.singleShot(500, self.close)
             return
+        # Step2's segmentation: the same treatment -- asked to stop, never
+        # waited for on the GUI thread; the window retries until it has ended
+        # (and with it any engine process it started).
+        step2 = self.__dict__.get("_step2")
+        if step2 is not None and step2.stop_background_jobs():
+            event.ignore()
+            self._display.resume()
+            self.prev_status.setText("Waiting for Step2 segmentation to stop…")
+            QtCore.QTimer.singleShot(500, self.close)
+            return
         # The close is CERTAIN from here: nothing above can refuse it any
         # more. Now the irreversible half -- the compose thread is retired and
         # the two shared windows are closed, once.

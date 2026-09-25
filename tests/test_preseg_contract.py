@@ -5,10 +5,10 @@ chosen with Use goes: Save's params file -> Step2's page (loaded through the
 index, as after a real Save) -> `get_seg_config()` -> the Step2 worker's
 config -> `preseg_contract.runner_params`, and arrives unchanged, with no
 Cellpose defaults added. The file carries the HALO, pixels, Fusion settings,
-run, combination and the engine identity of THAT run. Until the new path is
-connected (user ruling A, 2026-09-25) such a file is refused: by the page and
-by the worker, never run on the old path; a Step2 edit is refused as a
-mismatch; a broken contract refuses to load or to save.
+run, combination and the engine identity of THAT run. Since step 3 the page
+lets such a file run and the worker takes it to the engine process, never
+to the old path (tests/test_step2_runner_path.py); a Step2 edit is refused
+as a mismatch; a broken contract refuses to load or to save.
 """
 
 import json
@@ -173,12 +173,12 @@ def _told(monkeypatch):
     return said
 
 
-def test_step2_refuses_the_hand_over_until_its_path_is_connected(app, tmp_path, monkeypatch):
+def test_step2_lets_an_unchanged_hand_over_run(app, tmp_path, monkeypatch):
     _, out, _ = _use_and_save(tmp_path, "stardist_nuclei_dapi", COMBOS["stardist_nuclei_dapi"])
     page = _page_config(app, out)
     said = _told(monkeypatch)
-    assert page._check_preseg_contract(page.get_seg_config()) is False
-    assert "not connected yet" in said[-1][1]
+    assert page._check_preseg_contract(page.get_seg_config()) is True
+    assert said == []
 
 
 def test_a_step2_edit_is_refused_as_a_mismatch(app, tmp_path, monkeypatch):
@@ -215,16 +215,27 @@ def test_manual_parameters_drop_the_hand_over(app, tmp_path, monkeypatch):
     assert pc.CONTRACT_KEY not in started["seg_config"]
 
 
-def test_the_worker_refuses_a_hand_over_too(app, tmp_path):
+def test_the_worker_takes_a_hand_over_to_the_engine_process(app, tmp_path, monkeypatch):
+    """Never the old in-process Mesmer path: the worker starts the contract's
+    engine process (refused to start here, so nothing runs)."""
+    from block01.seg_runner.client import EngineProcess, EngineStartError
     from block01.workers.segment_merge_worker import SegmentMergeWorker
     run, out, path = _use_and_save(tmp_path, "mesmer_whole_cell", COMBOS["mesmer_whole_cell"])
     with open(path, encoding="utf-8") as f:
         seg = json.load(f)
+    started = []
+
+    def start(self):
+        started.append(self.engine)
+        raise EngineStartError("not in this test")
+
+    monkeypatch.setattr(EngineProcess, "start", start)
     worker = SegmentMergeWorker("unused.zarr", seg_config=seg, output_dir=str(tmp_path / "s2"))
     errors = []
     worker.error.connect(errors.append)
     worker.run()
-    assert errors and "not connected yet" in errors[0]
+    assert started == ["mesmer"]
+    assert errors and "the mesmer engine did not start" in errors[0]
 
 
 def test_a_broken_contract_does_not_load(app, tmp_path, monkeypatch):

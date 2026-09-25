@@ -2249,9 +2249,9 @@ class Step2Page(QWidget):
 
     def _check_preseg_contract(self, seg_config):
         """True when `seg_config` may run. A Step1 pre-segmentation hand-over
-        must reach the engine unchanged, and its path is not connected yet
-        (Step2 hook-up, step 2; user ruling A, 2026-09-25): it is refused,
-        never run on the old path."""
+        must reach the engine unchanged and run with the HALO it was computed
+        with (plan 7.11.3); the worker then runs it through the engine
+        process (Step2 hook-up, step 3)."""
         try:
             block = preseg_contract.validate(seg_config)
         except preseg_contract.ContractError as exc:
@@ -2271,11 +2271,15 @@ class Step2Page(QWidget):
                 "The parameters in Step2 are not the ones chosen in Step1:\n"
                 f"{lines}\n\nReload the saved parameters, or choose again in Step1.")
             return False
-        QMessageBox.information(
-            self, 'Segmentation params',
-            "This parameter file needs the new way of running a pre-segmentation "
-            "result, which is not connected yet. It can be used once that step is done.")
-        return False
+        halo = int(block["halo_px"])
+        if halo != self._overlap_spin.value():
+            QMessageBox.warning(
+                self, 'Segmentation params',
+                f"The Step1 result was computed with a HALO of {halo} px, but the Tile "
+                f"Grid overlap is {self._overlap_spin.value()} px.\n\n"
+                f"Set the overlap to {halo} px to run it.")
+            return False
+        return True
 
     def _run(self):
         if not self._zarr_path or not os.path.exists(self._zarr_path):
@@ -2402,6 +2406,15 @@ class Step2Page(QWidget):
     def _stop(self):
         if self._worker:
             self._worker.stop()
+
+    def stop_background_jobs(self):
+        """Window closing: ask the segmentation to stop, never wait for it.
+        True while the worker is still running (the window then retries)."""
+        worker = self._worker
+        if worker is None or not worker.isRunning():
+            return False
+        worker.stop()
+        return worker.isRunning()
 
     def _on_progress(self, done, total, msg):
         pct = int(done / total * 100) if total > 0 else 0

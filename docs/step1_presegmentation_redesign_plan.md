@@ -1,7 +1,7 @@
 # Step1 预分割（Method & Parameters / Patch Results）重设计 — 项目计划
 
 日期：2026-09-23（第三版，块 A0 产出）　分支 `v15-interactive-channel-workspace`，起点 `c9f80df`，A0 核查基于 `e655409`。
-状态：**已执行：块 P、A1、A2、B、C、D、V0。本文档记录的验收：B「用户验收总体通过」、C 第 4 步「用户人工测试通过」、D「块 D 验收通过（2026-09-25）」；P、A1、A2、V0 的执行记录仍写「待用户验收」，文档中没有后续验收记录。V2（代码中称「Step2 hook-up」）第 1、2 步已提交（`54e825d`、`1adfe4e`），第 3 步已提交（`dcaca2c`），真机上 Cellpose 路径跑通，Mesmer 未验收；块 L 已提交（`1d14801`、`2294bc7`）并通过真机验收；块 F 已提交（`5bc65bc`）；块 E 已提交（`7ee98fc`）并通过真机验收（Mesmer 除外）。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动须另行批准。
+状态：**已执行：块 P、A1、A2、B、C、D、V0。本文档记录的验收：B「用户验收总体通过」、C 第 4 步「用户人工测试通过」、D「块 D 验收通过（2026-09-25）」；P、A1、A2、V0 的执行记录仍写「待用户验收」，文档中没有后续验收记录。V2（代码中称「Step2 hook-up」）第 1、2 步已提交（`54e825d`、`1adfe4e`），第 3 步已提交（`dcaca2c`），真机上 Cellpose 路径跑通，Mesmer 未验收；块 L 已提交（`1d14801`、`2294bc7`）并通过真机验收；块 F 已提交（`5bc65bc`）并通过真机验收；块 E 已提交（`7ee98fc`）并通过真机验收（Mesmer 除外）。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动须另行批准。
 
 修订记录：
 - v1：初稿。
@@ -9,7 +9,7 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
-- v3.21：块 F、块 E 已提交（`5bc65bc`、`7ee98fc`）；块 E 真机验收通过。
+- v3.21：块 F、块 E 已提交（`5bc65bc`、`7ee98fc`），都通过真机验收。
 - v3.20：记录 V2 第 3 步的提交（`dcaca2c`）和真机情况；新增块 L（Step1 Save 进度框、Step2 布局，计划外，用户 2026-09-25 提出）的申请、执行记录和真机验收。
 - v3.19：补记 V2（Step2 hook-up）第 1、2 步的执行记录和用户裁定 A（写在 7.10.7 的 V2 下）；更新状态行。第 3 步的范围另行申请。
 - v3.18：块 B 已执行（Methods 部分、参数表、R9 合并、方案保存与加载）。
@@ -781,7 +781,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
 - **做法**：窗口新增 `load_weights_from_step1_session(path)`：按会话特有的字段识别会话文件（`fusion_draft`、`channel_visibility`、`channel_weights`、`patches`、`preview_mode`、`p2_params` 至少有一个；`fusion_config.json` 和 `step1_fusion_settings.json` 都没有）；先用 `fusion_domain.migrate_session` 检查会话里至少有一个当前切片的 marker 通道（兼容 `{members: [...]}` 和 `{channels: {...}}` 两种组格式）；再调用和 `Load Previous Step1 Session` 相同的两个函数（`_restore_step1_scientific_state` → `_apply_step1_display_state`），一次性恢复权重、参与、勾选、颜色、当前通道和显示模式；patch、路径、分割参数等字段不恢复。`config_panel._load_weights_from_file` 改为打开文件对话框（默认过滤 `step1_session.json`）后交给窗口，拒绝时弹出原因。
 - **白名单**：`ui/step0/config_panel.py` 的 `_load_weights_from_file`、`ui/main_window.py` 新增的入口、`tests/test_step1_load_weights.py`。不改 `apply_full_config`、fusion 模型、会话加载、Save。
 - **测试**：`tests/test_step1_load_weights.py` 6 条：同一个真实会话文件，`Load weights` 恢复的权重、参与、组和勾选与 `Load Previous Step1 Session` 的恢复路径完全相同；`fusion_config.json`、`step1_fusion_settings.json`、其他 JSON 被拒绝且状态不变；没有当前切片 marker 的会话被拒绝且状态不变；加载后新勾选的通道进入组、参与 fusion。相关 9 个模块 215 passed / 1 failed（`test_step1_channel_panel.py::test_the_weight_row_and_the_buttons_kept_their_look`，按钮高 19 px 而非 20 px，HEAD 上同样失败，是这台机器的字体差异）。测试写的会话文件都在沙箱临时目录，没有写到 `~/fusion_data`。
-- **真机验收**：待用户验收。
+- **真机验收通过（用户 2026-09-25）**。提交：`5bc65bc`。
 - **Advisory**：Step1 目前写三个 JSON——`fusion_config.json`（`Save` 时写，Step3 从中读原始切片路径，Step2 通过 `step1_output` 拿到它的路径）、`step1_fusion_settings.json`（`Save Fusion Settings` 的已确认快照，预分割用它的 hash 判断是否过期）、`step1_session.json`（会话）。用户希望 Step1 只生成一个统一的 JSON；这会牵涉 Step2、Step3 和预分割的读取方，另立块处理。
 
 ## 六、未决与 advisory

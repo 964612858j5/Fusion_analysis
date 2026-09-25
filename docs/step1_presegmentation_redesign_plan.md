@@ -1,7 +1,7 @@
 # Step1 预分割（Method & Parameters / Patch Results）重设计 — 项目计划
 
 日期：2026-09-23（第三版，块 A0 产出）　分支 `v15-interactive-channel-workspace`，起点 `c9f80df`，A0 核查基于 `e655409`。
-状态：**A0 已定稿（v3.8，`1807a69`）。v3.9 修订块 V，待用户审核。A1 及以后都没有启动；V0 的范围已经用户审定，尚未启动。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动（块 C）须另行批准。
+状态：**已执行：块 P、A1、A2、B、C、D、V0。本文档记录的验收：B「用户验收总体通过」、C 第 4 步「用户人工测试通过」、D「块 D 验收通过（2026-09-25）」；P、A1、A2、V0 的执行记录仍写「待用户验收」，文档中没有后续验收记录。V2（代码中称「Step2 hook-up」）第 1、2 步已提交（`54e825d`、`1adfe4e`），第 3 步待用户批准白名单后启动；块 E 未启动。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动须另行批准。
 
 修订记录：
 - v1：初稿。
@@ -9,6 +9,7 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.19：补记 V2（Step2 hook-up）第 1、2 步的执行记录和用户裁定 A（写在 7.10.7 的 V2 下）；更新状态行。第 3 步的范围另行申请。
 - v3.18：块 B 已执行（Methods 部分、参数表、R9 合并、方案保存与加载）。
 - v3.17：Step1 patch 按钮统一用 patch 色（与 Step0 共用样式）。
 - v3.16：左栏标签页 Channels 改名为 Fusion。
@@ -1413,6 +1414,54 @@ v3.1 起，各条的裁定结果标在原位，汇总见 7.9。「设计选择�
 **V2：Step2 接入**（单独成块，在块 E 之前）
 - 复用同一个 runner。保留 Step2 现有的切块、合并和恢复机制，只替换每个切块的推理调用。
 - 验证：参数语义一致；输入语义按 7.10.4 和用户的裁定执行；引擎身份和 Step1 保存的参数文件一致，不一致时拒绝运行。
+
+**V2 执行记录**（代码和提交说明里称「Step2 hook-up」；本节于 2026-09-25 按提交说明和代码补记，第 1、2 步执行时没有同步写进本文档）：
+- **用户裁定（2026-09-25；待用户确认的补记）**：
+  - 参数文件以版本号区分新旧：顶层有 `preseg_contract` 的是新格式；没有的是旧文件，**继续走旧路径**，行为不变。新格式里版本未知或缺字段一律报错，不猜测、不退回。
+  - **裁定 A**：在新的执行路径接通之前，Step2 遇到有效的契约也**拒绝运行**，绝不在旧路径上运行 Step1 交来的结果。
+  - 手动模式（参数来源不是 index）的参数属于用户自己，运行时丢掉契约，按旧路径执行。
+  - 以上措辞依据 `1adfe4e` 的提交说明和代码注释整理，原始裁定文字没有留存；用户确认前不作为定稿。
+- **第 1 步：纯搬迁（`54e825d`，已提交）**
+  - `workers/segment_merge_worker.py` 的两个切块循环（`_segment_one_zarr` 和 `run()` 里的全图循环）改为从 `core.label_ownership` 取质心归属和重编号 LUT（`kept_labels`、`ownership_lut`），不再用内联拷贝；HQ 核、HQ2 各层和 QC 行仍走同一张 LUT；Step2 粘贴整个读取窗口的做法不变。
+  - 影子对比（merge-policy shadow compare）关闭：删去 5 处调用和两行 `shadow_compare=enabled` 日志，引擎元数据记为 disabled；对比函数本身保留。这对应 7.12「V2：Step2 改为调用；停掉影子对比」。
+  - 性能统计注意：选取归属标签的耗时从 `relabel` 阶段移到了 `postprocess` 阶段，跨这次提交不要比较这两项。
+  - 门：`tests/test_step2_ownership_move.py`，两个循环（whole-cell、HQ、HQ2；跨切块边界的细胞、空切块）与冻结的旧内联代码逐项相同：主输出、核、HQ2 各层、QC id、HQ2 切块元数据和总数。
+- **第 2 步：版本化交接契约（`1adfe4e`，已提交）**
+  - `core/preseg_contract.py`（新，无 Qt）：`build`、`validate`、`runner_params`、`mismatches`、`fixed_rules`。契约块（版本 1）包含：`method`；`params`（组合自己的参数加方法的固定规则，Mesmer 为 `normalize_input: false` 和 `threshold_target`）；`halo_px`；`pixel_key`；`fusion_settings_hash`；`preseg_run_id`；`combo_id`；**那一次运行的**引擎身份——取自该组合成功的结果记录，各记录之间以及与 `run.json` 必须一致，从不取保存时所在环境的身份。
+  - Step1 Save（选定结果的分支）：只写组合自己的参数（不再混入固定的 `min_size 15`、Cellpose 默认值、`phase1_diameter`），并在写任何文件之前先构造契约，被拒时不留下半成品。旧面板的 Save 不变（测试用本次提交之前的代码钉住它写出的文件）。
+  - Step2：装载参数文件时校验契约；运行前再核对一次——控件里的参数与契约不一致按 mismatch 拒绝；一致也按裁定 A 拒绝（提示「新的运行方式尚未接通」）。worker 同样拒绝（双保险）。手动模式丢掉契约。旧文件不受影响。
+  - Step2 的 `image_mpp` 输入框改为 3 位小数，和 Step1 编辑器一致（0.325 不再被四舍五入）。
+  - 测试：`tests/test_preseg_contract.py`（新）、`tests/test_step1_save_params_file.py`。
+- **复核（2026-09-25，另一台机器：WSL2、RTX 3060 Laptop，按锁文件重建的 `fusion_mesmer`，离屏）**：相关 7 个模块（契约、Save 参数文件、归属搬迁、label_ownership、Step1→Step2 交接、preseg_run、preseg 界面）95 passed；没有跑全量回归；该机器没有 Mesmer 模型和真实数据。
+- **Q2 核实（2026-09-25）**：`fusion_settings_hash` 是 fusion 配置和 display mapping 的摘要（`MainWindow._fusion_settings_hash`，`ui/main_window.py:7716`）；fused.zarr 的 `config_hash` 另含来源、区域、方法和产物版本等字段（产物身份构造，`ui/main_window.py:8270` 起）。两者**不能直接比较**。fused 数据来源一致性的校验留待块 E 裁定；第 3 步不声称已验证。
+- **第 3 步：Step2 切块推理改用 `seg_runner`（申请第四版，2026-09-25 用户批准；经三轮独立审核）**
+  - **行为范围**：只有带契约的参数文件走新路径；旧文件、HQ/HQ2/CDS、手动模式行为不变。唯一例外见「关窗」。
+  - **白名单**：
+    - `workers/segment_merge_worker.py`：backend 初始化的契约分支（启动引擎子进程、核对引擎身份与 HALO）；`_segment_tile` 的契约分支；两个切块循环 `except` 里的契约判断（失败向外传播）；取消退出分支（全图循环和 ROI 外层，只限契约路径）；`stop()`；`run()` 的 `finally` 清理；去掉裁定 A 的拒绝。
+    - `ui/step2_page.py`：`_check_preseg_contract`（去掉裁定 A 的拒绝，加 HALO 核对）；新增 `stop_background_jobs()`（只调 `worker.stop()`，返回 worker 是否仍在运行）。
+    - `ui/main_window.py`：`closeEvent` 加一个 Step2 分支，按 fusion job / patch loader / overview read 的现有做法「仍在运行则暂缓关闭，500 ms 后重试」。
+    - 测试：`tests/test_preseg_contract.py` 只改 `:176`、`:218` 两条临时拒绝测试；新增 `tests/test_step2_runner_path.py`。
+    - 本文档。
+  - **不改**：`seg_runner/`（包括 client）、`core/preseg_input.py`、`core/label_ownership.py`、切块、归属、合并、恢复、fused.zarr 写入、Step2 控件。不新增 registry 或状态机，只复用现有协议。
+  - **输入**：`preseg_input.INPUT_KIND` + `model_input`，与 Step1 同一函数——Cellpose whole-cell `[f,f,n]`；Cellpose/StarDist nuclei 与 expansion 单通道核图；Mesmer whole-cell 与 nuclear-guided `[n,f]`；Mesmer nuclei `[n,0]`。参数取 `runner_params`。
+  - **输出映射（Q1 裁定）**：whole-cell、expansion、Mesmer whole-cell 取 `cell`（expansion 只接回扩张后的细胞）；nuclei 类取 `nucleus` 作主输出；Mesmer nuclear-guided 取 `cell` 作主输出，`nucleus` 仍按原 `nuclei` 字段交回。
+  - **runner 对接**：临时目录 `runner_io/` 归本次运行所有，每块读完即删，结束、Stop、出错时整目录删除；任务 ID `{out_prefix}_r{r}_c{c}`。
+  - **失败**：契约路径的推理失败向外传播到 `run()` 最外层，发出 `error`，不登记结果、不发布成功结果；旧路径保持「零 mask 后继续」。
+  - **取消**：契约路径下不再写入取消的那一块、不发布成功结果；ROI 内层返回后外层 `run()` 也退出，不进入汇总、别名写入、`_register_completed_result()` 和 `finished`；沿用 `error.emit('Stopped by user.')` 后返回。之前的切块可能已留下中间文件，如实说明。
+  - **Stop 不阻塞界面**：`worker.stop()` 只置标志、调用 `ep.stop()`；引擎还在加载模型时再对进程组发 SIGKILL，不等待。等待都在 worker 线程里（client 每 0.2 s 检查标志后自己 `terminate()`；加载期间 `start()` 读到 EOF 抛 `EngineStartError`，按用户停止处理）。
+  - **关窗**：界面线程不等待；worker 未结束时暂缓关闭并重试，不设总超时。**申请例外**：旧路径关窗也会先停 Step2 worker 再关（以前不理会），旧路径推理不能中途打断，可能要等当前切块结束。
+  - **验收门**：
+    1. 旧文件：无契约时两个循环的输出与改动前逐像素相同，含原有多输出方法的核。
+    2. 等价：合成 fused.zarr 上，契约运行的全局 mask 与「同一 runner 逐块跑 + 共用归属函数粘贴」逐像素相同；两个循环都覆盖；nuclear-guided 比对核。
+    3. 输入与 Step1 同一窗口的构造一致（见上面的输入表）。
+    4. 引擎身份不符、HALO 与 overlap 不一致、参数不一致都拒绝运行并写明原因。
+    5. 加载期间 Stop、推理期间 Stop、kill -9 引擎子进程、运行中关主窗口：登记正确，界面线程不阻塞（Stop 调用 < 50 ms），结束后无残留进程；关窗在加载和推理期间验证暂缓关闭，任务恰好已结束时直接关闭也算通过。
+    6. 取消：单 ROI、多 ROI 中途 Stop、全图中途 Stop，结果索引里没有本次运行，没有 `finished`，无残留进程。
+    7. 8 个方法各用真实引擎跑一次；Mesmer 在缺模型的机器上记为「未验收」，不用 mock 或 skip 顶替。反向注入只用来证明测试有效，不引出新的产品防御要求。
+    8. 真机：用户在原机器上完成一次「Step1 选定 → Save → Step2 运行」。
+    9. 交付时写明：块 E 之前没有验证 fused 数据来源一致（见 Q2 核实）。
+  - **说明**：父进程意外退出时 runner 读到 stdin EOF，会在当前任务返回后退出；这不保证立即无残留，不作为验收依据。
+  - **Advisory（不在本块处理）**：旧路径 ROI 模式中途 Stop 同样会汇总并登记成功——现有行为，等用户裁定。
 
 
 #### 7.10.8 V0 执行结果（2026-09-23，待用户验收）

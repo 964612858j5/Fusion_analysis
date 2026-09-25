@@ -965,7 +965,14 @@ class ConfigPanel(QWidget):
                 self.set_current_channel(current_channel, auto_show=False)
 
     def _load_weights_from_file(self):
+        """Block F (user ruling 2026-09-25): a Step1 session file only,
+        restored by the window exactly as `Load Previous Step1 Session`
+        restores its channels. Anything else is refused, nothing changes."""
         mw = self.window()
+        load = getattr(mw, "load_weights_from_step1_session", None)
+        if load is None:
+            QMessageBox.warning(self, "Load Weights", "Not available here.")
+            return
         out_dir = ""
         if hasattr(mw, "current_gui_work_dir"):
             out_dir = mw.current_gui_work_dir()
@@ -973,22 +980,16 @@ class ConfigPanel(QWidget):
             out_dir = mw._out_path_edit.text().strip()
         start_dir = out_dir if out_dir and os.path.exists(out_dir) else os.getcwd()
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load Channel Weights", start_dir, "JSON Files (*.json)"
+            self, "Load Weights from a Step1 Session", start_dir,
+            "Step1 Session (step1_session.json);;JSON (*.json)"
         )
         if not path:
             return
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-        except Exception as e:
-            QMessageBox.warning(self, "Load Weights", f"Invalid JSON file:\n{e}")
-            return
-        try:
-            self.apply_full_config(cfg)
-        except Exception as e:
-            QMessageBox.warning(
-                self, "Load Weights",
-                f"Failed to apply weight configuration:\n{e}")
+        ok, message = load(path)
+        if not ok:
+            QMessageBox.warning(self, "Load Weights", message)
+        else:
+            print(f"[Step1] {message}")
 
     # ── channel universe ──────────────────────────────────────────────
     def set_channels(self, channels, prune=True):

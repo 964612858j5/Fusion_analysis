@@ -3541,6 +3541,50 @@ class MainWindow(QMainWindow):
         if isinstance(recorded, (list, tuple, dict)):
             self.config.restore_weight_initialization(recorded)
 
+    #: Keys only a Step1 session carries (block F): `step1_fusion_settings.json`
+    #: and `fusion_config.json` have none of them.
+    _STEP1_SESSION_KEYS = ("fusion_draft", "channel_visibility", "channel_weights",
+                           "patches", "preview_mode", "p2_params")
+
+    def load_weights_from_step1_session(self, path):
+        """`Load weights` (block F, user ruling 2026-09-25): a Step1 session
+        file only. Its channel part -- weights, participation, ticks, colours,
+        the current channel and the mode -- is put back exactly as `Load
+        Previous Step1 Session` puts it back, through the same two calls;
+        patches, paths and segmentation fields are left alone. Anything else
+        is refused and nothing changes. Returns (ok, message)."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                sess = json.load(f)
+        except Exception as exc:  # noqa: BLE001 -- told to the user
+            return False, f"Not a readable JSON file:\n{exc}"
+        if not isinstance(sess, dict) or not any(k in sess for k in self._STEP1_SESSION_KEYS):
+            return False, ("This is not a Step1 session. Load weights reads "
+                           "step1_session.json only.")
+        if self.loader is None:
+            return False, "Load a slide first."
+        names = list(self.loader.channel_names() or [])
+        # Checked before anything is installed: a session that brings no
+        # marker of this slide would leave a fusion of the nucleus alone.
+        fusion_cfg = (sess.get("fusion_config")
+                      or self._fusion_config_from_flat_weights(sess))
+        spec, _ = fusion_domain.migrate_session(sess, fusion_config=fusion_cfg, channels=names)
+        # Both install shapes: {group: {members: [...]}} (the current
+        # schema) and {group: {channels: {ch: w}}} (the older ones).
+        markers = {str(ch) for g in (spec.get("groups") or {}).values()
+                   for ch in list((g or {}).get("members") or []) + list((g or {}).get("channels") or {})
+                   if str(ch) in names}
+        if not markers:
+            return False, ("This session has no marker channel of the current slide; "
+                           "nothing was changed.")
+        restored = self._restore_step1_scientific_state(
+            sess, source_path=getattr(self.loader, "filepath", ""))
+        self._apply_step1_display_state(sess, restored.visibility,
+                                        display_installed=True,
+                                        restore_changed=restored.changed,
+                                        mode_moved=restored.mode_moved)
+        return True, f"Loaded weights for {len(markers)} channel(s) from {os.path.basename(path)}."
+
     def _apply_step1_display_state(self, sess, visibility=None,
                                    display_installed=False,
                                    restore_changed=True, mode_moved=None):

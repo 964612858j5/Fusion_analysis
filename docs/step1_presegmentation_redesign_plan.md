@@ -759,6 +759,16 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 离屏 1500 宽窗口下 Step0 与 Step1 的通道列宽度不一致（365 vs 271 px），已提交的 HEAD 上一样，可能只是离屏现象；
   - 旧路径 ROI 模式中途 Stop 仍会登记成功（见 V2 第 3 步的 advisory）。
 
+### 块 F — `Load weights` 只读 Step1 会话（计划外；用户 2026-09-25 报告并批准）
+- **缺陷**（真机报告）：Step1 的 `Load weights` 选中 `step1_session.json` 后，通道勾选和权重都没有恢复；之后再勾选通道，viewer 只显示 DAPI；Save Fusion Settings 被拒绝。
+- **原因**（已有问题，不是块 L 引入的）：`_load_weights_from_file` 按 `fusion_config.json` 的格式读取（最外层直接有 `groups`），而会话文件的权重放在 `fusion_config` 里面。代码不检查就调用 `apply_full_config`，装入一个没有任何组的草稿：所有 marker 移出 fusion，只剩 DAPI。之后勾选的通道只记了权重，没有组可加入，所以始终进不了 fusion；fusion 里没有 marker，Save 因此被拒绝。
+- **用户裁定**：`Load weights` 只读 `step1_session.json`，减少复杂度；其他文件一律拒绝。
+- **做法**：窗口新增 `load_weights_from_step1_session(path)`：按会话特有的字段识别会话文件（`fusion_draft`、`channel_visibility`、`channel_weights`、`patches`、`preview_mode`、`p2_params` 至少有一个；`fusion_config.json` 和 `step1_fusion_settings.json` 都没有）；先用 `fusion_domain.migrate_session` 检查会话里至少有一个当前切片的 marker 通道（兼容 `{members: [...]}` 和 `{channels: {...}}` 两种组格式）；再调用和 `Load Previous Step1 Session` 相同的两个函数（`_restore_step1_scientific_state` → `_apply_step1_display_state`），一次性恢复权重、参与、勾选、颜色、当前通道和显示模式；patch、路径、分割参数等字段不恢复。`config_panel._load_weights_from_file` 改为打开文件对话框（默认过滤 `step1_session.json`）后交给窗口，拒绝时弹出原因。
+- **白名单**：`ui/step0/config_panel.py` 的 `_load_weights_from_file`、`ui/main_window.py` 新增的入口、`tests/test_step1_load_weights.py`。不改 `apply_full_config`、fusion 模型、会话加载、Save。
+- **测试**：`tests/test_step1_load_weights.py` 6 条：同一个真实会话文件，`Load weights` 恢复的权重、参与、组和勾选与 `Load Previous Step1 Session` 的恢复路径完全相同；`fusion_config.json`、`step1_fusion_settings.json`、其他 JSON 被拒绝且状态不变；没有当前切片 marker 的会话被拒绝且状态不变；加载后新勾选的通道进入组、参与 fusion。相关 9 个模块 215 passed / 1 failed（`test_step1_channel_panel.py::test_the_weight_row_and_the_buttons_kept_their_look`，按钮高 19 px 而非 20 px，HEAD 上同样失败，是这台机器的字体差异）。测试写的会话文件都在沙箱临时目录，没有写到 `~/fusion_data`。
+- **真机验收**：待用户验收。
+- **Advisory**：Step1 目前写三个 JSON——`fusion_config.json`（`Save` 时写，Step3 从中读原始切片路径，Step2 通过 `step1_output` 拿到它的路径）、`step1_fusion_settings.json`（`Save Fusion Settings` 的已确认快照，预分割用它的 hash 判断是否过期）、`step1_session.json`（会话）。用户希望 Step1 只生成一个统一的 JSON；这会牵涉 Step2、Step3 和预分割的读取方，另立块处理。
+
 ## 六、未决与 advisory
 
 - A0 各项产出（见块 A0）。

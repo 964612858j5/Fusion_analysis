@@ -207,6 +207,10 @@ row, and the duplicate Tissue Preview button in the step bar.
   together because the share is normalised. Step0 is written through its own
   left-column mechanism so its hidden peer splitter stays at the same width.
 * **Step2 / Step3 rows** -- tick, swatch, name. Nothing else.
+* **Step1's Save progress** (block L1, user ruling 2026-09-25) -- the modal
+  progress dialog alone (with Cancel). The bar that used to sit at the
+  bottom of the page is kept, hidden, and never shown; its words go to the
+  terminal.
 * **Top step bar** -- NO buttons. Three were added there and none was asked
   for; the last of them was a second `🗺 Tissue Preview` beside the one Step0
   already has next to Load.

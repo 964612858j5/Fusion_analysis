@@ -1439,7 +1439,10 @@ class MainWindow(QMainWindow):
         )
         fbl.addWidget(self._fusion_pbar)
 
-        self._fusion_lbl = QLabel("")
+        # Its words go to the terminal (block L1, user ruling 2026-09-25):
+        # the Save progress is the modal dialog alone, so this bar is kept,
+        # hidden, and never shown.
+        self._fusion_lbl = _TerminalStatus("", tag="Step1-Fusion")
         self._fusion_lbl.setAlignment(Qt.AlignCenter)
         self._fusion_lbl.setStyleSheet("color:#aaa;font-size:10px;")
         self._fusion_lbl.setWordWrap(True)
@@ -7998,7 +8001,6 @@ class MainWindow(QMainWindow):
                     f"→ click Save to generate DAPI input zarr"
                 )
             self._fusion_lbl.setText(msg)
-            self._fusion_bar_widget.setVisible(True)
 
     # ── Lock / unlock UI during fusion ──────────────────────────────
 
@@ -9225,7 +9227,6 @@ class MainWindow(QMainWindow):
             self._guarded_fusion_callback(token, self._on_fusion_error, "error"))
 
         self._lock_ui()
-        self._fusion_bar_widget.setVisible(True)
         self._fusion_pbar.setValue(0)
         self._fusion_lbl.setText(
             f"Starting {job_name}  {n_rows}×{n_cols} = {n_rows*n_cols} tiles…"

@@ -1,7 +1,7 @@
 # Step1 预分割（Method & Parameters / Patch Results）重设计 — 项目计划
 
 日期：2026-09-23（第三版，块 A0 产出）　分支 `v15-interactive-channel-workspace`，起点 `c9f80df`，A0 核查基于 `e655409`。
-状态：**已执行：块 P、A1、A2、B、C、D、V0。本文档记录的验收：B「用户验收总体通过」、C 第 4 步「用户人工测试通过」、D「块 D 验收通过（2026-09-25）」；P、A1、A2、V0 的执行记录仍写「待用户验收」，文档中没有后续验收记录。V2（代码中称「Step2 hook-up」）第 1、2 步已提交（`54e825d`、`1adfe4e`），第 3 步已提交（`dcaca2c`），真机上 Cellpose 路径跑通，Mesmer 未验收；块 L 已提交（`1d14801`、`2294bc7`）并通过真机验收；块 E 未启动。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动须另行批准。
+状态：**已执行：块 P、A1、A2、B、C、D、V0。本文档记录的验收：B「用户验收总体通过」、C 第 4 步「用户人工测试通过」、D「块 D 验收通过（2026-09-25）」；P、A1、A2、V0 的执行记录仍写「待用户验收」，文档中没有后续验收记录。V2（代码中称「Step2 hook-up」）第 1、2 步已提交（`54e825d`、`1adfe4e`），第 3 步已提交（`dcaca2c`），真机上 Cellpose 路径跑通，Mesmer 未验收；块 L 已提交（`1d14801`、`2294bc7`）并通过真机验收；块 F 已提交（`5bc65bc`）；块 E 已提交（`7ee98fc`）并通过真机验收（Mesmer 除外）。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动须另行批准。
 
 修订记录：
 - v1：初稿。
@@ -9,6 +9,7 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.21：块 F、块 E 已提交（`5bc65bc`、`7ee98fc`）；块 E 真机验收通过。
 - v3.20：记录 V2 第 3 步的提交（`dcaca2c`）和真机情况；新增块 L（Step1 Save 进度框、Step2 布局，计划外，用户 2026-09-25 提出）的申请、执行记录和真机验收。
 - v3.19：补记 V2（Step2 hook-up）第 1、2 步的执行记录和用户裁定 A（写在 7.10.7 的 V2 下）；更新状态行。第 3 步的范围另行申请。
 - v3.18：块 B 已执行（Methods 部分、参数表、R9 合并、方案保存与加载）。
@@ -749,12 +750,13 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
 3. 交接验收：真实窗口的 Use → `_save` → `_go_to_step2` → `get_seg_config()`，8 个方法各一次（只核对参数，不需要引擎，Mesmer 也覆盖）。
 - 白名单：`ui/main_window.py`（旧面板和 Patch Results 的可见性、Save 的解锁条件和 `_save` 入口的拒绝）、`UI_SURFACE_RULES.md`、测试、本文档。`search_ctrl.py`、`result_grid.py` 不需要改（在容器层隐藏）；Step2 装载实测一致，`step2_page.py` 不需要改。
 
-**E 执行记录**（2026-09-25，待真机全流程验收）：
+**E 执行记录**（2026-09-25，真机验收通过）：
 - `ui/main_window.py`：新增 `_save_allowed()`（有 `Use` 选定的结果才为真），`_check_save_unlock`、`_unlock_ui` 和 `_save` 入口都只认它；`_save` 被拒时提示「Choose a pre-segmentation result first: Pre-segmentation tab → Results → Use.」。旧面板的滚动区 `setVisible(False)`；Patch Results 标签页 `setTabVisible(False)`；旧的 `_show_step1_patch_results_tab` 调用在标签页隐藏时不做任何事。
 - 新增 `tests/test_step1_step2_handoff_e2e.py` 10 条：8 个方法走真实的 Use → `_save`（写出真实参数文件，fusion 作业开始前停下）→ `_go_to_step2`，Step2 不作编辑时 `get_seg_config()` 通过契约核对、没有不一致，`runner_params` 正好是所选组合加方法的固定规则；旧 Phase 2 参数不能解锁 Save；旧面板和 Patch Results 标签页不再显示、仍保留。
 - 更新因旧界面退场而失效的 12 条测试：Save 相关的 guard 测试（未保存设置、显示映射提交、重绑、运行写入的快照）改为经「选定的结果」到达 Save，原有断言不变；「Phase 2 参数在别的设置上搜出来」那条改为断言 Save 直接拒绝；旧面板 Save 的文件钉住测试改为断言拒绝、不写文件；两条 Patch Results 标签页测试和一条 720p 布局测试改为断言标签页和旧面板不显示。
 - 回归（Step1 全部 55 个模块 + 契约 + 界面约定，逐模块单独进程）：与已提交的 HEAD 逐条对比，没有新增失败。仍失败的都在 HEAD 上同样失败：`test_step1_channel_panel.py::test_the_weight_row_and_the_buttons_kept_their_look`（字体差异）；`test_step1_montage_view.py` 在第 27 条后 Qt 异常中止（本机 WSL 的 GPU/EGL，HEAD 同样）；5 个 GPU 模块在本机不收集测试。
-- **真机**：待用户完成一次「预分割 → 选定 → Save → Step2 全量分割」（Mesmer 除外）。
+- **真机验收通过（用户 2026-09-25）**：「预分割 → 选定 → Save → Step2 全量分割」（Mesmer 除外，本机无模型）。
+- 提交：`7ee98fc`。
 
 ### 块 L — Step1 Save 进度框与 Step2 布局（计划外；用户 2026-09-25 提出并批准）
 - **L1**：Step1 的 Save 生成 fused.zarr 时，模态进度弹窗和页面底部的旧进度条同时出现。用户裁定只保留弹窗（它有 Cancel）；底部进度条保留但不再显示，它的文字改为打到终端（前缀 `[Step1-Fusion]`），完成和出错仍各有消息框。

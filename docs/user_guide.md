@@ -189,7 +189,7 @@ Take the parameters tuned in Step 1 and **actually circle every single cell in t
 
 ### Step 3 · QC Viewer
 
-> 🚧 **Being rebuilt.** Step 3 is being rebuilt to look and work like Step 1. What is available **now** is listed below; the whole-slide view on the right comes in the next update, and the cell mask overlay after that.
+> 🚧 **Being rebuilt.** Step 3 is being rebuilt to look and work like Step 1. What is available **now** is listed below; the cell mask overlay comes in a later update.
 
 **What it will do:**
 Check the Step 2 result against the tissue: the whole slide with the cell mask on top, pan and zoom, jump by Tissue Navigator or patch.
@@ -199,7 +199,9 @@ Check the Step 2 result against the tissue: the whole slide with the cell mask o
 1. The left column is Step 1's `Channels` frame: `Show all`, `Intensity…`, `Reset weights`, `Load weights` and the channel list with weights.
 2. **Step 3 and Step 1 share the same channels, weights and fusion**: a tick or a weight changed here is the same in Step 1 (and is saved in the session like any Step 1 change). Your saved Fusion Settings only change when you save them in Step 1.
 3. `Overlay` / `Fusion` switch the mode for Step 1 and Step 3 together; the Tissue Navigator follows what you set here.
-4. The right side is a placeholder for now — **no image yet**.
+4. The right side shows the **whole slide**, like Step 1: drag to pan, scroll to zoom, click in the Tissue Navigator to jump there. Step 1 and Step 3 keep the same position when you switch between them.
+5. The Tissue Navigator opened from Step 3 is **view-only**: ROIs and patches cannot be edited here yet.
+6. **No cell mask yet** — it comes in a later update.
 
 **Output:** no new files.
 

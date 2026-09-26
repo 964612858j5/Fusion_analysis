@@ -139,8 +139,8 @@ def _window(app, monkeypatch, tmp_path):
 
     original = mount_module.Step1WholeSlideMount.__init__
 
-    def _init(self, window, host=None, parent=None):
-        original(self, window, host=_Host(), parent=parent)
+    def _init(self, window, host=None, parent=None, **kwargs):
+        original(self, window, host=_Host(), parent=parent, **kwargs)
 
     monkeypatch.setattr(mount_module.Step1WholeSlideMount, "__init__", _init)
     monkeypatch.setattr(mount_module.Step1ViewerBinding, "_source_moved",

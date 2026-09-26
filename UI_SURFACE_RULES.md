@@ -230,11 +230,15 @@ row, and the duplicate Tissue Preview button in the step bar.
   `Show all` (Step1's sweep) and `Intensity…`, the rule, `Reset weights` and
   `Load weights`, then the one dock with Step1's rows, in a host of Step3's
   own; RIGHT, the `Viewer` tab with the `Overlay` / `Fusion` pair (the SAME
-  mode as Step1's pair) over the viewer slot, which shows a notice until the
-  whole-slide viewer is connected (block 2c-2); `← Back to Step 2` below.
-  No Save, no pre-segmentation, no patch strip (a later block), no mask yet.
-  The column joins the one channel-column share. A refusal to open Step3 is
-  said in a (non-modal) dialog on the page the user is on.
+  mode as Step1's pair) over Step3's own whole-slide viewer (block 2c-2): a
+  second Step1 viewer, resident, paused while Step3 is not on screen (and
+  Step1's paused while Step3 is), sharing Step1's camera; a navigator click
+  moves the viewer of the step on screen. When it cannot open, the slot's
+  notice says why. `← Back to Step 2` below. No Save, no pre-segmentation, no
+  patch strip (a later block), no mask yet. The column joins the one
+  channel-column share. A refusal to open Step3 is said in a (non-modal)
+  dialog on the page the user is on. The Tissue Navigator opened from Step3
+  is READ-ONLY until the sandbox (plan step 5): no ROI or patch edit there.
 * **Step2's page** (block L2, user ruling 2026-09-25) -- TWO columns: the
   parameter panel on the LEFT, as wide as Step0's and Step1's channel column
   (the same one share: dragging any of the three handles moves all three),

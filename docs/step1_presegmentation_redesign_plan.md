@@ -9,6 +9,7 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.43：块 2c-2 已实施，真机验收第 1–3 项通过；偶发的 Step1 全黑记为待观察；第 ⑤ 步提前并记录沙盒要求。
 - v3.42：块 2c-2 按独立审核修订为 v2（Navigator 连接不依赖 Step1 的 viewer；重绑失败的回退；后台契约、热切换、模式验收的措辞；权限修补的文件验证）；记录用户目标权限（Step3 可编辑不保存 = 第 ⑤ 步）。
 - v3.41：块 2c-2 申请（第二个 viewer；修补 2c-1 中 Step3 的 Tissue Navigator 按钮沿用 Step1 编辑权限的缺陷）。
 - v3.40：块 2c-1 已实施并通过真机验收。
@@ -924,6 +925,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 2b 修改 `UI_SURFACE_RULES.md` 时，精确替换「四步的勾选各自独立」相关条款（第 197、214 行附近）为：Step1 ↔ Step3 共用勾选与权重，Step0、Step2 仍各自独立；并修改第 211、222、292 行（权重只属于 Step1、Step3 行只有勾选 / 颜色 / 名称、权重只在 Step1 的行里编辑）。
   - 2b / 2c 的验收包含一次完整的公开操作：在 Step3 调整勾选与权重 → Step1 显示同样的设置 → 当前会话记住草稿；已确认的快照和 Step2 的输入保持原样，直到用户在 Step1 明确保存。
   - 骨架拆成 2a / 2b / 2c：2a viewer 的暂停 / 恢复、Navigator 视野框只在前台发布、相机标识参数（重构，除视野框一项外界面与 Step1 行为不变）；2b Step3 使用 Step1 的显示范围与 fusion 草稿（通道面板在 Step3 与 Step1 相同、Reset / Load weights 同一套功能、Navigator 实时联动的核实）、界面规则与规则测试修改；2c 新的 Step3 页面（左栏同 Step1 的 Channels 框 + Show all / Intensity + Reset / Load weights + 通道列表；右栏 Overlay / Fusion 按钮 + viewer），删除旧页面、旧标签页与写进 Step2 目录的配置文件，加入共用列宽，常驻、隐藏暂停、换数据集与退出时释放。
+- **顺序调整（用户 2026-09-26）**：第 ⑤ 步（Navigator 沙盒 ROI）提前到第 ③、④ 步之前。沙盒的要求：Step3 里 Navigator 可以画 ROI、改 patch，但**不保存、不改任何本地文件、不影响 Step0 / Step1**；在 Step3 画的 ROI / patch **保留到下次进入 Step3**（本次运行内，不写盘）；用途是**临时标记和快速切换位置**。
 - **拟分步**（每步单独申请、单独验收；② 已拆成 2a / 2b / 2c，见上）：① 块 N（标签金字塔，先做）；② Step3 骨架（2a / 2b / 2c：复用 viewer 与通道面板，与 Step1 共用显示范围和 fusion 草稿，删除旧功能与标签页）；③ patch 按钮条组件化 + Navigator 空降；④ GPU 标签渲染与 mask 控件；⑤ Navigator 沙盒 ROI。在 ⑤ 完成之前，Step3 的 Navigator 保持现在的只读策略，不开放任何会写 Step0 文件的编辑。
 
 ### 块 N — Step2 生成标签金字塔（申请 v2，按独立审核修订，用户 2026-09-26 批准；已实施，**真机验收通过**）
@@ -1075,7 +1077,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 回归：75 个构造主窗口或涉及步骤切换 / 显示范围 / 通道面板 / `ChannelWorkbench` 的模块，与 `git archive HEAD`（`d69402f`）逐条对比**无新增失败**；通过数的差异正好是删除的旧页面测试（15 / 2 / 1）。两边相同：`test_global_channel_dock.py::test_the_step0_panel_looks_like_the_baseline_panel`、`test_step1_channel_panel.py::test_the_weight_row_and_the_buttons_kept_their_look`（字体差异）、`test_step0_method_prefetch.py::test_the_neighbouring_channel_is_still_prepared_as_well`；HEAD 一侧另有 `test_step0_method_prefetch.py::test_a_remounted_coordinator_does_not_reuse_a_cancelled_generation`（负载下偶发）。
   - **真机验收通过（用户 2026-09-26）**。
 
-### 块 2c-2 — Step3 的第二个 viewer，与 2c-1 的 Navigator 权限修补（申请 v2，按独立审核修订，**用户 2026-09-26 批准**；Step3 只读至第 ⑤ 步）
+### 块 2c-2 — Step3 的第二个 viewer，与 2c-1 的 Navigator 权限修补（申请 v2，按独立审核修订，用户 2026-09-26 批准；Step3 只读至第 ⑤ 步；已实施，**真机验收通过（第 1–3 项）**）
 - **2c-1 留下的缺陷（须修补）**：Step3 标题栏的 `Tissue Navigator` 按钮接到了 Step1 的 `_show_tissue_navigator`，它调用 `show_navigator(_CTX_STEP1, roi_policy="delete_only", patch_editable=True)`，而 `show_navigator` 带参数时会先改写编辑权限（`block01_display.py:2248-2249`）。所以在 Step3 点这个按钮，Navigator 会变成可删除 ROI、可编辑 patch，这些编辑会写进 Step0 的项目文件，违反「沙盒 ROI（第 ⑤ 步）完成前 Step3 的 Navigator 只读」的裁定。修补：Step3 的按钮改为调用新的 `_show_step3_tissue_navigator`，以只读权限（`roi_policy="read_only"`、`patch_editable=False`，与 `_apply_navigator_policy_for_step(3)` 相同）打开。
 - **用户的目标权限（2026-09-26）**：Step3 里**可以**编辑 ROI 与 patch，但编辑不保存、不改本地文件——即第 ⑤ 步「Navigator 沙盒 ROI」。现在 Navigator 的每次编辑都经 Step0 的唯一模型写进 `roi_config.json` 等文件（`_reconcile_roi_edit` → `_persist_geometry_edit`），没有「只在内存里」的路径，所以在第 ⑤ 步完成之前 Step3 必须只读；本块的修补只是堵住现在会写文件的口子，第 ⑤ 步再实现可编辑、不保存。
 - **必要性**：用户裁定 Step3 是 Step1 的简化版，右侧是整张图 viewer，可拖动缩放、Navigator 空降；2c-1 之后右栏只有占位提示（已接受的功能空档）。
@@ -1102,6 +1104,17 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 换数据集后 Step3 的 viewer 已关闭，再进 Step3 按新数据打开；关窗时两个 viewer 都释放。
   - 回归与 HEAD 逐条对比，除上述两个桩函数签名外无新增失败。
   - 真机（用户）：Step3 右栏显示整张图，拖动缩放、Intensity、Overlay / Fusion 与 Step1 一致，Navigator 空降到 Step3，Step1 ↔ Step3 往返位置不变；**同一来源、数据已准备好的热切换**无明显等待（首次打开与来源变化后的等待单独记录耗时，不以常驻推定为无等待）；Step3 里 Navigator 不可编辑（第 ⑤ 步再改为可编辑不保存）。
+
+- **执行记录**（2026-09-26，未提交）：
+  - Navigator 权限修补：Step3 的 `Tissue Navigator` 按钮改接新增的 `_show_step3_tissue_navigator`（`show_navigator(_CTX_STEP3, roi_policy="read_only", patch_editable=False)`）。
+  - `ui/main_window.py`：新增 `_step3_whole_slide`（第二个 mount，`camera_reason="step3"`，装进 Step3 的 viewer 位置、占位提示作回退控件；创建时以唯一连接接上 `navigator_created`）、`_step3_viewer_shown`（成功时显示 viewer、隐藏提示——`restore_legacy` 之后 `install` 以外没有代码会重新显示 viewer）、`_step3_viewer_failed`（暂停、回退、提示写明原因、记下失败）、`_step3_follow_step`、`_close_step3_viewer`、`_on_step3_camera`、`_step3_sync_whole_slide_source`；`_step1_whole_slide_step_changed_inner` 拆出 `_step1_follow_step`，先暂停要离开的 viewer、再恢复要进入的；Step1 离开时由 `deactivate()` 改为 `pause_requests()`，进入时已暂停则 `resume_requests()`；`_capture_camera_of` / `_apply_shared_camera_to` 加 Step3；共享相机条件改为 `(0, 1, 3)`；`_on_step1_tissue_navigate` 按当前步骤路由；`_step1_sync_whole_slide_source` 同时重绑 Step3；`_discard_step1_dataset_state` 关闭 Step3 的 viewer；`closeEvent` 关闭 Step3 的 viewer；`set_preview_mode` 在同一处给 Step3 的 viewer `set_mode`。
+  - `ui/step3_page.py`：新增 `set_viewer_notice(text=None)`。
+  - 测试桩：`tests/test_step1_viewer_takeover.py` 与 `tests/test_step1_shared_camera.py` 中替换 `Step1WholeSlideMount.__init__` 的桩函数加上 `**kwargs`（未改断言）。
+  - 新测试 `tests/test_step3_viewer.py` 10 条：Step3 按钮打开的 Navigator 保持只读，新建 ROI、删除 ROI、增删 patch、改 patch 几何都不生效，`roi_config.json` / `patch_config.json` / `step0_roi_result.json` 不变，Step1 的按钮仍给 Step1 的权限；进入 Step3 打开独立的第二个 viewer、装在 Step3 位置、提示隐藏、`camera_reason` 为 step3；只有前台的 viewer 读取（Step3 时 Step1 已暂停、改草稿与移动相机不使 Step1 读取；反之亦然；Step2 时两者都暂停）；两对模式按钮使两个 viewer 的模式一致（后台的记录）；Step3 → Step1 与 Step1 → Step3 两个方向位置保持；未建过 Step1 的 viewer 时 Navigator 出现后点击移动 Step3；Navigator 先打开、多次往返后一次点击只移动当前的 viewer 一次；打开失败时提示写明原因、同一张切片不重试；重绑失败时回退（提示原因、viewer 隐藏并暂停、不再读取），handoff 再更新后重试成功；换数据集关闭 Step3 的 viewer、提示恢复默认；关窗两个都关闭。反向注入 5 处（按钮修补、Step3 离开不暂停、Step3 创建时不接 `navigator_created`、Step3 路由、相机条件）各使至少 1 条变红（相机一条补了 Step1 → Step3 方向后才能被测出）。
+  - 文档：`UI_SURFACE_RULES.md` 的 Step3 页面一条（viewer 已接入、只读 Navigator）；两份用户指南的 Step3 一节（可浏览整张图、拖动缩放、Navigator 空降、Navigator 只能看、mask 待后续）。
+  - 回归：78 个模块，与 `git archive HEAD`（`455d127`）逐条对比**无新增失败**。只在改后一侧出现的 `test_step0_method_prefetch.py::test_a_remounted_coordinator_does_not_reuse_a_cancelled_generation`（上一轮只在 HEAD 一侧出现）与 StarDist ROI 等价一条，单独各重跑 3 次都通过，属负载下偶发；只在 HEAD 一侧出现 `test_preseg_run.py::test_the_job_equals_the_steps_done_by_hand`。两边相同的已知失败见前几块。`test_step0_channel_conditioning.py` 在两边都卡住（上一轮 2c-1 的回归中两边同样卡住、失败位置相同），本轮手动结束，未参与对比（已有问题，advisory）。
+  - **真机验收（用户 2026-09-26）**：第 1 项（Step3 显示整张图，拖动缩放、Intensity、Overlay / Fusion 与 Step1 一致）、第 2 项（Step1 ↔ Step3 位置保持、热切换无明显等待）、第 3 项（Navigator 空降到当前步骤的 viewer）**通过**。第 4 项：只读按设计生效；用户的目标是 Step3 可编辑 ROI / patch 但不保存（第 ⑤ 步），只读只是过渡。第 5 项（重启后直接进 Step3）：程序目前没有重新加载历史会话的入口，以后再测。
+  - **偶发问题（待观察，未改代码）**：一次真机操作中，Step0 保存 → 直接进 Step3（有图）→ 回 Step1，Step1 的 viewer 全黑，提示 `fine budget refused for DAPI`；再次操作无法复现。机制：GPU 显示的规则是通道第一次出现时要等精细层到齐才显示（`step1_gpu_binding.py` 的 `_publish_current`，`test_a_first_channel_over_the_fine_budget_stays_off_the_screen` 锁定），精细层因超预算被拒时通道永远不出现。推测的触发：Step1 的 viewer 第一次打开时套用 Step3 的共享相机，此刻窗口尺寸可能尚未排好，视野与选中的精细层级不匹配。再出现时请先试滚轮缩放 / 拖动 / 改窗口大小并记下操作顺序，据此确认后再申请修补（候选：第一次打开时等布局完成再套相机）。
 
 ## 六、未决与 advisory
 

@@ -1575,7 +1575,7 @@ class MainWindow(QMainWindow):
         nav = QPushButton("Tissue Navigator")
         nav.setToolTip(self._btn_step1_tissue_nav.toolTip())
         nav.setStyleSheet(self._step0._btn_tissue_nav.styleSheet())
-        nav.clicked.connect(self._show_tissue_navigator)
+        nav.clicked.connect(self._show_step3_tissue_navigator)
         title_row.addWidget(nav)
         self._btn_step3_tissue_nav = nav
 
@@ -1855,6 +1855,101 @@ class MainWindow(QMainWindow):
                 mount.install(layout, self.prev_gv)
         return mount
 
+    def _step3_whole_slide(self):
+        """Step3's whole-slide viewer (block 2c-2): a second instance of
+        Step1's mount, resident, in Step3's viewer slot. Its fallback widget
+        is the slot's notice."""
+        mount = self.__dict__.get("_step3_mount")
+        if mount is None:
+            mount = Step1WholeSlideMount(self, parent=self, camera_reason="step3")
+            mount.camera_sink = self._on_step3_camera
+            self._step3_mount = mount
+            # THE NAVIGATOR CLICK must not depend on Step1's viewer having
+            # been built: a restart that goes straight to Step3 never builds
+            # it. One connection (UniqueConnection), wired here as well.
+            try:
+                self._display.navigator_created.connect(
+                    self._wire_step1_tissue_navigation, Qt.UniqueConnection)
+            except TypeError:
+                pass
+            layout = self._step3.viewer_layout()
+            if layout is not None:
+                mount.install(layout, self._step3.viewer_notice())
+        return mount
+
+    def _step3_viewer_shown(self, mount):
+        """The viewer draws: it is on screen and the notice is not."""
+        mount.host.setVisible(True)
+        notice = self._step3.viewer_notice()
+        if notice is not None:
+            notice.setVisible(False)
+        self._step3.set_viewer_notice(None)
+
+    def _step3_viewer_failed(self, mount, path, reason):
+        """Fail closed: nothing of the old source stays on screen or reads."""
+        print(f"[Step3-Viewer] whole-slide viewer unavailable: {reason}")
+        self._step3_mount_refused_for = path
+        try:
+            mount.pause_requests()
+        except Exception:                                   # noqa: BLE001
+            pass
+        mount.restore_legacy()
+        self._step3.set_viewer_notice(
+            f"The whole-slide view could not open: {reason}")
+        return False
+
+    def _step3_follow_step(self, active):
+        """Step3's viewer follows the step: paused unless Step3 is on screen."""
+        mount = self.__dict__.get("_step3_mount")
+        if active != 3:
+            if mount is not None:
+                mount.pause_requests()
+            return False
+        if not getattr(self, "loader", None):
+            return False
+        path = str(getattr(self.loader, "filepath", "") or "")
+        if self.__dict__.get("_step3_mount_refused_for") == path:
+            return False
+        mount = self._step3_whole_slide()
+        if mount.host.stack is not None:
+            try:
+                mount.sync_source("handoff")
+                if mount.paused:
+                    mount.resume_requests()
+                else:
+                    mount.activate()
+            except Exception as exc:                        # noqa: BLE001
+                return self._step3_viewer_failed(mount, path, exc)
+            if mount.host.stack is None:
+                return self._step3_viewer_failed(mount, path, "the source could not be reopened")
+            self._step3_viewer_shown(mount)
+            return True
+        reason = "the slide could not be opened"
+        try:
+            opened = mount.open()
+        except Exception as exc:                            # noqa: BLE001
+            opened, reason = None, exc
+        if opened is None:
+            return self._step3_viewer_failed(mount, path, reason)
+        self._step3_mount_refused_for = None
+        mount.set_mode(self._step1_preview_mode)
+        self._step3_viewer_shown(mount)
+        self._wire_step1_tissue_navigation()
+        return True
+
+    def _close_step3_viewer(self):
+        """The dataset moved: Step3's viewer closes; the next entry reopens."""
+        mount = self.__dict__.get("_step3_mount")
+        self._step3_mount_refused_for = None
+        if mount is None:
+            return False
+        try:
+            mount.close()
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Step3-Viewer] close failed: {exc}")
+        self._step3.set_viewer_notice(None)
+        return True
+
     def _step1_whole_slide_step_changed(self, active):
         if active != 1:
             # Leaving Step1 empties the montage's caches and ends its thread.
@@ -1869,10 +1964,20 @@ class MainWindow(QMainWindow):
         is looking at. Coming back composes ONCE, which is what picks up
         everything that moved while Step1 was away.
         """
+        if active == 1:
+            self._step3_follow_step(active)        # pause Step3's first
+            return self._step1_follow_step(active)
+        result = self._step1_follow_step(active)   # pause Step1's first
+        self._step3_follow_step(active)
+        return result
+
+    def _step1_follow_step(self, active):
         mount = getattr(self, "_step1_mount", None)
         if active != 1:
             if mount is not None:
-                mount.deactivate()
+                # RESIDENT, NOT READING (block 2c-2): paused, it issues no
+                # new read while another step is on screen (block 2a).
+                mount.pause_requests()
             return False
         if not getattr(self, "loader", None):
             return False
@@ -1890,7 +1995,10 @@ class MainWindow(QMainWindow):
             with perf_trace.span("step1.entry.sync_source"):
                 mount.sync_source("handoff")
             with perf_trace.span("step1.entry.activate"):
-                mount.activate()
+                if mount.paused:
+                    mount.resume_requests()
+                else:
+                    mount.activate()
             return True
         try:
             with perf_trace.span("step1.entry.mount_open"):
@@ -1927,6 +2035,12 @@ class MainWindow(QMainWindow):
             return False
         return self._remember_camera(camera, f"step1:{reason}")
 
+    def _on_step3_camera(self, camera, reason=""):
+        """Step3 moved. Recorded only while Step3 is the step on screen."""
+        if self._current_step != 3:
+            return False
+        return self._remember_camera(camera, f"step3:{reason}")
+
     def _remember_camera(self, camera, origin=""):
         dataset = self._camera_dataset()
         if not dataset:
@@ -1948,6 +2062,10 @@ class MainWindow(QMainWindow):
             mount = getattr(self, "_step1_mount", None)
             camera = None if mount is None else mount.current_camera()
             return self._remember_camera(camera, "step1:leave")
+        if step == 3:
+            mount = self.__dict__.get("_step3_mount")
+            camera = None if mount is None else mount.current_camera()
+            return self._remember_camera(camera, "step3:leave")
         return False
 
     def _apply_shared_camera_to(self, step):
@@ -1971,8 +2089,9 @@ class MainWindow(QMainWindow):
             page = self.__dict__.get("_step0")
             apply = getattr(page, "apply_camera_snapshot", None)
             applied = bool(apply is not None and apply(cx, cy, scale))
-        elif step == 1:
-            mount = getattr(self, "_step1_mount", None)
+        elif step in (1, 3):
+            mount = (getattr(self, "_step1_mount", None) if step == 1
+                     else self.__dict__.get("_step3_mount"))
             applied = bool(mount is not None and mount.host.stack is not None
                            and mount.apply_camera(cx, cy, scale))
         if applied:
@@ -1993,6 +2112,7 @@ class MainWindow(QMainWindow):
             # C++ side refuses every attribute; a viewer that does not exist
             # has no source to rebind.
             return False
+        self._step3_sync_whole_slide_source(reason)
         if mount is None or mount.host.stack is None:
             return False
         try:
@@ -2001,6 +2121,23 @@ class MainWindow(QMainWindow):
             print(f"[Step1-Viewer] rebind failed: {exc}")
             mount.restore_legacy()
             return False
+
+    def _step3_sync_whole_slide_source(self, reason="handoff"):
+        """The handoff moved: Step3's viewer rebinds too (block 2c-2); a
+        failure falls back like a failed open, and a slide refused before
+        gets another try."""
+        try:
+            self._step3_mount_refused_for = None
+            mount = self.__dict__.get("_step3_mount")
+        except RuntimeError:
+            return False
+        if mount is None or mount.host.stack is None:
+            return False
+        try:
+            return bool(mount.sync_source(reason))
+        except Exception as exc:                            # noqa: BLE001
+            path = str(getattr(getattr(self, "loader", None), "filepath", "") or "")
+            return self._step3_viewer_failed(mount, path, exc)
 
     def _step1_whole_slide_active(self):
         """Is the whole-slide viewer the picture Step1 is showing?
@@ -2044,13 +2181,29 @@ class MainWindow(QMainWindow):
         return True
 
     def _on_step1_tissue_navigate(self, y, x):
-        """Teleport Step1's camera, keeping the viewport size."""
-        mount = getattr(self, "_step1_mount", None)
-        if mount is None or self._current_step != 1 or mount.host.stack is None:
+        """Teleport the camera of the step on screen -- Step1's viewer or
+        Step3's (block 2c-2) -- keeping the viewport size."""
+        if self._current_step == 1:
+            mount = getattr(self, "_step1_mount", None)
+        elif self._current_step == 3:
+            mount = self.__dict__.get("_step3_mount")
+        else:
+            return False
+        if mount is None or mount.host.stack is None:
             return False
         rect = mount.host.stack.view.view_box.viewRect()
         size = max(1, int(min(rect.width(), rect.height())))
         return mount.jump_to_point(int(y), int(x), size)
+
+    def _show_step3_tissue_navigator(self):
+        """Open the shared Tissue Preview from Step3 -- READ-ONLY (block 2c-2).
+
+        Step3 may not edit the ROI or the patches until the sandbox exists
+        (plan step 5): every navigator edit today is Step0's and is written to
+        its files. `show_navigator` sets the policy it is given, so this entry
+        must give Step3's, never Step1's."""
+        self._display.show_navigator(_CTX_STEP3, roi_policy="read_only",
+                                     patch_editable=False)
 
     def _show_tissue_navigator(self):
         """Open the shared Tissue Preview from Step1.
@@ -2527,6 +2680,8 @@ class MainWindow(QMainWindow):
         self.prev_status.setText(status_text)
 
         # 7. Downstream pages, through their public entry points only.
+        # Step3's viewer draws the old dataset: closed, reopened on entry.
+        self._close_step3_viewer()
         if hasattr(self, "_step2"):
             self._step2.set_rois([])
             if hasattr(self._step2, "set_roi_context"):
@@ -4838,7 +4993,7 @@ class MainWindow(QMainWindow):
         # ...and the step being entered goes to where the user was, on the
         # viewer that is now on screen. Only this one: the other viewer is
         # hidden, and nothing here touches it.
-        if active in (0, 1):
+        if active in (0, 1, 3):
             with perf_trace.span("step1.entry.camera", step=active):
                 self._apply_shared_camera_to(active)
         # THE ONE public channel dock follows the step by switching its
@@ -6467,6 +6622,14 @@ class MainWindow(QMainWindow):
             except Exception as exc:                        # noqa: BLE001
                 print(f"[Step1-Viewer] close failed: {exc}")
             self._step1_mount = None
+        # ...and Step3's (block 2c-2), for the same reasons.
+        mount3 = self.__dict__.get("_step3_mount")
+        if mount3 is not None:
+            try:
+                mount3.close()
+            except Exception as exc:                        # noqa: BLE001
+                print(f"[Step3-Viewer] close failed: {exc}")
+            self._step3_mount = None
         # The sink closes LAST, and finally: every loader has reported its own
         # `job.end` by now, so nothing is left to write and nothing can start
         # a second writer on a file the first one closed. Bounded, because a
@@ -6566,6 +6729,11 @@ class MainWindow(QMainWindow):
             mount = getattr(self, "_step1_mount", None)
             if mount is not None:
                 mount.set_mode(mode)
+            # Step3's viewer takes the same mode (block 2c-2); a paused one
+            # records it and composes it when it is looked at again.
+            mount3 = self.__dict__.get("_step3_mount")
+            if mount3 is not None:
+                mount3.set_mode(mode)
             self._schedule_step1_session_save()
 
     def _drop_overlay_cache_for(self, patch_idx):

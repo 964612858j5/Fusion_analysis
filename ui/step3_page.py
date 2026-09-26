@@ -151,5 +151,11 @@ class Step3Page(QWidget):
         return self._viewer_layout
 
     def viewer_notice(self):
-        """The notice in the viewer slot (the viewer's legacy widget later)."""
+        """The notice in the viewer slot -- the viewer's fallback widget
+        (block 2c-2): hidden while the viewer draws, shown when it cannot."""
         return self._viewer_notice
+
+    def set_viewer_notice(self, text=None):
+        """Say why the viewer is not drawing; None puts the default back."""
+        if self._viewer_notice is not None:
+            self._viewer_notice.setText(VIEWER_PENDING_TEXT if text is None else str(text))

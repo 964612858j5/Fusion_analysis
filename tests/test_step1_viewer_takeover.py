@@ -216,8 +216,8 @@ def _window(app, monkeypatch, tmp_path):
     w._step1_mount_host_factory = _Host
     original = mount_module.Step1WholeSlideMount.__init__
 
-    def _init(self, window, host=None, parent=None):
-        original(self, window, host=_Host(), parent=parent)
+    def _init(self, window, host=None, parent=None, **kwargs):
+        original(self, window, host=_Host(), parent=parent, **kwargs)
 
     monkeypatch.setattr(mount_module.Step1WholeSlideMount, "__init__", _init)
     return SimpleNamespace(w=w, jumps=jumps, opens=opens, stack=stack)

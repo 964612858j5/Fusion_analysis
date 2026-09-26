@@ -270,7 +270,7 @@ def test_each_step_shows_the_fields_it_works_with(app):
         Step0   checkbox | correction state | swatch | name | method
         Step1   checkbox |                  | swatch | name | weight | f
         Step2   checkbox |                  | swatch | name
-        Step3   checkbox |                  | swatch | name
+        Step3   = Step1 (block 2b, user ruling 2026-09-26)
 
     `isHidden` and the focus policy, not `isVisible`: the window is not shown
     in these tests, so everything answers False to `isVisible` and a control
@@ -288,7 +288,7 @@ def test_each_step_shows_the_fields_it_works_with(app):
             0: (row.method_cb,),
             1: (row.slider, row.spin),
             2: (),
-            3: (),
+            3: (row.slider, row.spin),          # block 2b: Step1's row
         }
         for step in STEP_WALK:
             w._set_step_active(step)
@@ -335,7 +335,8 @@ def test_a_hidden_control_cannot_command_its_owner(app):
                   page._channel_preview_method("CD3"),
                   fusion.draft_revision())
 
-        for step in (0, 2, 3):
+        # Step3's row is Step1's row since block 2b: its weight IS a command.
+        for step in (0, 2):
             w._set_step_active(step)
             # straight at the row's own signals, which is the most a stale
             # connection could ever do
@@ -505,7 +506,8 @@ def test_the_tick_box_is_display_alone_outside_step1(app):
         row = w._channel_dock.row("CD3")
         fusion.set_fusion_enabled("CD3", True, origin="test")
 
-        for step in (0, 2, 3):
+        # Step3's tick is Step1's fusion command since block 2b.
+        for step in (0, 2):
             w._set_step_active(step)
             # from a known state, so the change below really is one: the
             # widget and the owner both start at False.
@@ -1161,7 +1163,7 @@ def test_the_mixed_marker_is_shown_only_where_the_weight_is(app):
 
         for step in STEP_WALK:
             w._set_step_active(step)
-            if step == 1:
+            if step in (1, 3):                  # block 2b: Step3 shows the weight
                 assert row.name_label.text() == "CD3 *", step
                 assert "several groups" in row.toolTip(), step
             else:

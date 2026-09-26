@@ -388,7 +388,9 @@ def test_outside_step1_the_same_gestures_are_display_only(app):
     w = _window(app)
     try:
         state, model = w._display.state, w._display.fusion
-        for step in (0, 2, 3):
+        # Step3's row is Step1's row since block 2b (user ruling 2026-09-26):
+        # there the tick IS the fusion command (tests/test_step3_shares_step1.py).
+        for step in (0, 2):
             w._set_step_active(step)
             state.set_display_visible("CD20", False, origin="test")
             rev = model.draft_revision()

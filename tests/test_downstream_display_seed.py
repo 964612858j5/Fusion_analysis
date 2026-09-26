@@ -1,9 +1,10 @@
-"""Step2 and Step3 open on what Step1 COMMITTED, then keep their own ticks.
+"""Step2 opens on what Step1 COMMITTED, then keeps its own ticks.
 
-User ruling, 2026-09-16. All four steps keep their own display answers, and
-the two downstream ones are seeded rather than left empty: opening Step2 or
-Step3 for the first time -- and the first time after Step1 commits again --
-ticks exactly the channels the committed snapshot enabled.
+User ruling, 2026-09-16: Step2 keeps its own display answers and is seeded
+rather than left empty -- opening it for the first time, and the first time
+after Step1 commits again, ticks exactly the channels the committed snapshot
+enabled. Block 2b (user ruling, 2026-09-26): Step3 is no longer seeded -- it
+IS Step1's scope, so its ticks are Step1's ticks, draft included.
 
 What that deliberately excludes: Step0's ticks (a viewing decision), and
 Step1's UNCOMMITTED draft (not yet what any job would run on). What it
@@ -131,8 +132,9 @@ def test_an_uncommitted_draft_does_not_reach_step2_or_step3(app, tmp_path):
     w = _window(app, tmp_path)
     try:
         _enable(w, "CD3", True)
-        for step in (2, 3):
-            assert "CD3" not in _ticks(w, step), step
+        assert "CD3" not in _ticks(w, 2)
+        # Block 2b: Step3 is Step1's scope -- the draft's tick is its tick.
+        assert _ticks(w, 3) == _ticks(w, 1) and "CD3" in _ticks(w, 3)
     finally:
         _close(w)
 
@@ -148,8 +150,8 @@ def test_step2_and_step3_open_on_the_committed_channels(app, tmp_path):
         expected = w._committed_enabled_channels()
         assert {"CD3", "CD8"} <= expected
 
-        for step in (2, 3):
-            assert _ticks(w, step) == expected, step
+        assert _ticks(w, 2) == expected
+        assert _ticks(w, 3) == _ticks(w, 1)          # block 2b: Step1's scope
     finally:
         _close(w)
 
@@ -226,22 +228,23 @@ def test_a_step2_tick_writes_back_to_nobody(app, tmp_path):
         _close(w)
 
 
-def test_a_step3_tick_writes_back_to_nobody(app, tmp_path):
+def test_a_step3_tick_is_step1_s_tick_and_leaves_step2_alone(app, tmp_path):
+    """Block 2b: Step3 and Step1 share one scope; Step2 keeps its own."""
     w = _window(app, tmp_path)
     try:
         _enable(w, "CD3", True)
         _commit(w)
         _ticks(w, 2)
-        _ticks(w, 3)
-        step1_before = _ticks(w, 1)
+        committed = w._display.fusion.committed_snapshot()
 
         _in(w, 3)
         w._display.state.set_display_visible("CD8", True, origin="step3-test")
         QtWidgets.QApplication.processEvents()
 
-        assert _ticks(w, 1) == step1_before
-        assert "CD8" not in _ticks(w, 2)
+        assert "CD8" in _ticks(w, 1)
         assert "CD8" in _ticks(w, 3)
+        assert "CD8" not in _ticks(w, 2)
+        assert w._display.fusion.committed_snapshot() == committed
     finally:
         _close(w)
 
@@ -267,7 +270,7 @@ def test_a_new_commit_re_seeds_the_downstream_steps_on_next_entry(app,
         assert "CD8" in expected
 
         assert _ticks(w, 2) == expected, "Step2 did not follow the new commit"
-        assert _ticks(w, 3) == expected
+        assert _ticks(w, 3) == _ticks(w, 1)          # block 2b: Step1's scope
     finally:
         _close(w)
 

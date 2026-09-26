@@ -542,14 +542,15 @@ def test_every_step_transition_moves_the_context_and_the_generation(app):
     try:
         co = w._display.coordinator
         seen = []
+        # Block 2b: Step3 draws Step1's live context.
         for step, expected in ((0, bd.STEP0), (1, bd.STEP1), (2, bd.STEP2),
-                               (3, bd.STEP3), (0, bd.STEP0)):
+                               (3, bd.STEP1), (0, bd.STEP0)):
             before = co.generation()
             _goto(w, step)
             assert co.active_context_id() == expected, step
             assert co.generation() > before, step
             seen.append(expected)
-        assert seen == [bd.STEP0, bd.STEP1, bd.STEP2, bd.STEP3, bd.STEP0]
+        assert seen == [bd.STEP0, bd.STEP1, bd.STEP2, bd.STEP1, bd.STEP0]
     finally:
         w.close()
 
@@ -631,7 +632,7 @@ def test_a_mapping_drag_in_step2_and_step3_publishes_intermediate_frames(app):
             assert len(frames) >= 4, (step, len(frames))
             assert len({f.tobytes() for f in frames}) >= 3, step
             assert w._display.coordinator.active_context_id() == (
-                bd.STEP2 if step == 2 else bd.STEP3)
+                bd.STEP2 if step == 2 else bd.STEP1)      # block 2b
     finally:
         w.close()
 
@@ -706,9 +707,8 @@ def test_a_late_frame_from_each_step_is_refused_downstream(app):
 def test_a_stale_frame_is_refused_between_two_steps_of_the_SAME_mode(app):
     """The mode check is not enough, and this is the case that proves it.
 
-    Step2 and Step3 draw the same inherited spec in the same mode, so a Step2
-    frame arriving after the user reached Step3 matches on mode AND on
-    dataset. What refuses it is the OWNER and the GENERATION -- the two facts
+    A Step2 frame arriving after the user reached Step3 (which draws Step1's
+    live context since block 2b) matches on mode AND on dataset. What refuses it is the OWNER and the GENERATION -- the two facts
     a step transition moves atomically. Without them a step that has been
     left keeps drawing.
     """
@@ -737,7 +737,7 @@ def test_a_stale_frame_is_refused_between_two_steps_of_the_SAME_mode(app):
 
         assert co.frame_stats()["dropped"] > dropped_before, "it was accepted"
         assert co.last_published() == published_before
-        assert co.active_context_id() == bd.STEP3
+        assert co.active_context_id() == bd.STEP1          # block 2b
     finally:
         w.close()
 

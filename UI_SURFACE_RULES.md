@@ -193,33 +193,37 @@ row, and the duplicate Tissue Preview button in the step bar.
   a time. The nucleus is a reference layer with a switch of its own and is
   untouched by either gesture. Step1 is not affected: its tick is the fusion
   command and it shows as many channels as the user ticks.
-* **What a step keeps to itself** (user ruling, 2026-09-16) -- the display
-  tick and the current channel are PER STEP, in ALL FOUR: ticking or selecting
-  in one leaves every other step's own answers untouched, and each step gets
-  its own back on return. Step2 and Step3 do not start empty: the first time
-  each is opened, and the first time after Step1 commits again, its ticks are
-  SEEDED from Step1's committed snapshot -- the channels that snapshot
+* **What a step keeps to itself** (user ruling, 2026-09-16; Step1 <-> Step3
+  revised by block 2b, user ruling 2026-09-26) -- the display tick and the
+  current channel are PER STEP for Step0 and Step2: ticking or selecting in
+  one leaves every other step's own answers untouched, and each gets its own
+  back on return. **Step1 and Step3 are ONE scope**: they share their ticks,
+  their current channel, the weights and the fusion draft, so a fusion built
+  in Step3 against the mask is the one Step1 runs again; a Step3 edit is saved
+  in the session exactly like a Step1 edit, and the committed snapshot moves
+  only when the user saves in Step1. Step2 does not start empty: the first
+  time it is opened, and the first time after Step1 commits again, its ticks
+  are SEEDED from Step1's committed snapshot -- the channels that snapshot
   enabled, an explicit `0.0` included, and never a channel disabled with a
-  weight still in its history. Never from Step0, and never from an uncommitted
-  draft. Afterwards those ticks are that step's own and write back to nobody -- and that separation reaches the PAGES, not only the
-  store: Step0's consumers act on Step0's scope, Step1's on Step1's, Step3 on
-  the shared pair alone, and a page replays its own answers once when it comes
-  back on screen. A session names the scope it restores, so a Step1 session
-  reloaded from Step0 leaves Step0 untouched. Colour, Min/Max/Gamma, the
-  channel order and names stay shared, and so do the dock instance, its rows
-  (which are therefore the same widgets in both steps), its search text and
-  its scroll position. Fusion participation and weights belong to Step1's
-  scientific draft alone. Entering a step is a redraw, never a command: no
-  tick, no weight, no fusion revision and no session save comes out of it.
-  ALL FOUR steps are separate (second ruling, 2026-09-16): Step2 and Step3 no
-  longer read a shared pair -- they are seeded from Step1's committed
-  snapshot the first time each is opened and after every later commit, and
-  their ticks are their own from then on.
+  weight still in its history. Never from Step0, and never from an
+  uncommitted draft. Afterwards Step2's ticks are its own and write back to
+  nobody -- and that separation reaches the PAGES, not only the store:
+  Step0's consumers act on Step0's scope, Step1's (and Step3's) on Step1's,
+  and a page replays its own answers once when its scope comes back on
+  screen. A session names the scope it restores, so a Step1 session reloaded
+  from Step0 leaves Step0 untouched. Colour, Min/Max/Gamma, the channel order
+  and names stay shared, and so do the dock instance, its rows (which are
+  therefore the same widgets in every step), its search text and its scroll
+  position. Fusion participation and weights belong to Step1's scientific
+  draft; Step3 edits that same draft. Entering a step is a redraw, never a
+  command: no tick, no weight, no fusion revision and no session save comes
+  out of it. The Tissue Preview in Step3 composes Step1's live context.
 * **The channel column's width** -- ONE share of the page, with two handles:
   dragging Step0's or Step1's moves both, and a window resize keeps them
   together because the share is normalised. Step0 is written through its own
   left-column mechanism so its hidden peer splitter stays at the same width.
-* **Step2 / Step3 rows** -- tick, swatch, name. Nothing else.
+* **Step2 rows** -- tick, swatch, name. Nothing else. **Step3 rows** are
+  Step1's rows (block 2b): tick (the fusion command), swatch, name, weight.
 * **Step2's page** (block L2, user ruling 2026-09-25) -- TWO columns: the
   parameter panel on the LEFT, as wide as Step0's and Step1's channel column
   (the same one share: dragging any of the three handles moves all three),
@@ -289,7 +293,8 @@ row, and the duplicate Tissue Preview button in the step bar.
   image`, and no `downsampled ×N preview` banner over the picture.
 * **Step0's Load row** -- the project's own status. A patch geometry save that
   worked announces nothing there.
-* **Weights** -- edited in Step1's rows. There is no separate weight window.
+* **Weights** -- edited in Step1's rows, and in Step3's, which are the same
+  rows (block 2b). There is no separate weight window.
 * **Intensity** -- the shared window, opened from Step0's and Step1's own
   existing entries. In BOTH steps that entry lives inside the `Channels`
   frame: it edits the selected channel, so it belongs with the channel list.

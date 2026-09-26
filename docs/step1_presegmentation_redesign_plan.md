@@ -9,6 +9,7 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.37：块 2b 已实施并通过真机验收（真机验收步骤修正为只看 Step1 / Step3）。
 - v3.36：块 2b 按独立审核修订为 v2（明确接受旧 Step3 页面不跟随勾选的过渡限制；模式按钮切换的验收移到 2c；测试白名单封闭）。
 - v3.35：块 2b 申请（Step3 与 Step1 共用显示范围、fusion 草稿与 Navigator 上下文）。
 - v3.34：块 2a 已实施并通过真机验收。
@@ -985,7 +986,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 回归：27 个模块（Step1 viewer 挂载 / 绑定 / host / 退出门、GPU takeover / request gate / overview skip / sources / ROI 裁切、共享相机、Navigator、patch 选择、Tissue Preview 契约、Step0 对比视图等），与 `git archive HEAD`（`d1f3f36`）逐条对比**无新增失败**。两边相同：`test_tissue_navigator_viewport_sync.py::test_mapping_slide_local_to_full`；`test_step1_montage_view.py` 第 27 条后 Qt 中止；5 个 GPU 模块不收集测试；`test_step1_gpu_takeover.py` 34 条因无真实 OpenGL 跳过。只在 HEAD 一侧出现 `test_step0_compare_tiles.py::test_a_pan_during_a_pending_switch_replans_for_the_new_viewport`（负载下偶发）。
   - **真机验收通过（用户 2026-09-26）**：Step1 画面、Overlay / Fusion、Intensity、拖动缩放、patch 与 Navigator 空降、步骤往返与改动前一样（含 GPU 路径）。
 
-### 块 2b — Step3 与 Step1 共用显示范围、fusion 草稿与 Navigator 上下文（申请 v2，按独立审核修订，**用户 2026-09-26 批准**，过渡限制按 (b) 接受）
+### 块 2b — Step3 与 Step1 共用显示范围、fusion 草稿与 Navigator 上下文（申请 v2，按独立审核修订，用户 2026-09-26 批准，过渡限制按 (b) 接受；已实施，**真机验收通过**）
 - **必要性**：用户裁定 Step1 ↔ Step3 的勾选、权重、fusion 草稿、Overlay / Fusion 模式全局联动，Tissue Navigator 与 Step3 画面实时联动。现在 Step3 有自己的显示范围 step3（首次进入与 Step1 每次新确认后从已确认快照播种，`main_window.py:4448-4517`），通道面板在 Step3 只有勾选 / 颜色 / 名称且勾选不影响 fusion（`global_dock.py:226-264`、`:957-1025`），Navigator 在 Step3 画 Step1 发布的共享规格（`_SharedSpecTissueContext`，`main_window.py:354`），而该规格只在权重变化时重新发布（`_refresh_published_render_spec`，`:2143`；勾选与模式不更新）。
 - **做法**（全部在主窗口的步骤切换里，不改通道面板、fusion 模型、显示状态与合成代码）：
   1. `_DISPLAY_SCOPES[3]` 由 `"step3"` 改为 `"step1"`；`_DOWNSTREAM_STEPS` 由 `(2, 3)` 改为 `(2,)`（只有 Step2 从已确认快照播种）。
@@ -1006,7 +1007,19 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 从 Step0 进入 Step3、再回 Step1：Step1 页面反映 Step0 期间的共享变化（颜色 / Intensity），无残留。
   - 进入 Step3 本身不产生命令：不改勾选、不改权重、不产生 fusion 修订、不触发会话保存。
   - 回归：相关模块与 HEAD 逐条对比，除按裁定改写的测试外无新增失败。
-  - 真机（用户）：Step3 通道面板里调勾选 / 权重，回到 Step1 是同样的设置；Navigator 在 Step3 随勾选 / 权重实时变化；旧 Step3 页面的画面不作要求（过渡限制）。
+  - 真机（用户）：只看 Step1 与 Step3——Step3 通道面板与 Step1 相同（有权重控件）；Step3 里勾选一个 Step1 未用的通道并调权重，Navigator 实时变化；回到 Step1 是同样的设置；旧 Step3 页面的画面不作要求（过渡限制）。Step2 页面按块 L2 不显示通道列表，2b 不改 Step2 的任何行为，真机不验 Step2。
+- **执行记录**（2026-09-26，未提交）：
+  - `ui/main_window.py`：`_STEP_CONTEXTS[3] = _CTX_STEP1`；`_DISPLAY_SCOPES[3] = "step1"`（上方注释同步改正）；`_DOWNSTREAM_STEPS = (2,)`；`_set_step_active` 中重新同步条件改为「进入的 Step 的范围是 step1」；`dock.set_step(1 if active == 3 else active)`。
+  - `UI_SURFACE_RULES.md`：「What a step keeps to itself」整条按裁定改写（Step0 / Step2 各自独立；Step1 ↔ Step3 一个范围，共用勾选、当前通道、权重与草稿；Step3 的编辑与 Step1 一样写进会话，已确认快照只在 Step1 保存时变；只有 Step2 播种；进入 Step 只是重画；Step3 的 Tissue Preview 画 Step1 的实时上下文）；「Step2 / Step3 rows」拆为 Step2 三项、Step3 同 Step1；「Weights」加上 Step3 的行。`tests/test_ui_surface_contract.py` 通过。
+  - 按裁定改写的现有测试（仅与新裁定直接冲突的断言）：
+    - `test_downstream_display_seed.py`：模块说明；`test_an_uncommitted_draft_does_not_reach_step2_or_step3`（Step3 改为等于 Step1 的勾选）；`test_step2_and_step3_open_on_the_committed_channels`（Step3 改为等于 Step1）；`test_a_step3_tick_writes_back_to_nobody` 改为 `test_a_step3_tick_is_step1_s_tick_and_leaves_step2_alone`；`test_a_new_commit_re_seeds_the_downstream_steps_on_next_entry` 的 Step3 断言改为等于 Step1。
+    - `test_global_channel_dock.py`：字段表 Step3 = Step1（显示权重控件）；`test_a_hidden_control_cannot_command_its_owner` 与 `test_the_tick_box_is_display_alone_outside_step1` 的步骤列表去掉 3；`test_the_mixed_marker_is_shown_only_where_the_weight_is` 的 Step3 显示 `CD3 *`。
+    - `test_block01_tissue_preview_contract.py`：Step3 的激活上下文为 STEP1（`test_every_step_transition_moves_the_context_and_the_generation`、`test_a_mapping_drag_in_step2_and_step3_publishes_intermediate_frames`、`test_a_stale_frame_is_refused_between_two_steps_of_the_SAME_mode`，后者说明同步改写；Step2 的旧帧在 Step3 仍因归属不符被拒）。
+    - `test_step0_step1_display_isolation.py`、`test_channel_row_template.py`：无需修改。
+    - **白名单外（用户 2026-09-26 授权）**：`test_step1_checkbox_is_the_fusion_command.py::test_outside_step1_the_same_gestures_are_display_only` 的步骤列表由 `(0, 2, 3)` 改为 `(0, 2)`（Step3 的勾选按裁定即 fusion 命令，由新测试覆盖）。
+  - 新测试 `tests/test_step3_shares_step1.py` 8 条：完整公开操作（Step3 里勾选 CD8 并把权重调到 0.6 → Step1 行与状态相同 → 会话被要求保存；已确认快照与哈希不变、Step2 勾选不变）；Step3 行 = Step1 行、Step2 行无权重；从 Step0 / Step1 / Step2 进入 Step3 不改草稿、不改勾选、不触发保存；Step0 → Step3 重新同步一次、Step3 → Step1 不重复、Step2 → Step3 再同步；Tissue Preview 在 Step3 为 STEP1 上下文、勾选使绿色通道出现、调低权重使其变暗；进入 Step3 沿用 Step1 的 Fusion 模式。反向注入主窗口 4 处改动（上下文、范围、重新同步条件、通道面板步骤），分别使 2 / 5 / 1 / 3 条变红。
+  - 回归：46 个模块（步骤切换、显示范围、通道面板、Tissue Preview、会话、Step1 viewer 等），与 `git archive HEAD`（`e13be53`）逐条对比，除上述授权修改的一条外**无新增失败**；两边相同：`test_global_channel_dock.py::test_the_step0_panel_looks_like_the_baseline_panel`、`test_step1_channel_panel.py::test_the_weight_row_and_the_buttons_kept_their_look`（本机字体差异）。
+  - **真机验收通过（用户 2026-09-26）**：按上面只看 Step1 / Step3 的 6 步。
 
 ## 六、未决与 advisory
 

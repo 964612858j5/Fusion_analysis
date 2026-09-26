@@ -4402,8 +4402,12 @@ class MainWindow(QMainWindow):
         self._go_to_step0()
         return True
 
+    #: Step3 draws Step1's live context (block 2b, user ruling 2026-09-26):
+    #: its ticks, weights and mode are Step1's, so the Tissue Preview there
+    #: composes exactly what Step1 would -- and follows a tick or a weight
+    #: moved in Step3 at once. Step2 keeps the shared published spec.
     _STEP_CONTEXTS = {0: _CTX_STEP0, 1: _CTX_STEP1, 2: _CTX_STEP2,
-                      3: _CTX_STEP3}
+                      3: _CTX_STEP1}
 
     def _channels_host_for(self, step):
         """The layout of the step's own `Channels` panel, or None."""
@@ -4441,15 +4445,16 @@ class MainWindow(QMainWindow):
         dock.mount_into(host)
         dock.setVisible(True)
 
-    #: Which steps keep their own ticks and current channel (user ruling,
-    #: 2026-09-16). ALL FOUR are separate: a tick is a question about the step
-    #: you are in. Step2 and Step3 do not start empty, though -- see
-    #: `_seed_downstream_scope`.
-    _DISPLAY_SCOPES = {0: "step0", 1: "step1", 2: "step2", 3: "step3"}
+    #: Which steps keep their own ticks and current channel. Step0 and Step2
+    #: keep their own (user ruling, 2026-09-16); Step3 is Step1's scope (block
+    #: 2b, user ruling 2026-09-26): Step1 and Step3 share their ticks, current
+    #: channel, weights and fusion draft. Step2 does not start empty, though
+    #: -- see `_seed_downstream_scope`.
+    _DISPLAY_SCOPES = {0: "step0", 1: "step1", 2: "step2", 3: "step1"}
 
     #: The steps seeded from Step1's COMMITTED snapshot the first time they
     #: are opened, and again after Step1 commits something else.
-    _DOWNSTREAM_STEPS = (2, 3)
+    _DOWNSTREAM_STEPS = (2,)
 
     def _committed_enabled_channels(self):
         """The channels Step1 FROZE, from the committed snapshot alone.
@@ -4677,7 +4682,10 @@ class MainWindow(QMainWindow):
                 resync = getattr(self._step0, "resync_display_from_state", None)
                 if resync is not None:
                     resync()
-            elif active == 1:
+            elif self._DISPLAY_SCOPES.get(active) == self._DISPLAY_SCOPES.get(1):
+                # Step1 OR Step3 (block 2b): whichever of them brings Step1's
+                # scope back, Step1's consumers catch up with what moved
+                # while another scope was on screen.
                 self._resync_step1_display_from_state()
         # THE WHOLE-SLIDE VIEWER follows the step whether or not the scope
         # moved: a return to Step1 with the same scope still has to compose
@@ -4702,7 +4710,9 @@ class MainWindow(QMainWindow):
         dock = getattr(self, "_channel_dock", None)
         if dock is not None:
             with perf_trace.span("step1.entry.dock_set_step", step=active):
-                dock.set_step(active)
+                # Step3's rows are Step1's rows (block 2b): the tick is the
+                # fusion command and the weight is editable there too.
+                dock.set_step(1 if active == 3 else active)
             with perf_trace.span("step1.entry.dock_mount", step=active):
                 self._mount_channels_dock(active)
         # The ONE place the shared navigator's edit policy is decided.  Every

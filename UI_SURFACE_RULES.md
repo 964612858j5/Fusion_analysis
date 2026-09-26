@@ -169,7 +169,9 @@ row, and the duplicate Tissue Preview button in the step bar.
   (the same grey border; green while it is in use). Outlines start
   off, in a fixed palette; they are left out while cells are smaller than
   about 3 screen pixels; a failed patch is tagged `failed`, a patch with no
-  cell `0 cells`. Many rows scroll rather than squeeze.
+  cell `0 cells`. Many rows scroll rather than squeeze. The rows start at
+  the top of the `Results` frame and go down; spare height is below them
+  (user ruling 2026-09-26).
   `Save plan` and Step1's `Save Fusion settings` say when they worked
   (user ruling, 2026-09-24), not only when they fail.
 * **Patch names** (user ruling, 2026-09-24; plan block P) -- a patch keeps

@@ -198,6 +198,12 @@ class ResultsPanel(QtWidgets.QWidget):
         self.scroll.setWidget(self._rows_host)
         self.scroll.setMinimumWidth(0)
         lay.addWidget(self.scroll, 1)
+        # The boxes start at the top and go down (user ruling 2026-09-26):
+        # the scroll is capped at its boxes' height, so the height left over
+        # goes BELOW them -- a stretch-0 spacer gets only what the scroll
+        # cannot take.
+        lay.addItem(QtWidgets.QSpacerItem(0, 0, QtWidgets.QSizePolicy.Minimum,
+                                          QtWidgets.QSizePolicy.Expanding))
         self._by_combo = {}
         self._fit_scroll()
 

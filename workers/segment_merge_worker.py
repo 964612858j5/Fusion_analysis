@@ -611,10 +611,7 @@ class SegmentMergeWorker(QThread):
         for kind, src in (("cell", mask_zarr_path), ("nucleus", nuclei_zarr_path)):
             if not src or not os.path.exists(src):
                 continue
-            stem = os.path.basename(src)[:-len(".zarr")]
-            dest = os.path.join(os.path.dirname(src),
-                                stem.replace("global_nuclei_mask", "label_pyramid_nuclei")
-                                    .replace("global_mask", "label_pyramid") + ".zarr")
+            dest = label_pyramid.pyramid_path_for(src)
             try:
                 with self.step2_profiler.time_stage("write_label_pyramid", method=self.method,
                                                     output_path=self._abs(dest)):

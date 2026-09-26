@@ -1,7 +1,7 @@
 # Step1 预分割（Method & Parameters / Patch Results）重设计 — 项目计划
 
 日期：2026-09-23（第三版，块 A0 产出）　分支 `v15-interactive-channel-workspace`，起点 `c9f80df`，A0 核查基于 `e655409`。
-状态：**已执行：块 P、A1、A2、B、C、D、V0。本文档记录的验收：B「用户验收总体通过」、C 第 4 步「用户人工测试通过」、D「块 D 验收通过（2026-09-25）」；P、A1、A2、V0 的执行记录仍写「待用户验收」，文档中没有后续验收记录。V2（代码中称「Step2 hook-up」）第 1、2 步已提交（`54e825d`、`1adfe4e`），第 3 步已提交（`dcaca2c`），真机上 Cellpose 路径跑通，Mesmer 未验收；块 L 已提交（`1d14801`、`2294bc7`）并通过真机验收；块 F 已提交（`5bc65bc`）并通过真机验收；块 E 已提交（`7ee98fc`）并通过真机验收（Mesmer 除外）；U1、Results 顺序、块 S 已提交；块 K 已实施并通过真机验收；块 M 已实施并通过真机验收；块 N 已实施并通过真机验收；S2 冻结；后续计划见第六节。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动须另行批准。
+状态：**已执行：块 P、A1、A2、B、C、D、V0。本文档记录的验收：B「用户验收总体通过」、C 第 4 步「用户人工测试通过」、D「块 D 验收通过（2026-09-25）」；P、A1、A2、V0 的执行记录仍写「待用户验收」，文档中没有后续验收记录。V2（代码中称「Step2 hook-up」）第 1、2 步已提交（`54e825d`、`1adfe4e`），第 3 步已提交（`dcaca2c`），真机上 Cellpose 路径跑通，Mesmer 未验收；块 L 已提交（`1d14801`、`2294bc7`）并通过真机验收；块 F 已提交（`5bc65bc`）并通过真机验收；块 E 已提交（`7ee98fc`）并通过真机验收（Mesmer 除外）；U1、Results 顺序、块 S 已提交；块 K 已实施并通过真机验收；块 M 已实施并通过真机验收；块 N 已实施并通过真机验收；块 ④a 已实施（数据层自动验收通过）；S2 冻结；后续计划见第六节。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动须另行批准。
 
 修订记录：
 - v1：初稿。
@@ -9,6 +9,7 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.48：块 ④a 已实施（数据层自动验收通过，真机随 ④c），写入执行记录与实施中确定的 6 项细节。
 - v3.47：块 ④a 按独立审核修订为 v2（细胞 / 核按方法分类；读取前完整校验；坐标来源表与证据不足不显示；只有第 0 级时粗层返回「不可用」；扫描去重与排除未完成运行；取消不走内存退路；屏幕编号图的轮廓规则）。
 - v3.46：第 ④ 步调查结论与用户裁定（拆三块、后台线程、新增项批准、暂不做 CPU 版、控件位置、细胞 / 核 mask 各一个下拉面板）；块 ④a 申请。
 - v3.45：块 S5 已实施并通过真机验收。
@@ -1161,7 +1162,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   5. 控件在 Step3 右栏顶部一行：运行下拉框、mask 控件、提示文字，右端是 Overlay / Fusion。
   6. **细胞 mask 与核 mask 都有控件**，都放在 viewer 顶部；每种 mask 一个按钮，点开是下拉展开面板，设置显示 / 隐藏、颜色、透明度、线宽、轮廓或填充。运行没有核 mask 时核 mask 的控件禁用。
 
-### 块 ④a — Step3 mask 的数据层（申请 v2，按独立审核修订，**用户 2026-09-26 批准**，未启动实施）
+### 块 ④a — Step3 mask 的数据层（申请 v2，按独立审核修订，**用户 2026-09-26 批准**；已实施，**数据层自动验收通过**，真机随 ④c）
 - **必要性**：④b（GPU）与 ④c（界面）都依赖「选哪一次运行、它的哪种 mask 在哪、按 viewer 的分块读出标签」。主要风险是把正确的标签放到错误的 mask 控件或错误的坐标上，所以先把这些数据契约写死并单独测试。
 - **细胞 / 核的分类按方法，不按文件名**：Step2 的主输出一律叫 `global_mask*.zarr`，块 N 生成金字塔时也一律记作 `cell`（`segment_merge_worker.py:611`），但纯核方法的主输出其实是核标签。分类表（与 `seg_runner.engines.METHOD_OUTPUTS` 对照，但以 Step2 实际写出的文件为准）：
 
@@ -1209,6 +1210,21 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - `outline_reference` / `fill_colour`：按上面写定的邻域、边缘与线宽规则的小例子手算对照（含 width 0 与 4、图像边缘、相邻两个细胞）；编号 0 不画；同一编号颜色稳定。
   - 回归：Step2 与标签金字塔相关模块与 HEAD 逐条对比无新增失败。
   - ④a 只交付为**数据层自动验收通过**，不宣称实际叠加正确；真机验收随 ④c。
+- **执行记录**（2026-09-26，未提交）：
+  - `core/label_pyramid.py`：新增 `pyramid_path_for`（Step2 原命名规则原样搬入）；`build` 的逐级写入与属性拆成 `_write_levels` / `_attrs` 两个内部函数，`build` 的行为与写出的属性不变；新增 `build_in_memory`（同样的层级写进 zarr 内存存储，`level0.path` 记绝对路径，不写盘）。`read` 未改。
+  - `workers/segment_merge_worker.py`：`_write_label_pyramids` 的目标路径改用 `label_pyramid.pyramid_path_for(src)`，其余不变。
+  - `core/step3_masks.py`（新，无 Qt）：`list_runs`、`choose_run`、`resolve_masks`、`check_pyramid`（完整校验，磁盘与内存金字塔共用）、`ensure_pyramid`、`read_label_tile`、`outline_reference`、`fill_colour`，按申请实现。
+  - **实施中按事实确定的细节**（都在白名单文件内，未扩大行为范围，请用户知悉）：
+    1. ROI 模式的 mask 路径**先取 `rois[i].paths.mask_zarr`，再退到 `rois[i].zarr_path`**：实测第一个 ROI 的 `zarr_path` 是 Step2 的 `global_mask.zarr` 别名（符号链接；建链失败时是**复制件**），而块 N 的金字塔记录的是真实文件 `global_mask_<ROI>.zarr`。比较一律用真实路径（`realpath`）。
+    2. 核 mask（nuclear-guided、HQ 系）取主 mask 旁边的 `global_nuclei_mask*`：Step2 的 ROI 记录里没有核 zarr 的路径字段，只有核的 OME-TIFF 与金字塔路径；命名与 Step2 写出的一致。
+    3. `list_runs` 另外排除 meta 里 `roi_id` 是别的 ROI 的运行（属于「不属于当前工作区」）。
+    4. 「写不进去」的判定：zarr 2.18 的目录存储把 `PermissionError` 包成 `KeyError(key) from e` 抛出，所以沿异常的 cause 链找 `OSError`，找到才走内存退路；其他错误直接「只有第 0 级」并写明原因。
+    5. 「不删除已有的有效结果」落实为：**目标位置上 `label_pyramid.read` 接受的金字塔一律不覆盖**（例如为别的层级建的），返回「只有第 0 级」并写明「原有金字塔保留」；只有 `read` 不接受的（未完成、第 0 级已变）才重建。
+    6. `fill_colour`：lowbias32 整数散列（着色器里可逐字实现），R、G、B 各取散列的一个字节映射到 55–255（避免近黑），不透明；编号 0 全透明。
+  - 测试：新增 `tests/test_step3_masks.py`（47 条）：运行列表（索引 + 扫描去重、失败 / 无 meta / 外工作区 / 别的 ROI 排除、排序、active 与失效 active）、选择规则、9 种方法的分类与未知方法、nuclear-guided 缺核文件、完整金字塔通过与 6 种缺陷各自不同的原因、未完成金字塔、坐标来源（ROI 记录的 bbox、退到该 ROI 的 meta、bbox 不符、找不到 ROI、别名为复制件、块 N 之前的运行、全图模式与形状不符、只有 TIFF）、`read_label_tile` 在 3 种 bbox 下各级各分块逐像素等于独立参考且 world rect 与真实的 `Step1GpuBinding._world_rect` 相等、编号超过 2^24、无金字塔时粗层「不可用」、`ensure_pyramid` 的写盘 / 只读目录走内存（目录内容不变）/ 内存失败（模拟）/ 取消 / 不覆盖有效金字塔 / 重建未完成的、`pyramid_path_for` 与原公式逐字相同（5 种名字）、内存与磁盘构建逐级相同、模块不加载 Qt、轮廓与填充色手算例子（含宽 0 / 4、图像边缘、相邻两个细胞、只在对角相邻）。反向注入 11 处（纯核方法归为细胞、未知方法、粗层返回全零、用别名路径、world rect 取整、去掉 dtype 校验、取消后继续、覆盖有效金字塔、列出失败运行、改命名、轮廓邻域改为菱形）各使至少 1 条变红。
+  - 只读核对真实项目（`~/fusion_data/test1` 的一次 ROI 模式运行，不写入）：运行被列出并标为 active；细胞 mask 解析到 `global_mask_Full WSI.zarr`，块 N 的金字塔通过完整校验；核为「该方法不产生核 mask」；三级分块可读。
+  - 回归：11 个模块（`test_label_pyramid`、`test_step2_runner_path`、`test_step2_engine_unified`、`test_step2_legacy_stop`、`test_step2_ownership_move`、`test_step2_remap_integration`、`test_step1_step2_handoff_e2e`、`test_step1_to_step2_handoff`、`test_step2_tile`、`test_step2_profiler`、`test_seg_runner_engines`），每模块单独进程、顺序运行，与 `git archive HEAD`（`faee7f1`）逐条对比，**无新增失败**。两边相同：`test_seg_runner_engines.py` 的 2 条 Mesmer（本机无模型）。StarDist 偶发（已知问题）：`test_step2_engine_unified.py::test_a_manual_run_equals_the_runner[stardist_nuclei_dapi-roi]` 本侧失败一次、单独重跑通过；`test_seg_runner_engines.py::test_stardist_expansion_returns_the_nuclei_from_before_expanding` 本侧失败，HEAD 批量时通过、单独重跑同样失败（该模块不引用本块改动的任何文件）。
+  - 真机：本块无界面，真机验收随 ④c。
 
 ## 六、未决与 advisory
 

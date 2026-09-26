@@ -21,6 +21,10 @@ A pyramid is written under `<out>.partial` and renamed to `<out>` only after
 every level and the `complete` flag are written; a cancel or a failure
 removes the partial directory. `read` accepts only a complete pyramid whose
 level-0 mask is still the one it was built from.
+
+`pyramid_path_for` is the one naming rule (Step2 writes there, Step3 looks
+there). `build_in_memory` (block 4a) builds the same levels into a zarr
+memory store, for a run directory that cannot be written: nothing on disk.
 """
 
 import math
@@ -44,6 +48,17 @@ def raw_level_shapes(raw_ome_path):
     import tifffile
     with tifffile.TiffFile(raw_ome_path) as tf:
         return [tuple(int(v) for v in lvl.shape[-2:]) for lvl in tf.series[0].levels]
+
+
+def pyramid_path_for(mask_zarr):
+    """Where the pyramid of the mask at `mask_zarr` lives: beside it,
+    `global_mask*` -> `label_pyramid*`, `global_nuclei_mask*` ->
+    `label_pyramid_nuclei*`, e.g. `global_mask_ROI_1.zarr` ->
+    `label_pyramid_ROI_1.zarr`."""
+    stem = os.path.basename(mask_zarr)[:-len(".zarr")]
+    return os.path.join(os.path.dirname(mask_zarr),
+                        stem.replace("global_nuclei_mask", "label_pyramid_nuclei")
+                            .replace("global_mask", "label_pyramid") + ".zarr")
 
 
 def level_grid(raw_shapes, roi_bbox):
@@ -71,53 +86,73 @@ def _source_index(start, count, ds, roi_start, roi_len):
     return local, (local >= 0) & (local < int(roi_len))
 
 
+def _open_source(level0_zarr, roi_bbox):
+    import zarr
+    src = zarr.open(level0_zarr, mode="r")
+    y0, y1, x0, x1 = (int(v) for v in roi_bbox)
+    if tuple(src.shape) != (y1 - y0, x1 - x0):
+        raise ValueError(f"the mask is {tuple(src.shape)}, the ROI's bbox is "
+                         f"{(y1 - y0, x1 - x0)}")
+    return src
+
+
+def _write_levels(group, src, raw_shapes, roi_bbox, cancel_check):
+    """Every level >= 1 into `group`; returns the level records."""
+    from numcodecs import Blosc
+
+    y0, _y1, x0, _x1 = (int(v) for v in roi_bbox)
+    levels = level_grid(raw_shapes, roi_bbox)
+    comp = Blosc(cname="lz4", clevel=5, shuffle=Blosc.SHUFFLE)
+    for lv in levels:
+        h, w = lv["shape"]
+        arr = group.create_dataset(str(lv["level"]), shape=(h, w), chunks=(CHUNK, CHUNK),
+                                   dtype="<u4", compressor=comp, fill_value=0)
+        i0, j0 = lv["origin"]
+        for a in range(0, h, CHUNK):
+            rows, rok = _source_index(i0 + a, min(CHUNK, h - a), lv["ds_y"], y0, src.shape[0])
+            for b in range(0, w, CHUNK):
+                if cancel_check is not None and cancel_check():
+                    raise Cancelled()
+                cols, cok = _source_index(j0 + b, min(CHUNK, w - b), lv["ds_x"], x0,
+                                          src.shape[1])
+                block = np.zeros((rows.size, cols.size), dtype=np.uint32)
+                if rok.any() and cok.any():
+                    block[np.ix_(rok, cok)] = src.get_orthogonal_selection(
+                        (rows[rok], cols[cok]))
+                arr[a:a + rows.size, b:b + cols.size] = block
+    return levels
+
+
+def _attrs(kind, level0_path, src, roi_bbox, raw_shapes, levels):
+    y0, y1, x0, x1 = (int(v) for v in roi_bbox)
+    return {
+        "label_pyramid_version": VERSION,
+        "kind": kind,
+        "level0": {"path": level0_path, "shape": list(src.shape)},
+        "roi_bbox": [y0, y1, x0, x1],
+        "raw_level_shapes": [list(s) for s in raw_shapes],
+        "levels": [dict(lv, path=str(lv["level"])) for lv in levels],
+        "sampling": SAMPLING,
+    }
+
+
 def build(level0_zarr, out_path, raw_shapes, roi_bbox, kind, cancel_check=None):
     """Write the pyramid of the mask at `level0_zarr` (ROI coordinates,
     shape = the ROI's bbox) to `out_path`; returns `out_path`. Raises
     `Cancelled` when `cancel_check()` turns true; any other failure raises
     as it is. Either way no partial directory is left."""
     import zarr
-    from numcodecs import Blosc
 
-    src = zarr.open(level0_zarr, mode="r")
-    y0, y1, x0, x1 = (int(v) for v in roi_bbox)
-    if tuple(src.shape) != (y1 - y0, x1 - x0):
-        raise ValueError(f"the mask is {tuple(src.shape)}, the ROI's bbox is "
-                         f"{(y1 - y0, x1 - x0)}")
+    src = _open_source(level0_zarr, roi_bbox)
     partial = out_path + ".partial"
     shutil.rmtree(partial, ignore_errors=True)
     try:
         group = zarr.open_group(partial, mode="w")
-        levels = level_grid(raw_shapes, roi_bbox)
-        comp = Blosc(cname="lz4", clevel=5, shuffle=Blosc.SHUFFLE)
-        for lv in levels:
-            h, w = lv["shape"]
-            arr = group.create_dataset(str(lv["level"]), shape=(h, w), chunks=(CHUNK, CHUNK),
-                                       dtype="<u4", compressor=comp, fill_value=0)
-            i0, j0 = lv["origin"]
-            for a in range(0, h, CHUNK):
-                rows, rok = _source_index(i0 + a, min(CHUNK, h - a), lv["ds_y"], y0, src.shape[0])
-                for b in range(0, w, CHUNK):
-                    if cancel_check is not None and cancel_check():
-                        raise Cancelled()
-                    cols, cok = _source_index(j0 + b, min(CHUNK, w - b), lv["ds_x"], x0,
-                                              src.shape[1])
-                    block = np.zeros((rows.size, cols.size), dtype=np.uint32)
-                    if rok.any() and cok.any():
-                        block[np.ix_(rok, cok)] = src.get_orthogonal_selection(
-                            (rows[rok], cols[cok]))
-                    arr[a:a + rows.size, b:b + cols.size] = block
-        group.attrs.update({
-            "label_pyramid_version": VERSION,
-            "kind": kind,
-            "level0": {"path": os.path.relpath(os.path.abspath(level0_zarr),
-                                               os.path.dirname(os.path.abspath(out_path))),
-                       "shape": list(src.shape)},
-            "roi_bbox": [y0, y1, x0, x1],
-            "raw_level_shapes": [list(s) for s in raw_shapes],
-            "levels": [dict(lv, path=str(lv["level"])) for lv in levels],
-            "sampling": SAMPLING,
-        })
+        levels = _write_levels(group, src, raw_shapes, roi_bbox, cancel_check)
+        group.attrs.update(_attrs(
+            kind, os.path.relpath(os.path.abspath(level0_zarr),
+                                  os.path.dirname(os.path.abspath(out_path))),
+            src, roi_bbox, raw_shapes, levels))
         group.attrs["complete"] = True           # last: the pyramid is whole
         if os.path.lexists(out_path):
             shutil.rmtree(out_path)
@@ -126,6 +161,22 @@ def build(level0_zarr, out_path, raw_shapes, roi_bbox, kind, cancel_check=None):
         shutil.rmtree(partial, ignore_errors=True)
         raise
     return out_path
+
+
+def build_in_memory(level0_zarr, raw_shapes, roi_bbox, kind, cancel_check=None):
+    """The same pyramid in a zarr memory store: returns the group, whose
+    attributes are `build`'s with `level0.path` absolute. Nothing is written
+    to disk; a cancel or a failure raises and the half-built store is
+    dropped."""
+    import zarr
+
+    src = _open_source(level0_zarr, roi_bbox)
+    group = zarr.group(store=zarr.MemoryStore())
+    levels = _write_levels(group, src, raw_shapes, roi_bbox, cancel_check)
+    group.attrs.update(_attrs(kind, os.path.abspath(level0_zarr), src, roi_bbox,
+                              raw_shapes, levels))
+    group.attrs["complete"] = True
+    return group
 
 
 def read(out_path):

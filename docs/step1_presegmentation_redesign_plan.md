@@ -9,6 +9,8 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.29：块 N v2 获批；Step3 裁定 8a（补生成失败时的退路）。
+- v3.28：Step3 重设计的只读调查、Odon 参考与用户裁定；块 N 申请（Step2 生成标签金字塔，已按独立审核修订为 v2）；后续计划加入 Step4 优化（`.dat` 清理）与长期的 NGFF 评估。
 - v3.27：块 M 已实施并通过真机验收；新增已有问题（StarDist 偶发不一致、Cellpose CPU 极慢）。
 - v3.26：块 M 申请与用户裁定（Step2 的 8 个方法统一走引擎子进程）。
 - v3.25：块 K 真机验收通过并提交（`bc280d1`）；记录「旧路径 Stop 不能立即停止」的调查结论和用户决定（不改）。
@@ -880,13 +882,63 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 回归：31 个模块，与 `git archive HEAD` 导出件逐条对比。轻量模块 4 个并行；真实引擎模块在 4 并行下超时或崩溃（10 GB 内存 / 6 GB 显存不够），改为逐个顺序运行。**已有模块没有新增失败**。两边相同的失败：`test_hq_marker_segmentation.py` 2 条（HQ 不维护）、`test_tissue_navigator_viewport_sync.py::test_mapping_slide_local_to_full`、`test_seg_runner_engines.py` 3 条（2 条 Mesmer 缺模型，1 条 StarDist expansion）、`test_seg_runner.py::test_mesmer_in_subprocess_equals_direct_call`（缺模型）。`test_seg_runner.py::test_stardist_in_subprocess_equals_direct_call` 与新测试的 StarDist ROI 一条各失败过一次，重跑 3 次：HEAD 上失败 2 次、改后失败 1 次、新测试 3 次通过——StarDist 同机多次运行偶发 1 像素差，HEAD 上已有。
   - **真机验收通过（用户 2026-09-26）**。
 
+### Step3 重设计 — 只读调查与用户裁定（2026-09-26，未启动实施）
+- **现状**（只读调查）：`ui/step3_page.py` 3705 行。左栏：项目 / ROI / 结果选择、1/32 DAPI 缩略图、Channels 与 Channel Overlay 面板；右栏：矩形框出的 patch 放大视图（Alpha、Show Outline、Reset View）；另有「Channel Remap Review / QC」标签页。显示为 pyqtgraph + CPU 合成，无 GPU、无金字塔读取；只统计 ROI 内细胞数。写 `step3_input_files.json` 和 `step3_channel_overlay_config.json`（后者每次勾选都写，落在 Step2 运行目录里），无人读取；不向 Step4 传任何东西。已有缺陷：离开到 Step0/1 不停后台线程；切换数据集不重置。核心功能无测试。
+- **Step1 组件复用评估**：显示服务、全局通道面板、Navigator、相机快照为全局单实例，可直接用；`Step1ViewerHost` + 读取栈、`Step1GpuLayer` 可再建实例（montage 已有第二个 GPU 层）；`Step1WholeSlideMount` / `Step1ViewerBinding` 写死 `STEP1_SCOPE`、Step1 草稿、`window._active_roi` 和 step==1 判断，需参数化；patch 按钮条是主窗口代码，需抽成组件；Navigator 的 ROI 编辑经 `_persist_geometry_edit` 写 Step0 的 `roi_config.json` 等文件；仓库里没有整张图的 mask 叠加。
+- **Odon 参考**（https://github.com/alexcoulton/odon ，提交 `b01faef010b14ea03c33e92a14e438061d257e39`，GPL-3.0，只参考设计不复制代码；只读了 `src/render/labels*.rs`、`src/masks/layers.rs` 与 `src/app.rs` 的相关段落，其余功能未逐项核实）：标签图用 OME-NGFF 多级金字塔；mask 层级锁定为图像当前层级；按视野计算所需分块，LRU 块缓存 + 一个后台读取线程，快速平移时丢弃过期请求；每块带 1 像素 halo 以 R32UI 整数纹理上传，片元着色器比较相邻编号求边，线宽 0–4 px，单色 + 透明度（默认绿、0.75），CPU 不做轮廓或多边形。
+- **用户裁定（2026-09-26）**：
+  1. 重建 Step3：取消「画矩形 → 只看这块」，改为整张图的 mask 浏览；排版与外观同 Step1，是 Step1 的简化版（只有通道面板和 viewer），尽可能复用 Step1 组件。
+  2. 交互：Tissue Navigator 空降、patch 空降、缩放拖动；保留 Intensity、Overlay / Fusion。
+  3. 可以在 Tissue Navigator 上画 ROI，但不产生下游影响（Navigator 在 Step3 为沙盒：只在 Step3 内存，不写文件，不影响 Step0/Step1）。
+  4. 通道权重保留、可调整，但不保存：Step3 有自己的 fusion 草稿，**首次进入、以及 Step1 每次新的确认之后**从 Step1 已确认的设置复制（与现有的勾选播种规则一致），其余时候保留 Step3 自己的临时调整；需要修改 `UI_SURFACE_RULES.md`「Step3 行只有勾选、颜色、名称」一条。
+  5. mask 选择：默认当前 ROI 最新（`roi_index` 的 active run），面板上方一个小下拉框切换。
+  6. mask 控件放在 viewer 上方一行：显示开关、透明度、线宽、颜色；默认只画轮廓（单色、0.75、线宽 1），「填充」为选项（按细胞编号的固定随机色）。
+  7. 按 Odon 的做法：在 GPU 显示层加标签渲染（R32UI 纹理 + 求边 / 填充着色器）——用户批准修改 GPU 层。
+  8. 标签金字塔在 Step2 分割结束时生成（块 N）；旧结果没有金字塔时，Step3 打开时调用同一个生成函数现场补一次，存进该运行目录。
+  8a. 补生成也失败时的退路（用户 2026-09-26 同意；第 ④ 步实施）：金字塔只负责缩小时的粗层级，第 0 级就是 Step2 的 mask 本身。① 写不进运行目录（磁盘满、无权限）→ 在内存里生成、只在本次打开期间用、不写文件（粗层约为 mask 像素的 6.6%）；② 内存生成也失败 → 只在第 0 级显示 mask，缩小时不画，mask 控件行显示「缩小时无法显示 mask：原因」；③ mask 本身读不出 → 不显示 mask，状态栏写明原因并建议到 Step2 重跑。其余功能照常；原因同时打到终端；`read` 不接受未完成或第 0 级不吻合的金字塔。
+  9. 删除「Channel Remap Review / QC」标签页；不再写 Step2 运行目录里的两个配置文件。
+  10. Step3 的 viewer 常驻，离开 Step3 不释放（目标部署在资源充足的服务器，避免每次重新准备）；隐藏时停止视野请求，换数据集时关闭并按新数据重开，退出程序时释放——常驻不等于继续读旧数据。
+  11. patch 按钮条抽成 Step1 / Step3 共用组件，允许修改 Step1 并回归。
+- **拟分步**（每步单独申请、单独验收）：① 块 N（标签金字塔，先做）；② Step3 骨架（复用 viewer 与通道面板、Step3 的 fusion 草稿、删除旧功能与标签页）；③ patch 按钮条组件化 + Navigator 空降；④ GPU 标签渲染与 mask 控件；⑤ Navigator 沙盒 ROI。在 ⑤ 完成之前，Step3 的 Navigator 保持现在的只读策略，不开放任何会写 Step0 文件的编辑。
+
+### 块 N — Step2 生成标签金字塔（申请 v2，按独立审核修订，**用户 2026-09-26 批准**）
+- **必要性**：Step3 按 Odon 的做法浏览整张图的 mask，需要与图像金字塔同级的标签金字塔；Step2 的 mask 只有一层（uint32 zarr，1024² 分块，ROI 坐标）。用户裁定在 Step2 生成，用户只等一次。
+- **实测**（单个样本，只读真实 mask，输出写临时目录）：15437×16215 的 mask 生成两级 1.6 s；同尺寸合成 mask 0.7 s。不代表全切片耗时。
+- **坐标契约**（与 Viewer 一致，`viewer/raw_tile_provider.py:169-193`：几何一律用每轴不取整的比例）：
+  - 标签第 L 级与原始切片第 L 级使用**同一网格**：该级尺寸 `(H_L, W_L)` 取自原始切片金字塔，比例 `ds_y = H_0/H_L`、`ds_x = W_0/W_L`（浮点、两轴独立，不取整）。
+  - 采样规则（像素中心最近邻）：第 L 级像素 `(i, j)` 的值取第 0 级切片坐标 `(floor((i+0.5)·ds_y), floor((j+0.5)·ds_x))` 处的 mask；该点落在 ROI 外时为 0。ROI 局部坐标 = 切片坐标 − ROI bbox 起点。
+  - 每级数组只覆盖 ROI：行 `i ∈ [floor(y0/ds_y), ceil(y1/ds_y))`，列同理；数组名为级号（`1`、`2`…），不是倍数。
+  - 元数据（`.zattrs`）：版本；第 0 级 mask 的相对路径与形状（第 0 级不复制）；原始切片各级尺寸；每级的 `ds_y`、`ds_x`、在该级网格中的起点 `(i0, j0)` 与数组形状；ROI bbox；mask 种类（cell / nucleus）；采样规则的文字说明；`complete` 标志。
+  - 原始切片拿不到时不生成（记录原因），Step3 退回现场补生成。
+- **做法**：新增纯函数模块 `core/label_pyramid.py`（无 Qt）：`level_grid(raw_level_shapes, roi_bbox)`、`build(level0_zarr, out_path, raw_level_shapes, roi_bbox, kind, cancel_check=None)`、`read(out_path)`（只返回 `complete` 且第 0 级路径与形状吻合的金字塔，否则 None）。Step3 现场补生成调用同一个 `build`。
+- **停止与完整性**：
+  - 开始前已按 Stop：跳过。
+  - 生成中按块检查 Stop：写在临时目录 `label_pyramid_<ROI>.zarr.partial`，全部层级写完后先写 `complete: true`，再原子改名为正式名；Stop 或失败时删除临时目录。
+  - 之前已完成的 ROI 的金字塔保留（与块 K 一致：已完成 ROI 的产物留在目录，整次运行不登记）。
+  - `read` 不接受缺少 `complete` 或第 0 级不吻合的目录，未完成的金字塔不会被 Step3 当作完整产物。
+- **失败**：金字塔是可重建的显示派生产物。mask 已写成、金字塔因 I/O 等失败时：保留 mask 和分割结果，终端与日志明确报告，不写金字塔路径；Step3 打开时现场补生成（用户 2026-09-26 同意；补生成也失败时见 Step3 裁定 8a）。
+- **meta**：每个 ROI、每种 mask 分别记录：内层 ROI meta 写 `label_pyramid: {"cell": 路径或 null, "nucleus": 路径或 null}`；外层逐字段构造的 ROI 记录（`segment_merge_worker.py` 的 `roi_meta_all`）显式带上该字段；汇总 `segmentation_meta.json` 按 ROI 列出；全图模式同样写入。
+- **接入**：两个循环在 mask 写完、调用 `_record_step2_geometry(...)` 之后（`:2790`、`:3649`）调用 `_write_label_pyramids(...)`。
+- **白名单**：`core/label_pyramid.py`（新）；`workers/segment_merge_worker.py`（新增 `_write_label_pyramids`，两处调用，内层 ROI meta、外层 `roi_meta_all` 与汇总的 `label_pyramid` 字段）；`tests/test_label_pyramid.py`（新）；本文档。
+- **不改的范围**：mask 本身与其他输出、`.dat` 等现有文件（清理归 Step4 优化）；Step3（现场补生成在 Step3 块里接）；分割、归属、拼接逻辑；Viewer。
+- **空间**：两级下采样层的**未压缩像素量**约为第 0 级的 1/16 + 1/256 ≈ 6.6%（本数据按比例折算约 1 MB 级）；压缩后的实际增量随 mask 内容变化，不作保证。
+- **风险**：每次运行多几秒（单样本 2 s 以内，全切片未测）；原子改名在同一文件系统内。回退：删除两处调用。
+- **验收门**：
+  - 纯函数：奇数尺寸、非整数比例、两轴比例不同、ROI 起点非倍数、ROI 贴边；对照**用 Viewer 的坐标映射**（`RawTileProvider.level_downsample_yx` 读同一个合成 OME-TIFF 金字塔）独立算出每个标签像素的中心，而不是复用自身公式；各级形状等于该级网格上的 ROI 覆盖范围；0 与空 mask。
+  - 停止与完整性：生成中取消后无正式目录、无临时目录；缺 `complete` 或第 0 级不吻合时 `read` 返回 None。
+  - 失败：模拟普通 I/O 失败，分割照常完成并登记，meta 里没有金字塔路径，日志有报告。
+  - Step2 真实运行（StarDist，ROI 两个 + 全图）：每个 ROI、每种 mask 的路径都记录在内层、外层与汇总 meta 中，且能用 `read` 打开；第二个 ROI 中途 Stop 时，第一个 ROI 的金字塔保留、第二个不存在、整次不登记。
+  - 回归与 HEAD 逐条对比无新增失败。
+
 ## 六、未决与 advisory
 
 ### 后续计划（用户 2026-09-26 排定；都未启动，每块须单独申请）
 1. **Step2：旧路径 ROI 模式中途 Stop 仍登记成功**（没有契约的参数文件；契约路径已在 V2 第 3 步修好）。
-2. **Step3 重设计**：做成和 Step1 一样的布局和设置——左侧通道面板，右侧组织图像，可叠加分割 mask，可拖动、缩放，Tissue Navigator 空降和 patch；用户可以画 ROI，但不产生任何下游影响。
+2. **Step3 重设计**（调查与裁定见第五节「Step3 重设计」；先做块 N）：做成和 Step1 一样的布局和设置——左侧通道面板，右侧组织图像，可叠加分割 mask，可拖动、缩放，Tissue Navigator 空降和 patch；用户可以画 ROI，但不产生任何下游影响。
 3. **项目 / 会话架构**（最后做）：打开别的项目并切换一切（S2 的调查结论见块 S）；切换数据集后 Step2 仍留着上一个项目的 fused.zarr 和参数路径、正在跑的分割不停止——这一条随会话恢复一起治理。
-4. **暂缓**：Mesmer 3 个方法的真机验收（本机无模型，DeepCell token 申请网站不可用）；U2（`step1_fusion_settings.json` 并入会话）。
+4. **Step4 优化**（用户 2026-09-26 排定，在 Step3 之后）：Step2 每次运行留下两个未压缩的临时内存映射 `global_mask_<ROI>.dat`、`global_dapi_<ROI>.dat`（本项目一次运行 955 MB + 478 MB，占运行目录约 95%），另有重复的 `global_mask_*.ome.tiff`（float32）和 `global_dapi_*.ome.tiff`。Step4 旧代码仍把 `global_mask.dat` 当作 mask 路径的备选（`ui/main_window.py:4313/4322`、`workers/feature_extract_worker.py:70`、`ui/batch_step4_dialog.py:78`），须先让 Step4 改读 zarr，再清理这些文件。
+5. **长期**（Step4 优化完成后再议，用户 2026-09-26）：原始切片与 Step0 / Step1 的图像是否改用 OME-NGFF 多级 zarr（Odon 的数据结构）。评估：原始切片本身已是 1/4/16 金字塔（512 分块、LZW）；可能的收益是 LZ4 解压更快、更多粗层级（大切片的总览）；代价是一次转换（本机约一两分钟、多占约一倍磁盘，全切片更久）和所有读取方（Step0/1 viewer、Step2、Step3、Step4）改为支持 zarr，属于 P0 规则须单独审批的 Viewer 读取与缓存范围。建议先用现有基准测出瓶颈（解压 / 合成 / 上传）再立项。
+6. **暂缓**：Mesmer 3 个方法的真机验收（本机无模型，DeepCell token 申请网站不可用）；U2（`step1_fusion_settings.json` 并入会话）。
 
 ### 用户裁定（2026-09-26）
 - **HQ / HQ2 / CDS 这类不经 Step1 交接的方法不再维护。** 它们在新界面本来就不可见（R2）。此后各块不为它们修缺陷、不为它们补测试，也不把它们放进验收门；只有这些方法自身的测试失败不阻塞其他块——共用路径（例如两个切块循环、归属与合并）上仍维护方法的回归照常算失败。代码暂不删除；删除须另行申请。

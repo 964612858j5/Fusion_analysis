@@ -9,6 +9,8 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.36：块 2b 按独立审核修订为 v2（明确接受旧 Step3 页面不跟随勾选的过渡限制；模式按钮切换的验收移到 2c；测试白名单封闭）。
+- v3.35：块 2b 申请（Step3 与 Step1 共用显示范围、fusion 草稿与 Navigator 上下文）。
 - v3.34：块 2a 已实施并通过真机验收。
 - v3.33：块 2a v3（暂停期间模式切换只记录）；Load / Reset weights 措辞改正；全局联动范围写明为 Step1 ↔ Step3；删除旧方案残留；2b / 2c 待办（模式同步、界面规则精确替换、完整公开操作验收）。
 - v3.32：用户改定勾选、权重等全部与 Step1 全局联动（方案 A 作废）；块 2a 按独立审核修订为 v2（只做暂停 / 恢复、前台发布、相机标识）。
@@ -982,6 +984,29 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 测试 `tests/test_viewer_pause.py` 12 条：GPU 绑定——暂停后相机事件（平移、Navigator 空降、手势结束）与 `update_viewport` 不产生请求；**粗层读取未完成时暂停、结果随后到达，粗层照常收下且不派发精层请求**；暂停期间勾选新通道、改颜色 / Intensity / 权重不产生请求；重复暂停 / 恢复不重复连接（按信号接收者计数）；恢复后为新通道启动粗层、为新视野只请求缺失的精层、全部到达后画面包含两个通道；暂停期间来源变化在恢复时被接手。mount（CPU 路径，沿用 `test_step1_viewer_mount.py` 的仿真窗口与合成金字塔）——暂停后移动相机、改草稿、改颜色 / 勾选 / Intensity、切换模式、patch 空降，合成代数与读取数都不变；恢复后以 Fusion 模式重新合成且像素等于参考值；暂停期间的来源变化在恢复时才重建；只有激活且未暂停的实例发布 Navigator 视野框；相机标识带构造时的前缀（默认 `step1`，传入 `step3` 时为 `step3-patch` 等）。反向注入：去掉暂停期间模式切换只记录、去掉视野框的前台判断，各有 1 条变红；粗层回调与 `_plan_fine_for_channel` 两道判断同时去掉时，粗层那条变红（只去其一会被另一道挡住）。
   - 回归：27 个模块（Step1 viewer 挂载 / 绑定 / host / 退出门、GPU takeover / request gate / overview skip / sources / ROI 裁切、共享相机、Navigator、patch 选择、Tissue Preview 契约、Step0 对比视图等），与 `git archive HEAD`（`d1f3f36`）逐条对比**无新增失败**。两边相同：`test_tissue_navigator_viewport_sync.py::test_mapping_slide_local_to_full`；`test_step1_montage_view.py` 第 27 条后 Qt 中止；5 个 GPU 模块不收集测试；`test_step1_gpu_takeover.py` 34 条因无真实 OpenGL 跳过。只在 HEAD 一侧出现 `test_step0_compare_tiles.py::test_a_pan_during_a_pending_switch_replans_for_the_new_viewport`（负载下偶发）。
   - **真机验收通过（用户 2026-09-26）**：Step1 画面、Overlay / Fusion、Intensity、拖动缩放、patch 与 Navigator 空降、步骤往返与改动前一样（含 GPU 路径）。
+
+### 块 2b — Step3 与 Step1 共用显示范围、fusion 草稿与 Navigator 上下文（申请 v2，按独立审核修订，**用户 2026-09-26 批准**，过渡限制按 (b) 接受）
+- **必要性**：用户裁定 Step1 ↔ Step3 的勾选、权重、fusion 草稿、Overlay / Fusion 模式全局联动，Tissue Navigator 与 Step3 画面实时联动。现在 Step3 有自己的显示范围 step3（首次进入与 Step1 每次新确认后从已确认快照播种，`main_window.py:4448-4517`），通道面板在 Step3 只有勾选 / 颜色 / 名称且勾选不影响 fusion（`global_dock.py:226-264`、`:957-1025`），Navigator 在 Step3 画 Step1 发布的共享规格（`_SharedSpecTissueContext`，`main_window.py:354`），而该规格只在权重变化时重新发布（`_refresh_published_render_spec`，`:2143`；勾选与模式不更新）。
+- **做法**（全部在主窗口的步骤切换里，不改通道面板、fusion 模型、显示状态与合成代码）：
+  1. `_DISPLAY_SCOPES[3]` 由 `"step3"` 改为 `"step1"`；`_DOWNSTREAM_STEPS` 由 `(2, 3)` 改为 `(2,)`（只有 Step2 从已确认快照播种）。
+  2. `_set_step_active`：显示范围切到 step1 时（进入 Step1 **或 Step3**）都调用 `_resync_step1_display_from_state()`——否则从 Step0 进 Step3 再回 Step1，范围不变，Step1 页面会漏掉 Step0 期间的变化。
+  3. 通道面板：进入 Step3 时 `dock.set_step(1)`（与 Step1 相同的行：勾选即 fusion 命令、权重滑块与数值框），挂载位置仍由 `_mount_channels_dock(3)` 决定（Step3 页面的 `channels_host`）。
+  4. Navigator：`_STEP_CONTEXTS[3]` 改为 Step1 的上下文（窗口本身，按 step1 范围的勾选、草稿与模式实时合成）；现有的重画请求（勾选 `request_frame(kind="visibility")`、权重、模式）在 Step3 里即按 Step1 的方式生效。Step3 的编辑策略不变（`_apply_navigator_policy_for_step(3)` 仍为只读，沙盒 ROI 在第 ⑤ 步）。`_SharedSpecTissueContext` 对 Step3 不再使用（保留注册，不删）。
+  5. 会话自动保存：勾选的保存受 `_display_scope_is_step1()` 约束，Step3 现在在 step1 范围，Step3 的勾选与权重按现有机制写进当前 `step1_session.json`（用户已确认）。已确认快照只在 Step1 点保存时变化。
+  6. `UI_SURFACE_RULES.md` 精确替换：第 196-217 行「四步的勾选各自独立」改为「Step0、Step2 各自独立；Step1 ↔ Step3 共用勾选、当前通道、权重与 fusion 草稿；Step2 首次进入与 Step1 每次新确认后从已确认快照播种」；第 211 行「Fusion participation and weights belong to Step1's scientific draft alone」改为「属于 Step1 的科学草稿，Step3 编辑的是同一份」；第 222 行「Step2 / Step3 rows -- tick, swatch, name」改为只写 Step2，Step3 行与 Step1 相同；第 292 行「Weights -- edited in Step1's rows」改为「Step1 与 Step3 的行」。「进入一个 Step 只是重画、不是命令」一条保留。
+- **不在本块**：Step3 的新页面、Reset / Load weights 按钮、Overlay / Fusion 按钮与模式同步、第二个 viewer（均在 2c）。
+- **过渡限制（明确接受，不改旧页面）**：旧 Step3 页面在 2b 与 2c 之间仍在，但它的 `_display_scope_is_shared()` 只接受 `""` / `"step3"` 范围（`step3_page.py:1466-1478`），改用 step1 后 `_on_shared_display_changed` 直接返回：**旧页面的画面不会跟随勾选加载或重画**。2c 整体删除旧页面，不为它改代码；2b 的真机验收只看通道面板、Step1 同步与 Navigator，不看旧页面的画面。
+- **白名单**：`ui/main_window.py`（`_DISPLAY_SCOPES`、`_DOWNSTREAM_STEPS`、`_STEP_CONTEXTS`、`_set_step_active` 中的重新同步条件与 `dock.set_step` 的参数）；`UI_SURFACE_RULES.md`（上述条款）；现有测试**仅限**以下 5 个文件、且**仅限与新裁定直接冲突的断言**（Step3 独立范围与播种、Step3 行只有勾选 / 颜色 / 名称、Step3 的 Navigator 用共享规格）：`tests/test_downstream_display_seed.py`、`tests/test_global_channel_dock.py`、`tests/test_step0_step1_display_isolation.py`、`tests/test_block01_tissue_preview_contract.py`、`tests/test_channel_row_template.py`；每条改动在执行记录中列出。其他测试失败不因「涉及 Step3」而被当作预期变化——须停下说明；新测试 `tests/test_step3_shares_step1.py`；本文档。
+- **不改的范围**：`GlobalChannelDock`、`FusionDomainModel`、`ChannelDisplayState`、合成与渲染代码、Step2 的行为、Step0 的行为、Intensity 窗口、Navigator 编辑策略、Step3 页面。
+- **风险**：Step3 的操作会写 Step1 的会话（已确认）；旧 Step3 页面的过渡显示；按 step 号判断的其他代码若假设「Step3 的范围是 step3」会受影响（回归覆盖）。回退：恢复主窗口这四处与规则文件。
+- **验收门**：
+  - 完整公开操作（真实主窗口，合成项目）：进入 Step3，在通道面板勾选一个 Step1 未参与 fusion 的通道并调其权重 → 回到 Step1，通道面板与 fusion 草稿是同样的设置 → 当前会话记住草稿；已确认快照（哈希）与 Step2 的勾选保持原样，直到在 Step1 明确保存。
+  - Step3 的通道面板行与 Step1 相同（有权重控件），勾选即改变 fusion 参与；Step2 的行仍只有勾选 / 颜色 / 名称，Step2 仍从已确认快照播种、不受 Step3 操作影响。
+  - Navigator：Step3 激活的是 Step1 的上下文；在 Step3 勾选或调权重时发出重画请求，合成出的帧包含新设置；进入 Step3 时沿用 Step1 当前的 Overlay / Fusion 模式（上下文对两种模式的合成可在测试里直接验证，但**在 Step3 通过模式按钮切换并使两页与 Navigator 同步属于 2c 的验收**）。
+  - 从 Step0 进入 Step3、再回 Step1：Step1 页面反映 Step0 期间的共享变化（颜色 / Intensity），无残留。
+  - 进入 Step3 本身不产生命令：不改勾选、不改权重、不产生 fusion 修订、不触发会话保存。
+  - 回归：相关模块与 HEAD 逐条对比，除按裁定改写的测试外无新增失败。
+  - 真机（用户）：Step3 通道面板里调勾选 / 权重，回到 Step1 是同样的设置；Navigator 在 Step3 随勾选 / 权重实时变化；旧 Step3 页面的画面不作要求（过渡限制）。
 
 ## 六、未决与 advisory
 

@@ -56,6 +56,7 @@ from .step1_draft_spec import MODE_FUSION, MODE_OVERLAY, STEP1_SCOPE
 from .step1_gpu_binding import BindingBudgets, Step1GpuBinding
 from .step1_gpu_layer import DisplaySnapshot, Step1GpuLayer, ViewportSnapshot
 from .step1_viewer_binding import Step1ViewerBinding
+from .step3_label_binding import Step3LabelBinding
 
 _log = logging.getLogger(__name__)
 
@@ -138,9 +139,16 @@ class Step1WholeSlideMount(QtCore.QObject):
     """The whole-slide viewer's life inside Step1's Viewer tab."""
 
     def __init__(self, window, host=None, parent=None, *, gpu=True,
-                 gpu_layer_factory=None, camera_reason="step1"):
+                 gpu_layer_factory=None, camera_reason="step1", labels=False):
         super().__init__(parent)
         self._window = window
+        #: Block 4b: this viewer draws masks (Step3's; Step1's never does).
+        #: Off, nothing of it exists -- the GPU layer is built without its
+        #: label targets and no label binding is made.
+        self._labels_wanted = bool(labels)
+        self.label_binding = None
+        self._mask_sources = None
+        self._mask_styles = {}
         #: The prefix of the reasons this viewer publishes its camera with
         #: ("step1", "step1-patch", ...); a second viewer names itself.
         self._camera_reason = str(camera_reason)
@@ -380,7 +388,7 @@ class Step1WholeSlideMount(QtCore.QObject):
         if factory is not None:
             return factory(stack)
         return Step1GpuLayer(max_raw_texture_bytes=DEMO_GPU_RAW_TEXTURE_BYTES,
-                             require_hardware=True)
+                             require_hardware=True, labels=self._labels_wanted)
 
     def _start_gpu_backend(self, stack):
         """Put the G1 layer on the EXISTING view and feed it from G2.
@@ -445,7 +453,61 @@ class Step1WholeSlideMount(QtCore.QObject):
         self._gpu_reason = ""
         self._gpu_seed_requested.clear()
         self.gpu_binding.source_changed()
+        self._start_label_binding(stack, layer)
         return True
+
+    # ── masks (block 4b) ──────────────────────────────────────────────
+    def _start_label_binding(self, stack, layer):
+        """With the GPU backend, and only when this viewer draws masks."""
+        if not self._labels_wanted or not getattr(layer, "labels_enabled", False):
+            return False
+        provider, controller = stack.provider, stack.controller
+        self.label_binding = Step3LabelBinding(
+            controller=controller, layer=layer,
+            level_shapes=[provider.level_shape(level) for level in range(provider.num_levels)],
+            tile_size=controller.grid.tile_size, parent=self)
+        for kind, style in self._mask_styles.items():
+            self.label_binding.set_style(kind, **style)
+        if self._paused:
+            self.label_binding.pause()
+        if self._mask_sources is not None:
+            self.label_binding.set_sources(self._mask_sources)
+        return True
+
+    def _stop_label_binding(self):
+        binding, self.label_binding = self.label_binding, None
+        if binding is not None:
+            binding.dispose()
+            binding.setParent(None)
+        return binding is not None
+
+    def set_mask_sources(self, sources):
+        """The masks to draw: `core.step3_masks.resolve_masks`' cell and
+        nucleus (None for either, or None for none). Kept, so a rebuilt GPU
+        backend draws them again."""
+        self._mask_sources = dict(sources) if sources else None
+        if self.label_binding is not None:
+            self.label_binding.set_sources(self._mask_sources or {})
+        elif self._labels_wanted and sources:
+            print(f"[Step3] masks not drawn: {self.mask_status()['reason']}")
+        return self.label_binding is not None
+
+    def set_mask_style(self, kind, **style):
+        """Visibility, colour, alpha, width (logical px) or mode of one mask."""
+        self._mask_styles.setdefault(kind, {}).update(style)
+        if self.label_binding is not None:
+            self.label_binding.set_style(kind, **style)
+
+    def mask_status(self):
+        """{"available", "reason", and the label binding's per-mask status}."""
+        if not self._labels_wanted:
+            return {"available": False, "reason": "this viewer draws no masks"}
+        if self.label_binding is None:
+            reason = "Masks need the GPU display"
+            if self._gpu_reason:
+                reason += f" ({self._gpu_reason})"
+            return {"available": False, "reason": reason}
+        return dict(self.label_binding.mask_status(), available=True, reason="")
 
     def _stop_gpu_backend(self, restore_controller=True):
         """Give the GL names and the screen back. Idempotent.
@@ -468,6 +530,8 @@ class Step1WholeSlideMount(QtCore.QObject):
         So the CPU fallback is reached with the supply already on either
         way.)
         """
+        # The masks go first: their thread and textures belong to this layer.
+        self._stop_label_binding()
         binding, layer = self.gpu_binding, self.gpu_layer
         self.gpu_binding = self.gpu_layer = None
         self._disconnect_gpu_owners()
@@ -818,6 +882,8 @@ class Step1WholeSlideMount(QtCore.QObject):
             return False
         self.deactivate()
         self._paused = True
+        if self.label_binding is not None:
+            self.label_binding.pause()
         if self.gpu_binding is not None:
             self.gpu_binding.pause()
         elif self.host.stack is not None:
@@ -840,6 +906,8 @@ class Step1WholeSlideMount(QtCore.QObject):
             self.source_changed(reason)
         if self.gpu_binding is not None:
             self.gpu_binding.resume()
+            if self.label_binding is not None:
+                self.label_binding.resume()
         else:
             if self.compose is not None:
                 self.compose.set_mode(self._mode)
@@ -923,6 +991,9 @@ class Step1WholeSlideMount(QtCore.QObject):
         # The outgoing controller is about to be destroyed by `open()`;
         # it must not issue one last round on its way out.
         self._stop_gpu_backend(restore_controller=False)
+        # Masks belong to the source they were resolved for: a new source
+        # starts without them until its owner (block 4c) sets them again.
+        self._mask_sources = None
         stack = self.viewer.open()
         if stack is None:
             self._backend = BACKEND_LEGACY

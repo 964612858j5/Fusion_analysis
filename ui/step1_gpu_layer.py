@@ -125,6 +125,145 @@ class ViewportSnapshot:
         return width, height
 
 
+#: Block 4b: the label textures' own GPU budget (user ruling 2026-09-26),
+#: beside -- never inside -- the raw textures' 512 MB.
+LABEL_TEXTURE_BYTES = 256 * 1024 * 1024
+#: The largest outline radius the draw pass loops over, in screen pixels.
+MAX_LABEL_RADIUS = 8
+LABEL_OUTLINE = "outline"
+LABEL_FILL = "fill"
+
+
+@dataclass(frozen=True)
+class LabelPlane:
+    """One uint32 label tile and where it lies (level-0 world, x0 x1 y0 y1)."""
+
+    identity: Hashable
+    world_rect: Tuple[float, float, float, float]
+    ids: np.ndarray
+
+
+@dataclass(frozen=True)
+class LabelLayer:
+    """One mask (cell or nucleus) and how it is drawn.
+
+    `planes` are drawn in the order given, a later one over an earlier one
+    (the caller puts the target level last); `width` is in LOGICAL pixels,
+    0..4, and becomes floor(width * device pixel ratio + 0.5) screen pixels,
+    at most `MAX_LABEL_RADIUS`."""
+
+    kind: str
+    planes: Tuple[LabelPlane, ...] = ()
+    color: Tuple[float, float, float] = (0.0, 1.0, 0.0)
+    alpha: float = 0.75
+    width: float = 1.0
+    mode: str = LABEL_OUTLINE
+    visible: bool = True
+
+
+@dataclass(frozen=True)
+class LabelSnapshot:
+    """Every mask layer, drawn in order (a later layer over an earlier one)."""
+
+    layers: Tuple[LabelLayer, ...] = ()
+
+
+def label_radius(width: float, device_pixel_ratio: float) -> int:
+    """Screen radius of a logical outline width: floor(w * dpr + 0.5), 0..8."""
+    radius = int(math.floor(float(width) * float(device_pixel_ratio) + 0.5))
+    return max(0, min(MAX_LABEL_RADIUS, radius))
+
+
+class _LabelTextureLru:
+    """Block 4b: R32UI label textures, keyed by the caller's plane identity,
+    in their own budget. Integer textures, nearest only: an id is fetched,
+    never filtered."""
+
+    def __init__(self, max_bytes: int):
+        if max_bytes <= 0:
+            raise ValueError("max_label_texture_bytes must be positive")
+        self.max_bytes = int(max_bytes)
+        self.records: "collections.OrderedDict[Hashable, _TextureRecord]" = collections.OrderedDict()
+        self.bytes = 0
+        self.peak_bytes = 0
+        self.uploads = 0
+        self.evictions = 0
+
+    @staticmethod
+    def plane_bytes(plane: LabelPlane) -> int:
+        ids = np.asarray(plane.ids)
+        return int(ids.shape[0] * ids.shape[1] * 4)
+
+    @staticmethod
+    def _validate(plane: LabelPlane) -> None:
+        try:
+            hash(plane.identity)
+        except TypeError as exc:
+            raise Step1GpuLayerError("label plane identity must be hashable") from exc
+        x0, x1, y0, y1 = plane.world_rect
+        if not x1 > x0 or not y1 > y0:
+            raise Step1GpuLayerError("label plane world rect must have positive extent")
+        ids = np.asarray(plane.ids)
+        if ids.ndim != 2 or ids.shape[0] == 0 or ids.shape[1] == 0 or ids.dtype != np.uint32:
+            raise Step1GpuLayerError("label plane ids must be a nonempty HxW uint32 array")
+
+    def prepare(self, gl, planes: Sequence[LabelPlane]) -> None:
+        required: Dict[Hashable, LabelPlane] = {}
+        for plane in planes:
+            self._validate(plane)
+            required[plane.identity] = plane
+        total = sum(self.plane_bytes(plane) for plane in required.values())
+        if total > self.max_bytes:
+            raise Step1GpuLayerError(
+                f"label working set {total} bytes exceeds the label budget {self.max_bytes}")
+        missing = sum(self.plane_bytes(plane) for identity, plane in required.items()
+                      if identity not in self.records)
+        while self.bytes + missing > self.max_bytes:
+            victim = next(identity for identity in self.records if identity not in required)
+            record = self.records.pop(victim)
+            gl.glDeleteTextures([record.texture])
+            self.bytes -= record.byte_count
+            self.evictions += 1
+        for identity, plane in required.items():
+            if identity in self.records:
+                self.records.move_to_end(identity)
+                continue
+            ids = np.ascontiguousarray(np.asarray(plane.ids), dtype=np.uint32)
+            texture = _as_name(gl.glGenTextures(1))
+            gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
+            gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+            gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_R32UI, ids.shape[1], ids.shape[0],
+                            0, gl.GL_RED_INTEGER, gl.GL_UNSIGNED_INT, ids)
+            byte_count = self.plane_bytes(plane)
+            self.records[identity] = _TextureRecord(
+                texture=texture, width=ids.shape[1], height=ids.shape[0],
+                byte_count=byte_count, world_rect=plane.world_rect)
+            self.bytes += byte_count
+            self.peak_bytes = max(self.peak_bytes, self.bytes)
+            self.uploads += 1
+        _check_gl(gl, "label texture upload")
+
+    def texture_for(self, plane: LabelPlane) -> int:
+        return self.records[plane.identity].texture
+
+    def clear(self, gl) -> int:
+        count = len(self.records)
+        if self.records:
+            gl.glDeleteTextures([record.texture for record in self.records.values()])
+        self.records.clear()
+        self.bytes = 0
+        return count
+
+    def stats(self) -> Dict[str, int]:
+        return {"budget_bytes": self.max_bytes, "bytes": self.bytes,
+                "peak_bytes": self.peak_bytes, "textures": len(self.records),
+                "uploads": self.uploads, "evictions": self.evictions}
+
+
 @dataclass
 class _TextureRecord:
     texture: int
@@ -368,9 +507,24 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
     """A test-only G1 multi-pass GPU compositor with no production import path."""
 
     def __init__(self, *, max_raw_texture_bytes: int, require_hardware: bool = True,
-                 parent: Optional[QtWidgets.QWidget] = None):
+                 parent: Optional[QtWidgets.QWidget] = None, labels: bool = False,
+                 max_label_texture_bytes: int = LABEL_TEXTURE_BYTES):
         super().__init__(parent)
         self._cache = _TextureLru(max_raw_texture_bytes)
+        #: Block 4b: the label layer, Step3 only. Off (the default), nothing
+        #: below exists: no target, no program, no texture, and `paintGL`
+        #: shows `final` exactly as before.
+        self._labels_enabled = bool(labels)
+        self._label_cache = (_LabelTextureLru(max_label_texture_bytes)
+                             if self._labels_enabled else None)
+        self._label_snapshot = LabelSnapshot()
+        #: The viewport and the clip `final` was last composed with: a
+        #: label-only redraw uses them, so it lands on the same picture.
+        self._last_viewport: Optional[ViewportSnapshot] = None
+        self._last_clip: Optional[Tuple[Any, bool]] = None
+        self._shown_ready = False
+        self._label_counts = {"image_submissions": 0, "label_compositions": 0,
+                              "label_passes": 0}
         self._require_hardware = bool(require_hardware)
         self._gl = None
         self._programs: Dict[str, int] = {}
@@ -467,6 +621,12 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                 self._render_fusion(active_groups, active_nucleus, display_snapshot, viewport_snapshot)
             else:
                 raise Step1GpuLayerError(f"unknown display mode {mode!r}")
+            if self._labels_enabled:
+                # THE SAME SUBMISSION, THE SAME VIEW: the mask is drawn over
+                # the picture it belongs to, never a frame behind it.
+                self._label_counts["image_submissions"] += 1
+                self._last_viewport = viewport_snapshot
+                self._compose_labels()
             self._submission = {
                 "mode": mode,
                 "missing_windows": tuple(missing),
@@ -504,6 +664,100 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             pixels = gl.glReadPixels(0, 0, width, height, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE)
             result = np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, 4).copy()
             _check_gl(gl, "G1 framebuffer readback")
+            return np.flipud(result)
+        finally:
+            if own_current:
+                self.doneCurrent()
+
+    # Block 4b: the label layer ----------------------------------------
+
+    @property
+    def labels_enabled(self) -> bool:
+        return self._labels_enabled
+
+    def set_labels(self, snapshot: LabelSnapshot) -> Dict[str, Any]:
+        """Draw these masks over the picture as it stands. The channels are
+        NOT composed again: `final` stays, only `shown` is redrawn, with the
+        viewport and clip of the last submission."""
+        if not self._labels_enabled:
+            raise Step1GpuLayerError("this layer was built without labels")
+        if self._disposed:
+            raise Step1GpuLayerError("G1 layer is disposed")
+        for layer in snapshot.layers:
+            if layer.mode not in (LABEL_OUTLINE, LABEL_FILL):
+                raise Step1GpuLayerError(f"unknown label mode {layer.mode!r}")
+            for plane in layer.planes:
+                _LabelTextureLru._validate(plane)
+        # REFUSED BEFORE IT IS KEPT: a snapshot over the budget would
+        # otherwise fail every later image submission too.
+        needed = {plane.identity: _LabelTextureLru.plane_bytes(plane)
+                  for layer in snapshot.layers if layer.visible for plane in layer.planes}
+        if sum(needed.values()) > self._label_cache.max_bytes:
+            raise Step1GpuLayerError(
+                f"label working set {sum(needed.values())} bytes exceeds the label budget "
+                f"{self._label_cache.max_bytes}")
+        self._label_snapshot = snapshot
+        if not self._initialized or self._last_viewport is None or self._target_size is None:
+            return self.label_stats()
+        own_current = QtGui.QOpenGLContext.currentContext() is not self.context()
+        if own_current:
+            self.makeCurrent()
+        try:
+            self._require_ready()
+            self._compose_labels()
+        finally:
+            if own_current:
+                self.doneCurrent()
+        self.update()
+        return self.label_stats()
+
+    def label_stats(self) -> Dict[str, Any]:
+        stats = dict(self._label_counts)
+        stats["shown"] = bool(self._shown_ready)
+        stats["cache"] = self._label_cache.stats() if self._label_cache is not None else {}
+        return stats
+
+    def readback_shown_for_test(self) -> np.ndarray:
+        """What `paintGL` puts on screen: `shown` when masks are drawn, else
+        `final`; RGBA8, top-left rows."""
+        return self._readback_rgba("shown" if self._shown_ready else "final")
+
+    def readback_label_ids_for_test(self) -> np.ndarray:
+        """The screen id image of the LAST mask layer drawn, top-left rows."""
+        own_current = QtGui.QOpenGLContext.currentContext() is not self.context()
+        if own_current:
+            self.makeCurrent()
+        try:
+            self._require_ready()
+            gl = self._gl
+            fbo, _texture = self._targets["ids"]
+            width, height = self._target_size
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, fbo)
+            gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, 1)
+            pixels = gl.glReadPixels(0, 0, width, height, gl.GL_RED_INTEGER, gl.GL_UNSIGNED_INT)
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+            result = np.frombuffer(pixels, dtype=np.uint32).reshape(height, width).copy()
+            _check_gl(gl, "label id readback")
+            return np.flipud(result)
+        finally:
+            if own_current:
+                self.doneCurrent()
+
+    def _readback_rgba(self, target: str) -> np.ndarray:
+        own_current = QtGui.QOpenGLContext.currentContext() is not self.context()
+        if own_current:
+            self.makeCurrent()
+        try:
+            self._require_ready()
+            gl = self._gl
+            fbo, _texture = self._targets[target]
+            width, height = self._target_size
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, fbo)
+            gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, 1)
+            pixels = gl.glReadPixels(0, 0, width, height, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE)
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+            result = np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, 4).copy()
+            _check_gl(gl, f"{target} readback")
             return np.flipud(result)
         finally:
             if own_current:
@@ -587,7 +841,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         if not self._initialized or self._target_size is None:
             return
         gl = self._gl
-        final_fbo, final_texture = self._targets["final"]
+        final_fbo, final_texture = self._targets["shown" if self._shown_ready else "final"]
         gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, final_fbo)
         gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, self.defaultFramebufferObject())
         width, height = self.width(), self.height()
@@ -769,6 +1023,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         if not polygon_error:
             self._roi_polygon_error = ""
         self._submission["roi_polygon_points"] = 0 if polygon is None else len(polygon)
+        self._last_clip = None
         if scissor is not None or polygon is not None:
             gl.glDisable(gl.GL_SCISSOR_TEST)
             gl.glDisable(gl.GL_STENCIL_TEST)
@@ -776,6 +1031,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             gl.glClearColor(0.0, 0.0, 0.0, 0.0)
             gl.glClearStencil(0)
             gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_STENCIL_BUFFER_BIT)
+            self._last_clip = (scissor, polygon is not None)
             if scissor is not None and (scissor[2] <= 0 or scissor[3] <= 0):
                 # The region is not on screen at all. The cleared target IS
                 # the answer; drawing a zero-sized scissor is undefined.
@@ -921,6 +1177,13 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             source = fragment.replace("\n", f"\n#define {define}\n", 1)
             self._programs[name] = self._link_program(vertex, source)
             self._uniforms[name] = {}
+        if self._labels_enabled:
+            labels = (_SHADER_DIR / "step1_gpu_labels.frag").read_text(encoding="utf-8")
+            for name, define in {"label_ids": "PASS_LABEL_IDS",
+                                 "label_draw": "PASS_LABEL_DRAW"}.items():
+                source = labels.replace("\n", f"\n#define {define}\n", 1)
+                self._programs[name] = self._link_program(vertex, source)
+                self._uniforms[name] = {}
 
     def _link_program(self, vertex_source: str, fragment_source: str) -> int:
         gl = self._gl
@@ -987,9 +1250,109 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                         "G1 final framebuffer incomplete with its stencil")
                 self._stencil_rbo = stencil
             self._targets[name] = (fbo, texture)
+        if self._labels_enabled:
+            self._ensure_label_targets(size)
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
         self._target_size = size
+        self._shown_ready = False
         _check_gl(gl, "G1 transient target allocation")
+
+    def _ensure_label_targets(self, size: Tuple[int, int]) -> None:
+        """`ids` (the screen id image) and `shown` (RGBA8, the picture with
+        its masks). `shown` shares `final`'s stencil renderbuffer, so a mask
+        is clipped by the very polygon the picture was."""
+        gl = self._gl
+        for name, internal, fmt, typ in (
+            ("ids", gl.GL_R32UI, gl.GL_RED_INTEGER, gl.GL_UNSIGNED_INT),
+            ("shown", gl.GL_RGBA8, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE),
+        ):
+            texture = _as_name(gl.glGenTextures(1))
+            gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
+            gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, internal, size[0], size[1], 0, fmt, typ, None)
+            fbo = _as_name(gl.glGenFramebuffers(1))
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, fbo)
+            gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0,
+                                      gl.GL_TEXTURE_2D, texture, 0)
+            if name == "shown":
+                gl.glFramebufferRenderbuffer(gl.GL_FRAMEBUFFER, gl.GL_STENCIL_ATTACHMENT,
+                                             gl.GL_RENDERBUFFER, self._stencil_rbo)
+            if gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER) != gl.GL_FRAMEBUFFER_COMPLETE:
+                raise Step1GpuLayerError(f"G1 {name} framebuffer incomplete")
+            self._targets[name] = (fbo, texture)
+
+    def _compose_labels(self) -> None:
+        """`final` -> `shown`, then every visible mask layer over it."""
+        layers = [layer for layer in self._label_snapshot.layers
+                  if layer.visible and layer.planes]
+        if not layers or self._last_viewport is None:
+            self._shown_ready = False
+            return
+        gl = self._gl
+        viewport = self._last_viewport
+        self._label_cache.prepare(gl, [plane for layer in layers for plane in layer.planes])
+        width, height = self._target_size
+        gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, self._targets["final"][0])
+        gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, self._targets["shown"][0])
+        gl.glBlitFramebuffer(0, 0, width, height, 0, 0, width, height,
+                             gl.GL_COLOR_BUFFER_BIT, gl.GL_NEAREST)
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+        self._shown_ready = True
+        self._label_counts["label_compositions"] += 1
+        scissor, polygon_used = self._last_clip if self._last_clip is not None else (None, False)
+        if scissor is not None and (scissor[2] <= 0 or scissor[3] <= 0):
+            return                      # the region is off screen: the picture is the answer
+        radius_ratio = float(viewport.device_pixel_ratio)
+        for layer in layers:
+            self._draw_label_ids(layer, viewport)
+            self._bind_target("shown")
+            try:
+                if polygon_used:
+                    gl.glEnable(gl.GL_STENCIL_TEST)
+                    gl.glStencilMask(0x00)
+                    gl.glStencilFunc(gl.GL_EQUAL, 0x01, 0x01)
+                    gl.glStencilOp(gl.GL_KEEP, gl.GL_KEEP, gl.GL_KEEP)
+                if scissor is not None:
+                    gl.glEnable(gl.GL_SCISSOR_TEST)
+                    gl.glScissor(*scissor)
+                gl.glEnable(gl.GL_BLEND)
+                gl.glBlendEquation(gl.GL_FUNC_ADD)
+                gl.glBlendFuncSeparate(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA,
+                                       gl.GL_ONE, gl.GL_ONE_MINUS_SRC_ALPHA)
+                gl.glUseProgram(self._programs["label_draw"])
+                gl.glActiveTexture(gl.GL_TEXTURE0)
+                gl.glBindTexture(gl.GL_TEXTURE_2D, self._targets["ids"][1])
+                self._uniform1i("label_draw", "u_ids", 0)
+                self._uniform1i("label_draw", "u_mode", 1 if layer.mode == LABEL_FILL else 0)
+                self._uniform1i("label_draw", "u_radius", label_radius(layer.width, radius_ratio))
+                self._uniform3("label_draw", "u_color", layer.color)
+                self._uniform1f("label_draw", "u_alpha", layer.alpha)
+                self._draw()
+                self._label_counts["label_passes"] += 1
+                gl.glUseProgram(0)
+            finally:
+                gl.glDisable(gl.GL_BLEND)
+                self._restore_clip_state()
+        _check_gl(gl, "G1 label composition")
+
+    def _draw_label_ids(self, layer: LabelLayer, viewport: ViewportSnapshot) -> None:
+        gl = self._gl
+        self._bind_target("ids")
+        gl.glDisable(gl.GL_BLEND)
+        gl.glClearBufferuiv(gl.GL_COLOR, 0, np.zeros(4, np.uint32))
+        gl.glUseProgram(self._programs["label_ids"])
+        self._uniform4("label_ids", "u_view_rect", viewport.world_rect)
+        gl.glUniform2f(self._uniform_location("label_ids", "u_target_size"),
+                       float(self._target_size[0]), float(self._target_size[1]))
+        for plane in layer.planes:
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self._label_cache.texture_for(plane))
+            self._uniform1i("label_ids", "u_labels", 0)
+            self._uniform4("label_ids", "u_plane_rect", plane.world_rect)
+            self._draw()
+            self._label_counts["label_passes"] += 1
+        gl.glUseProgram(0)
 
     def _bind_target(self, name: str) -> None:
         fbo, _texture = self._targets[name]
@@ -1043,6 +1406,9 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         if self._gl is None:
             return
         self._cache.clear(self._gl)
+        if self._label_cache is not None:
+            self._label_cache.clear(self._gl)
+        self._shown_ready = False
         self._destroy_targets()
         if self._vao:
             self._gl.glDeleteVertexArrays(1, [self._vao])

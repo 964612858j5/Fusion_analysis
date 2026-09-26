@@ -620,7 +620,14 @@ def test_outline_width_4_and_zero_is_never_drawn():
     got = sm.outline_reference(ids, 2)
     assert got[0, 0] and got.sum() == 1
     with pytest.raises(ValueError):
-        sm.outline_reference(ids, 5)
+        sm.outline_reference(ids, 9)
+
+
+def test_outline_radius_8_for_a_high_dpi_screen():
+    ids = np.ones((19, 19), np.uint32)
+    want = np.ones((19, 19), bool)
+    want[8:11, 8:11] = False                      # window of 17 x 17 inside the image
+    np.testing.assert_array_equal(sm.outline_reference(ids, 8), want)
 
 
 def _lowbias32(x):

@@ -1,7 +1,7 @@
 # Step1 预分割（Method & Parameters / Patch Results）重设计 — 项目计划
 
 日期：2026-09-23（第三版，块 A0 产出）　分支 `v15-interactive-channel-workspace`，起点 `c9f80df`，A0 核查基于 `e655409`。
-状态：**已执行：块 P、A1、A2、B、C、D、V0。本文档记录的验收：B「用户验收总体通过」、C 第 4 步「用户人工测试通过」、D「块 D 验收通过（2026-09-25）」；P、A1、A2、V0 的执行记录仍写「待用户验收」，文档中没有后续验收记录。V2（代码中称「Step2 hook-up」）第 1、2 步已提交（`54e825d`、`1adfe4e`），第 3 步已提交（`dcaca2c`），真机上 Cellpose 路径跑通，Mesmer 未验收；块 L 已提交（`1d14801`、`2294bc7`）并通过真机验收；块 F 已提交（`5bc65bc`）并通过真机验收；块 E 已提交（`7ee98fc`）并通过真机验收（Mesmer 除外）；U1、Results 顺序、块 S 已提交；块 K 已实施并通过真机验收；块 M 已实施并通过真机验收；块 N 已实施并通过真机验收；块 ④a 已实施（数据层自动验收通过）；S2 冻结；后续计划见第六节。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动须另行批准。
+状态：**已执行：块 P、A1、A2、B、C、D、V0。本文档记录的验收：B「用户验收总体通过」、C 第 4 步「用户人工测试通过」、D「块 D 验收通过（2026-09-25）」；P、A1、A2、V0 的执行记录仍写「待用户验收」，文档中没有后续验收记录。V2（代码中称「Step2 hook-up」）第 1、2 步已提交（`54e825d`、`1adfe4e`），第 3 步已提交（`dcaca2c`），真机上 Cellpose 路径跑通，Mesmer 未验收；块 L 已提交（`1d14801`、`2294bc7`）并通过真机验收；块 F 已提交（`5bc65bc`）并通过真机验收；块 E 已提交（`7ee98fc`）并通过真机验收（Mesmer 除外）；U1、Results 顺序、块 S 已提交；块 K 已实施并通过真机验收；块 M 已实施并通过真机验收；块 N 已实施并通过真机验收；块 ④a 已实施（数据层自动验收通过）；块 ④b 已实施（自动验收通过）；S2 冻结；后续计划见第六节。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动须另行批准。
 
 修订记录：
 - v1：初稿。
@@ -9,6 +9,7 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.52：块 ④b 已实施（自动验收通过，含本机真实 GL 读回；真机随 ④c），写入执行记录与环境问题（本机 D3D12 驱动退出时段错误）。
 - v3.51：块 ④b v2 获批，5 项裁定按建议（核在上、逻辑线宽、旧层暂留目标优先、暂停停止补生成、256 MB）。
 - v3.50：块 ④b 按独立审核修订为 v2（目标层级优先与编号 0 覆盖；逻辑线宽与参考半径扩到 8；标签沿用图像的多边形边界；暂停与补生成、单线程的如实说明；预算实测与超额顺序、CPU 侧计入等待结果；编号图独立参考；Step3 图像不变的验收）。
 - v3.49：块 ④b 申请 v1（GPU 标签渲染：标签绑定与后台线程、64 MB 标签纹理、编号图与轮廓 / 填充着色器、mount 的 mask 开关；本机真实 GL 读回验证）。
@@ -1229,7 +1230,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 回归：11 个模块（`test_label_pyramid`、`test_step2_runner_path`、`test_step2_engine_unified`、`test_step2_legacy_stop`、`test_step2_ownership_move`、`test_step2_remap_integration`、`test_step1_step2_handoff_e2e`、`test_step1_to_step2_handoff`、`test_step2_tile`、`test_step2_profiler`、`test_seg_runner_engines`），每模块单独进程、顺序运行，与 `git archive HEAD`（`faee7f1`）逐条对比，**无新增失败**。两边相同：`test_seg_runner_engines.py` 的 2 条 Mesmer（本机无模型）。StarDist 偶发（已知问题）：`test_step2_engine_unified.py::test_a_manual_run_equals_the_runner[stardist_nuclei_dapi-roi]` 本侧失败一次、单独重跑通过；`test_seg_runner_engines.py::test_stardist_expansion_returns_the_nuclei_from_before_expanding` 本侧失败，HEAD 批量时通过、单独重跑同样失败（该模块不引用本块改动的任何文件）。
   - 真机：本块无界面，真机验收随 ④c。
 
-### 块 ④b — Step3 的 GPU 标签渲染（申请 v2，按独立审核修订，**用户 2026-09-26 批准**，实施中）
+### 块 ④b — Step3 的 GPU 标签渲染（申请 v2，按独立审核修订，**用户 2026-09-26 批准**；已实施，**自动验收通过**，真机随 ④c）
 - **必要性**：④a 已能按 viewer 的分块读出标签；要在 Step3 的整张图上画出 mask，须在 GPU 显示层加标签渲染（裁定 7、第 ④ 步裁定 2–4）。本块只交付「画得对、跟得上相机、资源有界」，不加任何界面；运行选择与控件是 ④c。
 - **只读调查结论**：
   - 画面的产生：`Step1GpuBinding._publish_current` 每次相机事件（跳转立即，拖动每 33 ms 一次，`BindingBudgets.motion_interval_ms`）调用 `Step1GpuLayer.submit`，后者把各通道合成进屏幕大小的 `final`（RGBA8）目标（`step1_gpu_layer.py:439-488`），`paintGL` 只把 `final` 拷到屏幕（`:586-598`）。所以 mask 必须在**同一次提交、同一个视野矩形**里画进去，否则拖动时 mask 会和图像错开；标签块晚到时又不能为此重算全部通道——需要「图像不动、只重画标签」的路径。
@@ -1284,6 +1285,20 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   4. 暂停（离开 Step3）时补生成金字塔：**停止、恢复后重来**（建议，与「不在屏幕上就不读」一致），还是作为例外继续？
   5. 标签纹理预算：(a) **上限改为 256 MB**，mask 与图像同一层级、精度一致（两种 mask 最坏约 250 MB；本机显存 6 GB，图像另有 512 MB）——建议；(b) 保持 64 MB，mask 改用「不细于屏幕」的层级（一个层级像素占 1–4 个屏幕像素，块数约为 (a) 的 1/16，缩小到切换点附近时轮廓会显得粗糙）；(c) 保持 64 MB 与同一层级，超额时按上面的顺序只画中心部分。
 - **用户裁定（2026-09-26，全部按建议）**：1 核画在细胞上面；2 线宽按逻辑像素；3 旧层级暂留、目标层级优先覆盖；4 暂停时补生成停止、恢复后重来；5 **标签纹理上限 256 MB**（mask 与图像同一层级），CPU 数组同额；超额顺序不变。
+- **执行记录**（2026-09-26，未提交）：
+  - `core/step3_masks.py`：`outline_reference` 的半径上限改为 8（`MAX_OUTLINE_RADIUS`），其余不变；`tests/test_step3_masks.py` 相应改一条、加一条（半径 8）。
+  - `ui/step1_gpu_layer.py`：构造参数 `labels=False` / `max_label_texture_bytes`（默认 256 MB，`LABEL_TEXTURE_BYTES`）；新数据类型 `LabelPlane` / `LabelLayer` / `LabelSnapshot` 与 `label_radius`（floor(线宽 × 设备像素比 + 0.5)，0–8）；`_LabelTextureLru`（R32UI，独立预算）；`labels=True` 时才有的两个目标 `ids`（R32UI）与 `shown`（RGBA8，挂 `final` 的同一个模板缓冲）、两个程序；`submit()` 末尾与 `set_labels()` 共用 `_compose_labels`（`final` → `shown`，每层先画编号图再画轮廓 / 填充，沿用上一次 `_finalize` 的矩形与多边形裁剪）；超预算的快照在保存之前就拒绝（否则之后每次图像提交都会失败）；`paintGL` 在有 mask 时显示 `shown`，否则照旧 `final`；测试用读回 `readback_shown_for_test` / `readback_label_ids_for_test`；`label_stats`。`labels=False` 时以上都不存在。
+  - `ui/shaders/step1_gpu_labels.frag`（新）：`PASS_LABEL_IDS`（按像素中心 `gl_FragCoord` 与图像同一换算取标签块的纹素，编号 0 照样写入）与 `PASS_LABEL_DRAW`（切比雪夫半径内有不同编号即轮廓；填充色为 lowbias32 散列，与 `fill_colour` 同式）。
+  - `ui/step3_label_binding.py`（新）：`Step3LabelBinding`，按申请实现（一个后台线程、先补生成再读块、可见块 + 一圈、中心优先、节奏同图像绑定、过期请求与迟到结果计数、目标层级最后画、旧层级只留仍在视野内的、预算淘汰顺序与提示、CPU 侧计入正在读与等待接收的结果、粗层无金字塔不请求并给原因、暂停取消补生成恢复重来、`dispose` 结束线程并等待）。默认显示设置：细胞绿色、核青色，透明度 0.75，线宽 1，轮廓。
+  - `ui/step1_viewer_mount.py`：`labels=False` 构造参数；GPU 后端启动后才建标签绑定（`_start_label_binding`，层级尺寸取自 provider、分块边长取自控制器的 grid），停止 GPU 后端时先释放它；`pause_requests` / `resume_requests` 转交；公开 `set_mask_sources` / `set_mask_style` / `mask_status`（无 GPU 时 `available=False`、「Masks need the GPU display」并在终端打印）；**换数据源时清空已设置的 mask 来源**（它们属于旧的数据源，由 ④c 重新设置）。
+  - `ui/main_window.py`：Step3 的 mount 构造加 `labels=True`，只此一处。
+  - **实施中查明的环境问题（advisory）**：本机 WSL 的 GPU（D3D12 转译，Mesa 23.2）上，只要本进程画过 mask（着色器真正读取纹理），**进程退出时约有一半概率段错误**——发生在全部测试通过、所有对象都已释放之后的解释器收尾阶段。排查：不读纹理的替身着色器（相同的 Python / GL 调用序列）从不出现；与 R32UI 无关（改 RGBA8 仍出现）；把 `texelFetch` 换成 `texture()`、关闭着色器缓存、`glFinish`、提前销毁 QApplication 都无效；`os._exit` 时不出现。判断为驱动在收尾时的缺陷，不在我们的调用序列里。另外，HEAD 自己的 `test_step1_gpu_roi_polygon_clip` / `test_step1_gpu_roi_clip` 在本机同一进程里建到约第 5 个 GL 上下文就中止（与本块无关，HEAD 上一样）。**对产品的影响**：在本机退出程序时可能报段错误（此时数据早已写完）；部署机（真正的 NVIDIA 驱动）是否出现须在真机验收时确认。本机跑真实 GL 测试的环境：`QT_QPA_PLATFORM=xcb PYOPENGL_PLATFORM=glx MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA`（不设最后一项时 WSLg 选 Intel 核显）。
+  - 测试：`tests/test_step3_label_render.py`（22 条，真实 GL 读回，本机 RTX 3060 经 D3D12）：编号图在设备像素比 1 / 1.5 / 2 下逐像素等于独立的 CPU 参考；后画的块连同编号 0 覆盖先画的；轮廓在 3 种设备像素比 × 线宽 0 / 1 / 2 / 4 下逐像素等于 `outline_reference`；填充色等于 `fill_colour`，透明度 0.5 混合误差 ≤ 1；核层在细胞层之上；凹多边形 ROI 外 mask 不上屏（只重画 mask 时同样）；只改 mask 不重新合成通道；`labels=True` 未设 mask 时画面与 `labels=False` 逐像素相同；预算超额被拒绝。`tests/test_step3_label_binding.py`（26 条，离屏，假控制器与假 GPU 层、真实线程与 `step3_masks`）：只读可见块 + 一圈、中心优先、读出等于 `read_label_tile`；相机移开丢弃队列并计数、迟到结果丢弃并计数；节流与停手补一次；放大 / 缩小时旧层级在目标层级之下（远的先画）；离开视野的块释放；无金字塔粗层不请求并给原因、第 0 级照读；缺金字塔先补生成再显示粗层；纯核方法只有核层；两层时核在后、改显示设置不读数据；暂停不请求、恢复补一次；暂停取消补生成（不留 `.partial`）、恢复后重来；`dispose` 结束线程并清空 mask；换源丢弃旧代次；预算：先丢外圈、再丢远处可见块并提示；线程持有量不超预算；GUI 未接收结果时线程停在预算处；屏幕半径的取整（9 组逻辑线宽 × 设备像素比，含封顶 8）。`tests/test_step3_label_mount.py`（3 条）：无 GPU 时不建标签绑定并给出原因；Step1 的 viewer 不画 mask；Step3 的 viewer 有标签绑定（层级与分块边长取自自身的栈）、mask 画出、暂停 / 恢复转交、换数据源后旧线程结束且 mask 来源清空、关闭后线程结束。
+  - 反向注入 15 处，各使至少 1 条变红：离屏 10 处（不读外圈、目标层级先画、无金字塔也请求粗层、暂停不取消补生成、超预算不丢外圈、迟到的无用结果被接收、核画在细胞下面、线程无视预算、远处先读，以及写死半径取整后的「忽略设备像素比」）；真实 GL 5 处（编号 0 当透明、轮廓半径少 1、不做多边形裁剪、填充散列常数改动、像素中心偏移半像素）。首轮「线程无视预算」「忽略设备像素比」两处未被抓到，分别补了「GUI 未接收结果时」与「半径取整」两类测试后抓到。
+  - 回归：与 `git archive HEAD`（`f91824d`）逐条对比，**无新增失败**。
+    - 离屏（每模块单独进程）26 个模块：Tissue Preview 契约、通道面板 / 工作台、标签金字塔、Navigator 权限、Step3 各模块、Step1 各 viewer / 相机 / 暂停 / 勾选模块、GPU 接管 / 数据供给 / 请求门 / 总览跳过、Step2 重映射集成等。两边相同：`test_global_channel_dock.py` 1 条（字体），`test_step1_montage_view.py` 第 27 条后崩溃。
+    - 真实 GL（本机，**每条测试单独进程**，避开驱动的上下文数限制）：Step1 的 8 个 GPU 模块共 150 条 + 本块 25 条。两边相同的唯一失败：`test_step1_gpu_takeover.py::test_the_mounted_widget_framebuffer_holds_real_gpu_pixels`（断言厂商名含「nvidia」，本机经 D3D12 显示为「Microsoft Corporation」，环境原因）。名字带空格的 7 条参数化用例另行单独补跑，两边都通过。
+  - 真机：本块用户看不到变化（没有人调用 `set_mask_sources`），真机验收随 ④c；届时一并确认上面的退出段错误在部署机上是否存在。
 
 ## 六、未决与 advisory
 

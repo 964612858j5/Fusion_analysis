@@ -1861,7 +1861,8 @@ class MainWindow(QMainWindow):
         is the slot's notice."""
         mount = self.__dict__.get("_step3_mount")
         if mount is None:
-            mount = Step1WholeSlideMount(self, parent=self, camera_reason="step3")
+            mount = Step1WholeSlideMount(self, parent=self, camera_reason="step3",
+                                         labels=True)
             mount.camera_sink = self._on_step3_camera
             self._step3_mount = mount
             # THE NAVIGATOR CLICK must not depend on Step1's viewer having

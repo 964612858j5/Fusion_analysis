@@ -544,15 +544,19 @@ def read_label_tile(source, level, tx, ty, tile_size, view_level_shapes):
 
 # ── display reference (block 4b's shaders are held to these) ─────────────
 
+MAX_OUTLINE_RADIUS = 8
+
 def outline_reference(ids, width):
     """Outline pixels of a SCREEN id image (one label per screen pixel): a
     pixel whose id is not 0 and whose (2*width+1)-square neighbourhood
     (Chebyshev distance <= width) holds a different id. Outside the image
-    counts as id 0, so a mask's edge is drawn. `width` 0..4; 0 draws none."""
+    counts as id 0, so a mask's edge is drawn. `width` is the SCREEN radius,
+    0..8 (a logical width 0..4 times the device pixel ratio, block 4b); 0
+    draws none."""
     ids = np.asarray(ids, dtype=np.uint32)
     width = int(width)
-    if not 0 <= width <= 4:
-        raise ValueError("width is 0..4")
+    if not 0 <= width <= MAX_OUTLINE_RADIUS:
+        raise ValueError(f"width is 0..{MAX_OUTLINE_RADIUS}")
     out = np.zeros(ids.shape, dtype=bool)
     if width == 0 or ids.size == 0:
         return out

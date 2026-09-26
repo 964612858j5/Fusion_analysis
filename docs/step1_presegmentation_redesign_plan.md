@@ -9,6 +9,8 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.39：块 2c-1 按独立审核修订为 v2（功能空档须用户接受；入口的写文件边界；Load weights 的表述与两种验收；Show all 保留 Step1 语义；模式同步在 2c-1 / 2c-2 的分工；用户指南只写当前可用功能；拒绝原因显示在可见页面）。
+- v3.38：块 2c 只读调查结论；2c 拆为 2c-1 / 2c-2；块 2c-1 申请（新 Step3 页面并删除旧页面）。
 - v3.37：块 2b 已实施并通过真机验收（真机验收步骤修正为只看 Step1 / Step3）。
 - v3.36：块 2b 按独立审核修订为 v2（明确接受旧 Step3 页面不跟随勾选的过渡限制；模式按钮切换的验收移到 2c；测试白名单封闭）。
 - v3.35：块 2b 申请（Step3 与 Step1 共用显示范围、fusion 草稿与 Navigator 上下文）。
@@ -1020,6 +1022,46 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 新测试 `tests/test_step3_shares_step1.py` 8 条：完整公开操作（Step3 里勾选 CD8 并把权重调到 0.6 → Step1 行与状态相同 → 会话被要求保存；已确认快照与哈希不变、Step2 勾选不变）；Step3 行 = Step1 行、Step2 行无权重；从 Step0 / Step1 / Step2 进入 Step3 不改草稿、不改勾选、不触发保存；Step0 → Step3 重新同步一次、Step3 → Step1 不重复、Step2 → Step3 再同步；Tissue Preview 在 Step3 为 STEP1 上下文、勾选使绿色通道出现、调低权重使其变暗；进入 Step3 沿用 Step1 的 Fusion 模式。反向注入主窗口 4 处改动（上下文、范围、重新同步条件、通道面板步骤），分别使 2 / 5 / 1 / 3 条变红。
   - 回归：46 个模块（步骤切换、显示范围、通道面板、Tissue Preview、会话、Step1 viewer 等），与 `git archive HEAD`（`e13be53`）逐条对比，除上述授权修改的一条外**无新增失败**；两边相同：`test_global_channel_dock.py::test_the_step0_panel_looks_like_the_baseline_panel`、`test_step1_channel_panel.py::test_the_weight_row_and_the_buttons_kept_their_look`（本机字体差异）。
   - **真机验收通过（用户 2026-09-26）**：按上面只看 Step1 / Step3 的 6 步。
+
+### 块 2c 只读调查（2026-09-26）
+- **旧页面的依赖**：生产代码里只有 `ui/main_window.py` 引用旧页面：构造（`:1484`，无参数；构造时会读 `step3_input_files.json`）、`set_display_services`、`go_back`（保留）、`go_step4`（从未发出）、页面栈固定在第 3 格（`setCurrentIndex(3)`）、`set_channel_context` / `set_output_dir`（`_go_to_step3` 与 `_on_step2_complete`）、`_stop_loaders`（鸭子类型）、`channels_host()`（**新页面必须保留，且与 Step1 的宿主是不同的控件**）。`_skip_to_step3` 无调用者。Step4 从 Step3 得不到任何东西：`step3_output` 只是 `step2_output` 的拷贝，`is_sequential_flow` 从不为真。`ChannelWorkbench` 另由 Step0 与 Step1.5 使用，删除 Step3 的标签页不会连带坏掉别的功能（Step1.5 才是正式的 remap 保存路径）。两个配置文件只有旧页面自己读写。`utils/mask_renderer.py` 与 `utils/roi_project.py` 仍被别处使用，不会变成死代码。
+- **新页面的做法**：Step1 左栏的 Channels 框、Show all、Intensity 的样式都取自 Step0 的控件与主窗口里的模块级辅助函数。**不能再建第二个 ConfigPanel**：它构造时会用空列表重建共用的通道面板，清掉所有行。Reset / Load weights 改为两个普通按钮，调用现有 `self.config.zero_marker_weights()` 与 Load weights 的流程（`load_weights_from_step1_session`）。Overlay / Fusion 的 `set_preview_mode` 会无条件同步 Step1 的两个按钮，Step3 的一对按钮要加在同一处。共用列宽：把 Step3 的分隔条加进 `_channel_column_splitters`，并把 `_wire_channel_column_sync` 的唯一调用移到 Step3 构造之后。
+- **第二个 viewer 要接线的地方**：构造（照 `_step1_whole_slide()`，`install` 必须给一个占位控件）；步骤切换（Step1 离开时由 `deactivate()` 改为 `pause_requests()`，进入时先 `sync_source` 再 `resume_requests()`；Step3 同样）；相机（`_on_step3_camera`，`_capture_camera_of` / `_apply_shared_camera_to` 加 Step3，`(0, 1)` 的门槛改为 `(0, 1, 3)`）；Tissue Preview 点击改为按当前步骤路由；handoff 重绑；换数据集时关闭；关窗时释放。两个常驻 GPU 实例约各占 512 MiB 显存纹理上限。
+- **进入 Step3 的数据前提**：viewer 需要 `loader.filepath`、校正决定、ROI 等，只有 Step0 Save、进入 Step1 时自动读取 handoff、或加载会话时才会填上。重启后没做这些就直接进 Step3，viewer 打不开，也没有退路。所以 Step3 的入口要沿用 Step1 的检查与自动读取，不满足时提示并留在原处。
+- **已有的小问题（advisory，不在 2c 处理）**：`set_preview_mode(..., reconcile=False)`（会话恢复、Load weights）不会把模式交给 viewer；换数据集时 `_step1_preview_mode` 被重置，按钮却不跟着变。
+
+### 块 2c-1 — 新 Step3 页面（左栏 + 右栏框架）并删除旧页面（申请 v2，按独立审核修订，**用户 2026-09-26 批准**，功能空档已接受）
+- **范围**：2c 拆成两块。2c-1 做页面、删除旧页面，并完成**两页的 Overlay / Fusion 按钮、共享模式与 Tissue Preview 的模式同步**；viewer 位置先放占位提示。2c-2 接入第二个 viewer（生命周期、相机、Tissue Preview 点击路由），并把**第二个 viewer 接到这个共享模式**。
+- **功能空档（须用户明确接受）**：2c-1 删除旧页面后、2c-2 完成前，Step3 右栏只有占位提示，**没有任何图像**（旧页面的缩略图与放大视图已删，第二个 viewer 尚未接入）。2c-1 不是完整的 Step3 交付。
+- **做法**：
+  - 重写 `ui/step3_page.py`（类名仍为 `Step3Page`，页面栈仍在第 3 格）。页面只负责摆放，所有动作由主窗口注入，页面自己不读写任何文件：
+    - 左栏：`Channels` 框（与 Step1 相同的样式）；Show all / Intensity 一行（Show all 直接复用 Step1 的行为 `dock.set_all_visible`：对每个允许批量切换的 marker 行执行勾选命令，显示并参与 fusion，没有权重答案的按既有规则处理；核通道不允许批量切换，保持原状态；不新增规则。Intensity 调 `_show_intensity_window`）；Reset weights / Load weights 一行（调 `self.config.zero_marker_weights()` 与 Load weights 流程，对话框父窗口为 Step3）；`channels_host()` 给出通道面板的挂载位置。
+    - 右栏：一行 Overlay / Fusion 按钮（与 Step1 相同的样式），点击调 `set_preview_mode`；下方是 viewer 的位置（2c-1 先放一个占位提示，2c-2 由第二个 viewer 接管）。
+    - 底部：`← Back to Step 2`（保留 `go_back`）。
+    - `channel_column_splitter()`：左右分隔条，加入共用列宽。
+  - `ui/main_window.py`：
+    - 构造新页面、注入动作与样式来源；删除 `set_display_services`、`go_step4` 的接线。
+    - `set_preview_mode` 同步 Step3 的一对按钮（与 Step1 的两个按钮一样无条件 `setChecked`）。
+    - `_go_to_step3`：去掉 `set_channel_context` / `set_output_dir`；记下 Step2 传来的运行目录（给第 ④ 步选 mask 用，2c-1 不使用）；**沿用 Step1 的入口检查**（几何保存未完成时等待、handoff 已绑定但未读取时自动读取），不满足时留在原处，**拒绝原因以对话框显示在当前可见的页面上**（不写到 Step1 隐藏页面的状态文字里）。
+    - 写文件的边界：上下文已就绪时，单纯切换到 Step3 **不触发**会话保存；需要自动读取 handoff 时，**沿用现有读取流程及其会话保存副作用**（`_load_step0_roi_result` 会安排一次会话保存，`main_window.py:2941`），不为此改造读取流程。
+    - 删除 `_on_step2_complete` 里对旧页面的调用、`_go_to_step2` / `_go_to_step4` 里的 `_stop_loaders` 分支、无调用者的 `_skip_to_step3`。
+    - `_channel_column_splitters` 加入 Step3 的分隔条；`_wire_channel_column_sync` 的唯一调用移到 Step3 构造之后。
+  - 删除：旧页面的全部内容（缩略图、矩形、patch 放大视图、Channel Overlay 面板、`Channel Remap Review / QC` 标签页、隐藏的开发者路径覆盖）；不再读写 `step3_input_files.json` 与 `step3_channel_overlay_config.json`（已存在的旧文件不删）。
+  - 文档：`docs/user_guide.md` 与 `docs/用户指南.md` 的 Step3 一节只描述当前可用的功能：左栏通道与权重、模式按钮；**右栏暂为占位，整张图浏览待 2c-2，mask 待第 ④ 步**；去掉「在缩略图上框一小块」的描述与对应截图占位。`UI_SURFACE_RULES.md` 加一条 Step3 页面的描述。
+- **白名单**：`ui/step3_page.py`（重写）；`ui/main_window.py`（上述各处）；`UI_SURFACE_RULES.md`；`docs/user_guide.md`、`docs/用户指南.md`（Step3 一节）；测试：删除或改写只测旧页面功能的测试——`tests/test_channel_workbench.py` 中构造 `Step3Page` 的 15 条、`tests/test_global_channel_dock.py` 的 `test_step3_marker_rows_carry_no_public_controls` 与 `test_step3_reads_the_shared_visibility_and_colour`、`tests/test_step0_step1_display_isolation.py::test_step3_does_not_follow_step0_or_step1_ticks`、`tests/test_step1_step2_handoff_e2e.py::test_step3_finds_the_raw_slide_in_the_session`（其保护的 `raw_ome_path` 会话字段只有旧页面读取；会话照常写入该字段，不改）；新测试 `tests/test_step3_page.py`；本文档。其他测试失败须停下说明。
+- **不改的范围**：`ChannelWorkbench` 模块本身（Step0、Step1.5 继续使用，其中提到 Step3 的按钮文字与提示另记 advisory）；`utils/mask_renderer.py`；viewer、mount、GPU 代码；Step1 页面；Step2、Step4；显示范围与通道面板（2b 已定）。
+- **风险**：删除约 3700 行旧代码；从 Step2 的完成对话框进入 Step3 时若上下文不满足会被拦下（按 Step1 的规则）；2c-1 与 2c-2 之间 Step3 右栏只有占位提示，没有图像。回退：恢复旧 `ui/step3_page.py` 与主窗口相关各处。
+- **验收门**：
+  - 新页面：左栏有 Channels 框、Show all / Intensity、Reset / Load weights 与通道面板（Step1 的行，带权重），右栏有 Overlay / Fusion 与 viewer 占位；样式与 Step1 相同的控件取自同一来源。
+  - Show all：marker 显示并参与 fusion（没有权重答案的按既有规则处理），核通道不被批量操作改变；再点一次取消。与 Step1 的 Show all 行为相同。
+  - Reset weights 把 marker 权重清零，Step1 同步；已确认快照不变。
+  - Load weights：加载动作不直接改写来源文件，当前会话仍按既有机制自动保存。分别验收：选**历史会话文件**时，来源文件内容不变、共用草稿变为该文件的权重、Step1 同步；选**当前的 `step1_session.json`** 时，草稿恢复为其中的权重，之后按既有机制被自动保存改写（预期）；两种情况下已确认快照都不变。
+  - Step3 的 Overlay / Fusion 与 Step1 的按钮始终一致：在 Step3 点 Fusion，Step1 的按钮与 Tissue Preview 都是 Fusion，反之亦然。
+  - 共用列宽：拖动 Step0、Step1、Step2、Step3 任一分隔条，四页一起动。
+  - 进入 Step3：上下文已就绪时正常进入，且单纯切换不触发会话保存；handoff 已绑定未读取时自动读取（允许其既有的会话保存）；不满足时留在原处，拒绝原因以对话框显示在当前可见页面上。
+  - `_channels_host_for(3)` 与 Step1 的宿主不同，通道面板在四页之间移动（现有测试 `test_the_one_panel_moves_between_the_steps_hosts`）。
+  - 回归与 HEAD 逐条对比，除上述列出的测试外无新增失败。
+  - 真机（用户）：Step3 的外观与 Step1 的左栏、模式按钮一致；上述操作正常；在 Step3 切换模式时 Step1 的按钮与 Tissue Preview 同步；右栏暂为占位提示（功能空档，已接受）。
 
 ## 六、未决与 advisory
 

@@ -138,9 +138,17 @@ class Step1WholeSlideMount(QtCore.QObject):
     """The whole-slide viewer's life inside Step1's Viewer tab."""
 
     def __init__(self, window, host=None, parent=None, *, gpu=True,
-                 gpu_layer_factory=None):
+                 gpu_layer_factory=None, camera_reason="step1"):
         super().__init__(parent)
         self._window = window
+        #: The prefix of the reasons this viewer publishes its camera with
+        #: ("step1", "step1-patch", ...); a second viewer names itself.
+        self._camera_reason = str(camera_reason)
+        #: Block 2a: paused, this viewer asks for nothing -- no read, no
+        #: composition, no rectangle on the shared navigator. A mode or a
+        #: source that changes meanwhile is recorded and taken up on resume.
+        self._paused = False
+        self._source_pending = None
         #: Whether this mount may take the GPU path at all, and how its
         #: layer is built. Constructor seams, not a user control: the
         #: product leaves both alone, and a test uses them to exercise the
@@ -792,10 +800,65 @@ class Step1WholeSlideMount(QtCore.QObject):
         self._active = False
         return True
 
+    # ── not on screen: ask for nothing (block 2a) ─────────────────────
+    @property
+    def paused(self):
+        return self._paused
+
+    def pause_requests(self):
+        """Stop every read this viewer would issue. Idempotent.
+
+        `deactivate()` lets the owners go (no draft, colour, Intensity or
+        tick reaches a composition); on top of it the GPU binding stops
+        following the camera and plans nothing, and on the CPU path the
+        controller's own camera reads are switched off. Reads already under
+        way may land and are kept; none of them starts a next round.
+        """
+        if self._paused:
+            return False
+        self.deactivate()
+        self._paused = True
+        if self.gpu_binding is not None:
+            self.gpu_binding.pause()
+        elif self.host.stack is not None:
+            self._set_controller_viewport_requests(
+                getattr(self.host.stack, "controller", None), False)
+        return True
+
+    def resume_requests(self):
+        """Ask again, from the state as it now reads. Idempotent.
+
+        A source that moved while paused is rebuilt first; the mode chosen
+        meanwhile reaches the CPU composition; then the camera reads come
+        back on and `activate()` follows the owners and refreshes once.
+        """
+        if not self._paused:
+            return False
+        self._paused = False
+        if self._source_pending is not None:
+            reason, self._source_pending = self._source_pending, None
+            self.source_changed(reason)
+        if self.gpu_binding is not None:
+            self.gpu_binding.resume()
+        else:
+            if self.compose is not None:
+                self.compose.set_mode(self._mode)
+            if self.host.stack is not None:
+                self._set_controller_viewport_requests(
+                    getattr(self.host.stack, "controller", None), True)
+        self.activate()
+        return True
+
     # ── the two pictures ──────────────────────────────────────────────
     def set_mode(self, mode):
         """The existing Overlay / Fusion buttons, through the one binding."""
         mode = _compose_mode(mode)
+        if self._paused:
+            # Recorded only: the picture is composed when this viewer is
+            # looked at again (`resume_requests`).
+            changed = mode != self._mode
+            self._mode = mode
+            return changed
         if self.gpu_binding is not None:
             if mode == self._mode:
                 return False
@@ -818,6 +881,10 @@ class Step1WholeSlideMount(QtCore.QObject):
         picture of the OLD source -- and a new generation composes the new
         one.
         """
+        if self._paused:
+            # A rebuild reads (a new controller, its overview); it waits.
+            self._source_pending = reason
+            return None
         if self.gpu_binding is not None or self.gpu_layer is not None:
             return self._gpu_source_changed(reason)
         stack = self.viewer.open()
@@ -972,8 +1039,12 @@ class Step1WholeSlideMount(QtCore.QObject):
 
         The rectangle only: no frame is asked for, no pixels are read, and
         nothing is added to the popup. It is the same `set_current_view_rect`
-        Step0 draws its own viewport with, and the step on screen owns it.
+        Step0 draws its own viewport with, and the step on screen owns it:
+        a viewer that is not active, or is paused, publishes nothing
+        (block 2a) -- a hidden one resizing must not move the rectangle.
         """
+        if not self._active or self._paused:
+            return False
         popup = self._navigator()
         overview = getattr(popup, "overview", None)
         if overview is None:
@@ -1015,27 +1086,27 @@ class Step1WholeSlideMount(QtCore.QObject):
     def _on_range_changed(self, *_args):
         """The camera moved -- by hand, by a jump, by a rebuild."""
         self.publish_view_rect()
-        self.publish_camera("step1")
+        self.publish_camera(self._camera_reason)
 
     # ── navigation: the same two gestures, the same camera ────────────
     def show_patch(self, bbox):
         moved = self.viewer.show_patch(bbox)
         self._recompose_for_the_camera()
         self.publish_view_rect()
-        self.publish_camera("step1-patch")
+        self.publish_camera(f"{self._camera_reason}-patch")
         return moved
 
     def jump_to_point(self, y, x, size):
         moved = self.viewer.jump_to_point(y, x, size)
         self._recompose_for_the_camera()
         self.publish_view_rect()
-        self.publish_camera("step1-preview")
+        self.publish_camera(f"{self._camera_reason}-preview")
         return moved
 
     def _on_gesture_quiet(self, _snapshot):
         self._recompose_for_the_camera()
         self.publish_view_rect()
-        self.publish_camera("step1-gesture")
+        self.publish_camera(f"{self._camera_reason}-gesture")
 
     def _recompose_for_the_camera(self):
         """The camera moved; the draft did not.
@@ -1043,7 +1114,7 @@ class Step1WholeSlideMount(QtCore.QObject):
         No new generation: what is already composed is still the right
         picture, and the tiles that came into view are the only new work.
         """
-        if self.compose is None or not self._active:
+        if self.compose is None or not self._active or self._paused:
             return 0
         composed = self.compose.recompose()
         self._refresh_notice()

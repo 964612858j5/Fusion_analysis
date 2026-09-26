@@ -9,6 +9,7 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.34：块 2a 已实施并通过真机验收。
 - v3.33：块 2a v3（暂停期间模式切换只记录）；Load / Reset weights 措辞改正；全局联动范围写明为 Step1 ↔ Step3；删除旧方案残留；2b / 2c 待办（模式同步、界面规则精确替换、完整公开操作验收）。
 - v3.32：用户改定勾选、权重等全部与 Step1 全局联动（方案 A 作废）；块 2a 按独立审核修订为 v2（只做暂停 / 恢复、前台发布、相机标识）。
 - v3.31：Step3 骨架调查结论与用户裁定（Intensity 与颜色全局联动、方案 A 的 Step3 fusion 草稿、Reset / Load weights 只读、Navigator 实时联动、拆成 2a / 2b / 2c）；块 2a 申请。
@@ -953,7 +954,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 回归：Step2 相关 19 个模块（轻量 4 并行，真实引擎 3 个逐个顺序），与 `git archive HEAD`（`4b33999`）逐条对比**无新增失败**；两边相同：`test_hq_marker_segmentation.py` 2 条（HQ 不维护）；HEAD 一侧偶发 StarDist ROI 等价 1 条（已知的 StarDist 偶发不一致）。
   - **真机验收通过（用户 2026-09-26）**：`test1` 上一次 Cellpose whole-cell 全图运行生成 `label_pyramid_Full WSI.zarr`（2.1 MB，mask 16 MB），`read` 正常，两级形状与原始切片一致，三处 meta 都有路径，无临时目录残留，生成 0.61 s（整次 857 s）。
 
-### 块 2a — viewer 的暂停 / 恢复与前台发布（申请 v3，按两轮独立审核与用户改定修订，**用户 2026-09-26 批准**）
+### 块 2a — viewer 的暂停 / 恢复与前台发布（申请 v3，按两轮独立审核与用户改定修订，用户 2026-09-26 批准；已实施，**真机验收通过**）
 - **必要性**：Step3 用第二个 viewer 实例，与 Step1 的实例交替进入后台；后台实例必须不读数据、不改写共享的 Navigator。现在 `deactivate()` 不停读取（GPU 绑定仍连着控制器的 `interaction_event` / `gesture_quiet`，`step1_gpu_binding.py:323-327`；粗层完成的回调会接着申请精层，`:709-720`；`refresh_display()` 可能为新勾选的通道申请读取，`:211`；CPU 路径下合成协调器直接向调度器取数据，控制器的开关只停控制器自己的读取，`viewer/explore_view.py:3654-3672`），`publish_view_rect`（`step1_viewer_mount.py:970`）也不查前台。
 - **v1 → v2**：用户改定为 Step3 与 Step1 共用显示范围、fusion 草稿与数据来源，v1 的 `scope` / `domain` / `source` 参数用不上，**不做**；暂停方案按独立审核补齐。
 - **暂停语义**：不再派发任何新的读取请求；已开始的读取允许完成，但完成回调不得启动下一轮读取；不强行中断底层 I/O，不改调度器。重复暂停 / 恢复幂等，不重复连接。
@@ -974,6 +975,13 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 暂停期间切换 Overlay / Fusion 不新增请求（两条路径），恢复后显示最新模式。
   - 未激活或暂停时 `publish_view_rect` 不发布；`camera_reason` 默认值下相机标识与现在逐字相同，传入前缀时按前缀生成。
   - 真机（用户）：Step1 画面、Overlay / Fusion、Intensity、拖动缩放、patch 空降与现在一样；GPU 路径以真机结果为准。
+- **执行记录**（2026-09-26，未提交）：
+  - `ui/step1_gpu_binding.py`：暂停标志；`pause()`（停计时器、断开控制器两个事件）/ `resume()`（重连；暂停期间来源变过则先 `source_changed()`，否则为缺粗层的已画通道启动粗层，并对当前视野重新规划所有已画通道的精层——一次恢复刷新入口）/ `paused`；`source_changed`（暂停时只记下）、`update_viewport`、`refresh_display`、`_start_coarse_channel`、`_plan_fine_for_channel` 在暂停时不派发；粗层完成的回调在暂停时不接着规划精层（已到达的结果照常收下）。
+  - `ui/step1_viewer_mount.py`：`camera_reason="step1"` 构造参数（默认值下标识与原来逐字相同）；`pause_requests()`（先 `deactivate()`，再暂停 GPU 绑定，或在 CPU 路径关闭控制器的视野请求）/ `resume_requests()`（先处理暂停期间的来源变化，GPU 绑定恢复或 CPU 路径把最新模式交给合成并打开视野请求，再 `activate()`）/ `paused`；`set_mode` 暂停时只记录；`_recompose_for_the_camera` 暂停时不合成；`publish_view_rect` 只在激活且未暂停时发布。
+  - **申请之外的必要覆盖**：`source_changed` 在暂停时只记下原因、恢复时再重建（重建读取栈时新控制器会读总览，GPU 路径还会新建一个未暂停的绑定——不覆盖就无法兑现「暂停期间不发新请求」）。与审核要求覆盖模式切换同理，未扩大到别的文件。
+  - 测试 `tests/test_viewer_pause.py` 12 条：GPU 绑定——暂停后相机事件（平移、Navigator 空降、手势结束）与 `update_viewport` 不产生请求；**粗层读取未完成时暂停、结果随后到达，粗层照常收下且不派发精层请求**；暂停期间勾选新通道、改颜色 / Intensity / 权重不产生请求；重复暂停 / 恢复不重复连接（按信号接收者计数）；恢复后为新通道启动粗层、为新视野只请求缺失的精层、全部到达后画面包含两个通道；暂停期间来源变化在恢复时被接手。mount（CPU 路径，沿用 `test_step1_viewer_mount.py` 的仿真窗口与合成金字塔）——暂停后移动相机、改草稿、改颜色 / 勾选 / Intensity、切换模式、patch 空降，合成代数与读取数都不变；恢复后以 Fusion 模式重新合成且像素等于参考值；暂停期间的来源变化在恢复时才重建；只有激活且未暂停的实例发布 Navigator 视野框；相机标识带构造时的前缀（默认 `step1`，传入 `step3` 时为 `step3-patch` 等）。反向注入：去掉暂停期间模式切换只记录、去掉视野框的前台判断，各有 1 条变红；粗层回调与 `_plan_fine_for_channel` 两道判断同时去掉时，粗层那条变红（只去其一会被另一道挡住）。
+  - 回归：27 个模块（Step1 viewer 挂载 / 绑定 / host / 退出门、GPU takeover / request gate / overview skip / sources / ROI 裁切、共享相机、Navigator、patch 选择、Tissue Preview 契约、Step0 对比视图等），与 `git archive HEAD`（`d1f3f36`）逐条对比**无新增失败**。两边相同：`test_tissue_navigator_viewport_sync.py::test_mapping_slide_local_to_full`；`test_step1_montage_view.py` 第 27 条后 Qt 中止；5 个 GPU 模块不收集测试；`test_step1_gpu_takeover.py` 34 条因无真实 OpenGL 跳过。只在 HEAD 一侧出现 `test_step0_compare_tiles.py::test_a_pan_during_a_pending_switch_replans_for_the_new_viewport`（负载下偶发）。
+  - **真机验收通过（用户 2026-09-26）**：Step1 画面、Overlay / Fusion、Intensity、拖动缩放、patch 与 Navigator 空降、步骤往返与改动前一样（含 GPU 路径）。
 
 ## 六、未决与 advisory
 

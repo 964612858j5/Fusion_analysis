@@ -118,6 +118,12 @@ class Step1GpuBinding(QtCore.QObject):
         self.budgets = budgets
         self._dispose_layer = bool(dispose_layer)
         self._disposed = False
+        #: Block 2a: a viewer that is not on screen asks for nothing. While
+        #: paused no new read is issued; a read already under way may land
+        #: and is kept, but it starts no next round. A source replacement
+        #: that arrives meanwhile waits for `resume()`.
+        self._paused = False
+        self._source_pending = False
         self._revision = 0
         self._source = None
         self._serial = 0
@@ -173,6 +179,9 @@ class Step1GpuBinding(QtCore.QObject):
         """Explicit owner lifecycle fence after a public source replacement."""
         if self._disposed:
             return
+        if self._paused:
+            self._source_pending = True
+            return
         self._cancel_all()
         self._revision += 1
         self._fine_epoch = 0
@@ -197,6 +206,8 @@ class Step1GpuBinding(QtCore.QObject):
         """Immediately plan the public current viewport; never waits for quiet."""
         if self._disposed or self._source is None:
             return
+        if self._paused:
+            return
         snapshot = self.controller.snapshot() if snapshot is None else snapshot
         if snapshot.source != self._source:
             # An owner must call source_changed() after rebinding.  Do not
@@ -219,6 +230,8 @@ class Step1GpuBinding(QtCore.QObject):
         and therefore still reads nothing and asks for nothing.
         """
         if self._disposed or self._source is None:
+            return
+        if self._paused:
             return
         active = self._active_channels(self._build_display_snapshot())
         previous = self._active_fine_channels
@@ -258,6 +271,51 @@ class Step1GpuBinding(QtCore.QObject):
                 self._generations.discard(plan.generation)
         self._fine_budget_refused &= wanted
         return released
+
+    def pause(self) -> bool:
+        """Block 2a: stop asking. Idempotent.
+
+        The controller's camera events are let go and the motion timer is
+        stopped; every planning entry refuses while paused. Reads already
+        issued may still land -- they are kept -- but none of them starts a
+        next round (a coarse that completes does not plan its fine)."""
+        if self._disposed or self._paused:
+            return False
+        self._paused = True
+        self._motion_timer.stop()
+        self._disconnect_controller()
+        return True
+
+    def resume(self) -> bool:
+        """Block 2a: follow the camera again and catch up once. Idempotent.
+
+        ONE refresh entry, from the state as it now reads: a source that
+        moved while paused is taken up first; otherwise every drawn channel
+        without coarse starts it, and the current viewport is planned
+        afresh for every drawn channel -- whatever is missing is asked for,
+        whatever is resident stays."""
+        if self._disposed or not self._paused:
+            return False
+        self._paused = False
+        self._connect_controller()
+        if self._source_pending:
+            self._source_pending = False
+            self.source_changed()
+            return True
+        if self._source is None:
+            return True
+        active = self._active_channels(self._build_display_snapshot())
+        self._release_inactive_fine(active)
+        for channel in active:
+            if channel not in self._coarse and channel not in self._unavailable:
+                self._start_coarse_channel(channel)
+        self._consumed_viewport = None
+        self.update_viewport()
+        return True
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
 
     def dispose(self) -> Dict[str, Any]:
         if self._disposed:
@@ -403,7 +461,7 @@ class Step1GpuBinding(QtCore.QObject):
             self._start_coarse_channel(channel)
 
     def _start_coarse_channel(self, channel: str) -> None:
-        if self._disposed or channel in self._coarse or channel in self._unavailable:
+        if self._disposed or self._paused or channel in self._coarse or channel in self._unavailable:
             return
         source_kind = self.provider.source_table.source_of(channel)
         if source_kind == "missing":
@@ -483,7 +541,7 @@ class Step1GpuBinding(QtCore.QObject):
         neighbour -- or a new channel's coarse landing -- cannot restart a
         load that is already half done.
         """
-        if self._disposed or self._source is None:
+        if self._disposed or self._source is None or self._paused:
             return 0, 0
         if channel in self._unavailable:
             self._published_fine.pop(channel, None)
@@ -710,7 +768,7 @@ class Step1GpuBinding(QtCore.QObject):
             self._published_coarse[channel] = tuple(
                 plan.planes[item] for item in sorted(plan.expected, key=self._key_order))
             self._coarse[channel] = plan
-            if self._latest_snapshot is not None:
+            if self._latest_snapshot is not None and not self._paused:
                 # Only this channel's fine starts here. Another channel's
                 # load is already under way and must not be restarted.
                 kept, asked = self._plan_fine_for_channel(

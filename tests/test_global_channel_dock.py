@@ -185,50 +185,6 @@ def test_the_retired_per_step_channel_lists_are_gone(app):
     assert ChannelLayerList is not None and ChannelWorkbench is not None
 
 
-def test_step3_marker_rows_carry_no_public_controls(app):
-    w = _window(app)
-    try:
-        step3 = w._step3
-        step3._available_channels = ["CD3", "CD8"]
-        step3._channel_sources = {"CD3": "raw", "CD8": "raw"}
-        for ch in step3._available_channels:
-            step3._channel_settings.setdefault(
-                ch, step3._default_channel_settings(ch))
-        step3._rebuild_channel_panel()
-        for ch in ("CD3", "CD8"):
-            row = step3._channel_rows[ch]
-            # display visibility and colour are public and edited in the dock
-            assert "checkbox" not in row, ch
-            assert "color_btn" not in row, ch
-            # ...while the page keeps its own overlay control
-            assert "opacity" in row, ch
-        # the page's own layers are not channels and keep their controls
-        assert "checkbox" in step3._channel_rows["__layer_dapi__"]
-        assert "checkbox" in step3._channel_rows["__layer_fusion__"]
-    finally:
-        _close(w)
-
-
-def test_step3_reads_the_shared_visibility_and_colour(app):
-    w = _window(app)
-    try:
-        step3 = w._step3
-        step3._available_channels = ["CD3", "CD8"]
-        step3._channel_sources = {"CD3": "raw", "CD8": "raw"}
-        for ch in step3._available_channels:
-            step3._channel_settings.setdefault(
-                ch, step3._default_channel_settings(ch))
-        state = w._display.state
-        state.set_display_visible("CD3", True, origin="test")
-        state.set_color("CD3", "#123456", origin="test")
-        assert step3._marker_visible("CD3") is True
-        assert step3._marker_color("CD3").lower() == "#123456"
-        state.set_display_visible("CD3", False, origin="test")
-        assert step3._marker_visible("CD3") is False
-    finally:
-        _close(w)
-
-
 # ── C. the user's place in the list survives the walk ───────────────────────
 
 def test_search_scroll_selection_and_focus_survive_the_walk(app):

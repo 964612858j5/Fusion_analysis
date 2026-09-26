@@ -224,6 +224,17 @@ row, and the duplicate Tissue Preview button in the step bar.
   left-column mechanism so its hidden peer splitter stays at the same width.
 * **Step2 rows** -- tick, swatch, name. Nothing else. **Step3 rows** are
   Step1's rows (block 2b): tick (the fusion command), swatch, name, weight.
+* **Step3's page** (block 2c-1, user ruling 2026-09-26) -- Step1's layout
+  and look, the channel panel and the viewer only: the title bar with
+  `Tissue Navigator`; LEFT, the `Fusion` tab with Step1's `Channels` frame --
+  `Show all` (Step1's sweep) and `Intensity…`, the rule, `Reset weights` and
+  `Load weights`, then the one dock with Step1's rows, in a host of Step3's
+  own; RIGHT, the `Viewer` tab with the `Overlay` / `Fusion` pair (the SAME
+  mode as Step1's pair) over the viewer slot, which shows a notice until the
+  whole-slide viewer is connected (block 2c-2); `← Back to Step 2` below.
+  No Save, no pre-segmentation, no patch strip (a later block), no mask yet.
+  The column joins the one channel-column share. A refusal to open Step3 is
+  said in a (non-modal) dialog on the page the user is on.
 * **Step2's page** (block L2, user ruling 2026-09-25) -- TWO columns: the
   parameter panel on the LEFT, as wide as Step0's and Step1's channel column
   (the same one share: dragging any of the three handles moves all three),

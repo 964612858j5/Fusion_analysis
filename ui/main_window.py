@@ -1476,20 +1476,20 @@ class MainWindow(QMainWindow):
         self._step2.segmentation_done.connect(self._on_step2_complete)
         self._step2.open_qc_requested.connect(self._go_to_step3)
         self._stack.addWidget(self._step2)
-        # ONE share, three places to grab it (Step0, Step1, and Step2's
-        # controls column, block L2): a drag on any page writes the shared
-        # share and the others follow. Wired once Step2 exists.
-        self._wire_channel_column_sync()
 
+        # Step3 (block 2c-1, user ruling 2026-09-26): a simplified Step1 --
+        # the Channels frame and the viewer slot -- built from Step1's own
+        # controls and style sources. It shares Step1's ticks, weights, draft
+        # and mode (block 2b), so every control here is a Step1 action.
         self._step3 = Step3Page()
-        # Step3 CONSUMES the public display answers -- which markers are
-        # drawn, and in what colour -- and edits them in the one public
-        # channel dock like every other step. Its own overlay controls
-        # (result, opacity, Auto, DAPI/Fusion layers) stay on the page.
-        self._step3.set_display_services(self._display)
+        self._build_step3_page(self._step3)
         self._step3.go_back.connect(self._go_to_step2)
-        self._step3.go_step4.connect(self._go_to_step4)
         self._stack.addWidget(self._step3)
+        # ONE share, four places to grab it (Step0, Step1, Step2's controls
+        # column, block L2, and Step3's column, block 2c-1): a drag on any
+        # page writes the shared share and the others follow. Wired ONCE,
+        # after the last of them exists.
+        self._wire_channel_column_sync()
 
         self._step4 = Step4Page()
         self._step4.go_back.connect(self._go_to_step3)
@@ -1562,13 +1562,107 @@ class MainWindow(QMainWindow):
     #: 1280/1600/1920/2560). A fallback only; a real measurement replaces it.
     _CHANNEL_COLUMN_FRACTION_FALLBACK = 0.278
 
+    # ── Step3 (block 2c-1) ────────────────────────────────────────────
+    def _build_step3_page(self, page):
+        """Step1's controls, built from Step1's style sources, handed to the
+        Step3 page to lay out. Each one is the Step1 action: Step3 shares
+        Step1's scope, draft and mode (block 2b)."""
+        title_bar = _HeightTwinBar(self._step0._file_bar)
+        title_row = QHBoxLayout(title_bar)
+        title_row.setContentsMargins(8, 4, 8, 4)
+        title_row.addWidget(self._make_label("Step 3 — QC Viewer", bold=True))
+        title_row.addStretch()
+        nav = QPushButton("Tissue Navigator")
+        nav.setToolTip(self._btn_step1_tissue_nav.toolTip())
+        nav.setStyleSheet(self._step0._btn_tissue_nav.styleSheet())
+        nav.clicked.connect(self._show_tissue_navigator)
+        title_row.addWidget(nav)
+        self._btn_step3_tissue_nav = nav
+
+        # The header row: Step1's `Show all` (the dock's own sweep, which
+        # puts each bulk-toggleable marker through the tick command and
+        # leaves the nucleus alone) and Step1's `Intensity…`.
+        show_all = _WidthMatchedCheckBox("Show all", self._step0._method_all)
+        show_all.setStyleSheet(self._step0._cb_all.styleSheet())
+        show_all.setToolTip(self._step1_cb_all.toolTip())
+        show_all.toggled.connect(
+            lambda on: self._channel_dock.set_all_visible(bool(on)))
+        intensity = QPushButton("Intensity…")
+        intensity.setToolTip(self._btn_step1_intensity.toolTip())
+        intensity.setStyleSheet(self._step0._btn_intensity_window.styleSheet())
+        intensity.clicked.connect(self._show_intensity_window)
+        s0_host = self._step0._channels_host
+        s0 = s0_host.getContentsMargins()
+        header_margins = (s0[0] - 4, s0[1] - 4, s0[2] - 4, 0)
+        header_spacing = s0_host.itemAt(0).layout().spacing()
+
+        # Step1's weight tools, calling Step1's panel (never a second panel:
+        # a ConfigPanel rebuilds the shared dock when it is constructed).
+        reset = QPushButton("Reset weights")
+        reset.setStyleSheet(
+            "QPushButton{color:#e5c07b;background:#182230;border:1px solid #354a63;"
+            "border-radius:4px;padding:2px 8px;font-size:10px;}"
+            "QPushButton:hover{background:#23354a;}")
+        reset.clicked.connect(lambda _c=False: self.config.zero_marker_weights())
+        load = QPushButton("Load weights")
+        load.setStyleSheet(
+            "QPushButton{color:#9bd0ff;background:#182230;border:1px solid #354a63;"
+            "border-radius:4px;padding:2px 8px;font-size:10px;}"
+            "QPushButton:hover{background:#23354a;}")
+        load.clicked.connect(lambda _c=False: self._load_weights_dialog(page))
+
+        # The Overlay / Fusion pair: the SAME mode as Step1's pair.
+        self._btn_step3_mode_overlay = QPushButton("Overlay")
+        self._btn_step3_mode_fusion = QPushButton("Fusion")
+        for btn, mode in ((self._btn_step3_mode_overlay, STEP1_PREVIEW_OVERLAY),
+                          (self._btn_step3_mode_fusion, STEP1_PREVIEW_FUSION)):
+            btn.setCheckable(True)
+            btn.setStyleSheet(MODE_BUTTON_QSS)
+            btn.clicked.connect(lambda _c, m=mode: self.set_preview_mode(m))
+        self._btn_step3_mode_overlay.setToolTip(self._btn_mode_overlay.toolTip())
+        self._btn_step3_mode_fusion.setToolTip(self._btn_mode_fusion.toolTip())
+        mode = getattr(self, "_step1_preview_mode", STEP1_PREVIEW_OVERLAY)
+        self._btn_step3_mode_overlay.setChecked(mode == STEP1_PREVIEW_OVERLAY)
+        self._btn_step3_mode_fusion.setChecked(mode == STEP1_PREVIEW_FUSION)
+        self._step3_cb_all = show_all
+
+        page.assemble(
+            title_bar=title_bar, tab_qss=_STEP1_TAB_QSS, free_tab_bar=_free_the_tab_bar,
+            frame_qss=channel_template.frame_qss(),
+            header_widgets=(show_all, intensity), header_margins=header_margins,
+            header_spacing=header_spacing, weight_widgets=(reset, load),
+            mode_widgets=(self._btn_step3_mode_overlay, self._btn_step3_mode_fusion))
+
+    def _load_weights_dialog(self, parent):
+        """Load weights from a Step1 session, asked from `parent` (block F's
+        flow, `ConfigPanel._load_weights_from_file`). The chosen file is only
+        read; the loaded weights change the shared draft, which the current
+        session then saves as any edit is saved."""
+        out_dir = self.current_gui_work_dir() if hasattr(self, "current_gui_work_dir") else ""
+        if not out_dir:
+            out_dir = self._out_path_edit.text().strip()
+        start_dir = out_dir if out_dir and os.path.exists(out_dir) else os.getcwd()
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            parent, "Load Weights from a Step1 Session", start_dir,
+            "Step1 Session (step1_session.json);;JSON (*.json)")
+        if not path:
+            return False
+        ok, message = self.load_weights_from_step1_session(path)
+        if not ok:
+            QMessageBox.warning(parent, "Load Weights", message)
+        else:
+            print(f"[Step3] {message}")
+        return bool(ok)
+
     def _channel_column_splitters(self):
         """The handles that mean the same thing, Step0's first; Step2's
         controls column is the third (block L2, user ruling 2026-09-25)."""
         step2 = getattr(self, "_step2", None)
+        step3 = getattr(self, "_step3", None)
         return [getattr(getattr(self, "_step0", None), "_bg_c_split", None),
                 getattr(self, "_step1_main_split", None),
-                getattr(step2, "channel_column_splitter", lambda: None)()]
+                getattr(step2, "channel_column_splitter", lambda: None)(),
+                getattr(step3, "channel_column_splitter", lambda: None)()]
 
     @staticmethod
     def _fraction_of(split):
@@ -4133,8 +4227,6 @@ class MainWindow(QMainWindow):
             self._step1_restore_active = False
 
     def _go_to_step2(self):
-        if self._current_step == 3 and hasattr(self._step3, "_stop_loaders"):
-            self._step3._stop_loaders()
         if self._current_step == 1:
             self._stop_all_loaders()
         # Auto-sync Step2 Input Data from the finished Step1 whenever a Step1
@@ -4265,44 +4357,94 @@ class MainWindow(QMainWindow):
         self._apply_navigator_policy_for_step(2)
 
     def _go_to_step3(self, output_dir=None):
+        """Enter Step3 -- Step1's picture with Step1's channel panel (block
+        2c-1). Step3 draws what Step1 draws, so it needs what Step1 needs:
+        the same two entry checks as `_go_to_step1`, and a refusal said in a
+        dialog on the page the user is looking at (Step1's status line is on
+        a hidden page)."""
+        if not self._step3_entry_ready(output_dir):
+            return
         if self._current_step == 1:
             self._stop_all_loaders()
         # Breadcrumb navigation passes no output_dir; fall back to the completed
-        # Step2 result so Step3 Input auto-syncs even when the user clicked OK on
-        # the finish dialog (no auto-advance) and then clicked the Step3 tab.
+        # Step2 result. The run is kept for the mask (plan step 4); the page
+        # itself reads no file.
         if not output_dir:
             output_dir = (self.step2_output or {}).get("output_dir")
         if output_dir:
             self._on_step2_complete(output_dir)
-            self._step3.set_channel_context(
-                loader=self.loader,
-                corrected_zarr_path=self._corrected_zarr_path,
-                rois=self._rois,
-            )
-            self._step3.set_output_dir(output_dir)
             self.step3_output = dict(self.step2_output)
+        self._step3_run_dir = output_dir or ""
         self._stack.setCurrentIndex(3)
         self._set_step_active(3)
+
+    def _step3_entry_ready(self, output_dir=None):
+        """`_go_to_step1`'s checks, for Step3: wait while the geometry is
+        still being written; read a bound handoff that was not read yet
+        (that reader schedules its session save, as it does for Step1);
+        otherwise refuse, in a dialog. True when Step3 may open now."""
+        page = self.__dict__.get("_step0")
+        ready = getattr(page, "geometry_ready_for_consumers", None)
+        waiting = bool(ready is not None and not ready())
+        blocked = getattr(page, "geometry_blocked_reason", None)
+        blocked = blocked() if blocked is not None else None
+        waits = int(self.__dict__.get("_step3_entry_waits") or 0)
+        if waiting and blocked is None and waits < 40:
+            self._step3_entry_waits = waits + 1
+            QtCore.QTimer.singleShot(150, lambda: self._go_to_step3(output_dir))
+            return False
+        self._step3_entry_waits = 0
+        if waiting:
+            self._say_step3_refusal(
+                "Step3 is not ready: the patch geometry on disk is not the "
+                "geometry on screen"
+                + (f" ({blocked})." if blocked else " — the write is still running."))
+            return False
+        if not getattr(self, "_step1_context_ready", False):
+            handoff = self.step0_output or {}
+            has_bound_handoff = bool(
+                str(handoff.get("step0_manifest_path") or "").strip()
+                and str(handoff.get("step0_dir") or "").strip()
+                and str(handoff.get("step1_dir") or "").strip())
+            accepted = bool(has_bound_handoff
+                            and self._load_step0_roi_result(auto=True) is True)
+            if not accepted:
+                self._say_step3_refusal(
+                    "Step3 is not ready: load a valid Step0 handoff or use "
+                    "Load Previous Step1 Session.")
+                return False
+            self._step1_context_ready = True
+        return True
+
+    def _say_step3_refusal(self, text):
+        """Show why Step3 did not open, over the page the user is on. Not
+        modal: a refusal must not hold the event loop, and a second refusal
+        rewrites the same box instead of stacking another one."""
+        print(f"[Step3] {text}")
+        box = self.__dict__.get("_step3_refusal_box")
+        if box is None:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Information)
+            box.setWindowTitle("Step 3")
+            box.setStandardButtons(QMessageBox.Ok)
+            box.setModal(False)
+            self._step3_refusal_box = box
+        box.setText(text)
+        box.show()
+        box.raise_()
+        return box
 
     def _on_step2_complete(self, output_dir):
         self.step2_done = True
         self.step2_output = {
             "output_dir": output_dir,
         }
-        if hasattr(self, "_step3"):
-            self._step3.set_channel_context(
-                loader=self.loader,
-                corrected_zarr_path=self._corrected_zarr_path,
-                rois=self._rois,
-            )
         self._update_next_button()
         print(f"[MainWindow] Step2 complete output_dir={output_dir}")
         print(f"[MainWindow] step2_done={self.step2_done}")
         print(f"[MainWindow] next_enabled={self._btn_next.isEnabled()}")
 
     def _go_to_step4(self, output_dir=None):
-        if self._current_step == 3 and hasattr(self._step3, "_stop_loaders"):
-            self._step3._stop_loaders()
         if self._current_step == 1:
             self._stop_all_loaders()
         if self._current_step == 3:
@@ -4336,10 +4478,6 @@ class MainWindow(QMainWindow):
     def _skip_to_step2(self):
         self.is_sequential_flow = False
         self._go_to_step2()
-
-    def _skip_to_step3(self):
-        self.is_sequential_flow = False
-        self._go_to_step3()
 
     def _skip_to_step4(self):
         self.is_sequential_flow = False
@@ -6399,6 +6537,13 @@ class MainWindow(QMainWindow):
         self._step1_preview_mode = mode
         self._btn_mode_overlay.setChecked(mode == STEP1_PREVIEW_OVERLAY)
         self._btn_mode_fusion.setChecked(mode == STEP1_PREVIEW_FUSION)
+        # Step3's pair is the same pair (block 2c-1): checked here every time,
+        # because clicking a checked checkable button unchecks it.
+        for name, want in (("_btn_step3_mode_overlay", STEP1_PREVIEW_OVERLAY),
+                           ("_btn_step3_mode_fusion", STEP1_PREVIEW_FUSION)):
+            btn = self.__dict__.get(name)
+            if btn is not None:
+                btn.setChecked(mode == want)
         montage = self.__dict__.get("_preseg_montage")
         if montage is not None:
             montage.set_mode(mode)                # its two buttons are these two

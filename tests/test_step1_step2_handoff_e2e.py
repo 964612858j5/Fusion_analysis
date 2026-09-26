@@ -146,19 +146,3 @@ def test_save_writes_no_fusion_config_json_and_the_session_keeps_the_record(
     finally:
         w.close()
 
-
-def test_step3_finds_the_raw_slide_in_the_session(app, tmp_path):
-    from block01.ui.step3_page import Step3Page
-    raw = tmp_path / "slide.ome.tif"
-    raw.write_bytes(b"x")
-    (tmp_path / "step1_session.json").write_text(
-        json.dumps({"raw_ome_path": str(raw)}), encoding="utf-8")
-    page = Step3Page()
-    try:
-        page._output_dir = str(tmp_path)
-        page._raw_ome_path = ""
-        page._loader = None
-        found = page._resolve_raw_ome_path()
-        assert found and os.path.abspath(found) == os.path.abspath(str(raw))
-    finally:
-        page.close()

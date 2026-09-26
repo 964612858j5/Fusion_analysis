@@ -43,7 +43,7 @@ Step 0          Step 1          Step 2          Step 3        Step 4
 | **Step 0** | Setup | Pick the region to analyze, organize channels, remove background noise | Corrected image, ROI config |
 | **Step 1** | Fusion + Tuning | Merge channels into one "cell-outline image"; tune the best segmentation parameters on small patches | Segmentation parameter file |
 | **Step 2** | Segmentation + Merge | Use the chosen parameters to circle **every cell in the whole region** | Whole-image cell mask |
-| **Step 3** | QC Viewer | Visually check whether the cells are circled correctly | Confirm / not confirm |
+| **Step 3** | QC Viewer | Check the cells against the tissue (being rebuilt; see Step 3) | Confirm / not confirm |
 | **Step 4** | Feature Extraction | Measure each cell's value in each channel, export the table | `cell_features.csv` / `.h5ad` |
 
 > **Core idea**: the earlier steps are all "preparation and trial". The truly heavy lifting is Step 2 (processing the entire big image), and the final Step 4 produces the table.
@@ -189,21 +189,19 @@ Take the parameters tuned in Step 1 and **actually circle every single cell in t
 
 ### Step 3 · QC Viewer
 
-**What it does:**
-**Visually check whether the Step 2 result is accurate.** The software **overlays the freshly generated cell mask onto the DAPI (nucleus) image** — good segmentation should look like "exactly one cell outline wrapped around each nucleus", with nothing over-circled, missed, or two cells fused into one.
+> 🚧 **Being rebuilt.** Step 3 is being rebuilt to look and work like Step 1. What is available **now** is listed below; the whole-slide view on the right comes in the next update, and the cell mask overlay after that.
 
-**How to operate:**
+**What it will do:**
+Check the Step 2 result against the tissue: the whole slide with the cell mask on top, pan and zoom, jump by Tissue Navigator or patch.
 
-1. **Frame a small region** on the DAPI thumbnail to inspect closely.
-2. The software loads the raw image + mask overlay for that region; zoom in to check the boundaries.
-3. Checkboxes let you toggle the mask overlay and adjust transparency, comparing against the raw signal to see if the circling is correct.
-4. If circling is generally poor → **go back to Step 1 and re-tune**, then re-run Step 2. If satisfied → move on to Step 4.
+**What works now:**
 
-**Output:** no new files; this step is a **manual confirmation** gate.
+1. The left column is Step 1's `Channels` frame: `Show all`, `Intensity…`, `Reset weights`, `Load weights` and the channel list with weights.
+2. **Step 3 and Step 1 share the same channels, weights and fusion**: a tick or a weight changed here is the same in Step 1 (and is saved in the session like any Step 1 change). Your saved Fusion Settings only change when you save them in Step 1.
+3. `Overlay` / `Fusion` switch the mode for Step 1 and Step 3 together; the Tissue Navigator follows what you set here.
+4. The right side is a placeholder for now — **no image yet**.
 
-<!-- image placeholder: images/11_step3_qc_overlay.png — a zoomed-in view of cell mask outlines overlaid on DAPI, showing "outline wrapping the nucleus" -->
-
-> 💡 **What counts as "well circled"?** Check three things: ① most nuclei are circled; ② each outline contains basically one nucleus; ③ outlines hug the real cells, with no large gaps or overflow.
+**Output:** no new files.
 
 ---
 

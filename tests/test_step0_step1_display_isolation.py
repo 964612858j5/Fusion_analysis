@@ -431,27 +431,6 @@ def test_step1_s_panel_ignores_a_selection_made_in_step0(app):
         _close(w)
 
 
-def test_step3_does_not_follow_step0_or_step1_ticks(app):
-    """Step3 draws the shared pair and was not part of this ruling."""
-    w = _window(app)
-    try:
-        state = w._display.state
-        renders = []
-        w._step3._render_roi = lambda reset_view=False: renders.append(
-            reset_view)
-        w._step3._marker_channels = lambda: ["CD3", "CD8", "CD20"]
-
-        _in(w, 1)
-        state.set_display_visible("CD3", True, origin="step1-test")
-        _in(w, 0)
-        state.set_display_visible("CD8", True, origin="step0-test")
-        QtWidgets.QApplication.processEvents()
-
-        assert renders == [], renders
-    finally:
-        _close(w)
-
-
 def test_a_step1_handoff_does_not_untick_step0(app):
     """The bug a real Save produced: everything off but DAPI.
 

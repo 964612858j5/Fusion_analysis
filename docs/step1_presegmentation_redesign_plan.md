@@ -9,6 +9,7 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.40：块 2c-1 已实施并通过真机验收。
 - v3.39：块 2c-1 按独立审核修订为 v2（功能空档须用户接受；入口的写文件边界；Load weights 的表述与两种验收；Show all 保留 Step1 语义；模式同步在 2c-1 / 2c-2 的分工；用户指南只写当前可用功能；拒绝原因显示在可见页面）。
 - v3.38：块 2c 只读调查结论；2c 拆为 2c-1 / 2c-2；块 2c-1 申请（新 Step3 页面并删除旧页面）。
 - v3.37：块 2b 已实施并通过真机验收（真机验收步骤修正为只看 Step1 / Step3）。
@@ -1030,7 +1031,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
 - **进入 Step3 的数据前提**：viewer 需要 `loader.filepath`、校正决定、ROI 等，只有 Step0 Save、进入 Step1 时自动读取 handoff、或加载会话时才会填上。重启后没做这些就直接进 Step3，viewer 打不开，也没有退路。所以 Step3 的入口要沿用 Step1 的检查与自动读取，不满足时提示并留在原处。
 - **已有的小问题（advisory，不在 2c 处理）**：`set_preview_mode(..., reconcile=False)`（会话恢复、Load weights）不会把模式交给 viewer；换数据集时 `_step1_preview_mode` 被重置，按钮却不跟着变。
 
-### 块 2c-1 — 新 Step3 页面（左栏 + 右栏框架）并删除旧页面（申请 v2，按独立审核修订，**用户 2026-09-26 批准**，功能空档已接受）
+### 块 2c-1 — 新 Step3 页面（左栏 + 右栏框架）并删除旧页面（申请 v2，按独立审核修订，用户 2026-09-26 批准，功能空档已接受；已实施，**真机验收通过**）
 - **范围**：2c 拆成两块。2c-1 做页面、删除旧页面，并完成**两页的 Overlay / Fusion 按钮、共享模式与 Tissue Preview 的模式同步**；viewer 位置先放占位提示。2c-2 接入第二个 viewer（生命周期、相机、Tissue Preview 点击路由），并把**第二个 viewer 接到这个共享模式**。
 - **功能空档（须用户明确接受）**：2c-1 删除旧页面后、2c-2 完成前，Step3 右栏只有占位提示，**没有任何图像**（旧页面的缩略图与放大视图已删，第二个 viewer 尚未接入）。2c-1 不是完整的 Step3 交付。
 - **做法**：
@@ -1062,6 +1063,15 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - `_channels_host_for(3)` 与 Step1 的宿主不同，通道面板在四页之间移动（现有测试 `test_the_one_panel_moves_between_the_steps_hosts`）。
   - 回归与 HEAD 逐条对比，除上述列出的测试外无新增失败。
   - 真机（用户）：Step3 的外观与 Step1 的左栏、模式按钮一致；上述操作正常；在 Step3 切换模式时 Step1 的按钮与 Tissue Preview 同步；右栏暂为占位提示（功能空档，已接受）。
+- **执行记录**（2026-09-26，未提交）：
+  - `ui/step3_page.py` 重写（3705 行 → 约 170 行）：`Step3Page` 只负责摆放，不读写任何文件、不持有状态；`assemble()` 接收主窗口建好的控件；`channels_host()`（独立宿主）、`channel_column_splitter()`、`viewer_layout()` / `viewer_notice()`（给 2c-2）；`VIEWER_PENDING_TEXT` 占位提示；`go_back`。
+  - `ui/main_window.py`：新增 `_build_step3_page`（标题栏同 Step1、带 Tissue Navigator；Show all 用 Step1 的宽度匹配复选框与 Step0 的样式来源，调 `dock.set_all_visible`；Intensity 调 `_show_intensity_window`；Reset weights 调 `self.config.zero_marker_weights()`；Load weights 调新增的 `_load_weights_dialog(parent)`——与 `ConfigPanel._load_weights_from_file` 同一流程，对话框父窗口为 Step3；Overlay / Fusion 用 `MODE_BUTTON_QSS`，点击调 `set_preview_mode`）；`set_preview_mode` 同步 Step3 的一对按钮；`_go_to_step3` 改为先过 `_step3_entry_ready`（与 `_go_to_step1` 相同的两项检查），记下 `_step3_run_dir`；新增 `_say_step3_refusal`；删除 `set_display_services` / `go_step4` 接线、`_on_step2_complete` 中对旧页面的调用、`_go_to_step2` / `_go_to_step4` 的 `_stop_loaders` 分支、`_skip_to_step3`；`_channel_column_splitters` 加入 Step3；`_wire_channel_column_sync` 的唯一调用移到 Step3 构造之后。
+  - **与申请的差异**：拒绝原因仍以对话框显示在当前页面上，但改为**非模态**（`_say_step3_refusal`，重复拒绝复用同一个框）。模态对话框会阻塞事件循环；离屏测试 `test_main_window_step1_5.py::test_navigation_alone_creates_no_outputs`（未就绪时调用 `_go_to_step3()`）因此卡死，改为非模态后通过。
+  - 删除的旧页面测试（与白名单一致，共 19 条）：`test_channel_workbench.py` 中构造 `Step3Page` 的 15 条；`test_global_channel_dock.py` 的 2 条；`test_step0_step1_display_isolation.py` 的 1 条；`test_step1_step2_handoff_e2e.py` 的 1 条。
+  - 新测试 `tests/test_step3_page.py` 10 条：页面结构与样式来源（Channels 框的样式、Show all 与 Step0 相同、模式按钮 `MODE_BUTTON_QSS`、占位提示、只有 Fusion / Viewer 两个标签页、Step3 宿主与 Step1 不同、进入后通道面板挂在 Step3 且带权重控件）；Show all 使三个 marker 显示并参与 fusion、再点取消，核通道不变；Reset weights 清零、Step1 同步、已确认快照不变；Load weights 两种情况（历史文件 / 当前会话文件）——对话框从 Step3 弹出、权重读入、来源文件字节不变、已确认快照不变、会话被要求保存、Step1 同步；两对模式按钮一致且在 Step3 点 Fusion 后 Tissue Preview 为 Fusion、再点已选中的按钮仍保持选中；四页共用列宽（拖 Step3，Step0 / Step1 / Step2 跟随）；就绪时进入不触发保存；handoff 已绑定未读取时先自动读取；不满足时留在原页、非模态对话框显示原因、重复拒绝复用同一个框。反向注入 3 处（Step3 按钮同步、Step3 不在列宽列表、跳过入口检查）分别使 1 / 1 / 2 条变红。
+  - 文档：`docs/user_guide.md`、`docs/用户指南.md` 的 Step3 一节改为「正在重建」——只写现在可用的功能，写明右侧暂为占位、整张图浏览在下一次更新、掩膜在其后；概览表的 Step3 一行同步。`UI_SURFACE_RULES.md` 新增「Step3's page」一条。
+  - 回归：75 个构造主窗口或涉及步骤切换 / 显示范围 / 通道面板 / `ChannelWorkbench` 的模块，与 `git archive HEAD`（`d69402f`）逐条对比**无新增失败**；通过数的差异正好是删除的旧页面测试（15 / 2 / 1）。两边相同：`test_global_channel_dock.py::test_the_step0_panel_looks_like_the_baseline_panel`、`test_step1_channel_panel.py::test_the_weight_row_and_the_buttons_kept_their_look`（字体差异）、`test_step0_method_prefetch.py::test_the_neighbouring_channel_is_still_prepared_as_well`；HEAD 一侧另有 `test_step0_method_prefetch.py::test_a_remounted_coordinator_does_not_reuse_a_cancelled_generation`（负载下偶发）。
+  - **真机验收通过（用户 2026-09-26）**。
 
 ## 六、未决与 advisory
 

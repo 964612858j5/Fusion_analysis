@@ -110,16 +110,6 @@ def test_clear_channel_images(workbench):
     assert workbench._active is None
 
 
-def test_step3_page_instantiates_with_workbench(app):
-    from block01.ui.step3_page import Step3Page
-    page = Step3Page()
-    assert hasattr(page, "_channel_workbench")
-    # adapter with no patch loaded returns an empty dict (no crash)
-    assert page._get_current_channel_images_for_conditioning() == {}
-    page._sync_step3_to_workbench()
-    assert page._channel_workbench.has_channel_data() is False
-
-
 # ── source provenance guard (Phase 2.1b) ────────────────────────────────────
 
 def test_build_config_includes_source_policy_from_context(workbench):
@@ -177,31 +167,6 @@ def test_status_shows_intensity_space_when_known(workbench):
     txt = workbench._status_lbl.text()
     assert "corrected_zarr_native_float" in txt
     assert "roi_preview" in txt
-
-
-def test_step3_sync_passes_source_metadata(app):
-    from block01.ui.step3_page import Step3Page
-    page = Step3Page()
-    # Map a couple of source strings to intensity spaces (no guessing).
-    assert page._intensity_space_for_source("corrected_zarr roi_local") == (
-        "corrected_zarr_native_float", "none")
-    assert page._intensity_space_for_source("raw_ome global_bbox=[]") == (
-        "raw_ome_normalized_0_1", "minmax_per_read")
-    assert page._intensity_space_for_source("canonical_step3_dapi") == (
-        "step3_dapi_normalized_0_1", "display_minmax")
-    assert page._intensity_space_for_source("weird") == ("unknown", "unknown")
-    # markers without step2_compatible -> preview fallback mode at top level
-    meta = {
-        "CD45": {"intensity_space": "corrected_zarr_native_float",
-                 "normalization": "none"},
-        "CK19": {"intensity_space": "raw_ome_normalized_0_1",
-                 "normalization": "minmax_per_read"},
-    }
-    sp = page._build_conditioning_source_policy(meta)
-    assert sp["intensity_space"] == "mixed_or_preview"
-    assert sp["source_alignment_mode"] == "partial_or_preview_fallback"
-    assert sp["preview_only"] is True
-    assert sp["scope"] == "roi_preview"
 
 
 # ── reference layer overlays (Phase 2.2) ────────────────────────────────────
@@ -283,17 +248,6 @@ def test_clear_reference_layers(workbench):
     workbench.set_reference_layers(dapi=np.ones((48, 48), np.float32))
     workbench.clear_reference_layers()
     assert workbench.reference_layer_availability() == {
-        "dapi": False, "mask": False, "fusion": False}
-
-
-def test_step3_sync_reference_layers_no_crash_when_missing(app):
-    from block01.ui.step3_page import Step3Page
-    page = Step3Page()
-    # no patch loaded -> all reference layers None, sync must not crash
-    refs = page._get_current_reference_layers_for_conditioning()
-    assert set(refs.keys()) == {"dapi", "mask", "fusion"}
-    page._sync_step3_to_workbench()
-    assert page._channel_workbench.reference_layer_availability() == {
         "dapi": False, "mask": False, "fusion": False}
 
 
@@ -394,132 +348,7 @@ def test_build_config_keeps_step2_ready_false(workbench):
     assert sp["calibration_source_matches_step2"] is True
 
 
-def test_step3_build_policy_corrected_matches_but_not_ready(app):
-    from block01.ui.step3_page import Step3Page
-    page = Step3Page()
-    meta = {"CD45": {"intensity_space": "corrected_zarr_native_float",
-                     "step2_compatible": True},
-            "CK19": {"intensity_space": "corrected_zarr_native_float",
-                     "step2_compatible": True}}
-    sp = page._build_conditioning_source_policy(meta)
-    assert sp["calibration_source_matches_step2"] is True
-    assert sp["step2_ready"] is False
-    assert sp["preview_only"] is True
-
-
-def test_step3_build_policy_mixed_sources_not_matching(app):
-    from block01.ui.step3_page import Step3Page
-    page = Step3Page()
-    meta = {"CD45": {"intensity_space": "corrected_zarr_native_float",
-                     "step2_compatible": True},
-            "CK19": {"intensity_space": "raw_ome_normalized_0_1",
-                     "step2_compatible": False}}
-    sp = page._build_conditioning_source_policy(meta)
-    assert sp["calibration_source_matches_step2"] is False
-    assert sp["step2_ready"] is False
-
-
-def test_step3_build_policy_raw_normalized_is_fallback(app):
-    from block01.ui.step3_page import Step3Page
-    page = Step3Page()
-    meta = {"CD45": {"intensity_space": "raw_ome_normalized_0_1",
-                     "step2_compatible": False}}
-    sp = page._build_conditioning_source_policy(meta)
-    assert sp["calibration_source_matches_step2"] is False
-    assert sp["preview_only"] is True
-
-
-def test_reference_layers_do_not_affect_marker_source_policy(app):
-    # DAPI reference must not enter the marker source policy computation.
-    from block01.ui.step3_page import Step3Page
-    page = Step3Page()
-    # only markers are passed to the policy builder; a DAPI reference is never
-    # part of channel_metadata
-    marker_meta = {"CD45": {"intensity_space": "corrected_zarr_native_float",
-                            "step2_compatible": True}}
-    sp = page._build_conditioning_source_policy(marker_meta)
-    assert sp["intensity_space"] == "corrected_zarr_native_float"
-    assert sp["calibration_source_matches_step2"] is True
-
-
 # ── per-channel source alignment hardening (Phase 2.1d) ─────────────────────
-
-def test_alignment_mode_single_native_source(app):
-    from block01.ui.step3_page import Step3Page
-    page = Step3Page()
-    meta = {
-        "CD45": {"intensity_space": "corrected_zarr_native_float",
-                 "step2_compatible": True},
-        "CK19": {"intensity_space": "corrected_zarr_native_float",
-                 "step2_compatible": True},
-    }
-    sp = page._build_conditioning_source_policy(meta)
-    assert sp["source_alignment_mode"] == "single_native_source"
-    assert sp["intensity_space"] == "corrected_zarr_native_float"
-    assert sp["calibration_source_matches_step2"] is True
-    assert sp["step2_ready"] is False
-    assert sp["preview_only"] is True
-
-
-def test_alignment_mode_per_channel_native(app):
-    from block01.ui.step3_page import Step3Page
-    page = Step3Page()
-    meta = {
-        "CD45": {"intensity_space": "corrected_zarr_native_float",
-                 "step2_compatible": True},
-        "CK19": {"intensity_space": "raw_ome_native_float",
-                 "step2_compatible": True},
-    }
-    sp = page._build_conditioning_source_policy(meta)
-    assert sp["source_alignment_mode"] == "per_channel_native"
-    assert sp["intensity_space"] == "mixed_native"
-    assert sp["step2_pre_remap_source"] == "per_channel_native"
-    assert sp["calibration_source_matches_step2"] is True
-    assert sp["step2_ready"] is False
-    assert sp["preview_only"] is True
-
-
-def test_alignment_mode_partial_preview_fallback(app):
-    from block01.ui.step3_page import Step3Page
-    page = Step3Page()
-    meta = {
-        "CD45": {"intensity_space": "corrected_zarr_native_float",
-                 "step2_compatible": True},
-        "CK19": {"intensity_space": "raw_ome_normalized_0_1",
-                 "step2_compatible": False},
-    }
-    sp = page._build_conditioning_source_policy(meta)
-    assert sp["source_alignment_mode"] == "partial_or_preview_fallback"
-    assert sp["intensity_space"] == "mixed_or_preview"
-    assert sp["calibration_source_matches_step2"] is False
-    assert sp["step2_ready"] is False
-    assert sp["preview_only"] is True
-
-
-def test_alignment_match_requires_all_channels_compatible(app):
-    from block01.ui.step3_page import Step3Page
-    page = Step3Page()
-    # one incompatible channel flips the top-level match to False
-    meta = {
-        "A": {"intensity_space": "corrected_zarr_native_float",
-              "step2_compatible": True},
-        "B": {"intensity_space": "corrected_zarr_native_float",
-              "step2_compatible": True},
-        "C": {"intensity_space": "unknown", "step2_compatible": False},
-    }
-    sp = page._build_conditioning_source_policy(meta)
-    assert sp["calibration_source_matches_step2"] is False
-    assert sp["source_alignment_mode"] == "partial_or_preview_fallback"
-
-
-def test_alignment_mode_none_when_no_markers(app):
-    from block01.ui.step3_page import Step3Page
-    page = Step3Page()
-    sp = page._build_conditioning_source_policy({})
-    assert sp["source_alignment_mode"] == "none"
-    assert sp["calibration_source_matches_step2"] is False
-    assert sp["step2_ready"] is False
-
 
 def test_status_shows_per_channel_native_mix(workbench):
     policy = {
@@ -583,19 +412,6 @@ def test_saved_config_preserves_per_channel_source_metadata(workbench, tmp_path)
     assert cd45["step2_compatible"] is True
     assert ck19["intensity_space"] == "raw_ome_native_float"
     assert ck19["fallback_reason"] == "channel_not_found_in_corrected_zarr"
-
-
-def test_reference_layers_do_not_change_alignment_mode(app):
-    from block01.ui.step3_page import Step3Page
-    page = Step3Page()
-    # only marker metadata reaches the policy builder; references never do
-    marker_meta = {
-        "CD45": {"intensity_space": "corrected_zarr_native_float",
-                 "step2_compatible": True},
-    }
-    sp = page._build_conditioning_source_policy(marker_meta)
-    assert sp["source_alignment_mode"] == "single_native_source"
-    assert sp["calibration_source_matches_step2"] is True
 
 
 def test_reference_display_norm_does_not_touch_config(workbench, tmp_path):
@@ -787,15 +603,6 @@ def test_step15_no_loader_clears_workbench(app, tmp_path):
     assert page._cond_workbench.has_channel_data() is False
 
 
-def test_step3_workbench_tab_reframed_as_review(app):
-    from block01.ui.step3_page import Step3Page
-    page = Step3Page()
-    # Step3 keeps the workbench but it is now a review/QC surface.
-    assert hasattr(page, "_channel_workbench")
-    idx = getattr(page, "_cond_tab_index", -1)
-    assert idx >= 0
-
-
 # ── Phase 5f-a.1: honest Step1.5 metadata + host-action cleanup ────────────
 
 def _step15_saved_config(app, tmp_path, monkeypatch):
@@ -864,17 +671,6 @@ def test_step15_hides_generic_internal_save(app, tmp_path):
     wb = page._cond_workbench
     # generic internal save hidden; Step1.5's own save button is the official path
     assert wb._btn_save_internal.isHidden() is True
-
-
-def test_step3_workbench_keeps_default_host_actions(app):
-    from block01.ui.step3_page import Step3Page
-    from PyQt5 import QtWidgets
-    page = Step3Page()
-    wb = page._channel_workbench
-    labels = [b.text() for b in wb.findChildren(QtWidgets.QPushButton)]
-    assert "Load current Step3 ROI" in labels
-    assert "Save remap config…" in labels
-    assert wb._btn_save_internal.isHidden() is False
 
 
 # ── Phase 2.1c-b Part A: Step1.5 records calibration source identity ─────────

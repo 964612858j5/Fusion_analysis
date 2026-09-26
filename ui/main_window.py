@@ -1182,7 +1182,7 @@ class MainWindow(QMainWindow):
             "border:1px solid #8cf;border-radius:3px;padding:2px 8px;}"
             "QPushButton:hover{background:#122333;}"
         )
-        btn_load_session.clicked.connect(self._load_previous_step1_session)
+        btn_load_session.clicked.connect(self._on_load_previous_session_clicked)
         status_row.addWidget(btn_load_session)
 
         btn_save_session = QPushButton("Save Session")
@@ -3780,7 +3780,7 @@ class MainWindow(QMainWindow):
         self.step0_done = False
         self._step1_context_ready = False
         if not manifest_path:
-            print("[Step1] v2 session has no exact Step0 manifest")
+            self._refuse_session("This session names no Step0 manifest.")
             return False
 
         # Preserve and validate an already-bound handoff before replacing the
@@ -3788,11 +3788,11 @@ class MainWindow(QMainWindow):
         current_handoff = self.step0_output or {}
         expected_manifest = current_handoff.get("step0_manifest_path") or ""
         if expected_manifest and os.path.abspath(expected_manifest) != os.path.abspath(manifest_path):
-            print("[Step1] session manifest does not match the current handoff")
+            self._refuse_session('This session belongs to another ROI or project. Opening another project is not supported yet; this session was not loaded.')
             return False
         expected_identity = current_handoff.get("source_identity") or {}
         if expected_identity and sess.get("source_identity") != expected_identity:
-            print("[Step1] session source identity does not match the current handoff")
+            self._refuse_session('This session belongs to another ROI or project. Opening another project is not supported yet; this session was not loaded.')
             return False
 
         # The existing loader is only a hint.  The authoritative reader below
@@ -3804,6 +3804,8 @@ class MainWindow(QMainWindow):
             "handoff_schema_version": 2,
         }
         if self._load_step0_roi_result(auto=True) is not True:
+            self._refuse_session("The Step0 result this session names could not be read "
+                                 "(see the terminal).")
             return False
 
         # The authoritative reader marks the handoff ready on success.  The
@@ -3813,7 +3815,7 @@ class MainWindow(QMainWindow):
         self._step1_context_ready = False
         authority = self.step0_output
         if sess.get("source_identity") != authority.get("source_identity"):
-            print("[Step1] session source identity does not match the Step0 authority")
+            self._refuse_session("The session and its Step0 result describe different slides.")
             return False
         out_dir = authority.get("output_dir") or OUTPUT_DIR
         raw_ome = getattr(self.loader, "filepath", "") or authority.get("ome_tiff_path", "")
@@ -3845,6 +3847,32 @@ class MainWindow(QMainWindow):
                 }
             },
         }
+
+    def _refuse_session(self, reason):
+        """Why a session was not loaded: printed, and kept for the button to
+        say (block S). The automatic restore only prints, as before."""
+        print(f"[Step1] session not loaded: {reason}")
+        self._session_refusal = reason
+
+    def _on_load_previous_session_clicked(self, _checked=False):
+        """`Load Previous Step1 Session` (block S, user ruling 2026-09-26):
+        always a file dialog, starting in the current ROI's Step1 folder; the
+        chosen session is loaded and the outcome is said on screen."""
+        start = (self.step0_output or {}).get("step1_dir") or OUTPUT_DIR
+        if not start or not os.path.isdir(start):
+            start = os.getcwd()
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Previous Step1 Session", start,
+            "Step1 Session (step1_session.json);;JSON (*.json)")
+        if not path:
+            return False
+        self._session_refusal = None
+        ok = self._load_previous_step1_session(path=path)
+        if ok:
+            QMessageBox.information(self, "Step1", f"Opened the Step1 session:\n{path}")
+        elif self._session_refusal:
+            QMessageBox.warning(self, "Step1", self._session_refusal)
+        return ok
 
     def _load_previous_step1_session(self, _checked=False, auto=False, path=None):
         global OME_TIFF_FILE, OUTPUT_DIR
@@ -3898,7 +3926,7 @@ class MainWindow(QMainWindow):
                         manifest_header.get("handoff_schema_version", 1) or 1
                     )
                 except Exception as e:
-                    print(f"[Step1] failed to read session manifest header: {e}")
+                    self._refuse_session(f"The Step0 manifest this session names could not be read: {e}")
                     if session_schema_hint >= 2:
                         return False
                     manifest_schema = session_schema_hint
@@ -3912,10 +3940,10 @@ class MainWindow(QMainWindow):
                 # identity and all other validation remain in the authority
                 # reader below.
                 if sess.get("source_identity") != manifest_header.get("source_identity"):
-                    print("[Step1] session source identity does not match the manifest header")
+                    self._refuse_session("The session and its Step0 manifest describe different slides.")
                     return False
             if session_schema_hint >= 2 and manifest_schema < 2:
-                print("[Step1] v2 session hint cannot use a v1 manifest")
+                self._refuse_session("This session needs a newer Step0 manifest than the one it names.")
                 return False
             # A manually browsed session is still not allowed to replace the
             # active Step0 handoff with a sibling ROI.  When a handoff is
@@ -3926,17 +3954,17 @@ class MainWindow(QMainWindow):
             if expected_step1_dir:
                 expected_session_dir = os.path.abspath(expected_step1_dir)
                 if os.path.dirname(os.path.abspath(session_path)) != expected_session_dir:
-                    print("[Step1] session is outside the current Step1 directory")
+                    self._refuse_session('This session belongs to another ROI or project. Opening another project is not supported yet; this session was not loaded.')
                     return False
             expected_manifest = current_handoff.get("step0_manifest_path") or ""
             actual_manifest = sess.get("step0_manifest_path") or ""
             if expected_manifest and (not actual_manifest or
                                       os.path.abspath(actual_manifest) != os.path.abspath(expected_manifest)):
-                print("[Step1] session manifest does not match the current handoff")
+                self._refuse_session('This session belongs to another ROI or project. Opening another project is not supported yet; this session was not loaded.')
                 return False
             expected_identity = current_handoff.get("source_identity") or {}
             if expected_identity and sess.get("source_identity") != expected_identity:
-                print("[Step1] session source identity does not match the current handoff")
+                self._refuse_session('This session belongs to another ROI or project. Opening another project is not supported yet; this session was not loaded.')
                 return False
 
             # Schema-v2 sessions are state overlays on the committed Step0

@@ -111,6 +111,12 @@ row, and the duplicate Tissue Preview button in the step bar.
   end -- there is no row above it for the mode buttons -- and no status row
   under it: `Loading patch…`, `Loading channels…`, warnings and errors go to
   the terminal, and the height goes to the viewer.
+  `Load Previous Step1 Session` always opens a file dialog, starting in the
+  current ROI's Step1 folder (block S, user ruling 2026-09-26), and says on
+  screen what happened: opened, or why not -- a session of another ROI or
+  project is refused, saying that opening another project is not supported
+  yet (block S2 frozen, user ruling 2026-09-26). `Load weights` restores a
+  session's channels only; `Load Previous Step1 Session` the whole scene.
 * **Step1's `Pre-segmentation` tab** is three titled frames, `Patches`,
   `Methods` and `Results` (user ruling 2026-09-25), in the look of the
   old controls' boxes. The old Phase1 / Phase2 controls that followed them

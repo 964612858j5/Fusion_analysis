@@ -1,7 +1,7 @@
 # Step1 预分割（Method & Parameters / Patch Results）重设计 — 项目计划
 
 日期：2026-09-23（第三版，块 A0 产出）　分支 `v15-interactive-channel-workspace`，起点 `c9f80df`，A0 核查基于 `e655409`。
-状态：**已执行：块 P、A1、A2、B、C、D、V0。本文档记录的验收：B「用户验收总体通过」、C 第 4 步「用户人工测试通过」、D「块 D 验收通过（2026-09-25）」；P、A1、A2、V0 的执行记录仍写「待用户验收」，文档中没有后续验收记录。V2（代码中称「Step2 hook-up」）第 1、2 步已提交（`54e825d`、`1adfe4e`），第 3 步已提交（`dcaca2c`），真机上 Cellpose 路径跑通，Mesmer 未验收；块 L 已提交（`1d14801`、`2294bc7`）并通过真机验收；块 F 已提交（`5bc65bc`）并通过真机验收；块 E 已提交（`7ee98fc`）并通过真机验收（Mesmer 除外）。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动须另行批准。
+状态：**已执行：块 P、A1、A2、B、C、D、V0。本文档记录的验收：B「用户验收总体通过」、C 第 4 步「用户人工测试通过」、D「块 D 验收通过（2026-09-25）」；P、A1、A2、V0 的执行记录仍写「待用户验收」，文档中没有后续验收记录。V2（代码中称「Step2 hook-up」）第 1、2 步已提交（`54e825d`、`1adfe4e`），第 3 步已提交（`dcaca2c`），真机上 Cellpose 路径跑通，Mesmer 未验收；块 L 已提交（`1d14801`、`2294bc7`）并通过真机验收；块 F 已提交（`5bc65bc`）并通过真机验收；块 E 已提交（`7ee98fc`）并通过真机验收（Mesmer 除外）；U1、Results 顺序、块 S 已提交；S2 冻结；后续计划见第六节。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动须另行批准。
 
 修订记录：
 - v1：初稿。
@@ -9,6 +9,7 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.22：块 U1、Results 顺序、块 S（每次弹对话框、拒绝原因上屏）已提交；S2 冻结，记录调查结论；新增「后续计划」和「已知的已有问题」。
 - v3.21：块 F、块 E 已提交（`5bc65bc`、`7ee98fc`），都通过真机验收。
 - v3.20：记录 V2 第 3 步的提交（`dcaca2c`）和真机情况；新增块 L（Step1 Save 进度框、Step2 布局，计划外，用户 2026-09-25 提出）的申请、执行记录和真机验收。
 - v3.19：补记 V2（Step2 hook-up）第 1、2 步的执行记录和用户裁定 A（写在 7.10.7 的 V2 下）；更新状态行。第 3 步的范围另行申请。
@@ -796,7 +797,37 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
 - **测试**：`tests/test_step1_step2_handoff_e2e.py` 新增 2 条（真实 Save 后没有 `fusion_config.json`，会话 payload 带着同一份 `last_save`，Step2 信息栏没有「Config:」；Step3 能从会话找到原始切片）；两条读回或断言 `fusion_config.json` 的旧测试改为读 `last_save`。回归 62 个模块（Step1 全部、Step3、会话和写保护、界面约定），与 HEAD 逐条对比没有新增失败。
 - **真机验收通过（用户 2026-09-26）**：Step1 目录不再新生成 `fusion_config.json`，会话里有 `last_save`，Step2 信息栏不再显示 Config，Step3 正常打开。
 
+### 块 S — `Load Previous Step1 Session` 每次弹对话框、打开所选场景（计划外；用户 2026-09-26 报告并批准）
+- **问题**（真机）：点 `Load Previous Step1 Session` 没有弹窗、没有反应。终端显示：程序自己找到了当前 ROI 的 `step1_session.json`，所以不弹文件对话框；这个文件随每次改动自动保存，恢复后「changed nothing」；成功提示只打到终端。这是原有设计（`7c54a10`），不是 E 或 U1 的回归。另外，手动选择别的 ROI 的会话时，被拒绝的原因也只打到终端。
+- **用户裁定**：`Load weights` 只恢复通道权重；`Load Previous Step1 Session` 完全复原当时的场景（ROI、patch、通道权重），每次都弹文件对话框；选中别的 ROI 或项目的会话时，直接切换到那个工作目录。
+- **只读核实（第 1 步）**：数据集和工作目录归 Step0 所有——Step0 的 Load 事务式切换并发出 `dataset_committed`，Step1 丢弃自己的状态并退回 Step0，进入 Step1 时再从新 ROI 的 manifest 读取交接；Step1 的读取器不碰 Step0 页面；Step0 每次加载似乎新建一个 ROI 工作区，能否重新打开已有工作区尚未确认。跨 ROI 打开因此需要改 Step0 页面，触发申请里的停止条件。
+- **用户裁定（2026-09-26）**：先交付缩小的一版（本块），同时做 S2 的只读调查。
+- **本块执行记录**（2026-09-26 提交）：
+  - `ui/main_window.py`：按钮改接 `_on_load_previous_session_clicked`：每次都弹文件对话框，默认在当前 ROI 的 step1 目录（没有时用输出目录）；取消则什么都不做；加载成功弹窗「Opened the Step1 session」；被拒绝时弹窗说明原因。加载函数和 v2 恢复里原来只打印的拒绝点改为 `_refuse_session(reason)`（打印并记下原因）；别的 ROI 或项目的会话提示「This session belongs to another ROI or project. Opening another project is not supported yet; this session was not loaded.」（用户 2026-09-26：Step0 没有「打开已有项目」的入口，原先让用户去 Step0 打开的提示会误导，改为如实说明）。程序打开 ROI 时的自动恢复仍然只打印，行为不变。
+  - `tests/test_step1_session_button.py` 4 条：已有自己的会话时也弹对话框、取消什么都不做；选中的文件被加载并提示成功；别的 ROI 的会话走真实加载函数被拒绝、原因上屏、状态不变；自动恢复仍只打印。相关模块（交接契约、Load weights、会话、写保护、布局、端到端交接等）213 条全部通过。
+- **拒绝时的「失败即锁」**：新格式会话被拒绝时，Step1 的就绪标志在核对之前就先清掉（有意设计，`test_step0_step1_handoff_contract.py:724` 锁定）；下次进入 Step1 会重新读交接，项目、ROI 和数据都不变。
+- **S2（跨 ROI/项目打开整个场景）——冻结（用户 2026-09-26）**：用户认为「Load Previous Step1 Session」的定位是打开别的项目并切换一切（工作目录、每个 step 的结果，可能包括 Step2、Step3），相当于新开会话或历史复盘，属于全局 / 架构级；先完成 Step2、Step3 的优化，最后统一调整架构（见第六节「后续计划」）。只读调查结论（2026-09-26）：
+  - Step0 目前**没有**重新打开已有 ROI 工作区的路径：`Load`（`_reload_from_paths`）每次清空 ROI、patch 和校正决定，不绑定已有的 `corrected_channels.zarr`；之后的第一次 Save 一定新建工作区（`utils/roi_project.py` 的 `create_roi_context` / `create_full_wsi_context`）。
+  - 可复用的零件：`build_roi_context`（只算路径）、`OverviewPanel.set_rois_and_patches`（不触发编辑）、`_apply_corrected_store`、`Block01DisplayServices.adopt_mappings`（尚无调用方）、Step1 的权威读取器 `_load_step0_roi_result`。
+  - 缺：可带参数调用的 Step0 Load、把场景装进 Step0 且不触发保存的入口、Step3 按 roi_id 选 ROI、切换时重置 Step2/Step3、Step2 分割运行时的忙碌检查、逐通道校正决定的恢复策略（v15 有意不在 Load 时预填）。
+  - 建议顺序：纯函数「读取场景」→ Step0 Load 参数化（行为不变）→ Step0「装入场景」→ 忙碌检查 → 主窗口编排 → Step2/Step3 重置与按 roi_id 选择 → 两个合成项目的写入隔离测试。
+  - 风险：Step0 提交切换之后再失败就回不到原项目；打开后若 Save 且没有恢复校正决定，会把该 ROI 的决定改写为 original；原始切片被改动（大小/mtime）会被拒绝；会话和 manifest 用绝对路径，项目移动后失效。
+
 ## 六、未决与 advisory
+
+### 后续计划（用户 2026-09-26 排定；都未启动，每块须单独申请）
+1. **Step2：旧路径 ROI 模式中途 Stop 仍登记成功**（没有契约的参数文件；契约路径已在 V2 第 3 步修好）。
+2. **Step3 重设计**：做成和 Step1 一样的布局和设置——左侧通道面板，右侧组织图像，可叠加分割 mask，可拖动、缩放，Tissue Navigator 空降和 patch；用户可以画 ROI，但不产生任何下游影响。
+3. **项目 / 会话架构**（最后做）：打开别的项目并切换一切（S2 的调查结论见块 S）；切换数据集后 Step2 仍留着上一个项目的 fused.zarr 和参数路径、正在跑的分割不停止——这一条随会话恢复一起治理。
+4. **暂缓**：Mesmer 3 个方法的真机验收（本机无模型，DeepCell token 申请网站不可用）；U2（`step1_fusion_settings.json` 并入会话）。
+
+### 已知的已有问题（advisory，未排期）
+- 用户主动 Stop 后，Step2 用标题为「Error」的对话框报告「Stopped by user.」。
+- Step1 读交接时把 Step0 界面上的「Output」输入框改写为 `<roi>/step1`（`_set_gui_work_dir`）；之后在 Step0 直接 Load，可能把 step1 当成项目根目录、在其下再建 `rois/`。
+- 仓库的测试写保护只保护 `config.py` 里的两个路径，不保护 `~/fusion_data`；在真实项目上做探测时只能用复制件。
+- 「没有任何组时勾选的通道进不了 fusion」（块 F 修好后 `Load weights` 走不到这个状态）。
+- 离屏 1500 宽窗口下 Step0 与 Step1 的通道列宽不一致（HEAD 上一样）。
+- 本机（WSL2、RTX 3060）上与 HEAD 相同的失败：`test_step1_channel_panel.py::test_the_weight_row_and_the_buttons_kept_their_look`、`test_global_channel_dock.py::test_the_step0_panel_looks_like_the_baseline_panel`、`test_step0_step1_display_isolation.py::test_step0_work_does_not_make_step1_load_or_redraw`（字体/几何差异），`test_step1_montage_view.py` 在第 27 条后 Qt 中止（WSL 的 GPU/EGL），5 个 GPU 模块不收集测试。
 
 - A0 各项产出（见块 A0）。
 - 同一个 patch 的核分割阶段复用：块 C 的第二步，另行申请。

@@ -784,6 +784,18 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
 - **真机验收通过（用户 2026-09-25）**。提交：`5bc65bc`。
 - **Advisory**：Step1 目前写三个 JSON——`fusion_config.json`（`Save` 时写，Step3 从中读原始切片路径，Step2 通过 `step1_output` 拿到它的路径）、`step1_fusion_settings.json`（`Save Fusion Settings` 的已确认快照，预分割用它的 hash 判断是否过期）、`step1_session.json`（会话）。用户希望 Step1 只生成一个统一的 JSON；这会牵涉 Step2、Step3 和预分割的读取方，另立块处理。
 
+### 块 U1 — Step1 不再写 `fusion_config.json`（计划外；用户 2026-09-26 裁定）
+- **背景**：Step1 目录里有 `fusion_config.json`（Save 时写）、`step1_fusion_settings.json`（已确认的设置）、`step1_session.json`（会话）和 `fusion_meta.json`（fused.zarr 的产物说明）。用户希望 Step1 只生成一个统一的 JSON。只读核查：`fusion_config.json` 几乎没人读内容——Step2 只在信息栏显示文件名，Step3 查找原始切片路径时把它当备选之一；`step1_fusion_settings.json` 是已确认设置的权威来源（hash、身份核对、预分割过期判断都靠它），并入会话风险高。
+- **用户裁定**：先做 U1（去掉 `fusion_config.json`）；`fusion_meta.json` 保留；Step2 信息栏那一行去掉。U2（把 `step1_fusion_settings.json` 并入会话）另行决定。
+- **做法**：
+  - Save 不再写 `fusion_config.json`；它原来写的内容（已确认的 fusion 配置、`ome_tiff`、`output_dir`、`norm_low/high`、`channel_remap_params`、`saved_at`）改为存进 `step1_session.json` 的 `last_save`，并立即请求一次会话保存。fusion 作业用的配置不变。
+  - `last_save` 随会话恢复（两条恢复路径），切换数据集时清空。
+  - `step1_output` 去掉 `fusion_config_path`；Step2 信息栏不再追加「Config: …」。
+  - Step3 查找原始切片路径时先读 `step1_session.json` 的 `raw_ome_path`；旧项目的 `fusion_config.json` 仍作为备选读取，**不删不改**。
+- **白名单**：`ui/main_window.py`（Save 写文件的一段、会话 payload 和恢复、`step1_output`、进入 Step2 时的信息栏）、`ui/step3_page.py`（`_resolve_raw_ome_path`）、`UI_SURFACE_RULES.md`、测试、本文档。`step2_page.py` 不需要改。
+- **测试**：`tests/test_step1_step2_handoff_e2e.py` 新增 2 条（真实 Save 后没有 `fusion_config.json`，会话 payload 带着同一份 `last_save`，Step2 信息栏没有「Config:」；Step3 能从会话找到原始切片）；两条读回或断言 `fusion_config.json` 的旧测试改为读 `last_save`。回归 62 个模块（Step1 全部、Step3、会话和写保护、界面约定），与 HEAD 逐条对比没有新增失败。
+- **真机验收通过（用户 2026-09-26）**：Step1 目录不再新生成 `fusion_config.json`，会话里有 `last_save`，Step2 信息栏不再显示 Config，Step3 正常打开。
+
 ## 六、未决与 advisory
 
 - A0 各项产出（见块 A0）。

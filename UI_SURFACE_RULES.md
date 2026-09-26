@@ -228,6 +228,8 @@ row, and the duplicate Tissue Preview button in the step bar.
   (it was not accurate). The
   public `Channels` panel is NOT shown in Step2: its frame and the dock
   mounted in it are kept, hidden, not deleted; Step2's own ticks are kept.
+  The Input Data line under `Load zarr info` names no config file (block
+  U1, user ruling 2026-09-26: Step1 writes no fusion_config.json).
 * **Step1's Save progress** (block L1, user ruling 2026-09-25) -- the modal
   progress dialog alone (with Cancel). The bar that used to sit at the
   bottom of the page is kept, hidden, and never shown; its words go to the

@@ -2381,6 +2381,7 @@ class MainWindow(QMainWindow):
         self._preseg_run = None
         self._preseg_records = {}
         self._preseg_selected = None
+        self._last_save = None             # block U1: it was this slide's Save
         results = self.__dict__.get("_preseg_results")
         if results is not None:
             results.clear()
@@ -3242,6 +3243,9 @@ class MainWindow(QMainWindow):
             # can be visible but not fused, or fused but not visible, and an
             # explicit 0.00 can still be told from a weight nobody ever gave.
             "fusion_draft": fusion_draft,
+            # What the last Save fused with (block U1): this used to be
+            # fusion_config.json, a separate file nobody read back.
+            "last_save": copy.deepcopy(getattr(self, "_last_save", None)),
             "fusion_enabled": sorted(fusion_draft.get("enabled") or []),
             "channel_weight_provenance": dict(fusion_draft.get("provenance")
                                               or {}),
@@ -3724,12 +3728,12 @@ class MainWindow(QMainWindow):
         )
         self._active_preview_patch = str(sess.get("active_preview_patch") or "")
         self._p1_diam = sess.get("p1_diam")
+        self._last_save = sess.get("last_save")
         self._params_source = sess.get("params_source")
         self._fused_zarr_path = self._restorable_fused_zarr(
             sess.get("fusion_zarr_path")) or None
 
         self.step1_output = {
-            "fusion_config_path": os.path.join(out_dir, "fusion_config.json"),
             "correction_config_path": self.step0_output.get("correction_config_path") or
                                       os.path.join(out_dir, "correction_config.json"),
             "zarr_path": self._fused_zarr_path,
@@ -4044,11 +4048,11 @@ class MainWindow(QMainWindow):
             )
             self._active_preview_patch = str(sess.get("active_preview_patch") or "")
             self._p1_diam = sess.get("p1_diam")
+            self._last_save = sess.get("last_save")
             self._params_source = sess.get("params_source")
             self._fused_zarr_path = self._restorable_fused_zarr(
                 sess.get("fusion_zarr_path")) or None
             self.step1_output = {
-                "fusion_config_path": os.path.join(out_dir, "fusion_config.json"),
                 "correction_config_path": os.path.join(out_dir, "correction_config.json"),
                 "zarr_path": self._fused_zarr_path,
                 "roi_info": self._rois,
@@ -4121,8 +4125,6 @@ class MainWindow(QMainWindow):
             zarr_path = self.step1_output.get("zarr_path")
             if zarr_path and not self._step2._zarr_edit.text().strip():
                 self._step2.set_zarr_path(zarr_path)
-            self._step2._fusion_config_path = self.step1_output.get("fusion_config_path")
-            cfg_path = self.step1_output.get("fusion_config_path")
             out_dir = self.step1_output.get("output_dir", OUTPUT_DIR)
             try:
                 if hasattr(self._step2, "load_step1_active_params") \
@@ -4130,11 +4132,6 @@ class MainWindow(QMainWindow):
                     self._step2.load_step1_active_params(out_dir)
             except Exception:
                 print(f"[Step2] failed to load active segmentation params:\n{traceback.format_exc()}")
-            if cfg_path:
-                self._step2._zarr_info.setText(
-                    (self._step2._zarr_info.text() or "") +
-                    f"\nConfig: {os.path.basename(cfg_path)}"
-                )
             rois = (self.step0_output or {}).get("rois") or self.step1_output.get("roi_info")
             if rois:
                 self._step2.set_rois(rois)
@@ -8130,7 +8127,6 @@ class MainWindow(QMainWindow):
         self._fusion_lbl.setText(f"✓  {result_name} complete → {zarr_path}")
         self._fused_zarr_path = zarr_path
         self.step1_output = {
-            "fusion_config_path": os.path.join(OUTPUT_DIR, "fusion_config.json"),
             "correction_config_path": os.path.join(OUTPUT_DIR, "correction_config.json"),
             "zarr_path": zarr_path,
             "segmentation_param_path": getattr(self, "_pending_segmentation_param_path", ""),
@@ -9082,7 +9078,9 @@ class MainWindow(QMainWindow):
             print(f"[Step1] save aborted: display mapping not committed ({reason})")
             return
 
-        # ── Write fusion_config.json ──────────────────────────────────
+        # ── What this Save fuses with ─────────────────────────────────
+        # (Block U1, user ruling 2026-09-26: kept in step1_session.json as
+        # `last_save`; Step1 writes no fusion_config.json any more.)
         # The COMMITTED settings, the same ones every search ran on, so the
         # file and the results that led to it describe one configuration. An
         # unticked channel is not in them, whatever weight it still holds.
@@ -9109,9 +9107,8 @@ class MainWindow(QMainWindow):
             "channel_remap_params": remap_params,
             "saved_at":   time.strftime("%Y-%m-%d %H:%M:%S"),
         })
-        fp1 = os.path.join(OUTPUT_DIR, "fusion_config.json")
-        with open(fp1, "w", encoding="utf-8") as f:
-            json.dump(fcfg, f, indent=2, ensure_ascii=False)
+        self._last_save = json.loads(json.dumps(fcfg, default=str))
+        self._schedule_step1_session_save()
 
         # ── Write timestamped segmentation params ─────────────────────
         method_cfg = self.search.get_selected_method_config()
@@ -9195,7 +9192,7 @@ class MainWindow(QMainWindow):
             print(f"[Step1] HQ selected channels={hq_meta['hq_channels']}")
             print(f"[Step1] HQ available at save={available_at_save}")
         fp_method, _ = save_segmentation_params(OUTPUT_DIR, cpcfg)
-        print(f"[Save] {fp1}")
+        print(f"[Save] fusion settings of this Save -> {self._step1_session_path(OUTPUT_DIR)} (last_save)")
         print(f"[Save] {fp_method}")
         print(f"[Step1] saved active segmentation params={fp_method}")
         self._pending_segmentation_param_path = fp_method

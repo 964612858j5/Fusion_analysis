@@ -269,8 +269,9 @@ def test_a_save_whose_mapping_cannot_be_committed_fuses_nothing(app, tmp_path, m
 
         assert started == []
         assert warned and "disk is full" in str(warned[-1])
-        # It stopped before producing anything: the config a Save writes on its
-        # way to fusing is not there.
+        # It stopped before producing anything: the record a Save keeps on its
+        # way to fusing (the session's `last_save`, block U1) is not there.
+        assert getattr(w, "_last_save", None) is None
         assert not os.path.exists(os.path.join(str(tmp_path), "fusion_config.json"))
     finally:
         w.close()

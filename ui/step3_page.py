@@ -1295,14 +1295,17 @@ class Step3Page(QWidget):
             candidates.append(self._loader.filepath)
         base_dir = self._output_dir or OUTPUT_DIR
         if base_dir:
-            for name in ("fusion_config.json", "correction_config.json", "roi_config.json", "step0_output.json"):
+            # step1_session.json first (block U1: Step1 writes no
+            # fusion_config.json any more; an old project's is still read).
+            for name in ("step1_session.json", "fusion_config.json", "correction_config.json",
+                         "roi_config.json", "step0_output.json"):
                 meta_path = os.path.join(base_dir, name)
                 if not os.path.exists(meta_path):
                     continue
                 try:
                     with open(meta_path, "r", encoding="utf-8") as f:
                         meta = json.load(f)
-                    for key in ("ome_tiff", "ome_tiff_path", "raw_ome"):
+                    for key in ("ome_tiff", "ome_tiff_path", "raw_ome", "raw_ome_path"):
                         if isinstance(meta, dict) and meta.get(key):
                             candidates.append(meta.get(key))
                 except Exception:

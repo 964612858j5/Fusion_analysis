@@ -638,7 +638,8 @@ def test_a_snapshot_that_names_nothing_is_refused(app, tmp_path):
 
 
 def test_the_saved_run_writes_the_snapshots_mapping(app, tmp_path, monkeypatch):
-    """Drive the real Save far enough to read fusion_config.json back."""
+    """Drive the real Save far enough to read back what it fused with --
+    the session's `last_save` since block U1 (it was fusion_config.json)."""
     from block01.ui import main_window as mw
 
     w = _window(app, tmp_path)
@@ -673,8 +674,10 @@ def test_the_saved_run_writes_the_snapshots_mapping(app, tmp_path, monkeypatch):
 
         w._save()
 
-        with open(tmp_path / "fusion_config.json") as f:
-            written = json.load(f)
+        assert not (tmp_path / "fusion_config.json").exists()      # block U1
+        w._save_step1_session()
+        with open(w._step1_session_path(str(tmp_path)), encoding="utf-8") as f:
+            written = json.load(f)["last_save"]
         assert written["channel_remap_params"]["CD3"]["max"] == 1.0
     finally:
         w.close()

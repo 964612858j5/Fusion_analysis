@@ -123,3 +123,42 @@ def test_the_old_panel_and_patch_results_are_off_the_screen(app, tmp_path, monke
         assert tabs.currentWidget() is not w.patch_results_tab
     finally:
         w.close()
+
+
+def test_save_writes_no_fusion_config_json_and_the_session_keeps_the_record(
+        app, tmp_path, monkeypatch):
+    """Block U1 (user ruling 2026-09-26): Step1's JSON is step1_session.json;
+    what a Save fused with is its `last_save`, kept through a restore."""
+    w, out, _ = _chosen_and_saved(app, tmp_path, monkeypatch, "cellpose_wholecell_fusion")
+    try:
+        assert not os.path.exists(os.path.join(out, "fusion_config.json"))
+        record = w._last_save
+        assert record and record.get("groups") is not None and "saved_at" in record
+        payload = w._step1_session_payload()
+        assert payload["last_save"] == record
+        # the Step2 info line no longer names a config file
+        monkeypatch.setattr(type(w), "_load_step0_roi_result", lambda self, *a, **k: True)
+        w.step1_output = {"zarr_path": _fused_zarr(tmp_path), "output_dir": out,
+                          "step2_dir": str(tmp_path / "step2"), "roi_info": [],
+                          "roi_id": "", "roi_dir": ""}
+        w._go_to_step2()
+        assert "Config:" not in (w._step2._zarr_info.text() or "")
+    finally:
+        w.close()
+
+
+def test_step3_finds_the_raw_slide_in_the_session(app, tmp_path):
+    from block01.ui.step3_page import Step3Page
+    raw = tmp_path / "slide.ome.tif"
+    raw.write_bytes(b"x")
+    (tmp_path / "step1_session.json").write_text(
+        json.dumps({"raw_ome_path": str(raw)}), encoding="utf-8")
+    page = Step3Page()
+    try:
+        page._output_dir = str(tmp_path)
+        page._raw_ome_path = ""
+        page._loader = None
+        found = page._resolve_raw_ome_path()
+        assert found and os.path.abspath(found) == os.path.abspath(str(raw))
+    finally:
+        page.close()

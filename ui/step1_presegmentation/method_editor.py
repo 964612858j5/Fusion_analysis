@@ -97,7 +97,9 @@ class MethodEditorDialog(QtWidgets.QDialog):
         start = values or ps.default_values(method)
         for spec in ps.specs(method):
             edit = QtWidgets.QLineEdit(self._form_host)
-            edit.setText(ps.format_values(spec, start.get(spec.key) or [spec.default]))
+            edit.setText(ps.format_values(
+                spec, [spec.default] if spec.fixed else (start.get(spec.key) or [spec.default])))
+            edit.setReadOnly(spec.fixed)
             err = QtWidgets.QLabel("", self._form_host)
             err.setStyleSheet("color:#ff6b6b;font-size:10px;")
             err.setWordWrap(True)

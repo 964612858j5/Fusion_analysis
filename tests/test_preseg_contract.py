@@ -334,14 +334,20 @@ def test_mesmer_fixed_rules_are_the_engines():
 
 
 @pytest.mark.parametrize("method", ["mesmer_whole_cell", "mesmer_nuclei", "mesmer_nuclear_guided"])
-def test_ticking_normalize_input_in_step2_is_a_mismatch(app, tmp_path, monkeypatch, method):
+def test_step2_mesmer_keeps_the_fixed_rules_and_checks_its_thresholds(app, tmp_path, monkeypatch,
+                                                                      method):
+    # Block M: Step2 has no normalize_input control any more; the fixed rules
+    # always go with the config, and the thresholds are checked like the rest.
     _, out, _ = _use_and_save(tmp_path, method, COMBOS[method])
     page = _page_config(app, out)
-    assert page._mesmer_norm.isChecked() is False
-    page._mesmer_norm.setChecked(True)
+    assert not hasattr(page, "_mesmer_norm")
+    seg = page.get_seg_config()
+    assert seg["normalize_input"] is False
+    assert seg["threshold_target"] == pc.fixed_rules(method)["threshold_target"]
+    page._mesmer_maxima.setValue(page._mesmer_maxima.value() + 0.01)
     said = _told(monkeypatch)
     assert page._check_preseg_contract(page.get_seg_config()) is False
-    assert "not the ones chosen in Step1" in said[-1][1] and "normalize_input" in said[-1][1]
+    assert "not the ones chosen in Step1" in said[-1][1] and "maxima_threshold" in said[-1][1]
 
 
 def test_a_mesmer_contract_without_its_fixed_rules_is_refused():

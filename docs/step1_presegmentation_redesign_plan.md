@@ -1,7 +1,7 @@
 # Step1 预分割（Method & Parameters / Patch Results）重设计 — 项目计划
 
 日期：2026-09-23（第三版，块 A0 产出）　分支 `v15-interactive-channel-workspace`，起点 `c9f80df`，A0 核查基于 `e655409`。
-状态：**已执行：块 P、A1、A2、B、C、D、V0。本文档记录的验收：B「用户验收总体通过」、C 第 4 步「用户人工测试通过」、D「块 D 验收通过（2026-09-25）」；P、A1、A2、V0 的执行记录仍写「待用户验收」，文档中没有后续验收记录。V2（代码中称「Step2 hook-up」）第 1、2 步已提交（`54e825d`、`1adfe4e`），第 3 步已提交（`dcaca2c`），真机上 Cellpose 路径跑通，Mesmer 未验收；块 L 已提交（`1d14801`、`2294bc7`）并通过真机验收；块 F 已提交（`5bc65bc`）并通过真机验收；块 E 已提交（`7ee98fc`）并通过真机验收（Mesmer 除外）；U1、Results 顺序、块 S 已提交；块 K 已实施并通过真机验收；S2 冻结；后续计划见第六节。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动须另行批准。
+状态：**已执行：块 P、A1、A2、B、C、D、V0。本文档记录的验收：B「用户验收总体通过」、C 第 4 步「用户人工测试通过」、D「块 D 验收通过（2026-09-25）」；P、A1、A2、V0 的执行记录仍写「待用户验收」，文档中没有后续验收记录。V2（代码中称「Step2 hook-up」）第 1、2 步已提交（`54e825d`、`1adfe4e`），第 3 步已提交（`dcaca2c`），真机上 Cellpose 路径跑通，Mesmer 未验收；块 L 已提交（`1d14801`、`2294bc7`）并通过真机验收；块 F 已提交（`5bc65bc`）并通过真机验收；块 E 已提交（`7ee98fc`）并通过真机验收（Mesmer 除外）；U1、Results 顺序、块 S 已提交；块 K 已实施并通过真机验收；块 M 已实施并通过真机验收；S2 冻结；后续计划见第六节。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动须另行批准。
 
 修订记录：
 - v1：初稿。
@@ -9,6 +9,9 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.27：块 M 已实施并通过真机验收；新增已有问题（StarDist 偶发不一致、Cellpose CPU 极慢）。
+- v3.26：块 M 申请与用户裁定（Step2 的 8 个方法统一走引擎子进程）。
+- v3.25：块 K 真机验收通过并提交（`bc280d1`）；记录「旧路径 Stop 不能立即停止」的调查结论和用户决定（不改）。
 - v3.24：块 K 已实施（旧路径 ROI 模式中途 Stop 不再登记成功），写入执行记录，待真机验收；新增已有问题：运行资源监控器 `NameError`。
 - v3.23：用户裁定 HQ / HQ2 / CDS 这类不经 Step1 交接的方法不再维护（R2 加注，第六节新增「用户裁定」）。写入块 K 申请（Step2 旧路径 ROI 模式中途 Stop 不再登记成功，待批准），已按独立审核意见修订。
 - v3.22：块 U1、Results 顺序、块 S（每次弹对话框、拒绝原因上屏）已提交；S2 冻结，记录调查结论；新增「后续计划」和「已知的已有问题」。
@@ -844,6 +847,39 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 并行时新测试有 3 条失败，原因是下面的已有问题（运行资源监控器的 `NameError`），不是本块改动：单独运行全部通过。
   - **真机验收通过（用户 2026-09-26）**：手动模式 ROI 分割中途 Stop，不再弹完成对话框、不登记。用户反馈：点 Stop 后不能立即停止（旧路径要等当前切块推理结束），另行调查。
 
+### 块 M — Step2 的 8 个方法统一走引擎子进程（用户 2026-09-26 批准；已实施，**真机验收通过**）
+- **背景**：块 K 之后，用户发现手动模式和 Step1 继承走两套流程（进程内推理 vs 引擎子进程）：Stop 快慢不同、失败处理不同、Cellpose whole-cell 输入不同（旧路径 `[fusion, DAPI]` 不指定 `channel_axis`，契约为 `[fusion, fusion, DAPI]`），违背 R14。用户选择完全统一。
+- **用户裁定（2026-09-26）**：
+  1. 范围覆盖 Cellpose、StarDist、Mesmer 共 8 个方法（HQ / HQ2 / CDS 不维护，留在旧路径；从 .npy 恢复不跑模型，不受影响）。手动、继承、无契约的旧参数文件都走引擎。
+  2. 接受 Cellpose whole-cell 手动结果改变。
+  3. Step2 保留「Use GPU」：手动和继承都可以选择 CPU（GPU 部署失败或用户想强制 CPU）；Step1 预分割不加，仍由引擎自动选择。StarDist 模型名固定为 `2D_versatile_fluo`，Step1、Step2 都不能修改。
+  4. 失败处理同契约路径：切块推理失败时整次运行报错、不登记。
+  5. Step2 手动界面里契约之外的 Mesmer 控件删除（nuclear_channel、membrane_channels、input_mode、use_gpu、tile_size、overlap、batch_size、normalize_input、percentile_low/high）；保留 image_mpp、postprocess_min_size；新增 maxima_threshold、interior_threshold（与 Step1 参数表一致）。
+  6. 旧参数文件里引擎不用的设置：点 Run 时弹窗逐条说明原因，按钮只有「按契约运行 / 取消」，强制按契约执行。
+  7. **引擎身份不再作为拒绝理由**：只核对引擎种类（`engine`）和能否启动；Step1 那次运行的身份与本次身份都记进运行元数据，不同时只写日志和终端。原因：Step1 定下的是参数，参数正确就复用；`runner_version` 按整个 `seg_runner/` 目录哈希，改启动代码也会误拒。
+  8. 旧路径中这 8 个方法走不到的推理分支删除（Cellpose 进程内加载留给 HQ）。
+  9. Mesmer 3 个方法本机无模型，推理标「未验收」，不用 mock。
+- **白名单**：
+  - `seg_runner/client.py`：`EngineProcess` 增加 CPU 选项（子进程环境 `CUDA_VISIBLE_DEVICES=""`）。
+  - `workers/segment_merge_worker.py`：`run()` 开头的路径选择与元数据；`_init_segmentation_backend`；`_start_contract_engine`（身份只核对种类、记录身份与设备）；`_segment_tile`（8 个方法走引擎，删除其旧分支）；`_segment_tile_contract`（无契约时按参数表取参数）；`_validate_mesmer_config`；两个切块循环 `except` 的判断。
+  - `ui/step2_page.py`：统一的 Use GPU 行（两种模式都显示）；Mesmer 控件删除 / 新增；StarDist 模型名只读；读写配置（`get_seg_config`、两处套用配置到界面）；`_run` 的旧设置弹窗。
+  - `utils/segmentation_param_schema.py`：`ParamSpec` 增加「固定值」，StarDist 模型名固定；`ui/step1_presegmentation/method_editor.py`：固定值只读。
+  - 纯函数（列出旧参数文件里引擎不用的设置）放在 `core/preseg_contract.py`。
+  - 测试、`UI_SURFACE_RULES.md`、本文档。
+- **不改的范围**：`seg_runner` 的 engines / runner / protocol（引擎行为不变）；Step1 预分割的运行；HQ 系；从 .npy 恢复；输出写出阶段；Step2 其他控件与布局。
+- **风险**：手动 Cellpose whole-cell 结果改变（已接受）；每块写一个临时 `.npy`（契约路径已如此）；旧 Mesmer 设置被强制忽略（弹窗说明）；Mesmer 未验收。
+- **验收门**：手动配置下 Cellpose 3 个、StarDist 2 个方法 × 两个循环，全局 mask 与「同一 runner 逐块跑 + Step2 方式粘贴」逐像素相同；手动模式推理中 Stop 在 2 s 内结束、不登记；切块失败整次报错；不勾 Use GPU 时引擎设备为 CPU（继承和手动）；引擎种类不同仍拒绝、身份其他键不同照常运行并记录；界面：Mesmer 控件删除 / 新增、模型名只读、两种模式都有 Use GPU、旧文件弹窗列出原因且「取消」不运行；Step1 模型名只读。回归与 HEAD 逐条对比无新增失败。真机验收：手动模式 Stop 立即生效；取消 Use GPU 后用 CPU 跑通。
+- **执行记录**（2026-09-26，未提交）：
+  - `seg_runner/client.py`：`EngineProcess(..., cpu_only=False)`；为 True 时子进程环境 `CUDA_VISIBLE_DEVICES=""`，torch 和 TensorFlow 都看不到 GPU。engines / runner / protocol 未改。
+  - `workers/segment_merge_worker.py`：新增 `_runs_on_engine()`（8 个方法且非 .npy 恢复）、`_wants_gpu()`、`_engine_params()`（有契约取契约参数；无契约按 `segmentation_param_schema` 的参数表从配置取值，加方法固定规则；固定参数一律取固定值）；`_init_segmentation_backend`、`_segment_tile`、两个切块循环的 `except` 改按 `_runs_on_engine()` 判断；`_start_contract_engine` 传 CPU 选项，引擎身份只核对种类，其余不同则打印并写日志，身份、设备、Use GPU 记入 `self._engine_meta`，写进 `segmentation_meta.json` 的 `seg_engine`；`_validate_mesmer_config` 只剩「读 fused 切块」；删除 8 个方法的旧推理分支（Cellpose whole-cell / nuclei / expansion、StarDist、Mesmer 的进程内推理和加载），以及随之不用的 `_mesmer_uses_selected_channels` 和 4 个导入。Cellpose 进程内加载只留给 HQ 系。
+  - `ui/step2_page.py`：`GPU:` 行对所有方法、两种参数来源都显示；删除 Mesmer 的 10 个控件和只对 Mesmer 显示的 `tile size` / `batch size`，新增 `maxima_threshold`、`interior_threshold`；`get_seg_config` 对 Mesmer 写入契约的固定规则和该方法的 `input_mode`，去掉引擎不用的键；旧的 Mesmer `use_gpu`（auto / gpu / cpu）套用到 Use GPU；StarDist 模型名只读、恒为 `2D_versatile_fluo`；`_check_preseg_contract` 不把固定参数算作不一致；新增 `_confirm_ignored_settings`，在 index 来源 Run 时弹窗。
+  - `core/preseg_contract.py`：新增 `STARDIST_MODEL`、`mesmer_input_mode()`、`ignored_settings()`（按写在文件里的内容判断，`params` 优先；契约文件只检查模型名）。
+  - `utils/segmentation_param_schema.py`：`ParamSpec.fixed`；StarDist `model_name` 固定；`parse_values` 拒绝非固定值；`combinations`、`summary` 对固定参数取固定值（旧方案里别的模型名按固定值运行）。`method_editor.py`：固定参数只读、显示固定值。
+  - 白名单外的小改动：`_check_preseg_contract`（固定参数不算不一致，属于「旧设置弹窗」的一部分）、`schema.summary`；已在上面列出。
+  - 测试：新增 `tests/test_step2_engine_unified.py`（38 条：手动配置 8 方法 × 两个循环与 runner 逐像素相同，Mesmer 6 条因本机无模型跳过并注明「未验收」；手动推理中 Stop 2 s 内结束、不登记；引擎失败整次报错；不勾 Use GPU 时 StarDist 手动 / 继承都在 CPU 上跑，Cellpose 仅验证 CPU 模式启动报告 `cpu`（本机 Cellpose-SAM 在 CPU 上一个 120×120 块约 230 s，不放进常规测试）；勾选时设备由引擎决定；模型名固定；HQ 不走引擎；`ignored_settings` 纯函数；界面各项；Step1 模型名只读）。改写 2 条旧测试：`test_step2_runner_path.py::test_another_engine_is_refused` → `test_another_engine_version_runs_and_is_recorded`（裁定 7），`test_preseg_contract.py::test_ticking_normalize_input_in_step2_is_a_mismatch` → `test_step2_mesmer_keeps_the_fixed_rules_and_checks_its_thresholds`（控件已按裁定 5 删除）。
+  - 回归：31 个模块，与 `git archive HEAD` 导出件逐条对比。轻量模块 4 个并行；真实引擎模块在 4 并行下超时或崩溃（10 GB 内存 / 6 GB 显存不够），改为逐个顺序运行。**已有模块没有新增失败**。两边相同的失败：`test_hq_marker_segmentation.py` 2 条（HQ 不维护）、`test_tissue_navigator_viewport_sync.py::test_mapping_slide_local_to_full`、`test_seg_runner_engines.py` 3 条（2 条 Mesmer 缺模型，1 条 StarDist expansion）、`test_seg_runner.py::test_mesmer_in_subprocess_equals_direct_call`（缺模型）。`test_seg_runner.py::test_stardist_in_subprocess_equals_direct_call` 与新测试的 StarDist ROI 一条各失败过一次，重跑 3 次：HEAD 上失败 2 次、改后失败 1 次、新测试 3 次通过——StarDist 同机多次运行偶发 1 像素差，HEAD 上已有。
+  - **真机验收通过（用户 2026-09-26）**。
+
 ## 六、未决与 advisory
 
 ### 后续计划（用户 2026-09-26 排定；都未启动，每块须单独申请）
@@ -856,6 +892,14 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
 - **HQ / HQ2 / CDS 这类不经 Step1 交接的方法不再维护。** 它们在新界面本来就不可见（R2）。此后各块不为它们修缺陷、不为它们补测试，也不把它们放进验收门；只有这些方法自身的测试失败不阻塞其他块——共用路径（例如两个切块循环、归属与合并）上仍维护方法的回归照常算失败。代码暂不删除；删除须另行申请。
 
 ### 已知的已有问题（advisory，未排期）
+- **StarDist 同一输入多次运行偶发不一致**（块 M 回归中确认，HEAD 上已有）：偶尔约 0.5% 像素的标签差 1，使逐像素相等的测试（`test_seg_runner.py::test_stardist_in_subprocess_equals_direct_call` 等）时过时不过。
+- **Cellpose 用 CPU 极慢**：本机 Cellpose-SAM 在 CPU 上一个 256×256 内部块约 230 s；全图（15437×16215）按此外推约两周。Use GPU 关闭只适合作为兜底或很小的 ROI。
+- **旧路径 Stop 不能立即停止**这一条已由块 M 解决（8 个方法都走引擎）。
+- **旧路径（手动模式、旧参数文件）点 Stop 不能立即停止**：推理在 Step2 worker 线程里直接调用模型，要等当前切块推理结束才走到 Stop 检查点；契约路径在引擎子进程里跑，约 0.2 秒停止。**用户 2026-09-26 决定不改（范围太大）**。只读调查结论留作参考：
+  - 可行做法是手动模式的 Cellpose 3 个、StarDist 2 个方法改走 `seg_runner` 引擎子进程，复用契约路径的启动、逐块、Stop 机制；Mesmer 手动模式（膜通道、`selected_channels`、额外拉伸、`tile_size`）引擎表达不了，HQ 系不维护。
+  - 合成图像实测（同参数，旧路径 vs 引擎逐块 + Step2 拼接）：Cellpose nuclei、nuclei + expansion、StarDist ×2 逐像素相同；Cellpose whole-cell 不同（72 vs 69 个细胞，前景 IoU 0.97），因为旧路径给 `[fusion, DAPI]` 且不指定 `channel_axis`，引擎按 7.11 契约给 `[fusion, fusion, DAPI]`。
+  - 还需裁定的点：引擎不理会 Cellpose 的 use GPU 勾选和 StarDist 的模型名；切块推理失败会从「零 mask 后继续」变为整次运行报错。
+  - 临时办法：Tile Grid 分得更细，Stop 最多等一个小切块。
 - **运行资源监控器在判定「推理退回 CPU」时崩溃**（块 K 回归中发现，2026-09-26）：`utils/runtime_resource_monitor.py:336` 的 `_cpu_fallback_reasons()` 用到 `likely_gpu_inference`、`gpu_peak_util`，它们只是 `diagnose()` 的局部变量，抛 `NameError`。只在 `likely_cpu_fallback` 为真时走到（推理期间 GPU 显存增长 ≥128 MB、GPU 利用率 <10%、CPU ≥70%）；Step2 在收尾 `_finish_runtime_monitor()` 时调用，此时输出已写完，运行却以错误结束、不登记。离屏 4 个并行进程时可复现；真机上 GPU 繁忙或推理退回 CPU 时可能遇到。未修，等用户裁定。
 - 用户主动 Stop 后，Step2 用标题为「Error」的对话框报告「Stopped by user.」。
 - Step1 读交接时把 Step0 界面上的「Output」输入框改写为 `<roi>/step1`（`_set_gui_work_dir`）；之后在 Step0 直接 Load，可能把 step1 当成项目根目录、在其下再建 `rois/`。

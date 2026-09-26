@@ -49,6 +49,13 @@ from ..workers.hq_marker_segmentation import (
 )
 from ..workers.segment_merge_worker import SegmentMergeWorker
 from ..core import preseg_contract
+from ..utils import segmentation_param_schema as param_schema
+
+
+def _gpu_on(value):
+    """A config's use_gpu (a bool, or an old Mesmer 'auto'/'gpu'/'cpu')."""
+    return str(value if value is not None else True).strip().lower() not in {
+        "0", "false", "no", "off", "cpu"}
 from ..core.io_loader import OMETIFFLoader
 
 # ══════════════════════════════════════════════════════════════════════
@@ -496,25 +503,16 @@ class Step2Page(QWidget):
         r, self._cp_minsize_label, _ = _param_row('min_size (px²):', self._cp_minsize)
         cpl.addLayout(r)
 
+        # Every method, manual or from the index (block M): unchecked, the
+        # engine runs on the CPU (a broken GPU setup, or the user's choice).
         self._cp_gpu = QCheckBox('Use GPU if available')
         self._cp_gpu.setChecked(True)
         r, self._cp_gpu_label, _ = _param_row('GPU:', self._cp_gpu)
         cpl.addLayout(r)
 
-        self._cp_tile_size = QtWidgets.QSpinBox()
-        self._cp_tile_size.setRange(128, 4096)
-        self._cp_tile_size.setSingleStep(128)
-        self._cp_tile_size.setValue(1024)
-        r, self._cp_tile_size_label, _ = _param_row('tile size:', self._cp_tile_size)
-        cpl.addLayout(r)
-
-        self._cp_batch_size = QtWidgets.QSpinBox()
-        self._cp_batch_size.setRange(1, 128)
-        self._cp_batch_size.setValue(8)
-        r, self._cp_batch_size_label, _ = _param_row('batch size:', self._cp_batch_size)
-        cpl.addLayout(r)
-
-        self._sd_model = QtWidgets.QLineEdit('2D_versatile_fluo')
+        # The engine loads this model only (block M): shown, not editable.
+        self._sd_model = QtWidgets.QLineEdit(preseg_contract.STARDIST_MODEL)
+        self._sd_model.setReadOnly(True)
         self._sd_model.setStyleSheet('font-size:11px;')
         r, self._sd_model_label, _ = _param_row('StarDist model:', self._sd_model)
         cpl.addLayout(r)
@@ -905,37 +903,18 @@ class Step2Page(QWidget):
         self._mesmer_section.setStyleSheet('color:#56b6c2;font-size:11px;font-weight:bold;padding-top:4px;')
         cpl.addWidget(self._mesmer_section)
         self._mesmer_widgets.append(self._mesmer_section)
-        self._mesmer_nuclear_channel = _mesmer_row('nuclear_channel:', QtWidgets.QLineEdit('DAPI'))
-        self._mesmer_membrane_channels = _mesmer_row('membrane_channels:', QtWidgets.QLineEdit())
-        self._mesmer_membrane_channels.setPlaceholderText('PanCK;CD45;CD68;HLA-DR')
-        self._mesmer_input_mode = _mesmer_row('input_mode:', QComboBox())
-        for label, value in (
-            ('DAPI only', 'DAPI only'),
-            ('DAPI + Fusion channel', 'step1_weighted_fusion'),
-            ('DAPI + membrane channels', 'selected_channels'),
-            ('selected channels', 'selected_channels'),
-        ):
-            self._mesmer_input_mode.addItem(label, value)
-        self._mesmer_use_gpu = _mesmer_row('use_gpu:', QComboBox())
-        for label, value in (('Auto', 'auto'), ('GPU', 'gpu'), ('CPU', 'cpu')):
-            self._mesmer_use_gpu.addItem(label, value)
-        self._mesmer_tile_size = _mesmer_row('tile_size:', QtWidgets.QSpinBox())
-        self._mesmer_tile_size.setRange(0, 8192)
-        self._mesmer_tile_size.setSingleStep(128)
-        self._mesmer_tile_size.setSpecialValueText('from Step2 Tile Grid')
-        self._mesmer_tile_size.setToolTip('Step2 uses Rows × Cols and Tile Grid overlap. This optional Mesmer tile_size is not used unless future internal Mesmer tiling is enabled.')
-        self._mesmer_tile_size.setValue(0)
-        self._mesmer_tile_size.setEnabled(False)
-        self._mesmer_overlap = _mesmer_row('overlap:', QtWidgets.QSpinBox())
-        self._mesmer_overlap.setRange(0, 1024)
-        self._mesmer_overlap.setSingleStep(32)
-        self._mesmer_overlap.setSpecialValueText('from Step2 Tile Grid')
-        self._mesmer_overlap.setToolTip('Step2 uses the Tile Grid overlap above for reading padded tiles. This optional Mesmer overlap is not used in current Step2.')
-        self._mesmer_overlap.setValue(0)
-        self._mesmer_overlap.setEnabled(False)
-        self._mesmer_batch_size = _mesmer_row('batch_size:', QtWidgets.QSpinBox())
-        self._mesmer_batch_size.setRange(1, 32)
-        self._mesmer_batch_size.setValue(1)
+        # The parameters Step1's table has for Mesmer (block M); the input and
+        # the preprocessing are fixed by the contract (plan 7.11).
+        self._mesmer_maxima = _mesmer_row('maxima_threshold:', QDoubleSpinBox())
+        self._mesmer_maxima.setDecimals(3)
+        self._mesmer_maxima.setRange(0, 1)
+        self._mesmer_maxima.setSingleStep(0.005)
+        self._mesmer_maxima.setValue(0.075)
+        self._mesmer_interior = _mesmer_row('interior_threshold:', QDoubleSpinBox())
+        self._mesmer_interior.setDecimals(3)
+        self._mesmer_interior.setRange(0, 1)
+        self._mesmer_interior.setSingleStep(0.01)
+        self._mesmer_interior.setValue(0.2)
         self._mesmer_mpp = _mesmer_row('image_mpp:', QDoubleSpinBox())
         # 3 decimals like Step1's method editor (0.325 at 20x), so a chosen
         # value is not rounded on its way through this box.
@@ -943,26 +922,9 @@ class Step2Page(QWidget):
         self._mesmer_mpp.setRange(0.01, 10)
         self._mesmer_mpp.setSingleStep(0.05)
         self._mesmer_mpp.setValue(0.5)
-        self._mesmer_norm = _mesmer_row('normalize_input:', QCheckBox('True'))
-        self._mesmer_norm.setChecked(True)
-        self._mesmer_low = _mesmer_row('percentile_low:', QDoubleSpinBox())
-        self._mesmer_low.setRange(0, 50)
-        self._mesmer_low.setValue(1.0)
-        self._mesmer_high = _mesmer_row('percentile_high:', QDoubleSpinBox())
-        self._mesmer_high.setRange(50, 100)
-        self._mesmer_high.setValue(99.8)
         self._mesmer_min_size = _mesmer_row('postprocess_min_size:', QtWidgets.QSpinBox())
         self._mesmer_min_size.setRange(0, 100000)
         self._mesmer_min_size.setValue(0)
-        self._mesmer_step2_tiling_hint = QLabel(
-            'Step2 tiling is controlled by Tile Grid: Rows × Cols plus Overlap (px). '
-            'Mesmer tile_size/overlap are optional and left empty here.'
-        )
-        self._mesmer_step2_tiling_hint.setStyleSheet('color:#999;font-size:10px;')
-        self._mesmer_step2_tiling_hint.setWordWrap(True)
-        cpl.addWidget(self._mesmer_step2_tiling_hint)
-        self._mesmer_widgets.append(self._mesmer_step2_tiling_hint)
-
         self._method_hint = QLabel('')
         self._method_hint.setStyleSheet('color:#999;font-size:10px;')
         self._method_hint.setWordWrap(True)
@@ -1681,10 +1643,8 @@ class Step2Page(QWidget):
             self._cp_flow.setValue(p.get('flow_threshold', 0.4))
             self._cp_prob.setValue(p.get('cellprob_threshold', 0.0))
             self._cp_minsize.setValue(p.get('min_size', 15))
-            self._cp_gpu.setChecked(bool(p.get('use_gpu', True)))
-            self._cp_tile_size.setValue(int(p.get('tile_size', 1024) or 1024))
-            self._cp_batch_size.setValue(int(p.get('batch_size', 8) or 8))
-        self._sd_model.setText(str(p.get('model_name') or '2D_versatile_fluo'))
+        self._cp_gpu.setChecked(_gpu_on(p.get('use_gpu', True)))
+        self._sd_model.setText(preseg_contract.STARDIST_MODEL)
         self._sd_prob.setValue(-1.0 if p.get('prob_thresh') is None else float(p.get('prob_thresh')))
         self._sd_nms.setValue(-1.0 if p.get('nms_thresh') is None else float(p.get('nms_thresh')))
         self._sd_expand.setValue(float(p.get('expand_distance', 8) or 0))
@@ -1764,19 +1724,12 @@ class Step2Page(QWidget):
         self._csd_fusion_mode.setCurrentIndex(max(0, idx))
         self._csd_tau.setValue(float(p.get("outside_in_z_threshold", 0.5) or 0.5))
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
-            self._mesmer_nuclear_channel.setText(str(p.get("nuclear_channel", "DAPI") or "DAPI"))
-            self._mesmer_membrane_channels.setText(";".join(parse_hq_channels(p.get("membrane_channels") or [])))
-            idx = self._mesmer_input_mode.findData(p.get("input_mode", "selected_channels"))
-            self._mesmer_input_mode.setCurrentIndex(max(0, idx))
-            idx = self._mesmer_use_gpu.findData(str(p.get("use_gpu", "auto")).lower())
-            self._mesmer_use_gpu.setCurrentIndex(max(0, idx))
-            self._mesmer_tile_size.setValue(0)
-            self._mesmer_overlap.setValue(0)
-            self._mesmer_batch_size.setValue(int(p.get("batch_size", 1) or 1))
+            maxima = p.get("maxima_threshold")
+            interior = p.get("interior_threshold")
+            self._mesmer_maxima.setValue(float(maxima) if maxima is not None
+                                         else (0.1 if method == MESMER_NUCLEI else 0.075))
+            self._mesmer_interior.setValue(float(interior) if interior is not None else 0.2)
             self._mesmer_mpp.setValue(float(p.get("image_mpp", p.get("pixel_size", 0.5)) or 0.5))
-            self._mesmer_norm.setChecked(bool(p.get("normalize_input", True)))
-            self._mesmer_low.setValue(float(p.get("percentile_low", 1.0)))
-            self._mesmer_high.setValue(float(p.get("percentile_high", 99.8)))
             self._mesmer_min_size.setValue(int(p.get("postprocess_min_size", 0) or 0))
         self._on_method_changed()
 
@@ -1786,10 +1739,8 @@ class Step2Page(QWidget):
         self._cp_flow.setValue(cfg.get('flow_threshold', 0.4))
         self._cp_prob.setValue(cfg.get('cellprob_threshold', 0.0))
         self._cp_minsize.setValue(cfg.get('min_size', 15))
-        self._cp_gpu.setChecked(bool(cfg.get('use_gpu', True)))
-        self._cp_tile_size.setValue(int(cfg.get('tile_size', 1024) or 1024))
-        self._cp_batch_size.setValue(int(cfg.get('batch_size', 8) or 8))
-        self._sd_model.setText(str(cfg.get('model_name') or '2D_versatile_fluo'))
+        self._cp_gpu.setChecked(_gpu_on(cfg.get('use_gpu', True)))
+        self._sd_model.setText(preseg_contract.STARDIST_MODEL)
         self._sd_prob.setValue(-1.0 if cfg.get('prob_thresh') is None else float(cfg.get('prob_thresh')))
         self._sd_nms.setValue(-1.0 if cfg.get('nms_thresh') is None else float(cfg.get('nms_thresh')))
         self._sd_expand.setValue(float(cfg.get('expand_distance', 8) or 0))
@@ -1868,19 +1819,12 @@ class Step2Page(QWidget):
         self._csd_fusion_mode.setCurrentIndex(max(0, idx))
         self._csd_tau.setValue(float(cfg.get("outside_in_z_threshold", 0.5) or 0.5))
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
-            self._mesmer_nuclear_channel.setText(str(cfg.get("nuclear_channel", "DAPI") or "DAPI"))
-            self._mesmer_membrane_channels.setText(";".join(parse_hq_channels(cfg.get("membrane_channels") or [])))
-            idx = self._mesmer_input_mode.findData(cfg.get("input_mode", "selected_channels"))
-            self._mesmer_input_mode.setCurrentIndex(max(0, idx))
-            idx = self._mesmer_use_gpu.findData(str(cfg.get("use_gpu", "auto")).lower())
-            self._mesmer_use_gpu.setCurrentIndex(max(0, idx))
-            self._mesmer_tile_size.setValue(0)
-            self._mesmer_overlap.setValue(0)
-            self._mesmer_batch_size.setValue(int(cfg.get("batch_size", 1) or 1))
+            maxima = cfg.get("maxima_threshold")
+            interior = cfg.get("interior_threshold")
+            self._mesmer_maxima.setValue(float(maxima) if maxima is not None
+                                         else (0.1 if method == MESMER_NUCLEI else 0.075))
+            self._mesmer_interior.setValue(float(interior) if interior is not None else 0.2)
             self._mesmer_mpp.setValue(float(cfg.get("image_mpp", cfg.get("pixel_size", 0.5)) or 0.5))
-            self._mesmer_norm.setChecked(bool(cfg.get("normalize_input", True)))
-            self._mesmer_low.setValue(float(cfg.get("percentile_low", 1.0)))
-            self._mesmer_high.setValue(float(cfg.get("percentile_high", 99.8)))
             self._mesmer_min_size.setValue(int(cfg.get("postprocess_min_size", 0) or 0))
 
     def get_cp_params(self):
@@ -1899,21 +1843,21 @@ class Step2Page(QWidget):
             }.get(method, "whole_cell")
             params.update({
                 "mesmer_mode": mode,
-                "nuclear_channel": self._mesmer_nuclear_channel.text().strip() or "DAPI",
-                "membrane_channels": parse_hq_channels(self._mesmer_membrane_channels.text()),
-                "input_mode": self._mesmer_input_mode.currentData() or "selected_channels",
+                "input_mode": preseg_contract.mesmer_input_mode(method),
                 "compartment": "nuclear" if method == MESMER_NUCLEI else "whole-cell",
-                "use_gpu": self._mesmer_use_gpu.currentData() or "auto",
-                "tile_size": None if self._mesmer_tile_size.value() <= 0 else self._mesmer_tile_size.value(),
-                "overlap": None if self._mesmer_overlap.value() <= 0 else self._mesmer_overlap.value(),
-                "batch_size": self._mesmer_batch_size.value(),
+                "maxima_threshold": self._mesmer_maxima.value(),
+                "interior_threshold": self._mesmer_interior.value(),
                 "image_mpp": self._mesmer_mpp.value(),
                 "pixel_size": self._mesmer_mpp.value(),
-                "normalize_input": self._mesmer_norm.isChecked(),
-                "percentile_low": self._mesmer_low.value(),
-                "percentile_high": self._mesmer_high.value(),
                 "postprocess_min_size": self._mesmer_min_size.value(),
             })
+            # The contract's fixed rules (no extra stretch; the thresholds'
+            # target); the settings the engine does not use are dropped.
+            params.update(preseg_contract.fixed_rules(method))
+            for key in ("use_gpu", "nuclear_channel", "membrane_channels", "tile_size",
+                        "overlap", "batch_size", "percentile_low", "percentile_high"):
+                params.pop(key, None)
+                data.pop(key, None)
         if method == CELLPOSE_NUCLEI_HQ2:
             hq_channels = parse_hq_channels(self._hq2_channels.text())
             hq_input_mode = self._hq2_input_mode.currentData() or 'selected_channels_from_source'
@@ -1951,7 +1895,7 @@ class Step2Page(QWidget):
             channel_weights = {}
             min_signal = params.get('min_signal_threshold', 0.08)
         params.update({
-            'model_name':         self._sd_model.text().strip() or '2D_versatile_fluo',
+            'model_name':         preseg_contract.STARDIST_MODEL,
             'prob_thresh':        None if self._sd_prob.value() < 0 else self._sd_prob.value(),
             'nms_thresh':         None if self._sd_nms.value() < 0 else self._sd_nms.value(),
             'expand_distance':    self._sd_expand.value(),
@@ -2050,8 +1994,6 @@ class Step2Page(QWidget):
             'cellprob_threshold': self._cp_prob.value(),
             'min_size':           self._cp_minsize.value(),
             'use_gpu':            self._cp_gpu.isChecked(),
-            'tile_size':          self._cp_tile_size.value(),
-            'batch_size':         self._cp_batch_size.value(),
             'tile_strategy_mode': 'auto' if self._auto_tile_strategy.isChecked() else 'manual',
             'suggested_tile_strategy': dict(self._suggested_tile_strategy or {}),
             'enable_tile_prefetch': True,
@@ -2199,13 +2141,8 @@ class Step2Page(QWidget):
             self._cp_flow_label, self._cp_flow,
             self._cp_prob_label, self._cp_prob,
             self._cp_minsize_label, self._cp_minsize,
-            self._cp_gpu_label, self._cp_gpu,
         ):
             w.setVisible(is_cellpose)
-        self._cp_tile_size_label.setVisible(is_mesmer)
-        self._cp_tile_size.setVisible(is_mesmer)
-        self._cp_batch_size_label.setVisible(is_mesmer)
-        self._cp_batch_size.setVisible(is_mesmer)
         for w in (
             self._sd_model_label, self._sd_model,
             self._sd_prob_label, self._sd_prob,
@@ -2365,7 +2302,10 @@ class Step2Page(QWidget):
         # `params` (params win) and keeps keys Step2 has no control for
         # (Mesmer's thresholds).
         effective = normalize_segmentation_config(seg_config)
-        diff = preseg_contract.mismatches(block, effective)
+        # A fixed parameter (the StarDist model) is not a mismatch: the file is
+        # run with the fixed value, said before the run (block M).
+        fixed = {spec.key for spec in param_schema.specs(block["method"]) if spec.fixed}
+        diff = [d for d in preseg_contract.mismatches(block, effective) if d[0] not in fixed]
         if diff:
             lines = "\n".join(f"  {k}: Step1 {want!r}, Step2 {got!r}" for k, want, got in diff)
             QMessageBox.warning(
@@ -2382,6 +2322,31 @@ class Step2Page(QWidget):
                 f"Set the overlap to {halo} px to run it.")
             return False
         return True
+
+    def _confirm_ignored_settings(self, path):
+        """Block M: a params file's settings the engine does not use are listed
+        with the reason before the run; the file runs by the contract or not
+        at all. True when there is nothing to say or the user runs it."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except (OSError, ValueError):
+            return True            # loading already reported an unreadable file
+        ignored = preseg_contract.ignored_settings(raw)
+        if not ignored:
+            return True
+        lines = "\n".join(f"  {key} = {value!r}: {reason}" for key, value, reason in ignored)
+        print(f"[Step2] settings the engine does not use ({os.path.basename(path)}):\n{lines}")
+        box = QMessageBox(self)
+        box.setWindowTitle('Segmentation params')
+        box.setIcon(QMessageBox.Information)
+        box.setText(
+            f"{os.path.basename(path)} has settings the segmentation engine does not use:\n"
+            f"{lines}\n\nThe run uses the contract instead.")
+        run_btn = box.addButton('Run per contract', QMessageBox.AcceptRole)
+        box.addButton('Cancel', QMessageBox.RejectRole)
+        box.exec_()
+        return box.clickedButton() is run_btn
 
     def _run(self):
         if not self._zarr_path or not os.path.exists(self._zarr_path):
@@ -2410,6 +2375,8 @@ class Step2Page(QWidget):
         seg_config = self.get_seg_config()
         if source == "index":
             if not self._check_preseg_contract(seg_config):
+                return
+            if not self._confirm_ignored_settings(resolved):
                 return
         else:
             # Manual parameters are the user's own, not a Step1 hand-over.

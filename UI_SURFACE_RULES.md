@@ -147,7 +147,8 @@ row, and the duplicate Tissue Preview button in the step bar.
   `Total: k patches × m combinations = N tasks`. `+` opens the method dialog:
   the eight methods only (HQ / HQ2 / CDS are hidden, R2; Mesmer disabled with
   the reason where DeepCell is missing), comma-separated values for a list
-  parameter, one value otherwise, each field checked as typed, the live
+  parameter, one value otherwise (the StarDist model is fixed and read-only,
+  block M), each field checked as typed, the live
   combination count, Save / Cancel. A method already in the plan asks to
   merge (R9, revised 2026-09-24): Yes merges, No keeps the new values as a
   block of their own. `Edit` may change the method as well. `Save plan`
@@ -238,6 +239,16 @@ row, and the duplicate Tissue Preview button in the step bar.
   mounted in it are kept, hidden, not deleted; Step2's own ticks are kept.
   The Input Data line under `Load zarr info` names no config file (block
   U1, user ruling 2026-09-26: Step1 writes no fusion_config.json).
+  Block M (user ruling 2026-09-26): ONE `GPU:` row (`Use GPU if
+  available`) for every method, manual or from the index -- unticked, the
+  engine runs on the CPU. Mesmer shows Step1's parameters only
+  (`maxima_threshold`, `interior_threshold`, `image_mpp`,
+  `postprocess_min_size`); nuclear_channel, membrane_channels, input_mode,
+  use_gpu, tile_size, overlap, batch_size, normalize_input and the
+  percentiles are gone, and so are the `tile size` / `batch size` rows. The
+  StarDist model is shown, read-only (`2D_versatile_fluo`). Run on a params
+  file with settings the engine does not use lists them with the reason;
+  the buttons are `Run per contract` and `Cancel` only.
 * **Step1's Save progress** (block L1, user ruling 2026-09-25) -- the modal
   progress dialog alone (with Cancel). The bar that used to sit at the
   bottom of the page is kept, hidden, and never shown; its words go to the

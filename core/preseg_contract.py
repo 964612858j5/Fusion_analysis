@@ -145,3 +145,56 @@ def mismatches(block, effective_params):
         if not _same(key, want, got):
             out.append((key, want, got))
     return out
+
+
+#: The StarDist model the engine loads (block M: fixed, never changed).
+STARDIST_MODEL = "2D_versatile_fluo"
+_MESMER_CHANNEL_MODES = ("selected_channels", "dapi + membrane", "dapi + selected channels",
+                         "membrane")
+
+
+def mesmer_input_mode(method):
+    """What a Mesmer method reads, in the old files' words (plan 7.11.1)."""
+    return "DAPI only" if method == "mesmer_nuclei" else "step1_weighted_fusion"
+
+
+def ignored_settings(cfg):
+    """Settings of a params file the engine does not use (block M), as
+    [(key, value, reason)] for Step2 to show before it runs the file by the
+    contract. `cfg` is the file as written (a normaliser would fill in
+    defaults that were never chosen). Empty for HQ / HQ2 / CDS, which keep
+    their own path."""
+    if not isinstance(cfg, dict):
+        return []
+    block = cfg.get(CONTRACT_KEY) if isinstance(cfg.get(CONTRACT_KEY), dict) else None
+    method = str((block or {}).get("method") or cfg.get("method") or "")
+    merged = dict(cfg)
+    merged.update(cfg.get("params") if isinstance(cfg.get("params"), dict) else {})
+    if block is not None:
+        merged = dict(block.get("params") or {})
+    out = []
+    if method.startswith("stardist_"):
+        name = merged.get("model_name")
+        if name not in (None, "", STARDIST_MODEL):
+            out.append(("model_name", name, f"the engine loads {STARDIST_MODEL} only"))
+    if method.startswith("mesmer_") and block is None:
+        mode = merged.get("input_mode")
+        fixed = mesmer_input_mode(method)
+        if mode not in (None, "", fixed):
+            what = "the fused nucleus channel only" if method == "mesmer_nuclei" \
+                else "the fused nucleus channel and the Fusion channel"
+            out.append(("input_mode", mode, f"Mesmer reads {what}"))
+            if str(mode).strip().lower() in _MESMER_CHANNEL_MODES:
+                for key in ("nuclear_channel", "membrane_channels"):
+                    if merged.get(key) not in (None, "", []):
+                        out.append((key, merged.get(key), "no channel is read from the channel group"))
+        if merged.get("normalize_input") is True:
+            out.append(("normalize_input", True,
+                        "DeepCell's own preprocessing only, no extra percentile stretch "
+                        "(percentile_low / percentile_high unused)"))
+        for key in ("tile_size", "overlap"):
+            if merged.get(key) not in (None, 0, ""):
+                out.append((key, merged.get(key), "Step2's Tile Grid decides the tiles"))
+        if merged.get("batch_size") not in (None, 1, ""):
+            out.append(("batch_size", merged.get("batch_size"), "one tile at a time"))
+    return out

@@ -49,6 +49,7 @@ class ParamSpec:
     listable: bool = False
     auto: bool = False        # "auto" (None: the library decides) is a value
     note: str = ""
+    fixed: bool = False       # always `default`: shown, never changed (block M)
 
     def describe(self):
         rng = ""
@@ -89,7 +90,9 @@ def _stardist(expansion):
     ]
     if expansion:
         specs.append(ParamSpec("expand_distance", "expand", "float", 0, 200, 1, 8.0, True))
-    specs.append(ParamSpec("model_name", "model", "str", default="2D_versatile_fluo"))
+    # The engine loads this model only (block M): shown, not editable.
+    specs.append(ParamSpec("model_name", "model", "str", default="2D_versatile_fluo",
+                           note="fixed", fixed=True))
     return specs
 
 
@@ -161,6 +164,8 @@ def parse_values(spec, text):
         raise ParamError("an empty value between commas")
     if len(raw) > 1 and not spec.listable:
         raise ParamError("one value only")
+    if spec.fixed and raw != [_fmt(spec.default)]:
+        raise ParamError(f"fixed at {_fmt(spec.default)}")
     out, dropped = [], 0
     for tok in raw:
         v = _parse_one(spec, tok)
@@ -209,7 +214,8 @@ def combo_count(method, values):
 def combinations(method, values):
     """Every parameter combination (R3: a cartesian product), as dicts."""
     keys = [s.key for s in METHOD_PARAMS[method]]
-    lists = [values.get(k) or [s.default] for k, s in zip(keys, METHOD_PARAMS[method])]
+    lists = [[s.default] if s.fixed else (values.get(k) or [s.default])
+             for k, s in zip(keys, METHOD_PARAMS[method])]
     return [dict(zip(keys, combo)) for combo in itertools.product(*lists)]
 
 
@@ -223,7 +229,7 @@ def combo_id(method, params):
 def summary(method, values):
     parts = []
     for s in METHOD_PARAMS[method]:
-        vals = values.get(s.key) or [s.default]
+        vals = [s.default] if s.fixed else (values.get(s.key) or [s.default])
         parts.append(f"{s.label} {format_values(s, vals)}")
     return " · ".join(parts)
 

@@ -12,7 +12,8 @@ ownership, paste and outputs stay as they are.
     this machine is skipped with the reason "not accepted" -- never mocked.
   * inputs: what the runner receives for each method is Step1's
     construction of the same window;
-  * refusals: another engine identity, a HALO other than the overlap;
+  * refusals: a HALO other than the overlap; another engine version runs
+    and is recorded (block M);
   * failure: a tile the engine fails on ends the run -- never an empty tile
     registered as success;
   * Stop (during the model load, during inference, between ROIs) and window
@@ -320,7 +321,10 @@ def test_a_mesmer_hand_over_opens_no_channel_group(app, tmp_path, monkeypatch):
 
 # ── refusals ──────────────────────────────────────────────────────────
 
-def test_another_engine_is_refused(app, tmp_path):
+def test_another_engine_version_runs_and_is_recorded(app, tmp_path, capsys):
+    # Block M: the Step1 run's identity is recorded, not required -- the
+    # parameters are what Step1 decided. Only another engine kind is refused
+    # (the contract itself cannot name one: `preseg_contract.validate`).
     if _engine_missing("stardist"):
         pytest.skip("no StarDist")
     ident = dict(_identity("stardist"), lib_versions={"stardist": "0.0.1"})
@@ -328,11 +332,17 @@ def test_another_engine_is_refused(app, tmp_path):
     worker = _worker(tmp_path, _fused_zarr(tmp_path, _image()), cfg)
     got = _collect(worker)
     worker.run()
-    assert got["finished"] == [] and len(got["error"]) == 1
-    assert "not the one the Step1 result ran on" in got["error"][0]
-    assert "lib_versions" in got["error"][0]
-    assert not _registered(worker)
+    assert got["error"] == [] and len(got["finished"]) == 1
+    assert "the engine differs from the Step1 run in: lib_versions" in capsys.readouterr().out
+    with open(os.path.join(worker.output_dir, "segmentation_meta.json"), encoding="utf-8") as f:
+        eng = json.load(f)["seg_engine"]
+    assert eng["step1_identity"] == ident and eng["identity"] == _identity("stardist")
+    assert _registered(worker)
     _assert_nothing_left(worker)
+    other = dict(ident, engine="cellpose")
+    wrong = _contract_config(tmp_path / "other", "stardist_nuclei_dapi", identity=other)
+    with pytest.raises(preseg_contract.ContractError, match="engine identity"):
+        preseg_contract.validate(wrong)
 
 
 def test_a_halo_other_than_the_overlap_is_refused(app, tmp_path, monkeypatch):

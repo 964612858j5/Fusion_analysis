@@ -62,12 +62,11 @@ from ..utils.channel_remap_config import (
 from ..utils.step2_tile import compute_tile_grid_metrics, crop_valid_region
 from ..utils.tile_scheduler import TileScheduler
 from ..utils.tile_strategy import suggest_tile_strategy
-from .cellpose_worker import load_stardist_model
-from .mesmer_worker import run_mesmer_on_channel_source, run_mesmer_on_fused_tile
 from ..seg_runner import protocol as runner_protocol
 from ..seg_runner.client import EngineProcess, EngineStartError
 from ..seg_runner.engines import METHOD_ENGINE, METHOD_OUTPUTS
-from ..utils.mesmer_utils import get_mesmer_device_status, load_mesmer_application, mesmer_metadata
+from ..utils.mesmer_utils import mesmer_metadata
+from ..utils import segmentation_param_schema as param_schema
 from .hq_marker_segmentation import (
     parse_hq_channels,
     resolve_hq_channels,
@@ -1740,52 +1739,11 @@ class SegmentMergeWorker(QThread):
         self.seg_config["hq_input_mode"] = mode
         return channels, None
 
-    def _mesmer_uses_selected_channels(self):
-        mode = str(self.seg_config.get("input_mode") or "selected_channels").strip().lower()
-        return mode in {
-            "selected_channels",
-            "dapi + membrane",
-            "dapi + selected channels",
-            "membrane",
-        }
-
     def _validate_mesmer_config(self, roi_name=None):
-        if self._contract is not None:
-            # A Step1 hand-over reads the fused tile only (plan 7.11.1); its
-            # file's input_mode is the normaliser's default, not a choice.
-            self.seg_config["mesmer_input_source"] = "fused_zarr"
-            return None
-        if not self._mesmer_uses_selected_channels():
-            self.seg_config["mesmer_input_source"] = "fused_zarr"
-            return None
-
-        nuclear = str(self.seg_config.get("nuclear_channel") or "DAPI").strip() or "DAPI"
-        membrane_channels = parse_hq_channels(self.seg_config.get("membrane_channels") or [])
-        requested = [nuclear] + [ch for ch in membrane_channels if ch != nuclear]
-        group = self._open_hq_channel_group(roi_name)
-        available = self._channel_array_names(group)
-        source_path = self._hq_resolved_source_path or self._multichannel_source_path() or self._raw_channel_source_path()
-        context = (
-            "Mesmer source debug:\n"
-            f"  loaded param_file path: {self.param_file or '(none)'}\n"
-            f"  selected channel source: {source_path or '(none)'}\n"
-            f"  input_mode: {self.seg_config.get('input_mode')}\n"
-            f"  nuclear_channel: {nuclear}\n"
-            f"  membrane_channels: {membrane_channels}\n"
-            f"  requested roi_id: {self.seg_config.get('roi_id') or self.roi_id or '(none)'}\n"
-            f"  requested roi_name: {self.seg_config.get('roi_name') or self.seg_config.get('roi_display_name') or roi_name or self.roi_display_name or '(none)'}\n"
-            f"  available channels: {available}"
-        )
-        validate_hq_channels(requested, available, context=context)
-        self.seg_config["nuclear_channel"] = nuclear
-        self.seg_config["membrane_channels"] = membrane_channels
-        self.seg_config["mesmer_input_source"] = "selected_channels_from_source"
-        if self._logger:
-            self._logger.info("[Mesmer] input source=selected_channels_from_source")
-            self._logger.info("[Mesmer] nuclear channel=%s", nuclear)
-            self._logger.info("[Mesmer] membrane channels=%s", membrane_channels)
-            self._logger.info("[Mesmer] selected channel source=%s", source_path)
-        return group
+        # Every Mesmer run goes through the engine process and reads the fused
+        # tile only (plan 7.11.1, block M); no channel group is opened.
+        self.seg_config["mesmer_input_source"] = "fused_zarr"
+        return None
 
     def _hq_meta_fields(self, nuclei_mask_path="", final_cell_mask_path="", qc_table_path=""):
         return {
@@ -1975,11 +1933,40 @@ class SegmentMergeWorker(QThread):
             return np.clip(arr / vmax, 0.0, 1.0)
         return np.zeros_like(arr, dtype=np.float32)
 
+    def _runs_on_engine(self):
+        """Block M: the eight Cellpose / StarDist / Mesmer methods always run
+        in the engine process -- a Step1 hand-over, manual parameters or an
+        old params file alike. HQ / HQ2 / CDS (no longer maintained) keep the
+        in-process path; a recovery run segments nothing."""
+        return self.method in METHOD_ENGINE and self.recovery_npy_dir is None
+
+    def _wants_gpu(self):
+        """Step2's Use GPU: False runs the engine on the CPU."""
+        return str(self.seg_config.get("use_gpu", True)).strip().lower() not in {
+            "0", "false", "no", "off", "cpu"}
+
+    def _engine_params(self):
+        """What the engine receives for one tile: a hand-over's own parameters,
+        or -- without one -- the method's parameters from Step1's table
+        (`segmentation_param_schema`) read from the config, plus the method's
+        fixed rules. The StarDist model is always the fixed one."""
+        if self._contract is not None:
+            params = preseg_contract.runner_params(self.seg_config)
+        else:
+            params = {spec.key: self.seg_config.get(spec.key, spec.default)
+                      for spec in param_schema.specs(self.method)}
+            params.update(preseg_contract.fixed_rules(self.method))
+            params["method"] = self.method
+        for spec in param_schema.specs(self.method):
+            if spec.fixed:
+                params[spec.key] = spec.default
+        return params
+
     def _init_segmentation_backend(self, use_gpu, device):
         method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
-        if self._contract is not None:
+        if self._runs_on_engine():
             return self._start_contract_engine(method)
-        if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
+        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             if device is None:
                 raise RuntimeError("PyTorch is required for Cellpose/HQ segmentation but is not available.")
             from cellpose import models as cp_models
@@ -2008,36 +1995,17 @@ class SegmentMergeWorker(QThread):
             if self._logger:
                 self._logger.info("[Cellpose-GPU] requested_use_gpu=%s torch_cuda=%s torch.version.cuda=%s selected=%s model_device=%s gpu_check_result=%s", requested_use_gpu, torch_cuda_available, torch_cuda_version, selected_device, model_device, gpu_check_result)
             return {"cellpose": model}
-        if method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
-            model_name = self.seg_config.get("model_name", "2D_versatile_fluo")
-            model, stardist_normalize, stardist_device = load_stardist_model(
-                model_name,
-                prefer_gpu=self.seg_config.get("device_preference", "gpu_first") != "cpu",
-            )
-            if self._logger:
-                self._logger.info(f"[Worker] StarDist device={stardist_device}")
-            return {
-                "stardist": model,
-                "stardist_normalize": stardist_normalize,
-                "stardist_device": stardist_device,
-            }
-        if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
-            status = get_mesmer_device_status(self.seg_config.get("use_gpu", "auto"), logger=self._logger)
-            if not status.mesmer_available:
-                raise RuntimeError(status.error or "DeepCell/Mesmer is not installed in the current environment.")
-            app = load_mesmer_application()
-            if self._logger:
-                self._logger.info(f"[Mesmer] device_used={status.device_used}")
-            return {"mesmer": app, "mesmer_device_status": status}
         raise ValueError(f"Unknown segmentation method: {method}")
 
     def _start_contract_engine(self, method):
-        """The Step1 hand-over's engine, in its own process (Step2 hook-up,
-        step 3). It must be the engine of the Step1 run, or nothing runs."""
+        """The method's engine, in its own process (Step2 hook-up, step 3;
+        block M). A hand-over must name the same engine kind; the rest of the
+        Step1 run's identity is recorded, not required (block M)."""
         engine = METHOD_ENGINE[method]
         self._runner_io = os.path.join(self.output_dir, "runner_io")
         os.makedirs(self._runner_io, exist_ok=True)
-        ep = EngineProcess(engine, log_path=os.path.join(self.output_dir, f"engine_{engine}.log"))
+        ep = EngineProcess(engine, log_path=os.path.join(self.output_dir, f"engine_{engine}.log"),
+                           cpu_only=not self._wants_gpu())
         self._engine = ep
         if self._stop:
             raise _ContractStopped()
@@ -2049,13 +2017,23 @@ class SegmentMergeWorker(QThread):
             raise RuntimeError(f"the {engine} engine did not start: {exc}") from exc
         if self._stop:
             raise _ContractStopped()
-        want = self._contract["engine_identity"]
         got = hello.get("identity") or {}
-        if got != want:
+        want = self._contract["engine_identity"] if self._contract is not None else None
+        if want is not None:
+            if want.get("engine") != got.get("engine"):
+                raise RuntimeError(
+                    f"the Step1 result ran on the {want.get('engine')} engine, "
+                    f"not {got.get('engine')}; choose again in Step1")
             keys = sorted(k for k in set(want) | set(got) if want.get(k) != got.get(k))
-            raise RuntimeError(
-                "the engine here is not the one the Step1 result ran on "
-                f"(differs in: {', '.join(keys)}); run the pre-segmentation again here")
+            if keys:
+                msg = (f"[Step2] the engine differs from the Step1 run in: {', '.join(keys)}; "
+                       "running with the Step1 parameters")
+                print(msg)
+                if self._logger:
+                    self._logger.warning(msg)
+        self._engine_meta = {"engine": engine, "device": hello.get("device"),
+                             "use_gpu": self._wants_gpu(), "identity": got,
+                             "step1_identity": want}
         if self._logger:
             self._logger.info(f"[Step2] {engine} engine process started, device={hello.get('device')}")
         return {"runner": ep}
@@ -2077,7 +2055,7 @@ class SegmentMergeWorker(QThread):
             self._set_runtime_stage("model_inference")
             with self.step2_profiler.time_stage("model_inference", tile_id=profile_tile_id, method=method):
                 states = ep.run([{"task_id": tid, "input": inp, "out_dir": self._runner_io,
-                                  "params": preseg_contract.runner_params(self.seg_config)}])
+                                  "params": self._engine_params()}])
             state = states[tid]
             detail = ep.states[tid]["detail"]
             if state == runner_protocol.CANCELLED:
@@ -2122,27 +2100,14 @@ class SegmentMergeWorker(QThread):
                       profile_tile_id=None, hq_block_loader=None, output_labels=None):
         """Return a uint32 label mask for one read tile."""
         method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
-        if self._contract is not None:
+        if self._runs_on_engine():
             return self._segment_tile_contract(tile_data, backend, profile_tile_id)
         self._set_runtime_stage("preprocess")
         with self.step2_profiler.time_stage("preprocess", tile_id=profile_tile_id, method=method):
             tile_f32 = tile_data.astype(np.float32) / 65535.0
 
-        if method == CELLPOSE_WHOLECELL_FUSION:
-            self._set_runtime_stage("model_inference")
-            with self.step2_profiler.time_stage("model_inference", tile_id=profile_tile_id, method=method):
-                masks, _, _ = backend["cellpose"].eval(
-                    tile_f32,
-                    diameter=self.seg_config.get("diameter"),
-                    flow_threshold=self.seg_config.get("flow_threshold", 0.4),
-                    cellprob_threshold=self.seg_config.get("cellprob_threshold", 0.0),
-                    min_size=self.seg_config.get("min_size", 15),
-                    do_3D=False,
-                )
-            return masks.astype(np.uint32)
-
         dapi = np.ascontiguousarray(tile_f32[:, :, 1])
-        if method in (CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
+        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             self._set_runtime_stage("model_inference")
             with self.step2_profiler.time_stage("model_inference", tile_id=profile_tile_id, method=method):
                 masks, _, _ = backend["cellpose"].eval(
@@ -2153,15 +2118,6 @@ class SegmentMergeWorker(QThread):
                     min_size=self.seg_config.get("min_size", 15),
                     do_3D=False,
                 )
-            if method == CELLPOSE_NUCLEI_EXPANSION:
-                from skimage.segmentation import expand_labels
-                dist = float(self.seg_config.get("expand_distance", 8) or 0)
-                if self._logger:
-                    self._logger.info(f"[Step2] applying expand_labels distance={dist}")
-                print(f"[Step2] applying expand_labels distance={dist}")
-                with self.step2_profiler.time_stage("postprocess", tile_id=profile_tile_id, method=method):
-                    if dist > 0:
-                        masks = expand_labels(masks, distance=dist)
             if method == CELLPOSE_NUCLEI_HQ:
                 hq_names = self.seg_config.get("hq_channels") or []
                 if str(self.seg_config.get("hq_input_mode") or "") == "step1_weighted_fusion":
@@ -2251,54 +2207,6 @@ class SegmentMergeWorker(QThread):
                     } if self.write_hq2_debug_layers else {}),
                 }
             return masks.astype(np.uint32)
-
-        if method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
-            self._set_runtime_stage("preprocess")
-            with self.step2_profiler.time_stage("preprocess", tile_id=profile_tile_id, method=method):
-                img = backend["stardist_normalize"](dapi, 1, 99.8, axis=(0, 1))
-            kwargs = {}
-            if self.seg_config.get("prob_thresh") is not None:
-                kwargs["prob_thresh"] = self.seg_config.get("prob_thresh")
-            if self.seg_config.get("nms_thresh") is not None:
-                kwargs["nms_thresh"] = self.seg_config.get("nms_thresh")
-            self._set_runtime_stage("model_inference")
-            with self.step2_profiler.time_stage("model_inference", tile_id=profile_tile_id, method=method):
-                masks, _ = backend["stardist"].predict_instances(img, **kwargs)
-            if method == STARDIST_NUCLEI_EXPANSION:
-                from skimage.segmentation import expand_labels
-                dist = float(self.seg_config.get("expand_distance", 8) or 0)
-                with self.step2_profiler.time_stage("postprocess", tile_id=profile_tile_id, method=method):
-                    if dist > 0:
-                        masks = expand_labels(masks, distance=dist)
-            return masks.astype(np.uint32)
-
-        if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
-            self._set_runtime_stage("model_inference")
-            with self.step2_profiler.time_stage("model_inference", tile_id=profile_tile_id, method=method):
-                if mesmer_channel_source is not None:
-                    result = run_mesmer_on_channel_source(
-                        mesmer_channel_source,
-                        self.seg_config,
-                        app=backend.get("mesmer"),
-                        logger=self._logger,
-                    )
-                else:
-                    result = run_mesmer_on_fused_tile(
-                        tile_data,
-                        self.seg_config,
-                        app=backend.get("mesmer"),
-                        logger=self._logger,
-                    )
-            self.seg_config["device_used"] = result.get("device_used")
-            self.seg_config["runtime_seconds_last_tile"] = result.get("runtime_seconds")
-            with self.step2_profiler.time_stage("postprocess", tile_id=profile_tile_id, method=method):
-                if method == MESMER_NUCLEAR_GUIDED:
-                    return {
-                        "mask": result["mask"].astype(np.uint32, copy=False),
-                        "nuclei": result.get("nuclei"),
-                        "qc_rows": [],
-                    }
-                return result["mask"].astype(np.uint32, copy=False)
 
         raise ValueError(f"Unknown segmentation method: {method}")
 
@@ -2565,8 +2473,8 @@ class SegmentMergeWorker(QThread):
                     else:
                         local_mask = local_result
                 except Exception as e:
-                    if self._contract is not None:
-                        # A hand-over tile that failed or was stopped is never
+                    if self._runs_on_engine():
+                        # An engine tile that failed or was stopped is never
                         # stored as an empty result: the run ends here.
                         self._close_tile_scheduler(scheduler)
                         raise
@@ -3006,6 +2914,7 @@ class SegmentMergeWorker(QThread):
             # through the engine process (`_segment_tile_contract`). A malformed
             # contract raises ContractError here.
             self._contract = preseg_contract.validate(self.seg_config)
+            self._engine_meta = None
             if self._contract is not None:
                 if int(self._contract["halo_px"]) != int(self.overlap_px):
                     raise RuntimeError(
@@ -3173,6 +3082,7 @@ class SegmentMergeWorker(QThread):
                     ))
                 runtime_meta = self._finish_runtime_monitor()
                 summary_meta["runtime"] = runtime_meta
+                summary_meta["seg_engine"] = self._engine_meta
                 summary_meta_path = os.path.join(self.output_dir, "segmentation_meta.json")
                 with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(summary_meta_path)):
                     with open(summary_meta_path, "w") as f:
@@ -3425,7 +3335,7 @@ class SegmentMergeWorker(QThread):
                         else:
                             local_mask = local_result
                     except Exception as e:
-                        if self._contract is not None:
+                        if self._runs_on_engine():
                             # As in the ROI loop: failed or stopped, the run ends.
                             self._close_tile_scheduler(scheduler)
                             raise
@@ -3820,6 +3730,7 @@ class SegmentMergeWorker(QThread):
             }
             runtime_meta = self._finish_runtime_monitor()
             meta["runtime"] = runtime_meta
+            meta["seg_engine"] = self._engine_meta
             meta_path = os.path.join(self.output_dir, 'segmentation_meta.json')
             with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(meta_path)):
                 with open(meta_path, 'w') as f:

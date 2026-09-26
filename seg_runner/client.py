@@ -31,8 +31,11 @@ class EngineStartError(RuntimeError):
 
 
 class EngineProcess:
-    def __init__(self, engine, python=None, log_path=None, start_timeout=600):
+    def __init__(self, engine, python=None, log_path=None, start_timeout=600, cpu_only=False):
         self.engine = engine
+        # True: the child sees no GPU, so every engine (torch or TensorFlow)
+        # runs on the CPU -- the user's choice in Step2, or a broken GPU setup.
+        self.cpu_only = bool(cpu_only)
         self.python = python or sys.executable
         self.log_path = log_path
         self.start_timeout = start_timeout
@@ -49,6 +52,8 @@ class EngineProcess:
         env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
         env.setdefault("KERAS_BACKEND", "tensorflow")
         env.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+        if self.cpu_only:
+            env["CUDA_VISIBLE_DEVICES"] = ""
         self._log = open(self.log_path, "ab") if self.log_path else subprocess.DEVNULL
         self.proc = subprocess.Popen(
             [self.python, "-m", "seg_runner.runner", "--engine", self.engine],

@@ -9,6 +9,7 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.23：用户裁定 HQ / HQ2 / CDS 这类不经 Step1 交接的方法不再维护（R2 加注，第六节新增「用户裁定」）。写入块 K 申请（Step2 旧路径 ROI 模式中途 Stop 不再登记成功，待批准），已按独立审核意见修订。
 - v3.22：块 U1、Results 顺序、块 S（每次弹对话框、拒绝原因上屏）已提交；S2 冻结，记录调查结论；新增「后续计划」和「已知的已有问题」。
 - v3.21：块 F、块 E 已提交（`5bc65bc`、`7ee98fc`），都通过真机验收。
 - v3.20：记录 V2 第 3 步的提交（`dcaca2c`）和真机情况；新增块 L（Step1 Save 进度框、Step2 布局，计划外，用户 2026-09-25 提出）的申请、执行记录和真机验收。
@@ -55,7 +56,7 @@
 | # | 裁定 |
 |---|---|
 | R1 | 随机 patch：有 ROI 就在当前 ROI 内生成，没有就在组织内生成。**空白面积超过 40% 的候选直接丢弃并重新生成。** 生成结果要在 Tissue Navigator 可见，也就是成为 Step0 的正式 patch。 |
-| R2 | HQ / HQ2 / CDS 只是**在新界面不可见**，后台代码和 Step2 兼容**全部保留**。 |
+| R2 | HQ / HQ2 / CDS 只是**在新界面不可见**，后台代码和 Step2 兼容**全部保留**。<br>**2026-09-26 用户补充裁定：HQ / HQ2 / CDS 这类不经 Step1 交接的方法不再维护**（见第六节「用户裁定」）。 |
 | R3 | 可以写成列表的参数：<br>• Cellpose：diameter、flow、cellprob<br>• StarDist：prob、nms、expand<br>• Mesmer：主要阈值<br>模型名这类参数只允许单值。**取消原来的两阶段流程**（Phase1 定直径 → Phase2 扫 flow × cellprob），改为每个方法对各参数列表取笛卡尔积。 |
 | R4 | 任务数（勾选 patch 数 × 全部组合数）**超过 10 个时，开始前弹窗提示**；用户坚持就照常运行。**某个结果一出来就可以在 Step1 看**，不必等全部结束。 |
 | R5 | 纯核方法只有核 mask，纯全细胞方法只有细胞 mask，expansion 类两种都有。**没有的那一种，开关置灰。** |
@@ -813,6 +814,29 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 建议顺序：纯函数「读取场景」→ Step0 Load 参数化（行为不变）→ Step0「装入场景」→ 忙碌检查 → 主窗口编排 → Step2/Step3 重置与按 roi_id 选择 → 两个合成项目的写入隔离测试。
   - 风险：Step0 提交切换之后再失败就回不到原项目；打开后若 Save 且没有恢复校正决定，会把该 ROI 的决定改写为 original；原始切片被改动（大小/mtime）会被拒绝；会话和 manifest 用绝对路径，项目移动后失效。
 
+### 块 K — Step2 旧路径 ROI 模式中途 Stop 不再登记成功（申请，**待用户批准**，2026-09-26）
+- **缺陷**（只读核实，未复现运行）：参数没有契约时（手动模式、旧参数文件），ROI 模式中途 Stop，`_segment_one_zarr` 在 Stop 检查点 `return 0`，但 ROI 外层的收尾检查（`workers/segment_merge_worker.py:3113`）只拦截契约路径：外层照常写 `segmentation_meta.json`、`_register_completed_result()` 登记为 `completed`、`update_roi_segmentation_run` 记 `done`、发 `finished`。界面随之显示「✓ Done!」、弹「Segmentation Complete」（带 Step3/Step4 按钮）、把该 ROI 的 Step2 标成 done。多 ROI 时，被停下的 ROI 还会沿用上一个 ROI 的 `_last_region_meta` 路径（`:3084`）。
+- **影响面**：现在的交接把全图工作区也作为一个 ROI（`Full WSI`）交给 Step2（`ui/main_window.py:4163-4165`；`~/fusion_data/test1` 只读核对），所以 ROI 外层循环是日常主路径。
+- **做法**：把 `:3113` 的 `if self._contract is not None and self._stop:` 改为 `if self._stop:`，旧路径复用已有的 `_ContractStopped` 收尾（不写汇总、不登记、不改 roi_index、不发 `finished`，只发 `error('Stopped by user.')`）；`run()` 的 `except` 里那条日志去掉「(Step1 hand-over)」，改为不区分路径的措辞。类名不改，不新增机制。
+- **白名单**：
+  - `workers/segment_merge_worker.py`：`run()` 中 ROI 外层收尾的这一处条件；`run()` 的 `except` 里 `_ContractStopped` 分支的那一行日志。
+  - 新增 `tests/test_step2_legacy_stop.py`。
+  - 本文档（执行记录）。
+- **不改的范围**：`_segment_one_zarr` 及其各 Stop 检查点；全图分支（本块只修已定位的 ROI 收尾问题，全图分支不在本块处理）；契约路径；Step2 页面（包括 Stop 后标题为「Error」的对话框，已知 advisory）；输出目录里的文件清理；HQ / HQ2 / CDS（不再维护）。
+- **测试**（只写合成项目的临时目录；真实引擎 Cellpose 或 StarDist，缺模型则跳过并注明，不用 mock）：参数不带契约，
+  1. 单 ROI，推理中 Stop；
+  2. 两个 ROI，第二个 ROI 推理中 Stop；
+  3. 两个 ROI，第一个 ROI 完成后、第二个开始前 Stop；
+  4. 不 Stop，正常完成。
+  1–3：`finished` 为空，`error == ["Stopped by user."]`，结果登记和 roi_index 里没有本次运行，先前已登记的结果保持不变。4：`finished` 发出，结果登记为 `completed`，roi_index 记 `done`。
+- **回归**：Step2 相关模块（含 `test_step2_runner_path.py`、`test_step2_ownership_move.py`、`test_step2_layout.py`、交接端到端）每模块单独进程，与 `git archive HEAD` 导出件逐条对比，只看新增失败。
+- **真机验收**（用户）：在已有项目里用手动模式或旧参数跑一次 ROI 分割，中途 Stop：没有「Segmentation Complete」对话框；结果列表里没有本次成功登记；原有结果保持不变。
+- **风险**：
+  - Stop 在最后一个 ROI 刚写完输出、到达检查点之前才生效时，本次结果被丢弃（契约路径已是如此）。
+  - 本改动只阻止整次运行被登记为成功，**不回收文件**：多 ROI 时前面已完成 ROI 的产物（`global_mask_<ROI>.zarr`、`global_mask_<ROI>.ome.tiff`、`global_dapi_<ROI>.ome.tiff`、`segmentation_meta_<ROI>.json`、`tile_masks/`）以及被停下 ROI 的半成品（`.dat`、部分切块）都留在本次输出目录里，未登记、不被下游读取。
+- **回退**：恢复 `:3113` 的条件（加回 `self._contract is not None and`）和 `except` 里那行日志的原措辞，两处。
+- **Advisory（不在本块处理）**：全图分支只在切块循环入口检查 Stop；最后一个切块推理期间或合并、写出阶段按 Stop，运行仍会完成并登记（结果是完整的，但与用户的 Stop 意图不符）。
+
 ## 六、未决与 advisory
 
 ### 后续计划（用户 2026-09-26 排定；都未启动，每块须单独申请）
@@ -820,6 +844,9 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
 2. **Step3 重设计**：做成和 Step1 一样的布局和设置——左侧通道面板，右侧组织图像，可叠加分割 mask，可拖动、缩放，Tissue Navigator 空降和 patch；用户可以画 ROI，但不产生任何下游影响。
 3. **项目 / 会话架构**（最后做）：打开别的项目并切换一切（S2 的调查结论见块 S）；切换数据集后 Step2 仍留着上一个项目的 fused.zarr 和参数路径、正在跑的分割不停止——这一条随会话恢复一起治理。
 4. **暂缓**：Mesmer 3 个方法的真机验收（本机无模型，DeepCell token 申请网站不可用）；U2（`step1_fusion_settings.json` 并入会话）。
+
+### 用户裁定（2026-09-26）
+- **HQ / HQ2 / CDS 这类不经 Step1 交接的方法不再维护。** 它们在新界面本来就不可见（R2）。此后各块不为它们修缺陷、不为它们补测试，也不把它们放进验收门；只有这些方法自身的测试失败不阻塞其他块——共用路径（例如两个切块循环、归属与合并）上仍维护方法的回归照常算失败。代码暂不删除；删除须另行申请。
 
 ### 已知的已有问题（advisory，未排期）
 - 用户主动 Stop 后，Step2 用标题为「Error」的对话框报告「Stopped by user.」。

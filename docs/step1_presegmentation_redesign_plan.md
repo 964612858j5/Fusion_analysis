@@ -9,6 +9,8 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.42：块 2c-2 按独立审核修订为 v2（Navigator 连接不依赖 Step1 的 viewer；重绑失败的回退；后台契约、热切换、模式验收的措辞；权限修补的文件验证）；记录用户目标权限（Step3 可编辑不保存 = 第 ⑤ 步）。
+- v3.41：块 2c-2 申请（第二个 viewer；修补 2c-1 中 Step3 的 Tissue Navigator 按钮沿用 Step1 编辑权限的缺陷）。
 - v3.40：块 2c-1 已实施并通过真机验收。
 - v3.39：块 2c-1 按独立审核修订为 v2（功能空档须用户接受；入口的写文件边界；Load weights 的表述与两种验收；Show all 保留 Step1 语义；模式同步在 2c-1 / 2c-2 的分工；用户指南只写当前可用功能；拒绝原因显示在可见页面）。
 - v3.38：块 2c 只读调查结论；2c 拆为 2c-1 / 2c-2；块 2c-1 申请（新 Step3 页面并删除旧页面）。
@@ -1072,6 +1074,34 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 文档：`docs/user_guide.md`、`docs/用户指南.md` 的 Step3 一节改为「正在重建」——只写现在可用的功能，写明右侧暂为占位、整张图浏览在下一次更新、掩膜在其后；概览表的 Step3 一行同步。`UI_SURFACE_RULES.md` 新增「Step3's page」一条。
   - 回归：75 个构造主窗口或涉及步骤切换 / 显示范围 / 通道面板 / `ChannelWorkbench` 的模块，与 `git archive HEAD`（`d69402f`）逐条对比**无新增失败**；通过数的差异正好是删除的旧页面测试（15 / 2 / 1）。两边相同：`test_global_channel_dock.py::test_the_step0_panel_looks_like_the_baseline_panel`、`test_step1_channel_panel.py::test_the_weight_row_and_the_buttons_kept_their_look`（字体差异）、`test_step0_method_prefetch.py::test_the_neighbouring_channel_is_still_prepared_as_well`；HEAD 一侧另有 `test_step0_method_prefetch.py::test_a_remounted_coordinator_does_not_reuse_a_cancelled_generation`（负载下偶发）。
   - **真机验收通过（用户 2026-09-26）**。
+
+### 块 2c-2 — Step3 的第二个 viewer，与 2c-1 的 Navigator 权限修补（申请 v2，按独立审核修订，**用户 2026-09-26 批准**；Step3 只读至第 ⑤ 步）
+- **2c-1 留下的缺陷（须修补）**：Step3 标题栏的 `Tissue Navigator` 按钮接到了 Step1 的 `_show_tissue_navigator`，它调用 `show_navigator(_CTX_STEP1, roi_policy="delete_only", patch_editable=True)`，而 `show_navigator` 带参数时会先改写编辑权限（`block01_display.py:2248-2249`）。所以在 Step3 点这个按钮，Navigator 会变成可删除 ROI、可编辑 patch，这些编辑会写进 Step0 的项目文件，违反「沙盒 ROI（第 ⑤ 步）完成前 Step3 的 Navigator 只读」的裁定。修补：Step3 的按钮改为调用新的 `_show_step3_tissue_navigator`，以只读权限（`roi_policy="read_only"`、`patch_editable=False`，与 `_apply_navigator_policy_for_step(3)` 相同）打开。
+- **用户的目标权限（2026-09-26）**：Step3 里**可以**编辑 ROI 与 patch，但编辑不保存、不改本地文件——即第 ⑤ 步「Navigator 沙盒 ROI」。现在 Navigator 的每次编辑都经 Step0 的唯一模型写进 `roi_config.json` 等文件（`_reconcile_roi_edit` → `_persist_geometry_edit`），没有「只在内存里」的路径，所以在第 ⑤ 步完成之前 Step3 必须只读；本块的修补只是堵住现在会写文件的口子，第 ⑤ 步再实现可编辑、不保存。
+- **必要性**：用户裁定 Step3 是 Step1 的简化版，右侧是整张图 viewer，可拖动缩放、Navigator 空降；2c-1 之后右栏只有占位提示（已接受的功能空档）。
+- **做法**（全部在主窗口；viewer / mount / GPU 代码不改，只使用 2a 的暂停 / 恢复与 `camera_reason`）：
+  1. `_step3_whole_slide()`：照 `_step1_whole_slide()` 建第二个 `Step1WholeSlideMount(self, parent=self, camera_reason="step3")`，`camera_sink = self._on_step3_camera`，`install(page.viewer_layout(), page.viewer_notice())`——占位提示成为它的回退控件：viewer 打开后隐藏，打不开时显示并改写为「整张图 viewer 打不开：原因」。
+  2. 步骤切换（`_step1_whole_slide_step_changed_inner`）：两个 viewer 都常驻。离开 Step1 时 Step1 的 viewer 由 `deactivate()` 改为 `pause_requests()`；进入 Step1 时先 `sync_source`，已暂停则 `resume_requests()`，否则 `activate()`。Step3 的 viewer 同样：不在 Step3 时暂停，进入时同步来源并恢复；第一次进入时 `open()`，失败记在 `_step3_mount_refused_for`（同一张切片不重试），成功后 `set_mode(当前模式)`。
+  3. 模式：`set_preview_mode` 在给 Step1 的 viewer `set_mode` 的同一处也给 Step3 的 viewer `set_mode`（后台的那个只记录，恢复时按新模式合成，2a 已保证）。
+  4. 相机：新增 `_on_step3_camera`（只在当前是 Step3 时记录）；`_capture_camera_of` / `_apply_shared_camera_to` 加 Step3 分支；`_set_step_active` 中应用共享相机的条件由 `(0, 1)` 改为 `(0, 1, 3)`。Step1 ↔ Step3 往返保持同一位置。
+  5. Tissue Preview 点击：`_on_step1_tissue_navigate` 按当前步骤路由——Step1 给 Step1 的 viewer，Step3 给 Step3 的 viewer。**连接不能依赖 Step1 的 viewer 已创建**：现在 `navigator_created` 的连接只在 `_step1_whole_slide()` 里建立，重启后直接进 Step3 时不存在。`_step3_whole_slide()` 创建 viewer 时同样以唯一连接接上 `navigator_created`，并在 Navigator 已存在时立即调用 `_wire_step1_tissue_navigation()`（`Qt.UniqueConnection`，不会重复连接）。视野框只由前台的 viewer 发布（2a 已保证）。
+  6. handoff 重绑：`_step1_sync_whole_slide_source` 也同步 Step3 的 viewer，并清除它的失败记录。**重绑失败时的回退与首次打开相同**：同一数据集换 ROI 或 handoff 更新后 `sync_source` 失败（异常），Step3 的 viewer 回退——隐藏 viewer、显示占位提示并写明原因，不把旧来源的画面当作新来源继续显示；失败记录在 handoff 更新或换数据集后清除（与第 7 条一致）。
+  7. 换数据集：`_discard_step1_dataset_state` 关闭 Step3 的 viewer（`close()`，回退控件恢复为占位提示，失败记录清除），下次进入 Step3 按新数据重开。Step1 viewer 不在换数据集时关闭（原有行为，advisory 已记）。
+  8. 关窗：`closeEvent` 在关闭 Step1 的 viewer 的同一处关闭 Step3 的 viewer。
+- **白名单**：`ui/main_window.py`（上述各处与 `_show_step3_tissue_navigator`）；`ui/step3_page.py`（仅在需要时增加改写占位提示文字的方法）；`UI_SURFACE_RULES.md`（Step3 页面一条：viewer 已接入）；`docs/user_guide.md`、`docs/用户指南.md`（Step3 一节：可浏览整张图、拖动缩放、Navigator 空降；mask 待第 ④ 步）；测试：新测试 `tests/test_step3_viewer.py`；`tests/test_step1_viewer_takeover.py` 与 `tests/test_step1_shared_camera.py` 中替换 `Step1WholeSlideMount.__init__` 的桩函数签名加上 `**kwargs`（否则构造 Step3 的 viewer 时 `camera_reason` 会报错），不改其断言；本文档。其他测试失败须停下说明。
+- **不改的范围**：`step1_viewer_mount.py`、`step1_gpu_binding.py`、host、GPU 层与着色器；patch 按钮条（第 ③ 步）；mask（第 ④ 步）；Navigator 的沙盒 ROI（第 ⑤ 步）；`set_preview_mode(reconcile=False)` 不把模式交给 viewer 的已有问题（advisory，本块不改：Step3 的 viewer 与 Step1 的在同一处接收模式，行为一致）。
+- **风险**：两个常驻 viewer 的内存与显存上限约为一个的两倍（用户已接受）；Step1 离开时改为暂停是 Step1 行为的变化（后台不再读取；回来时补齐）；GPU 路径本机测试环境大部分跳过，须真机确认。回退：恢复主窗口这几处。
+- **验收门**：
+  - Navigator 权限：在 Step3 点 `Tissue Navigator` 后编辑权限仍为只读；在合成项目中验证 Step3 下删除 ROI、编辑 patch 都被拒绝，`roi_config.json` / `patch_config.json` / `step0_roi_result.json` 不变；Step1 的按钮仍给 Step1 的权限（可删除 ROI、编辑 patch）。
+  - 进入 Step3 打开第二个 viewer，装在 Step3 右栏、占位提示隐藏；打不开时占位提示显示原因，同一张切片不重复尝试。
+  - 后台：在 Step3 时 Step1 的 viewer 已暂停，在 Step1 / 其他步骤时 Step3 的 viewer 已暂停；各自在后台期间**不派发新请求，已开始的读取允许完成**（2a 的契约）；回来时补齐。
+  - 模式：用本块接入的按钮（Step3 或 Step1 的 Overlay / Fusion）切换时，两个 viewer 的模式都跟着变（后台的恢复后按新模式显示），Tissue Preview 一致。**不**宣称会话恢复 / Load weights（`reconcile=False`）路径下 viewer 模式一致（已记 advisory）。
+  - 相机：Step1 → Step3 → Step1 位置保持；在 Step3 拖动后回 Step1 是同一位置。
+  - Navigator 空降：在 Step3 点 Tissue Preview 空降，移动的是 Step3 的 viewer，视野框跟随 Step3；**未进入过 Step1、直接进入 Step3** 后打开 Navigator 空降可用；**Navigator 已打开时进入 Step3** 空降可用；Step1 ↔ Step3 往返后，一次点击只移动当前的 viewer、且只移动一次。
+  - 重绑失败：同一数据集换 ROI / 更新 handoff 后重绑失败时，Step3 显示原因、不再显示旧来源的画面；handoff 再次更新后会重试。
+  - 换数据集后 Step3 的 viewer 已关闭，再进 Step3 按新数据打开；关窗时两个 viewer 都释放。
+  - 回归与 HEAD 逐条对比，除上述两个桩函数签名外无新增失败。
+  - 真机（用户）：Step3 右栏显示整张图，拖动缩放、Intensity、Overlay / Fusion 与 Step1 一致，Navigator 空降到 Step3，Step1 ↔ Step3 往返位置不变；**同一来源、数据已准备好的热切换**无明显等待（首次打开与来源变化后的等待单独记录耗时，不以常驻推定为无等待）；Step3 里 Navigator 不可编辑（第 ⑤ 步再改为可编辑不保存）。
 
 ## 六、未决与 advisory
 

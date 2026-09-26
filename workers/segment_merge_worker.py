@@ -23,7 +23,7 @@ import zarr
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from ..core import label_ownership, preseg_contract, preseg_input
+from ..core import label_ownership, label_pyramid, preseg_contract, preseg_input
 from ..core.io_loader import OMETIFFLoader
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
@@ -583,6 +583,52 @@ class SegmentMergeWorker(QThread):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.seg_config, f, indent=2)
         return path
+
+    def _write_label_pyramids(self, mask_zarr_path, nuclei_zarr_path, bbox, full_h, full_w):
+        """Block N: the label pyramid of each mask of one region, on the
+        slide's own level grids (`core.label_pyramid`). A display product
+        that can be rebuilt: a failure is reported and leaves no path, the
+        segmentation stands; a Stop skips it or ends it with nothing left.
+        Returns {"cell": path | None, "nucleus": path | None}."""
+        out = {"cell": None, "nucleus": None}
+        if self._stop:
+            return out
+        log = self._logger
+        raw = self._raw_channel_source_path()
+        try:
+            raw_shapes = label_pyramid.raw_level_shapes(raw) if raw else []
+        except Exception as exc:  # noqa: BLE001 -- reported, the run stands
+            raw_shapes = []
+            raw = f"{raw} ({exc})"
+        if len(raw_shapes) < 2:
+            msg = f"[Step2] no label pyramid: no slide pyramid to align to ({raw or 'no raw OME'})"
+            print(msg)
+            if log:
+                log.warning(msg)
+            return out
+        roi_bbox = list(bbox) if bbox else (self.roi_manifest.get("bbox_fullres")
+                                            or [0, int(full_h), 0, int(full_w)])
+        for kind, src in (("cell", mask_zarr_path), ("nucleus", nuclei_zarr_path)):
+            if not src or not os.path.exists(src):
+                continue
+            stem = os.path.basename(src)[:-len(".zarr")]
+            dest = os.path.join(os.path.dirname(src),
+                                stem.replace("global_nuclei_mask", "label_pyramid_nuclei")
+                                    .replace("global_mask", "label_pyramid") + ".zarr")
+            try:
+                with self.step2_profiler.time_stage("write_label_pyramid", method=self.method,
+                                                    output_path=self._abs(dest)):
+                    label_pyramid.build(src, dest, raw_shapes, roi_bbox, kind,
+                                        cancel_check=lambda: bool(self._stop))
+                out[kind] = self._abs(dest)
+            except label_pyramid.Cancelled:
+                return out          # what finished before the Stop stays whole
+            except Exception as exc:  # noqa: BLE001 -- reported, the run stands
+                msg = f"[Step2] label pyramid of {os.path.basename(src)} failed: {exc}"
+                print(msg)
+                if log:
+                    log.warning(msg)
+        return out
 
     def _record_step2_geometry(self, full_h, full_w, nuclei_zarr_path="",
                                global_mask_zarr_path=""):
@@ -2788,6 +2834,7 @@ class SegmentMergeWorker(QThread):
             del nuclei_mmap_ro
 
         self._record_step2_geometry(full_h, full_w, nuclei_zarr_path, out_zarr_path)
+        pyramids = self._write_label_pyramids(out_zarr_path, nuclei_zarr_path, bbox, full_h, full_w)
 
         hq2_paths = {}
         if is_hq2:
@@ -2800,6 +2847,7 @@ class SegmentMergeWorker(QThread):
 
         meta = {
             'mode':            'roi',
+            'label_pyramid':   pyramids,
             'run_id':          self.result_id,
             'roi_id':          self.roi_id,
             'roi_display_name': out_prefix,
@@ -3012,6 +3060,8 @@ class SegmentMergeWorker(QThread):
                         "paths": region_meta.get("paths") or {},
                         "roi_bbox_fullres": region_meta.get("roi_bbox_fullres"),
                         "roi_shape": region_meta.get("roi_shape"),
+                        "label_pyramid": region_meta.get("label_pyramid")
+                                         or {"cell": None, "nucleus": None},
                     })
                     self.progress.emit(
                         roi_i + 1, len(self.rois),
@@ -3058,6 +3108,7 @@ class SegmentMergeWorker(QThread):
                     "result_id": self.result_id,
                     "display_name": self.seg_config.get("display_name", self.method),
                     "rois": roi_meta_all,
+                    "label_pyramid": {m["roi_name"]: m.get("label_pyramid") for m in roi_meta_all},
                     "total_cells": total_cells_all,
                     "seg_config": self.seg_config,
                     "config_path": self._abs(config_path),
@@ -3647,6 +3698,8 @@ class SegmentMergeWorker(QThread):
                 del nuclei_mmap_ro
 
             self._record_step2_geometry(full_h, full_w, nuclei_zarr_path, out_zarr_path)
+            pyramids = self._write_label_pyramids(out_zarr_path, nuclei_zarr_path, None,
+                                                  full_h, full_w)
 
             hq2_paths = {}
             if is_hq2:
@@ -3661,6 +3714,7 @@ class SegmentMergeWorker(QThread):
 
             meta = {
                 'mode':           'full_wsi',
+                'label_pyramid':  pyramids,
                 'result_id':      self.result_id,
                 'method':         self.method,
                 'display_name':   self.seg_config.get("display_name", self.method),

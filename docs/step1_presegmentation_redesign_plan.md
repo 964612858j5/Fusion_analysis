@@ -9,6 +9,9 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.33：块 2a v3（暂停期间模式切换只记录）；Load / Reset weights 措辞改正；全局联动范围写明为 Step1 ↔ Step3；删除旧方案残留；2b / 2c 待办（模式同步、界面规则精确替换、完整公开操作验收）。
+- v3.32：用户改定勾选、权重等全部与 Step1 全局联动（方案 A 作废）；块 2a 按独立审核修订为 v2（只做暂停 / 恢复、前台发布、相机标识）。
+- v3.31：Step3 骨架调查结论与用户裁定（Intensity 与颜色全局联动、方案 A 的 Step3 fusion 草稿、Reset / Load weights 只读、Navigator 实时联动、拆成 2a / 2b / 2c）；块 2a 申请。
 - v3.30：块 N 已实施并通过真机验收。
 - v3.29：块 N v2 获批；Step3 裁定 8a（补生成失败时的退路）。
 - v3.28：Step3 重设计的只读调查、Odon 参考与用户裁定；块 N 申请（Step2 生成标签金字塔，已按独立审核修订为 v2）；后续计划加入 Step4 优化（`.dat` 清理）与长期的 NGFF 评估。
@@ -891,7 +894,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   1. 重建 Step3：取消「画矩形 → 只看这块」，改为整张图的 mask 浏览；排版与外观同 Step1，是 Step1 的简化版（只有通道面板和 viewer），尽可能复用 Step1 组件。
   2. 交互：Tissue Navigator 空降、patch 空降、缩放拖动；保留 Intensity、Overlay / Fusion。
   3. 可以在 Tissue Navigator 上画 ROI，但不产生下游影响（Navigator 在 Step3 为沙盒：只在 Step3 内存，不写文件，不影响 Step0/Step1）。
-  4. 通道权重保留、可调整，但不保存：Step3 有自己的 fusion 草稿，**首次进入、以及 Step1 每次新的确认之后**从 Step1 已确认的设置复制（与现有的勾选播种规则一致），其余时候保留 Step3 自己的临时调整；需要修改 `UI_SURFACE_RULES.md`「Step3 行只有勾选、颜色、名称」一条。
+  4. ~~通道权重保留、可调整，但不保存：Step3 有自己的 fusion 草稿~~（**已被「骨架裁定」中的全局联动取代，不再执行**），**首次进入、以及 Step1 每次新的确认之后**从 Step1 已确认的设置复制（与现有的勾选播种规则一致），其余时候保留 Step3 自己的临时调整；需要修改 `UI_SURFACE_RULES.md`「Step3 行只有勾选、颜色、名称」一条。
   5. mask 选择：默认当前 ROI 最新（`roi_index` 的 active run），面板上方一个小下拉框切换。
   6. mask 控件放在 viewer 上方一行：显示开关、透明度、线宽、颜色；默认只画轮廓（单色、0.75、线宽 1），「填充」为选项（按细胞编号的固定随机色）。
   7. 按 Odon 的做法：在 GPU 显示层加标签渲染（R32UI 纹理 + 求边 / 填充着色器）——用户批准修改 GPU 层。
@@ -900,7 +903,19 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   9. 删除「Channel Remap Review / QC」标签页；不再写 Step2 运行目录里的两个配置文件。
   10. Step3 的 viewer 常驻，离开 Step3 不释放（目标部署在资源充足的服务器，避免每次重新准备）；隐藏时停止视野请求，换数据集时关闭并按新数据重开，退出程序时释放——常驻不等于继续读旧数据。
   11. patch 按钮条抽成 Step1 / Step3 共用组件，允许修改 Step1 并回归。
-- **拟分步**（每步单独申请、单独验收）：① 块 N（标签金字塔，先做）；② Step3 骨架（复用 viewer 与通道面板、Step3 的 fusion 草稿、删除旧功能与标签页）；③ patch 按钮条组件化 + Navigator 空降；④ GPU 标签渲染与 mask 控件；⑤ Navigator 沙盒 ROI。在 ⑤ 完成之前，Step3 的 Navigator 保持现在的只读策略，不开放任何会写 Step0 文件的编辑。
+- **骨架调查结论**（2026-09-26，只读）：viewer 底层（host、读取栈、GPU 层、合成）不碰主窗口，可建第二个实例；`Step1WholeSlideMount` / `Step1ViewerBinding` 需参数化：显示范围（`STEP1_SCOPE` 写死在 `step1_viewer_mount.py:602-603`、`step1_viewer_binding.py:111`，CPU 路径构造合成绑定时未传 scope，`:333`）、fusion 模型（`_domain = window._display.fusion`，`:188-190`）、数据来源（binding `:66-96` 读 `loader.filepath`、`_corrected_decisions`、`_corrected_zarr_path`、`_active_roi`、`step0_output`；mount `:735` 读 `_active_roi["polygon_fullres"]`）、相机标识（`"step1-*"`，`:1018-1038`）。`deactivate()` 不停视野请求（GPU 绑定仍连着控制器的 `interaction_event` / `gesture_quiet`，`step1_gpu_binding.py:323-327`），隐藏的 viewer 仍会读数据，`publish_view_rect`（`:970`）不查前台，会改写共享 Navigator 的视野框。全局通道面板构造时绑定 Step1 的 fusion 模型、不可换绑，权重与「勾选即加入 fusion」只在 Step1 生效（`global_dock.py:489-495`、`:957-1025`）。一个独立的 `FusionDomainModel` 没有任何全局监听者，不会触发 Step1 的会话保存。Step1 已确认的 fusion 快照只含参与 fusion 的通道（`main_window.py:7898-7911`）。换数据集时 Step1 的 viewer 不关闭，留到下次进入 Step1（advisory，未改）。每个 viewer 实例的缓存上限约 2.7 GB 内存 + 512 MB 显存。
+- **骨架裁定（用户 2026-09-26）**：
+  - Intensity（Min / Max / Gamma）与颜色保持全局联动：在 Step3 调也会改 Step1 的显示；分割用的是 Save Fusion Settings 保存的快照，可随时用 Load weights 恢复，所以不受影响。
+  - ~~方案 A：Step3 自己一份 fusion 草稿~~（**作废**，用户 2026-09-26 改为下一条）。
+  - **勾选、权重、Intensity、颜色、fusion 草稿与 Overlay / Fusion 模式全部在 Step1 ↔ Step3 之间联动**（用户 2026-09-26；Step0、Step2 的勾选仍各自独立，Intensity 与颜色延续原有的全局规则）：Step3 直接使用 Step1 的显示范围（step1）和同一份 fusion 草稿。理由：用户在 Step3 对着 mask 调出更满意的 fusion 后，回到 Step1 直接重算，不必手工记录再调一遍。后果（用户确认）：Step3 里的调整由 Step1 的会话自动保存写进 `step1_session.json`，与在 Step1 里调完全相同；已确认的快照（Save Fusion Settings）只有在 Step1 点保存时才变，分割不受影响；Step2 不变（仍只有自己的勾选，从 Step1 已确认的设置播种）。
+  - Step3 保留 Reset weights（所有 marker 权重清零）与 Load weights（读取同一项目的历史会话）。Load weights **不改写所选的历史会话文件**；读入后修改共用草稿，并按现有机制自动保存到当前的 `step1_session.json`。Reset weights 同样会自动保存草稿。两者都不提交已确认快照。若所选文件恰好就是当前的 `step1_session.json`，读入后它会像平常一样被自动保存改写——不承诺该文件永不被写入。Step3 没有任何 Save 按钮。
+  - Tissue Navigator 与 Step3 当前画面实时联动（与 Step1 看同一份合成；「已发布的规格是否随草稿实时更新」在 2b 核实）。
+  - Step3 仍用第二个 viewer 实例（与 Step1 画同样的内容，另加 mask 层）；两个实例交替进入后台，都要暂停 / 恢复。只用一个 viewer 在两页间搬动可能导致 OpenGL 重建与纹理重传，不采用。
+  - 两个 viewer 各自保存 `_mode`，共用草稿不会自动同步模式：2b / 2c 须明确模式同步的接线（切换写入共用的模式并通知两个实例；后台实例按 2a 只记录、恢复时合成），并保证只有前台实例发布 Navigator 视野框。
+  - 2b 修改 `UI_SURFACE_RULES.md` 时，精确替换「四步的勾选各自独立」相关条款（第 197、214 行附近）为：Step1 ↔ Step3 共用勾选与权重，Step0、Step2 仍各自独立；并修改第 211、222、292 行（权重只属于 Step1、Step3 行只有勾选 / 颜色 / 名称、权重只在 Step1 的行里编辑）。
+  - 2b / 2c 的验收包含一次完整的公开操作：在 Step3 调整勾选与权重 → Step1 显示同样的设置 → 当前会话记住草稿；已确认的快照和 Step2 的输入保持原样，直到用户在 Step1 明确保存。
+  - 骨架拆成 2a / 2b / 2c：2a viewer 的暂停 / 恢复、Navigator 视野框只在前台发布、相机标识参数（重构，除视野框一项外界面与 Step1 行为不变）；2b Step3 使用 Step1 的显示范围与 fusion 草稿（通道面板在 Step3 与 Step1 相同、Reset / Load weights 同一套功能、Navigator 实时联动的核实）、界面规则与规则测试修改；2c 新的 Step3 页面（左栏同 Step1 的 Channels 框 + Show all / Intensity + Reset / Load weights + 通道列表；右栏 Overlay / Fusion 按钮 + viewer），删除旧页面、旧标签页与写进 Step2 目录的配置文件，加入共用列宽，常驻、隐藏暂停、换数据集与退出时释放。
+- **拟分步**（每步单独申请、单独验收；② 已拆成 2a / 2b / 2c，见上）：① 块 N（标签金字塔，先做）；② Step3 骨架（2a / 2b / 2c：复用 viewer 与通道面板，与 Step1 共用显示范围和 fusion 草稿，删除旧功能与标签页）；③ patch 按钮条组件化 + Navigator 空降；④ GPU 标签渲染与 mask 控件；⑤ Navigator 沙盒 ROI。在 ⑤ 完成之前，Step3 的 Navigator 保持现在的只读策略，不开放任何会写 Step0 文件的编辑。
 
 ### 块 N — Step2 生成标签金字塔（申请 v2，按独立审核修订，用户 2026-09-26 批准；已实施，**真机验收通过**）
 - **必要性**：Step3 按 Odon 的做法浏览整张图的 mask，需要与图像金字塔同级的标签金字塔；Step2 的 mask 只有一层（uint32 zarr，1024² 分块，ROI 坐标）。用户裁定在 Step2 生成，用户只等一次。
@@ -937,6 +952,28 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 真实数据试算（只读真实 mask，输出写临时目录）：`cropped_region.ome.tif` 的层级 3859×4053、964×1013，生成 0.7 s，两级形状与原始切片层级一致，比例 4.0003 / 4.0007、16.0135 / 16.0069；压缩后 2.24 MB（mask 本身 18 MB，约 12%，与未压缩像素比例 6.6% 不同，符合前述限定）。
   - 回归：Step2 相关 19 个模块（轻量 4 并行，真实引擎 3 个逐个顺序），与 `git archive HEAD`（`4b33999`）逐条对比**无新增失败**；两边相同：`test_hq_marker_segmentation.py` 2 条（HQ 不维护）；HEAD 一侧偶发 StarDist ROI 等价 1 条（已知的 StarDist 偶发不一致）。
   - **真机验收通过（用户 2026-09-26）**：`test1` 上一次 Cellpose whole-cell 全图运行生成 `label_pyramid_Full WSI.zarr`（2.1 MB，mask 16 MB），`read` 正常，两级形状与原始切片一致，三处 meta 都有路径，无临时目录残留，生成 0.61 s（整次 857 s）。
+
+### 块 2a — viewer 的暂停 / 恢复与前台发布（申请 v3，按两轮独立审核与用户改定修订，**用户 2026-09-26 批准**）
+- **必要性**：Step3 用第二个 viewer 实例，与 Step1 的实例交替进入后台；后台实例必须不读数据、不改写共享的 Navigator。现在 `deactivate()` 不停读取（GPU 绑定仍连着控制器的 `interaction_event` / `gesture_quiet`，`step1_gpu_binding.py:323-327`；粗层完成的回调会接着申请精层，`:709-720`；`refresh_display()` 可能为新勾选的通道申请读取，`:211`；CPU 路径下合成协调器直接向调度器取数据，控制器的开关只停控制器自己的读取，`viewer/explore_view.py:3654-3672`），`publish_view_rect`（`step1_viewer_mount.py:970`）也不查前台。
+- **v1 → v2**：用户改定为 Step3 与 Step1 共用显示范围、fusion 草稿与数据来源，v1 的 `scope` / `domain` / `source` 参数用不上，**不做**；暂停方案按独立审核补齐。
+- **暂停语义**：不再派发任何新的读取请求；已开始的读取允许完成，但完成回调不得启动下一轮读取；不强行中断底层 I/O，不改调度器。重复暂停 / 恢复幂等，不重复连接。
+- **做法**：
+  - `Step1GpuBinding` 新增 `pause()` / `resume()` 与一个暂停标志：暂停时断开控制器的 `interaction_event`、`gesture_quiet`，停计时器；粗层回调里「接着规划精层」与 `refresh_display()` 里的规划、`update_viewport()` 在暂停时都不派发（已到达的结果照常收下）。恢复时重连并执行**一次恢复刷新入口**：按最新的显示快照与视野重新规划，继续取回缺失的粗层与精层（不是只补一个瓦片）。
+  - `Step1WholeSlideMount` 新增 `pause_requests()` / `resume_requests()`：GPU 路径调用上面的 `pause` / `resume`；CPU 路径复用现有的 `deactivate()`（断开合成的 fusion / 显示监听）并关闭控制器的视野请求（`_set_controller_viewport_requests(False)`），暂停期间 `_recompose_for_the_camera` 不触发合成；恢复时复用 `activate()` 重连并刷新到最新状态，再打开视野请求。不重构合成协调器。
+  - 模式切换也是读取入口（CPU 路径 `set_mode()` 直接调用 `compose.set_mode()` 并触发合成，`step1_viewer_mount.py:796-811`）：暂停期间 `set_mode()` 只记录最新模式（GPU 与 CPU 路径都是），恢复时按最新模式合成 / 刷新。不改协调器。
+  - `publish_view_rect` 与 `_on_range_changed` 只在 mount 激活且未暂停时发布（后台实例不改写共享 Navigator 的视野框）。**这是 Step1 行为上唯一的变化。**
+  - 构造参数 `camera_reason="step1"`，替代 `"step1-patch"` / `"step1-preview"` / `"step1-gesture"` 等标识的前缀；默认值下标识与现在逐字相同。
+  - 不接入主窗口：Step1 的 mount 仍以默认参数构造，暂停 / 恢复在 2c 接到 Step1 与 Step3 的切换上。
+- **白名单**：`ui/step1_gpu_binding.py`（`pause` / `resume`、暂停标志、粗层回调与 `refresh_display` / `update_viewport` 的暂停判断）；`ui/step1_viewer_mount.py`（`pause_requests` / `resume_requests`、`_recompose_for_the_camera` 与 `set_mode` 的暂停判断、`publish_view_rect` 与 `_on_range_changed` 的激活判断、`camera_reason` 参数）；新测试 `tests/test_viewer_pause.py`；本文档。
+- **不改的范围**：主窗口接线；host、读取栈、调度器、缓存、GPU 层与着色器、合成协调器、`step1_draft_spec`、`step1_viewer_binding.py`；通道面板、fusion 模型、显示状态；任何可见界面。
+- **风险**：GPU 真实渲染在本机测试环境大部分跳过（`test_step1_gpu_takeover.py` 34 条需要真正的 OpenGL），交付时 GPU 路径保持「真机未验收」，需真机确认 Step1 画面不变；暂停判断漏掉某个读取入口会让后台实例继续读数据（新测试覆盖已知入口）。回退：恢复这两个文件。
+- **验收门**：
+  - 除 Navigator 视野框一项外 Step1 行为不变：Step1 viewer 相关测试（mount、binding、host、exit gates、GPU takeover / request gate / overview skip、shared camera、viewer takeover、navigator teardown）与 HEAD 逐条对比无新增失败。
+  - GPU 绑定（沿用现有仿真 GPU 层与调度器的测试写法）：暂停后控制器事件不再触发规划；**粗层读取未完成时暂停，随后结果到达，不再派发精层请求**；暂停期间改变共享的 Intensity / 颜色与 fusion 草稿、勾选新通道，不新增请求；重复暂停 / 恢复不重复连接；恢复后按最新状态刷新，缺失的数据继续取回。
+  - CPU 路径（沿用 `test_step1_viewer_mount.py` 的仿真窗口与合成金字塔）：暂停后调度器不再收到来自该实例的请求（控制器与合成），相机移动与草稿 / 显示变化都不触发合成；恢复后显示最新状态并补齐数据。
+  - 暂停期间切换 Overlay / Fusion 不新增请求（两条路径），恢复后显示最新模式。
+  - 未激活或暂停时 `publish_view_rect` 不发布；`camera_reason` 默认值下相机标识与现在逐字相同，传入前缀时按前缀生成。
+  - 真机（用户）：Step1 画面、Overlay / Fusion、Intensity、拖动缩放、patch 空降与现在一样；GPU 路径以真机结果为准。
 
 ## 六、未决与 advisory
 

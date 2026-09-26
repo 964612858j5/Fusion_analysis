@@ -9,6 +9,9 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.55：块 ④c v2 获批（4 项裁定同意，含 ④b 错误状态的最小扩围）。
+- v3.54：块 ④c 按独立审核修订为 v2（Show 打开可补读；两种 mask 默认显示；④b 错误状态的最小扩围；来源不变不重设；颜色只用于轮廓；默认选择按规则验收；复制件须改写路径；设置在 mount 重建后重新应用；不闪空的前提；退出段错误在部署机出现即生命周期不通过）。
+- v3.53：块 ④c 申请 v1（运行下拉框、细胞 / 核 mask 各一个下拉面板、提示文字；进入 Step3 / Step2 新结果 / 换数据集的刷新；兼作 ④a、④b 的真机验收）。
 - v3.52：块 ④b 已实施（自动验收通过，含本机真实 GL 读回；真机随 ④c），写入执行记录与环境问题（本机 D3D12 驱动退出时段错误）。
 - v3.51：块 ④b v2 获批，5 项裁定按建议（核在上、逻辑线宽、旧层暂留目标优先、暂停停止补生成、256 MB）。
 - v3.50：块 ④b 按独立审核修订为 v2（目标层级优先与编号 0 覆盖；逻辑线宽与参考半径扩到 8；标签沿用图像的多边形边界；暂停与补生成、单线程的如实说明；预算实测与超额顺序、CPU 侧计入等待结果；编号图独立参考；Step3 图像不变的验收）。
@@ -1299,6 +1302,55 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
     - 离屏（每模块单独进程）26 个模块：Tissue Preview 契约、通道面板 / 工作台、标签金字塔、Navigator 权限、Step3 各模块、Step1 各 viewer / 相机 / 暂停 / 勾选模块、GPU 接管 / 数据供给 / 请求门 / 总览跳过、Step2 重映射集成等。两边相同：`test_global_channel_dock.py` 1 条（字体），`test_step1_montage_view.py` 第 27 条后崩溃。
     - 真实 GL（本机，**每条测试单独进程**，避开驱动的上下文数限制）：Step1 的 8 个 GPU 模块共 150 条 + 本块 25 条。两边相同的唯一失败：`test_step1_gpu_takeover.py::test_the_mounted_widget_framebuffer_holds_real_gpu_pixels`（断言厂商名含「nvidia」，本机经 D3D12 显示为「Microsoft Corporation」，环境原因）。名字带空格的 7 条参数化用例另行单独补跑，两边都通过。
   - 真机：本块用户看不到变化（没有人调用 `set_mask_sources`），真机验收随 ④c；届时一并确认上面的退出段错误在部署机上是否存在。
+
+### 块 ④c — Step3 的 mask 界面与接线（申请 v2，按独立审核修订，**用户 2026-09-27 批准**，实施中）
+- **必要性**：④a（数据层）与 ④b（GPU 渲染）已就位，但产品里没有人选运行、没有人把 mask 交给 viewer，用户看不到任何 mask。本块按第 ④ 步裁定 5、6 加界面并接线，是第 ④ 步的最后一块，**也是 ④a、④b 的真机验收**。
+- **只读调查结论**：
+  - Step3 页面（`ui/step3_page.py`）只负责摆放；右栏顶部现在一行只有右端的 `Overlay` / `Fusion`（`assemble(mode_widgets=...)`，`:111-117`），控件由 `main_window._build_step3_page` 构建（`main_window.py:1566-1633`）。现有测试没有锁定这一行的内容。
+  - 当前 ROI 工作区：`step0_output["roi_dir"]`；当前 ROI：`_active_roi`（`name` 与 `bbox_fullres` = y0, y1, x0, x1）。Step2 用的 `rois` 就是窗口的 `_rois`，`roi_name == _active_roi["name"]` 成立（`segment_merge_worker.py:3016`）。
+  - 进入 Step3：`_go_to_step3(output_dir)`（`:4515`）；Step2 完成对话框的「Open QC Viewer」经 `open_qc_requested(output_dir)` 进来（`step2_page.py:2608`），这就是 `choose_run` 的「显式目录」；Step2 跑完另发 `segmentation_done(output_dir)`（`:2570`）。Step3 的 viewer 在 `_step3_follow_step` 里打开 / 恢复（`:1914-1950`）。
+  - 换数据集：`_close_step3_viewer()`（`:2685`）关闭 Step3 的 mount；④b 已让 mount 在关闭 / 换数据源时丢掉 mask 来源。
+  - viewer 各层级尺寸：`mount.host.stack.provider.level_shape(l)`，与 ④b 标签绑定用的是同一组。
+  - 界面规则：Step1 的 viewer 下方没有状态行，警告与错误走终端（`UI_SURFACE_RULES.md` Step1 一节）；Step3 一节写着「no mask yet」——本块须改写这两处中与 Step3 相关的描述。
+- **界面**（用户已裁定位置与内容；**新增的可见控件以下列为准**）：Step3 右栏 `Viewer` 标签页顶部一行，从左到右：
+  1. **运行下拉框**：当前 ROI 工作区的已完成运行（④a `list_runs`），每项显示「方法名 · 日期 时间」，active 运行加「(active)」；新到旧。没有运行时只有一项「No segmentation results for this ROI」并禁用。默认按 ④a `choose_run`（显式目录 → 保持当前 → active → 最新）。
+  2. **`Cell mask ▾`** 与 **`Nucleus mask ▾`** 两个按钮，样式同 `Overlay` / `Fusion`（`MODE_BUTTON_QSS`）；按钮文字前有一个该 mask 当前颜色的小色块。点开是下拉面板：`Show`（勾选，**两种 mask 默认都显示**）、颜色（一排预设色块 + `Custom…` 打开系统取色对话框；**颜色只用于轮廓**——`Fill` 按细胞编号给固定随机色（④b），面板上写明「Fill uses one colour per cell」）、`Opacity`（滑块 0–100 %，默认 75 %，轮廓与填充都用）、`Width`（1–4，逻辑像素，默认 1，只用于轮廓；隐藏用 `Show`，所以不提供 0）、`Outline` / `Fill` 二选一（默认 Outline）。当前运行没有这种 mask 时按钮禁用。默认颜色：细胞绿、核青（④b 的默认值）。
+  3. **提示文字**（占剩余宽度，放不下时截断，悬停显示全文；**终端只在提示内容变化时打印一次**，拖动、缩放时不重复刷屏）：按优先级只显示一条——没有运行；mask 读不出（④a 的原因，并建议「re-run Step2」）；标签块读取失败（④b 的错误）；「Masks need the GPU display」；「Preparing zoomed-out masks…」（补生成中）；「Zoomed out, masks cannot be shown: 原因」（只在当前处于粗层时）；「Mask memory is full: part of the view has no mask」。都没有时为空。
+  4. 右端 `Overlay` / `Fusion`（不变）。
+- **接线**（`ui/main_window.py`）：
+  - `_step3_refresh_masks(requested_dir=None)`：读当前 ROI 工作区的运行 → 选运行 → 按 `_active_roi` 与 viewer 层级 `resolve_masks` → 更新下拉框、两个按钮的可用状态与提示。**只有选中的运行或解析出的来源（mask 路径、bbox、金字塔路径）与正在显示的不同时，才调用 `mount.set_mask_sources`**；否则只更新列表——进入 Step3、后台新结果到达时，正在显示的 mask 不被清空、不重新读取。换数据集后 mount 已丢掉来源（④b），下一次进入必定重新设置。
+  - 触发：进入 Step3 且 viewer 打开 / 恢复之后（带 `_go_to_step3` 的 `output_dir` 作显式目录）；在 Step3 页面上收到 `segmentation_done`（Step2 在后台跑完）时刷新列表并保持当前选择；用户切换下拉框；换数据集（`_close_step3_viewer`）时清空列表与选择。运行列表只在这些时刻读文件（几个 JSON），不轮询。
+  - 显示设置：两个面板的改动直接调 `mount.set_mask_style`。颜色、透明度、线宽、Outline / Fill **只重画、不读数据**；`Show` 由关到开时，允许补读当前视野缺的标签块（④b `set_style` 的现有行为：隐藏期间不读）。设置在本次运行内保留（换运行、换数据集都不重置），不写入任何文件；mount 重建（换数据集）后，mount 自己保存的设置（④b `_mask_styles`）重新应用到新的标签绑定。
+  - 提示随状态更新：mount 新增信号 `mask_status_changed`，转发 ④b 标签绑定的 `status_changed`（后者每次规划、补生成开始 / 结束时发出）。
+- **④b 模块的最小扩围（v2，须批准）**：`ui/step3_label_binding.py` 只改错误状态——① 标签块读取失败时发出 `status_changed`，使提示立即更新；② `set_sources` 清除上一个来源的错误；③ 旧代次的迟到错误直接丢弃（先查代次，再记错误）。读取架构、线程、预算、层级规则都不改；`tests/test_step3_label_binding.py` 加对应用例。
+- **白名单**：`ui/step3_label_binding.py`（仅上述三点）；`ui/step3_mask_bar.py`（新：这一行与两个下拉面板，只负责控件，不读文件）；`ui/step3_page.py`（`assemble` 接收这一行的控件）；`ui/main_window.py`（构建控件、上述接线）；`ui/step1_viewer_mount.py`（只加 `mask_status_changed` 信号的转发）；`UI_SURFACE_RULES.md`（Step3 一节：新的一行，删除「no mask yet」）；`docs/user_guide.md`、`docs/用户指南.md`（Step3 一节）；新测试 `tests/test_step3_mask_bar.py`（控件：禁用、默认值、改动转发、颜色、截断）与 `tests/test_step3_mask_wiring.py`（合成项目：进入 Step3 时的选择规则、显式目录、Step2 新结果、换数据集清空、ROI 不符 / 只有 TIFF / 纯核方法时按钮与提示、无 GPU 提示）；本文档。其他测试失败须停下说明。
+- **不改的范围**：④a / ④b 的模块（发现缺陷先停下说明）、GPU 层、Step1 / Step0 / Step2 页面与行为（`segmentation_done` / `open_qc_requested` 只接收不改）、Step3 左栏、Tissue Navigator、任何文件写入（本块不写文件；补生成金字塔是 ④b 已批准的写入）。
+- **风险**：
+  - 新的可见界面：按裁定的位置与内容，界面规则与两份用户指南同步。
+  - `segmentation_done` 在 Step2 后台完成时到达：只在 Step3 页面上时刷新，其他页面等下次进入。
+  - 多个 ROI 的运行只显示当前 ROI（`_active_roi`）的 mask；要看别的 ROI，先在 Step1 切换当前 ROI（现有行为）。
+  - 本机 D3D12 驱动的退出段错误（④b advisory）在真机验收时须确认部署机是否存在。
+  - 回退：去掉这一行与接线，④b 的 mount 仍然不画任何 mask。
+- **验收门**：
+  - 控件：没有运行 / 当前运行缺某种 mask 时相应控件禁用；默认值（两种都显示、绿 / 青、75 %、1、Outline）；颜色、透明度、线宽、模式每项改动只调一次 `set_mask_style`、不触发读取；`Show` 由关到开只补读当前视野缺的块；预设色与自定义色都生效（自定义取色对话框在测试里替换为直接返回颜色，不弹模态框）；提示截断时悬停有全文，终端对同一条提示只打印一次。
+  - 不重复设置来源：保持同一选择时的刷新（进入 Step3、后台新结果到达）不调用 `set_mask_sources`，已画的标签块不被清空、不重新读取。
+  - 错误提示（④b 扩围）：标签块读取失败时提示立即出现；切换到正常的运行后旧错误消失；旧来源迟到的错误不出现。
+  - 设置保留：换数据集（mount 重建）后再进入 Step3，之前改过的颜色 / 透明度 / 线宽 / 模式 / Show 在新的标签绑定上生效（检查绑定的实际设置，不只看控件外观）。
+  - 选择规则：进入 Step3 时 active 运行被选中；从 Step2 完成对话框进入时选中那次运行；在 Step3 时 Step2 新结果到达，列表出现新运行、当前选择不变；换数据集后列表清空、mask 不再显示。
+  - 分类与原因：纯核方法只有 `Nucleus mask` 可用；nuclear-guided 两个都可用；ROI 不符、只有 TIFF 的运行两个都禁用且提示原因（含「re-run Step2」）；无 GPU 时提示「Masks need the GPU display」。
+  - 回归：Step3 / Step1 / GPU / 标签相关模块与 HEAD 逐条对比，无新增失败。
+  - **真机（用户，同时是 ④a、④b 的真机验收）**：
+    1. 用 `~/fusion_data/test1` 进入 Step3：选中的运行符合「显式指定 → 当前选择 → active → 最新」（从导航条进入时即 active 运行），整张图上看到细胞轮廓，与组织对齐；放大、缩小、拖动、Tissue Navigator 空降、patch 空降时 mask 跟随、无错位、无明显延迟。
+    2. 缩放到最粗与最细两端，mask 都显示（块 N 的金字塔）；在金字塔有效、预算足够、旧块覆盖视野时，换层级不闪空。冷空降（目标区域从未读过）、读取失败、预算不足时按已批准的退路验收（暂时没有 mask / 提示原因），不算闪空。
+    3. `Cell mask ▾` 改颜色、透明度、线宽，立即生效；改为 Fill 时每个细胞一种固定颜色（所选颜色不用于填充）；`Show` 关掉再打开。
+    4. 切换运行（若有多个）；在 Step2 再跑一次、用完成对话框进入 Step3，选中的是新运行。
+    5. 一次没有金字塔的旧运行：**只复制运行目录不行**——运行的 metadata 用绝对路径指向原 mask，仍会读写原运行。做法：我准备一个脚本，把整个测试项目复制到临时目录、删去复制件里的 `label_pyramid_*.zarr`，并把复制件 metadata 与索引里的路径全部改写为指向复制件，再核对没有任何路径指向 `~/fusion_data`；程序打开这份复制件。若现有界面打不开一份复制的项目（「打开别的项目」尚未支持，S2 冻结），本项只由自动测试覆盖，并如实记为「真机未验」。预期：先显示「Preparing zoomed-out masks…」，完成后缩小时也有 mask。
+    6. 退出程序：记录是否出现段错误（④b advisory）。**若在部署机上正常关闭时出现，记为生命周期验收未通过**，第 ④ 步不宣称全部通过，另立块处理。
+- **用户裁定（2026-09-27，全部同意）**：
+  1. 颜色：预设色块 + `Custom…` 系统取色对话框。
+  2. 线宽 1–4，不提供 0，隐藏用 `Show`。
+  3. 提示文字：截断 + 悬停全文 + 终端只在提示变化时打印。
+  4. 批准上面 ④b 模块的最小扩围（只改错误状态的通知、换源清除、迟到错误丢弃）。
 
 ## 六、未决与 advisory
 

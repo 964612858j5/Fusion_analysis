@@ -1,7 +1,7 @@
 # Step1 预分割（Method & Parameters / Patch Results）重设计 — 项目计划
 
 日期：2026-09-23（第三版，块 A0 产出）　分支 `v15-interactive-channel-workspace`，起点 `c9f80df`，A0 核查基于 `e655409`。
-状态：**已执行：块 P、A1、A2、B、C、D、V0。本文档记录的验收：B「用户验收总体通过」、C 第 4 步「用户人工测试通过」、D「块 D 验收通过（2026-09-25）」；P、A1、A2、V0 的执行记录仍写「待用户验收」，文档中没有后续验收记录。V2（代码中称「Step2 hook-up」）第 1、2 步已提交（`54e825d`、`1adfe4e`），第 3 步已提交（`dcaca2c`），真机上 Cellpose 路径跑通，Mesmer 未验收；块 L 已提交（`1d14801`、`2294bc7`）并通过真机验收；块 F 已提交（`5bc65bc`）并通过真机验收；块 E 已提交（`7ee98fc`）并通过真机验收（Mesmer 除外）；U1、Results 顺序、块 S 已提交；S2 冻结；后续计划见第六节。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动须另行批准。
+状态：**已执行：块 P、A1、A2、B、C、D、V0。本文档记录的验收：B「用户验收总体通过」、C 第 4 步「用户人工测试通过」、D「块 D 验收通过（2026-09-25）」；P、A1、A2、V0 的执行记录仍写「待用户验收」，文档中没有后续验收记录。V2（代码中称「Step2 hook-up」）第 1、2 步已提交（`54e825d`、`1adfe4e`），第 3 步已提交（`dcaca2c`），真机上 Cellpose 路径跑通，Mesmer 未验收；块 L 已提交（`1d14801`、`2294bc7`）并通过真机验收；块 F 已提交（`5bc65bc`）并通过真机验收；块 E 已提交（`7ee98fc`）并通过真机验收（Mesmer 除外）；U1、Results 顺序、块 S 已提交；块 K 已实施并通过真机验收；S2 冻结；后续计划见第六节。** 提交本文档不代表批准任何生产实施。每块须用户单独启动；模块级改动须另行批准。
 
 修订记录：
 - v1：初稿。
@@ -9,6 +9,7 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.24：块 K 已实施（旧路径 ROI 模式中途 Stop 不再登记成功），写入执行记录，待真机验收；新增已有问题：运行资源监控器 `NameError`。
 - v3.23：用户裁定 HQ / HQ2 / CDS 这类不经 Step1 交接的方法不再维护（R2 加注，第六节新增「用户裁定」）。写入块 K 申请（Step2 旧路径 ROI 模式中途 Stop 不再登记成功，待批准），已按独立审核意见修订。
 - v3.22：块 U1、Results 顺序、块 S（每次弹对话框、拒绝原因上屏）已提交；S2 冻结，记录调查结论；新增「后续计划」和「已知的已有问题」。
 - v3.21：块 F、块 E 已提交（`5bc65bc`、`7ee98fc`），都通过真机验收。
@@ -814,7 +815,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 建议顺序：纯函数「读取场景」→ Step0 Load 参数化（行为不变）→ Step0「装入场景」→ 忙碌检查 → 主窗口编排 → Step2/Step3 重置与按 roi_id 选择 → 两个合成项目的写入隔离测试。
   - 风险：Step0 提交切换之后再失败就回不到原项目；打开后若 Save 且没有恢复校正决定，会把该 ROI 的决定改写为 original；原始切片被改动（大小/mtime）会被拒绝；会话和 manifest 用绝对路径，项目移动后失效。
 
-### 块 K — Step2 旧路径 ROI 模式中途 Stop 不再登记成功（申请，**待用户批准**，2026-09-26）
+### 块 K — Step2 旧路径 ROI 模式中途 Stop 不再登记成功（用户 2026-09-26 批准；已实施，**真机验收通过**）
 - **缺陷**（只读核实，未复现运行）：参数没有契约时（手动模式、旧参数文件），ROI 模式中途 Stop，`_segment_one_zarr` 在 Stop 检查点 `return 0`，但 ROI 外层的收尾检查（`workers/segment_merge_worker.py:3113`）只拦截契约路径：外层照常写 `segmentation_meta.json`、`_register_completed_result()` 登记为 `completed`、`update_roi_segmentation_run` 记 `done`、发 `finished`。界面随之显示「✓ Done!」、弹「Segmentation Complete」（带 Step3/Step4 按钮）、把该 ROI 的 Step2 标成 done。多 ROI 时，被停下的 ROI 还会沿用上一个 ROI 的 `_last_region_meta` 路径（`:3084`）。
 - **影响面**：现在的交接把全图工作区也作为一个 ROI（`Full WSI`）交给 Step2（`ui/main_window.py:4163-4165`；`~/fusion_data/test1` 只读核对），所以 ROI 外层循环是日常主路径。
 - **做法**：把 `:3113` 的 `if self._contract is not None and self._stop:` 改为 `if self._stop:`，旧路径复用已有的 `_ContractStopped` 收尾（不写汇总、不登记、不改 roi_index、不发 `finished`，只发 `error('Stopped by user.')`）；`run()` 的 `except` 里那条日志去掉「(Step1 hand-over)」，改为不区分路径的措辞。类名不改，不新增机制。
@@ -836,6 +837,12 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 本改动只阻止整次运行被登记为成功，**不回收文件**：多 ROI 时前面已完成 ROI 的产物（`global_mask_<ROI>.zarr`、`global_mask_<ROI>.ome.tiff`、`global_dapi_<ROI>.ome.tiff`、`segmentation_meta_<ROI>.json`、`tile_masks/`）以及被停下 ROI 的半成品（`.dat`、部分切块）都留在本次输出目录里，未登记、不被下游读取。
 - **回退**：恢复 `:3113` 的条件（加回 `self._contract is not None and`）和 `except` 里那行日志的原措辞，两处。
 - **Advisory（不在本块处理）**：全图分支只在切块循环入口检查 Stop；最后一个切块推理期间或合并、写出阶段按 Stop，运行仍会完成并登记（结果是完整的，但与用户的 Stop 意图不符）。
+- **执行记录**（2026-09-26，未提交）：
+  - `workers/segment_merge_worker.py`：`:3113` 条件改为 `if self._stop:`（紧邻的注释同步改措辞）；`except` 的 `_ContractStopped` 分支日志改为「Stopped by user; nothing registered.」。别处未改。
+  - `tests/test_step2_legacy_stop.py` 4 条（合成 ROI 工作区、真实 StarDist、参数不带契约）：改后单独运行 4 passed（连续两次）。同一测试放在 `git archive HEAD` 导出件上：3 条 Stop 场景失败——单 ROI 中途 Stop 仍发 `finished`（0 个细胞），另两种发 `finished`（60，即 ROI A 的数目）；不 Stop 的一条通过。缺陷由此复现并被锁住。
+  - 回归：24 个模块（Step2 worker/页面/交接、契约、归属、remap、HQ 选择、Tissue Navigator、写保护等），每模块单独进程、4 个并行，改后与 HEAD 导出件逐条对比，已有模块**没有新增失败**。两边相同的失败：`test_hq_marker_segmentation.py` 2 条（HQ，不再维护）、`test_tissue_navigator_viewport_sync.py::test_mapping_slide_local_to_full`。只在 HEAD 一侧出现的 `test_step2_runner_path.py::test_a_hand_over_equals_the_runner_with_shared_ownership[stardist_nuclei_dapi-full]`（1 像素差），两边单独重跑都通过，是负载下的偶发。
+  - 并行时新测试有 3 条失败，原因是下面的已有问题（运行资源监控器的 `NameError`），不是本块改动：单独运行全部通过。
+  - **真机验收通过（用户 2026-09-26）**：手动模式 ROI 分割中途 Stop，不再弹完成对话框、不登记。用户反馈：点 Stop 后不能立即停止（旧路径要等当前切块推理结束），另行调查。
 
 ## 六、未决与 advisory
 
@@ -849,6 +856,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
 - **HQ / HQ2 / CDS 这类不经 Step1 交接的方法不再维护。** 它们在新界面本来就不可见（R2）。此后各块不为它们修缺陷、不为它们补测试，也不把它们放进验收门；只有这些方法自身的测试失败不阻塞其他块——共用路径（例如两个切块循环、归属与合并）上仍维护方法的回归照常算失败。代码暂不删除；删除须另行申请。
 
 ### 已知的已有问题（advisory，未排期）
+- **运行资源监控器在判定「推理退回 CPU」时崩溃**（块 K 回归中发现，2026-09-26）：`utils/runtime_resource_monitor.py:336` 的 `_cpu_fallback_reasons()` 用到 `likely_gpu_inference`、`gpu_peak_util`，它们只是 `diagnose()` 的局部变量，抛 `NameError`。只在 `likely_cpu_fallback` 为真时走到（推理期间 GPU 显存增长 ≥128 MB、GPU 利用率 <10%、CPU ≥70%）；Step2 在收尾 `_finish_runtime_monitor()` 时调用，此时输出已写完，运行却以错误结束、不登记。离屏 4 个并行进程时可复现；真机上 GPU 繁忙或推理退回 CPU 时可能遇到。未修，等用户裁定。
 - 用户主动 Stop 后，Step2 用标题为「Error」的对话框报告「Stopped by user.」。
 - Step1 读交接时把 Step0 界面上的「Output」输入框改写为 `<roi>/step1`（`_set_gui_work_dir`）；之后在 Step0 直接 Load，可能把 step1 当成项目根目录、在其下再建 `rois/`。
 - 仓库的测试写保护只保护 `config.py` 里的两个路径，不保护 `~/fusion_data`；在真实项目上做探测时只能用复制件。

@@ -3110,8 +3110,8 @@ class SegmentMergeWorker(QThread):
                         f"(cumulative: {total_cells_all:,})"
                     )
 
-                if self._contract is not None and self._stop:
-                    # A stopped hand-over: no summary, no registered result.
+                if self._stop:
+                    # A stopped run, hand-over or not: no summary, no registered result.
                     raise _ContractStopped()
 
                 if model is not None:
@@ -3859,7 +3859,7 @@ class SegmentMergeWorker(QThread):
                 self._channel_store.close()
             if isinstance(exc, _ContractStopped):
                 if self._logger:
-                    self._logger.info("Stopped by user (Step1 hand-over); nothing registered.")
+                    self._logger.info("Stopped by user; nothing registered.")
                 self.error.emit('Stopped by user.')
                 return
             tb = traceback.format_exc()

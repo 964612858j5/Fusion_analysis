@@ -9,6 +9,8 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.45：块 S5 已实施并通过真机验收。
+- v3.44：第 ⑤ 步改定（Step3 的 ROI 冻结、patch 全局同步）；块 S5 申请。
 - v3.43：块 2c-2 已实施，真机验收第 1–3 项通过；偶发的 Step1 全黑记为待观察；第 ⑤ 步提前并记录沙盒要求。
 - v3.42：块 2c-2 按独立审核修订为 v2（Navigator 连接不依赖 Step1 的 viewer；重绑失败的回退；后台契约、热切换、模式验收的措辞；权限修补的文件验证）；记录用户目标权限（Step3 可编辑不保存 = 第 ⑤ 步）。
 - v3.41：块 2c-2 申请（第二个 viewer；修补 2c-1 中 Step3 的 Tissue Navigator 按钮沿用 Step1 编辑权限的缺陷）。
@@ -926,6 +928,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 2b / 2c 的验收包含一次完整的公开操作：在 Step3 调整勾选与权重 → Step1 显示同样的设置 → 当前会话记住草稿；已确认的快照和 Step2 的输入保持原样，直到用户在 Step1 明确保存。
   - 骨架拆成 2a / 2b / 2c：2a viewer 的暂停 / 恢复、Navigator 视野框只在前台发布、相机标识参数（重构，除视野框一项外界面与 Step1 行为不变）；2b Step3 使用 Step1 的显示范围与 fusion 草稿（通道面板在 Step3 与 Step1 相同、Reset / Load weights 同一套功能、Navigator 实时联动的核实）、界面规则与规则测试修改；2c 新的 Step3 页面（左栏同 Step1 的 Channels 框 + Show all / Intensity + Reset / Load weights + 通道列表；右栏 Overlay / Fusion 按钮 + viewer），删除旧页面、旧标签页与写进 Step2 目录的配置文件，加入共用列宽，常驻、隐藏暂停、换数据集与退出时释放。
 - **顺序调整（用户 2026-09-26）**：第 ⑤ 步（Navigator 沙盒 ROI）提前到第 ③、④ 步之前。沙盒的要求：Step3 里 Navigator 可以画 ROI、改 patch，但**不保存、不改任何本地文件、不影响 Step0 / Step1**；在 Step3 画的 ROI / patch **保留到下次进入 Step3**（本次运行内，不写盘）；用途是**临时标记和快速切换位置**。
+- **第 ⑤ 步改定（用户 2026-09-26，取代上一条的沙盒要求）**：只读调查发现，弹窗的编辑无条件交给 Step0 处理与保存（`step0_page.py:4521-4524`），新 patch 的编号取自 Step0 的计数器（`:4516`），弹窗里的 ROI / Patch 列表是 Step0 的控件——「可编辑不保存」需要给 Step3 一份独立的列表与路由；用户曾考虑「patch 全局同步、Step3 可增删自己的 ROI 并单独记录」，因需要「受保护 ROI」等新机制而放弃。**最终裁定：Step3 的 ROI 全部继承 Step0 / Step1、冻结锁定，Step3 不能新建、删除或修改任何 ROI；patch 在 Step3 可以新增、移动、删除、改名，并与 Step0 / Step1 全局同步（走现有的保存流程）。** 不需要沙盒、不需要 Step3 的本地记录文件。
 - **拟分步**（每步单独申请、单独验收；② 已拆成 2a / 2b / 2c，见上）：① 块 N（标签金字塔，先做）；② Step3 骨架（2a / 2b / 2c：复用 viewer 与通道面板，与 Step1 共用显示范围和 fusion 草稿，删除旧功能与标签页）；③ patch 按钮条组件化 + Navigator 空降；④ GPU 标签渲染与 mask 控件；⑤ Navigator 沙盒 ROI。在 ⑤ 完成之前，Step3 的 Navigator 保持现在的只读策略，不开放任何会写 Step0 文件的编辑。
 
 ### 块 N — Step2 生成标签金字塔（申请 v2，按独立审核修订，用户 2026-09-26 批准；已实施，**真机验收通过**）
@@ -1115,6 +1118,30 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 回归：78 个模块，与 `git archive HEAD`（`455d127`）逐条对比**无新增失败**。只在改后一侧出现的 `test_step0_method_prefetch.py::test_a_remounted_coordinator_does_not_reuse_a_cancelled_generation`（上一轮只在 HEAD 一侧出现）与 StarDist ROI 等价一条，单独各重跑 3 次都通过，属负载下偶发；只在 HEAD 一侧出现 `test_preseg_run.py::test_the_job_equals_the_steps_done_by_hand`。两边相同的已知失败见前几块。`test_step0_channel_conditioning.py` 在两边都卡住（上一轮 2c-1 的回归中两边同样卡住、失败位置相同），本轮手动结束，未参与对比（已有问题，advisory）。
   - **真机验收（用户 2026-09-26）**：第 1 项（Step3 显示整张图，拖动缩放、Intensity、Overlay / Fusion 与 Step1 一致）、第 2 项（Step1 ↔ Step3 位置保持、热切换无明显等待）、第 3 项（Navigator 空降到当前步骤的 viewer）**通过**。第 4 项：只读按设计生效；用户的目标是 Step3 可编辑 ROI / patch 但不保存（第 ⑤ 步），只读只是过渡。第 5 项（重启后直接进 Step3）：程序目前没有重新加载历史会话的入口，以后再测。
   - **偶发问题（待观察，未改代码）**：一次真机操作中，Step0 保存 → 直接进 Step3（有图）→ 回 Step1，Step1 的 viewer 全黑，提示 `fine budget refused for DAPI`；再次操作无法复现。机制：GPU 显示的规则是通道第一次出现时要等精细层到齐才显示（`step1_gpu_binding.py` 的 `_publish_current`，`test_a_first_channel_over_the_fine_budget_stays_off_the_screen` 锁定），精细层因超预算被拒时通道永远不出现。推测的触发：Step1 的 viewer 第一次打开时套用 Step3 的共享相机，此刻窗口尺寸可能尚未排好，视野与选中的精细层级不匹配。再出现时请先试滚轮缩放 / 拖动 / 改窗口大小并记下操作顺序，据此确认后再申请修补（候选：第一次打开时等布局完成再套相机）。
+
+### 块 S5 — Step3 的 Navigator：ROI 锁定、patch 可编辑并全局同步（用户 2026-09-26 批准；已实施，**真机验收通过**）
+- **必要性**：用户裁定（见 Step3 重设计「第 ⑤ 步改定」）。块 2c-2 把 Step3 的 Navigator 设为完全只读（过渡）。
+- **只读核实**：
+  - 现有权限校验已支持「ROI 只读 + patch 可编辑」的组合：`set_navigator_policy(roi_policy="read_only", patch_editable=True)`（`block01_display.py:2216-2228` 只校验 ROI 策略取值，patch 可编辑是独立开关）；面板上每个编辑入口都在改动前按对应开关拒绝（ROI 新建 / 删除按 ROI 策略，patch 的增删移动改名按 patch 开关）。
+  - Step0 的处理与保存（`_reconcile_roi_edit` → `_persist_geometry_edit`）不按步骤判断；Step1 接收 Step0 的几何提交（`_on_step0_geometry_committed`）也不按当前页判断。所以在 Step3 改 patch，会与在 Step1 改一样写进 Step0 的 `patch_config.json` 等文件，Step1 随之同步。
+  - 弹窗里的 ROI 列表删除按钮按 ROI 删除权限禁用；patch 列表（删除、双击改名）按 patch 开关启用。
+- **做法**：
+  1. `_apply_navigator_policy_for_step`：Step3 改为 `roi_policy="read_only"`、`patch_editable=True`（Step2、Step4 仍为完全只读）。
+  2. `_show_step3_tissue_navigator`：同样传 `roi_policy="read_only"`、`patch_editable=True`。
+- **白名单**：`ui/main_window.py`（上述两处）；`UI_SURFACE_RULES.md`（Step3 的 Navigator：ROI 锁定、patch 可编辑并全局同步）；`docs/user_guide.md`、`docs/用户指南.md`（Step3 一节）；测试：`tests/test_step3_viewer.py::test_step3_s_navigator_button_keeps_the_navigator_read_only` 改写为新行为；`tests/test_step1_navigator_policy.py::test_steps_after_step1_get_a_read_only_navigator` 的步骤参数由 `[2, 3, 4]` 改为 `[2, 4]`（Step3 的新行为由改写后的测试覆盖）；本文档。其他测试失败须停下说明。
+- **不改的范围**：Navigator 面板、Step0 页面、权限校验与保存流程；Step2 / Step4 的只读；patch 按钮条（第 ③ 步）。
+- **风险**：Step3 的 patch 编辑会立即写进 Step0 的项目文件（按裁定，与 Step1 相同）；patch 的中心须落在已有 ROI 内（现有规则）。回退：恢复这两处。
+- **验收门**：
+  - 在 Step3（进入时与点 Step3 的 `Tissue Navigator` 按钮后）：新建 ROI、删除 ROI（画布与 ROI 列表）都被拒绝，`roi_config.json` 不变；新增、移动、删除、改名 patch 都生效并写进 `patch_config.json`，回到 Step1 看到同样的 patch。
+  - Step1 的权限不变（可删除 ROI、可编辑 patch）；Step2、Step4 仍完全只读。
+  - 回归与 HEAD 逐条对比，除上述两条测试外无新增失败。
+  - 真机（用户）：在 Step3 的 Navigator 里不能画 / 删 ROI；能加、拖、删、改名 patch；回到 Step1 与 Step0 看到同样的 patch。
+- **执行记录**（2026-09-26，未提交）：
+  - `ui/main_window.py`：`_apply_navigator_policy_for_step` 为 Step3 新增一支 `roi_policy="read_only"`、`patch_editable=True`；`_show_step3_tissue_navigator` 改传 `patch_editable=True`。
+  - 文档：`UI_SURFACE_RULES.md` 的 Step3 页面一条（ROI 冻结、patch 可编辑并全局同步）；两份用户指南 Step3 一节第 5 条。
+  - 测试：`tests/test_step3_viewer.py` 的只读测试改写为 `test_step3_s_navigator_freezes_rois_and_syncs_patches`（两个入口：进入 Step3、点 Step3 的按钮）——画 ROI、删最后一个 ROI、用 ROI 列表删除都不生效，`roi_config.json` 不变；新增 patch、移动、改名（“Mark A”）、删除都写进 `patch_config.json`，`step0_output["patches"]` 跟随（Step1 同步）；Step1 的按钮仍给 Step1 的权限。`tests/test_step1_navigator_policy.py` 的 `_downstream_steps` 改为 `[2, 4]`；**白名单外（用户 2026-09-26 授权）**：同文件 `test_coming_back_to_step0_from_a_read_only_step_restores_everything` 中作为「只读步骤」的 Step3 换成 Step2（验证意图不变）。反向注入 2 处（Step3 的步骤权限、Step3 按钮的权限）各使 1 条变红。
+  - 回归：19 个模块（Navigator 权限、patch 几何保存、Step3 各测试、Tissue Preview 契约、界面规则），与 `git archive HEAD`（`7382a39`）逐条对比，除上述授权修改的一条外**无新增失败**；两边相同：`test_tissue_navigator_viewport_sync.py::test_mapping_slide_local_to_full`。
+  - **真机验收通过（用户 2026-09-26）**：Step3 的 Navigator 里 ROI 不能画、不能删；patch 可新增、拖动、改名、删除，并同步到 Step1 / Step0；Step1 的权限不变。
 
 ## 六、未决与 advisory
 

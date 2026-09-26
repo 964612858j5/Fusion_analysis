@@ -200,7 +200,7 @@ Check the Step 2 result against the tissue: the whole slide with the cell mask o
 2. **Step 3 and Step 1 share the same channels, weights and fusion**: a tick or a weight changed here is the same in Step 1 (and is saved in the session like any Step 1 change). Your saved Fusion Settings only change when you save them in Step 1.
 3. `Overlay` / `Fusion` switch the mode for Step 1 and Step 3 together; the Tissue Navigator follows what you set here.
 4. The right side shows the **whole slide**, like Step 1: drag to pan, scroll to zoom, click in the Tissue Navigator to jump there. Step 1 and Step 3 keep the same position when you switch between them.
-5. The Tissue Navigator opened from Step 3 is **view-only**: ROIs and patches cannot be edited here yet.
+5. In the Tissue Navigator opened from Step 3, **ROIs are locked** (they come from Step 0 / Step 1 and cannot be drawn, deleted or changed here), while **patches can be added, moved, renamed and deleted** — patch changes are saved and show up in Step 0 and Step 1 too.
 6. **No cell mask yet** — it comes in a later update.
 
 **Output:** no new files.

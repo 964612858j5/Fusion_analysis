@@ -2196,14 +2196,14 @@ class MainWindow(QMainWindow):
         return mount.jump_to_point(int(y), int(x), size)
 
     def _show_step3_tissue_navigator(self):
-        """Open the shared Tissue Preview from Step3 -- READ-ONLY (block 2c-2).
+        """Open the shared Tissue Preview from Step3 with Step3's rights.
 
-        Step3 may not edit the ROI or the patches until the sandbox exists
-        (plan step 5): every navigator edit today is Step0's and is written to
-        its files. `show_navigator` sets the policy it is given, so this entry
-        must give Step3's, never Step1's."""
+        Block S5 (user ruling 2026-09-26): the ROIs are Step0/Step1's and
+        frozen here; the patches are edited here and synced everywhere, like
+        Step1's. `show_navigator` sets the policy it is given, so this entry
+        must give Step3's, never Step1's (which may delete an ROI)."""
         self._display.show_navigator(_CTX_STEP3, roi_policy="read_only",
-                                     patch_editable=False)
+                                     patch_editable=True)
 
     def _show_tissue_navigator(self):
         """Open the shared Tissue Preview from Step1.
@@ -4673,6 +4673,10 @@ class MainWindow(QMainWindow):
             roi_policy, patch_editable = "full", True
         elif step == 1:
             roi_policy, patch_editable = "delete_only", True
+        elif step == 3:
+            # Block S5 (user ruling 2026-09-26): Step3 inherits Step0/Step1's
+            # ROIs, frozen; its patches are edited and synced like Step1's.
+            roi_policy, patch_editable = "read_only", True
         else:
             roi_policy, patch_editable = "read_only", False
         # Through Block01's display layer, which HOLDS the policy: it outlives

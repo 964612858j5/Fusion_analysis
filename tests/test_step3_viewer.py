@@ -1,8 +1,10 @@
 """Block 2c-2: Step3's own whole-slide viewer, and its read-only navigator.
 
-  * the navigator opened from Step3's button stays read-only (the 2c-1
-    button reused Step1's entry and handed Step1's edit rights over): no ROI
-    or patch edit lands, the Step0 files are unchanged; Step1 keeps its own;
+  * Step3's navigator (block S5): the ROIs are Step0/Step1's and frozen --
+    no ROI edit lands, roi_config.json is unchanged -- while patches are
+    added, moved, renamed and deleted there and written like Step1's, so
+    Step1 follows; Step1 keeps its own rights (the 2c-1 button once handed
+    Step1's rights to Step3);
   * entering Step3 opens a second Step1 mount in Step3's slot, the notice
     hidden; a failed open says why in the slot and is not retried for the
     same slide; a failed rebind falls back the same way and is retried after
@@ -48,31 +50,52 @@ def _no_modal_dialogs(monkeypatch):
                             staticmethod(lambda *a, **k: None))
 
 
-# ── the read-only navigator (fix of 2c-1) ─────────────────────────────
+# ── Step3's navigator: ROIs frozen, patches edited and synced (block S5) ──
 
-def test_step3_s_navigator_button_keeps_the_navigator_read_only(app, tmp_path):
+def _settle(w):
+    return nav._settle(w)
+
+
+@pytest.mark.parametrize("entry", ["step", "button"])
+def test_step3_s_navigator_freezes_rois_and_syncs_patches(app, tmp_path, entry):
     w, step0_dir = nav._window(app, tmp_path)
     try:
         ov = w._step0._tissue_navigator_popup.overview
         w._stack.setCurrentIndex(3)
         w._set_step_active(3)
-        w._btn_step3_tissue_nav.click()
+        if entry == "button":
+            w._btn_step3_tissue_nav.click()
         assert ov.edit_policy() == {"roi_create": False, "roi_delete": False,
-                                    "patch_edit": False}
+                                    "patch_edit": True}
+        # ROIs: every edit refused, on the canvas and in the ROI list
         rois = [dict(r) for r in ov._rois]
-        patches = [dict(p) for p in ov._patches]
-        disk = {n: nav._published(step0_dir, n)
-                for n in ("roi_config.json", "patch_config.json", "step0_roi_result.json")}
+        roi_disk = nav._published(step0_dir, "roi_config.json")
         nav._draw_roi(ov)
         ov._delete_last_roi()
-        ov._add_patch(40, 56, 40, 56, 10, 14, 10, 14, 0)
-        ov._remove_patch(0)
-        assert ov._commit_patch_geometry(0, (2, 14, 2, 14)) is False
+        w._step0._roi_selected_indices = [0]
+        w._step0._delete_selected_rois()
         assert [dict(r) for r in ov._rois] == rois
-        assert [dict(p) for p in ov._patches] == patches
-        for name, before in disk.items():
-            assert nav._published(step0_dir, name) == before, name
-        # Step1's own button still gives Step1's rights.
+        assert nav._published(step0_dir, "roi_config.json") == roi_disk
+        # patches: added, moved, renamed and deleted -- and written, like Step1's
+        ov._add_patch(16, 28, 16, 28, 16, 28, 16, 28, 0)
+        assert _settle(w) == "published"
+        boxes = [p["bbox_fullres"] for p in nav._published(step0_dir, "patch_config.json")]
+        assert boxes == [[0, 16, 0, 16], [16, 28, 16, 28]]
+        assert ov._commit_patch_geometry(1, (18, 30, 18, 30)) is True
+        assert _settle(w) == "published"
+        assert ov.rename_patch(1, "Mark A") is not False
+        assert _settle(w) == "published"
+        published = nav._published(step0_dir, "patch_config.json")
+        assert [p["bbox_fullres"] for p in published] == [[0, 16, 0, 16], [18, 30, 18, 30]]
+        assert "Mark A" in [p.get("name") for p in published]
+        # ...and Step1 follows
+        assert [tuple(p) for p in w.step0_output["patches"]][-1] == (18, 30, 18, 30)
+        ov._remove_patch(1)
+        assert _settle(w) == "published"
+        assert [p["bbox_fullres"] for p in nav._published(step0_dir, "patch_config.json")] \
+            == [[0, 16, 0, 16]]
+        assert nav._published(step0_dir, "roi_config.json") == roi_disk
+        # Step1 keeps its own rights
         nav._enter_step1(w)
         w._btn_step1_tissue_nav.click()
         assert ov.edit_policy()["roi_delete"] is True and ov.edit_policy()["patch_edit"] is True

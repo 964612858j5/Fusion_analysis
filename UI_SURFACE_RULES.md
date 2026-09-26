@@ -237,8 +237,11 @@ row, and the duplicate Tissue Preview button in the step bar.
   notice says why. `← Back to Step 2` below. No Save, no pre-segmentation, no
   patch strip (a later block), no mask yet. The column joins the one
   channel-column share. A refusal to open Step3 is said in a (non-modal)
-  dialog on the page the user is on. The Tissue Navigator opened from Step3
-  is READ-ONLY until the sandbox (plan step 5): no ROI or patch edit there.
+  dialog on the page the user is on. The Tissue Navigator in Step3 (block
+  S5, user ruling 2026-09-26): the ROIs are Step0/Step1's and FROZEN -- no
+  ROI is created, deleted or reshaped there -- while patches are added,
+  moved, renamed and deleted there and synced everywhere, exactly like
+  Step1's patch edits (written through Step0's one writer).
 * **Step2's page** (block L2, user ruling 2026-09-25) -- TWO columns: the
   parameter panel on the LEFT, as wide as Step0's and Step1's channel column
   (the same one share: dragging any of the three handles moves all three),

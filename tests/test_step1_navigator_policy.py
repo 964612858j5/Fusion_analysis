@@ -284,7 +284,9 @@ def test_round_trips_keep_one_popup_one_overview_and_the_camera(app, tmp_path):
 
 
 def _downstream_steps():
-    return [2, 3, 4]
+    # Step3 is not fully read-only since block S5 (ROIs frozen, patches
+    # editable): tests/test_step3_viewer.py covers it.
+    return [2, 4]
 
 
 @pytest.mark.parametrize("step", _downstream_steps())
@@ -346,7 +348,9 @@ def test_coming_back_to_step0_from_a_read_only_step_restores_everything(app, tmp
     w, step0_dir = _window(app, tmp_path)
     try:
         ov = w._step0._tissue_navigator_popup.overview
-        w._set_step_active(3)
+        # Step2 is still fully read-only; Step3's patches are editable since
+        # block S5 (user ruling 2026-09-26).
+        w._set_step_active(2)
         assert ov.edit_policy()["patch_edit"] is False
 
         w._go_to_step0()

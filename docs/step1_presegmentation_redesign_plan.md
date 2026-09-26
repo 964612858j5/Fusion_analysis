@@ -9,6 +9,8 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.47：块 ④a 按独立审核修订为 v2（细胞 / 核按方法分类；读取前完整校验；坐标来源表与证据不足不显示；只有第 0 级时粗层返回「不可用」；扫描去重与排除未完成运行；取消不走内存退路；屏幕编号图的轮廓规则）。
+- v3.46：第 ④ 步调查结论与用户裁定（拆三块、后台线程、新增项批准、暂不做 CPU 版、控件位置、细胞 / 核 mask 各一个下拉面板）；块 ④a 申请。
 - v3.45：块 S5 已实施并通过真机验收。
 - v3.44：第 ⑤ 步改定（Step3 的 ROI 冻结、patch 全局同步）；块 S5 申请。
 - v3.43：块 2c-2 已实施，真机验收第 1–3 项通过；偶发的 Step1 全黑记为待观察；第 ⑤ 步提前并记录沙盒要求。
@@ -1142,6 +1144,71 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 测试：`tests/test_step3_viewer.py` 的只读测试改写为 `test_step3_s_navigator_freezes_rois_and_syncs_patches`（两个入口：进入 Step3、点 Step3 的按钮）——画 ROI、删最后一个 ROI、用 ROI 列表删除都不生效，`roi_config.json` 不变；新增 patch、移动、改名（“Mark A”）、删除都写进 `patch_config.json`，`step0_output["patches"]` 跟随（Step1 同步）；Step1 的按钮仍给 Step1 的权限。`tests/test_step1_navigator_policy.py` 的 `_downstream_steps` 改为 `[2, 4]`；**白名单外（用户 2026-09-26 授权）**：同文件 `test_coming_back_to_step0_from_a_read_only_step_restores_everything` 中作为「只读步骤」的 Step3 换成 Step2（验证意图不变）。反向注入 2 处（Step3 的步骤权限、Step3 按钮的权限）各使 1 条变红。
   - 回归：19 个模块（Navigator 权限、patch 几何保存、Step3 各测试、Tissue Preview 契约、界面规则），与 `git archive HEAD`（`7382a39`）逐条对比，除上述授权修改的一条外**无新增失败**；两边相同：`test_tissue_navigator_viewport_sync.py::test_mapping_slide_local_to_full`。
   - **真机验收通过（用户 2026-09-26）**：Step3 的 Navigator 里 ROI 不能画、不能删；patch 可新增、拖动、改名、删除，并同步到 Step1 / Step0；Step1 的权限不变。
+
+### 第 ④ 步 — Step3 整张图 mask 浏览：调查结论与用户裁定（2026-09-26）
+- **调查结论**（只读）：
+  - Step3 的 viewer 用切片 level-0 坐标，层级就是原始切片的金字塔层级（`Step1TileProvider` 的几何取自 `RawTileProvider`）；标签金字塔（块 N）在同一网格上，可逐级对齐。须核对金字塔记录的 `raw_level_shapes` 与 viewer 的层级一致，不一致就不用。
+  - 标签分块不能走现有的 `TileScheduler` / provider：它们只处理 float32（细胞编号超过 2^24 会失真），且 `step1_gpu_demo_plan.md` 禁止修改。需要一个独立的标签读取器，跟随同一个控制器的快照（层级、可见分块、epoch），读取可见分块加一圈外扩，丢弃过期请求，随 mount 暂停 / 恢复 / 释放。
+  - GPU（GL 3.3 core）支持整数纹理（R32UI、`usampler2D`、`texelFetch`）。建议两遍：先把可见标签块画进屏幕大小的「编号图」，再逐像素比较相邻编号画轮廓（线宽正好为屏幕 1–4 像素，无接缝，不需要 halo）；填充模式按编号的散列算固定随机色。标签纹理不能用现有 `_TextureLru`（强制 float32），需单独的缓存。现有渲染只在 `submit()` 时重画 `final`，标签块晚到时需要自己的重画路径。
+  - 只有 Step3 的 mount 画 mask（构造开关）。
+  - 运行列表：当前 ROI 工作区 `roi_index.json` 的 `segmentation_runs` 与 `active_segmentation_run`，再扫描 `step2/segmentation_runs` 与 `step2/segmentation_results` 补充（旧 Step3 的做法）。多 ROI 的运行按 `rois[].roi_name == _active_roi["name"]` 匹配并核对 bbox；全图运行的 meta 里 `label_pyramid` 是扁平的 `{cell, nucleus}`，没有 `roi_id` / bbox。
+  - 已有问题：Step2 跑完新结果不通知已打开的 Step3；换数据集时 `step2_output` / `_step3_run_dir` 不清除——Step3 只认属于当前 ROI 工作区的运行。
+- **用户裁定（2026-09-26）**：
+  1. 拆成 ④a 数据层、④b GPU 渲染、④c Step3 界面。
+  2. 旧结果补生成金字塔放在 ④b 的标签读取后台线程里（整个 ④ 只新增这一个线程）。
+  3. 批准新增：一个后台读取线程；过期请求记录；GPU 标签纹理缓存（单独 64 MB 显存上限，不挤占原 512 MB）；mask 显示设置的状态；新着色器与编号图；mount 的 mask 开关。解压后的分块暂不做内存缓存（先实测）。
+  4. 先不做 CPU 版的 mask：没有 GPU 时显示「mask 需要 GPU 显示」。（macOS：系统 OpenGL 支持到 4.1 core，本程序要求 3.3 core；本程序从未在 Mac 上测试，GPU 层若在 Mac 上启动失败，图像退回 CPU、mask 不显示。）
+  5. 控件在 Step3 右栏顶部一行：运行下拉框、mask 控件、提示文字，右端是 Overlay / Fusion。
+  6. **细胞 mask 与核 mask 都有控件**，都放在 viewer 顶部；每种 mask 一个按钮，点开是下拉展开面板，设置显示 / 隐藏、颜色、透明度、线宽、轮廓或填充。运行没有核 mask 时核 mask 的控件禁用。
+
+### 块 ④a — Step3 mask 的数据层（申请 v2，按独立审核修订，**用户 2026-09-26 批准**，未启动实施）
+- **必要性**：④b（GPU）与 ④c（界面）都依赖「选哪一次运行、它的哪种 mask 在哪、按 viewer 的分块读出标签」。主要风险是把正确的标签放到错误的 mask 控件或错误的坐标上，所以先把这些数据契约写死并单独测试。
+- **细胞 / 核的分类按方法，不按文件名**：Step2 的主输出一律叫 `global_mask*.zarr`，块 N 生成金字塔时也一律记作 `cell`（`segment_merge_worker.py:611`），但纯核方法的主输出其实是核标签。分类表（与 `seg_runner.engines.METHOD_OUTPUTS` 对照，但以 Step2 实际写出的文件为准）：
+
+  | 方法 | 主输出 `global_mask*` | `global_nuclei_mask*` | Step3 的细胞 mask | Step3 的核 mask |
+  |---|---|---|---|---|
+  | cellpose_wholecell_fusion、mesmer_whole_cell | 细胞 | 无 | 主输出 | 无 |
+  | cellpose_nuclei_dapi、stardist_nuclei_dapi、mesmer_nuclei | **核** | 无 | 无 | **主输出** |
+  | cellpose_nuclei_expansion、stardist_nuclei_expansion | 扩张后的细胞 | 无（Step2 不保留原核） | 主输出 | 无（不能从扩张结果推回原核） |
+  | mesmer_nuclear_guided | 细胞 | 核 | 主输出 | 核文件 |
+  | HQ / HQ2 / CDS（不维护） | 细胞 | 核 | 主输出 | 核文件 |
+  | 未知方法 | — | — | 不显示，写明原因 | 不显示 |
+
+  方法取自运行的 meta（`method`）；块 N 金字塔里的 `kind` 只作校验，不决定归类。④c 按实际得到的类型禁用缺失的控件（包括没有细胞 mask 的情况）。
+- **读取前的完整校验**（在新模块里做，Step2 与 `label_pyramid.read` 的行为不变）：`read` 通过之后再逐项检查——`levels` 里每一级的数组都存在、形状等于记录的 `shape`、dtype 为 uint32；`level0` 解析出的路径**就是**当前选中的 mask；`roi_bbox` 等于这个源的 bbox；`raw_level_shapes` 与 viewer 的层级一致。任何一项不符，这个金字塔就不用（该 mask 按「没有金字塔」处理），并写明原因。
+- **坐标来源：只用元数据能确定的，证据不足就不显示**。支持的格式与优先级：
+
+  | 运行格式 | mask 路径 | bbox 来源（按优先级） |
+  |---|---|---|
+  | 块 N 起的 ROI 模式 | `rois[i].zarr_path`（`roi_name == 当前 ROI 名`） | `rois[i].bbox_fullres` → 该 ROI 的 `segmentation_meta_<ROI>.json` 的 `bbox` / `roi_bbox_fullres`；并须等于当前工作区该 ROI 的 bbox |
+  | 块 N 之前的 ROI 模式 | 同上（字段相同，只是没有 `label_pyramid`） | 同上 |
+  | 全图模式 | `zarr_path` / `paths.mask_zarr`（`global_mask.zarr`） | 当前工作区 manifest 的 `bbox_fullres`，**且** mask 的形状恰好等于这个 bbox 的尺寸 |
+  | 只有 OME-TIFF、没有 uint32 zarr 的旧运行 | 不支持 | ——（float32 TIFF 已丢失 2^24 以上的编号，转成 uint32 也恢复不了），写明原因 |
+
+  只读 uint32 zarr；bbox 与形状对不上、找不到当前 ROI、运行不属于当前工作区，都不显示并写明原因。
+- **只有第 0 级时的约定**：金字塔不存在（或补生成失败、落到裁定 8a 的第 ② 条）而 viewer 在粗层时，`read_label_tile` **明确返回「该层不可用」**（一个带原因的结果），**不从第 0 级临时采样、也不返回全零标签**。④b 据此在粗层不画 mask，由 ④c 在控件行显示「缩小时无法显示 mask：原因」；放大到第 0 级时照常显示。
+- **做法**：新增 `core/step3_masks.py`（无 Qt）：
+  - `list_runs(roi_dir)`：读 `roi_index.json` 的 `segmentation_runs` 并扫描 `step2/segmentation_runs`、`step2/segmentation_results`；按 `run_id`（缺失时用目录的规范路径）**去重**；**排除**未完成 / 失败的运行（索引里 `status` 不是 `done`，或目录里没有 `segmentation_meta.json` / `run_metadata.json`）；按 `created_at` 新到旧；标出 active（`active_segmentation_run` 指向的运行已失效时不标）。
+  - `choose_run(runs, requested_dir=None, current=None)`：显式目录（Step2 完成对话框）且在列表中 → 该运行；否则当前选择仍在列表中 → 保持；否则 active；否则最新；列表为空 → None。不属于当前工作区的目录一律不用。
+  - `resolve_masks(run, roi_name, roi_bbox, view_level_shapes)`：按上面两张表返回 `{"cell": 源或 None, "nucleus": 源或 None, "reasons": {...}}`；每个源记下种类、第 0 级 mask 路径、bbox、以及通过完整校验的金字塔（或 None 与原因）。
+  - `pyramid_path_for(mask_zarr)`：金字塔命名规则放进 `core/label_pyramid.py` 作为公共函数，Step2 的 worker 改用它（测试锁定与原命名逐字相同）。
+  - `ensure_pyramid(source, raw_level_shapes, cancel_check)`（由 ④b 的后台线程调用）：先写进运行目录；**写不进去**（无权限、磁盘满等 OSError）才在内存里生成、只供本次运行使用（`label_pyramid` 增加写入内存存储的选项）；内存也失败则返回「只有第 0 级」与原因。**取消直接结束**，不当作写盘失败、不再尝试内存退路；「无残留」指清理本次未完成的产物（`.partial`、内存中的半成品），**不删除已有的有效结果**。
+  - `read_label_tile(source, level, tx, ty, tile_size, view_level_shapes)`：按 viewer 的分块约定（与 `Step1GpuBinding._world_rect` 相同：`x0 = tx·T·ds_x`，范围为数组形状 × 不取整的比例）读出一个 uint32 标签块与它的 world rect；第 0 级从 ROI 坐标的 mask 读（减去 bbox 起点），第 L 级从金字塔数组读（减去 origin）；块内超出覆盖范围的部分补 0；该层不可用时返回带原因的「不可用」。
+  - 数值参考（给 ④b 的着色器对照）：`outline_reference(ids, width)`——输入是**屏幕编号图**（每个屏幕像素一个编号）；像素的编号不为 0，且以它为中心、边长 2·width+1 的方形邻域内（切比雪夫距离 ≤ width）存在不同的编号，则该像素为轮廓；图像边缘以外按编号 0 处理（即 mask 边界处画线）；width 取 0–4，0 表示不画轮廓。`fill_colour(ids)`——按编号的整数散列得到固定 RGB，编号 0 透明，同一编号颜色稳定。
+- **白名单**：`core/step3_masks.py`（新）；`core/label_pyramid.py`（`pyramid_path_for`、写入内存存储的选项）；`workers/segment_merge_worker.py`（金字塔命名改用 `pyramid_path_for`，行为不变）；新测试 `tests/test_step3_masks.py`；本文档。
+- **不改的范围**：任何界面、GPU、viewer、mount、调度器、provider；Step2 的其他行为；`label_pyramid.read` 的现有语义。
+- **风险**：**无 Qt、暂未接入 Step3**；但本块包含磁盘写入（补生成金字塔）、内存分配（内存退路）与 Step2 命名规则的搬迁，仍有运行风险——命名搬迁用测试锁定逐字相同，写入只发生在运行目录且沿用块 N 的 `.partial` → 改名流程。
+- **验收门**：
+  - 运行列表：索引与扫描去重；未完成 / 失败的运行被排除；排序；active 标记；active 指向失效运行时的退路；选择规则四种情况与空列表；外工作区的目录被拒绝。
+  - 分类：表中每一类方法得到正确的细胞 / 核归属（纯核方法的主输出归入核、细胞为 None；expansion 只有细胞；nuclear-guided 两种都有）；未知方法不显示。
+  - 完整校验：缺一层、某层形状不符、dtype 不是 uint32、`level0` 指向另一个 mask、bbox 不符、层级尺寸与 viewer 不符，各自使金字塔为 None 并给出不同的原因；完整的金字塔通过。
+  - 坐标来源：表中每种格式；bbox 与当前 ROI 不符、全图 mask 形状与 bbox 不符、只有 TIFF 的旧运行，都不显示并写明原因。
+  - `read_label_tile`：奇数尺寸、非整数比例的合成金字塔上，各级各分块逐像素等于独立参考（由 viewer 的比例逐像素计算）；world rect 与 `Step1GpuBinding._world_rect` 公式一致；编号超过 2^24 不失真；没有金字塔时请求粗层返回「不可用」而不是全零，第 0 级照常读出。
+  - `ensure_pyramid`：可写 → 写进运行目录且通过完整校验；不可写 → 内存生成、不写盘；内存失败（模拟）→ 只有第 0 级并给出原因；取消 → 不尝试内存退路，`.partial` 被清理，已有的有效金字塔不被删除。
+  - `pyramid_path_for` 与 Step2 原命名逐字相同（cell / nucleus、ROI / 全图）；块 N 的测试照常通过。
+  - `outline_reference` / `fill_colour`：按上面写定的邻域、边缘与线宽规则的小例子手算对照（含 width 0 与 4、图像边缘、相邻两个细胞）；编号 0 不画；同一编号颜色稳定。
+  - 回归：Step2 与标签金字塔相关模块与 HEAD 逐条对比无新增失败。
+  - ④a 只交付为**数据层自动验收通过**，不宣称实际叠加正确；真机验收随 ④c。
 
 ## 六、未决与 advisory
 

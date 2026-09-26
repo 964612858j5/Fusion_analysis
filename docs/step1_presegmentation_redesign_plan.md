@@ -9,6 +9,9 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.51：块 ④b v2 获批，5 项裁定按建议（核在上、逻辑线宽、旧层暂留目标优先、暂停停止补生成、256 MB）。
+- v3.50：块 ④b 按独立审核修订为 v2（目标层级优先与编号 0 覆盖；逻辑线宽与参考半径扩到 8；标签沿用图像的多边形边界；暂停与补生成、单线程的如实说明；预算实测与超额顺序、CPU 侧计入等待结果；编号图独立参考；Step3 图像不变的验收）。
+- v3.49：块 ④b 申请 v1（GPU 标签渲染：标签绑定与后台线程、64 MB 标签纹理、编号图与轮廓 / 填充着色器、mount 的 mask 开关；本机真实 GL 读回验证）。
 - v3.48：块 ④a 已实施（数据层自动验收通过，真机随 ④c），写入执行记录与实施中确定的 6 项细节。
 - v3.47：块 ④a 按独立审核修订为 v2（细胞 / 核按方法分类；读取前完整校验；坐标来源表与证据不足不显示；只有第 0 级时粗层返回「不可用」；扫描去重与排除未完成运行；取消不走内存退路；屏幕编号图的轮廓规则）。
 - v3.46：第 ④ 步调查结论与用户裁定（拆三块、后台线程、新增项批准、暂不做 CPU 版、控件位置、细胞 / 核 mask 各一个下拉面板）；块 ④a 申请。
@@ -1225,6 +1228,62 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 只读核对真实项目（`~/fusion_data/test1` 的一次 ROI 模式运行，不写入）：运行被列出并标为 active；细胞 mask 解析到 `global_mask_Full WSI.zarr`，块 N 的金字塔通过完整校验；核为「该方法不产生核 mask」；三级分块可读。
   - 回归：11 个模块（`test_label_pyramid`、`test_step2_runner_path`、`test_step2_engine_unified`、`test_step2_legacy_stop`、`test_step2_ownership_move`、`test_step2_remap_integration`、`test_step1_step2_handoff_e2e`、`test_step1_to_step2_handoff`、`test_step2_tile`、`test_step2_profiler`、`test_seg_runner_engines`），每模块单独进程、顺序运行，与 `git archive HEAD`（`faee7f1`）逐条对比，**无新增失败**。两边相同：`test_seg_runner_engines.py` 的 2 条 Mesmer（本机无模型）。StarDist 偶发（已知问题）：`test_step2_engine_unified.py::test_a_manual_run_equals_the_runner[stardist_nuclei_dapi-roi]` 本侧失败一次、单独重跑通过；`test_seg_runner_engines.py::test_stardist_expansion_returns_the_nuclei_from_before_expanding` 本侧失败，HEAD 批量时通过、单独重跑同样失败（该模块不引用本块改动的任何文件）。
   - 真机：本块无界面，真机验收随 ④c。
+
+### 块 ④b — Step3 的 GPU 标签渲染（申请 v2，按独立审核修订，**用户 2026-09-26 批准**，实施中）
+- **必要性**：④a 已能按 viewer 的分块读出标签；要在 Step3 的整张图上画出 mask，须在 GPU 显示层加标签渲染（裁定 7、第 ④ 步裁定 2–4）。本块只交付「画得对、跟得上相机、资源有界」，不加任何界面；运行选择与控件是 ④c。
+- **只读调查结论**：
+  - 画面的产生：`Step1GpuBinding._publish_current` 每次相机事件（跳转立即，拖动每 33 ms 一次，`BindingBudgets.motion_interval_ms`）调用 `Step1GpuLayer.submit`，后者把各通道合成进屏幕大小的 `final`（RGBA8）目标（`step1_gpu_layer.py:439-488`），`paintGL` 只把 `final` 拷到屏幕（`:586-598`）。所以 mask 必须在**同一次提交、同一个视野矩形**里画进去，否则拖动时 mask 会和图像错开；标签块晚到时又不能为此重算全部通道——需要「图像不动、只重画标签」的路径。
+  - 相机：同一个控制器的 `interaction_event(kind, snapshot)` / `gesture_quiet(snapshot)`；快照带 `epoch`、`level`、`visible_tiles`，分块边长在 `controller.grid.tile_size`（`viewer/explore_view.py:1270-1310、2200-2219`）。图像绑定按这些计划分块（`step1_gpu_binding.py:396-457、677-687`）。
+  - 纹理缓存 `_TextureLru` 只收 float32（R32F），不能放编号；512 MB 原始纹理上限不得挤占（`step1_gpu_demo_plan.md` G3.2a）。
+  - 两个 viewer 由同一个类 `Step1WholeSlideMount` 构建，Step3 的在 `main_window.py:1864`（`camera_reason="step3"`）；暂停 / 恢复 / 关闭 / 换数据源都经 mount（`step1_viewer_mount.py:756-860、876-955、1187`）。
+  - 本机在真实显示（WSLg，`QT_QPA_PLATFORM=xcb`）下能建起 GPU 层：Intel Iris Xe（D3D12 转译，GL 4.1 core）——不是 RTX 3060。所以着色器可以在本机用读回像素的方式自动验证；离屏平台下照旧跳过。
+- **做法**：
+  1. **GPU 层**（`ui/step1_gpu_layer.py`）：构造参数 `labels=False`（默认，Step1 与 montage 不变：不建新目标、不编译新着色器、`paintGL` 照旧）。`labels=True` 时：
+     - 新增两个屏幕大小的目标：`ids`（R32UI，屏幕编号图）和 `shown`（RGBA8，图像 + mask）；新着色器文件 `ui/shaders/step1_gpu_labels.frag`（顶点着色器沿用），两个程序：`label_ids`（按世界坐标把标签块画进 `ids`，`usampler2D` + `texelFetch`，不插值）与 `label_draw`（读 `ids`，按 ④a 的 `outline_reference` 规则求轮廓，或按 `fill_colour` 的 lowbias32 散列上色，按透明度混合到 `shown` 上）。
+     - 新的标签纹理缓存（R32UI，**单独 64 MB 上限**，最近最少使用淘汰），与 `_TextureLru` 分开。
+     - 公开入口 `set_labels(snapshot)`：每种 mask 一层（种类、显示与否、颜色、透明度、线宽、轮廓 / 填充、标签块列表）。`submit()` 末尾与 `set_labels()` 都执行同一段「`final` → `shown`，再按层画 mask」；`set_labels` 用上一次提交的视野，**不重算通道**。
+     - 画的顺序（v2，按审核改）：每种 mask 内**当前目标层级最后画、优先**；旧层级只填补目标层级尚未到达的区域（按与目标层级的距离由远到近先画）。放大、缩小都成立——缩小时旧的细块不会盖住新到的粗块。编号图这一遍**不丢弃编号 0**：新块里的背景照样覆盖旧标签，不留旧轮廓。两层都显示时先细胞、后核（核在上，待裁定 1）。
+     - ROI 边界（v2）：`shown` 目标**共用 `final` 的模板缓冲**，mask 在与图像同一个多边形和矩形内绘制（`_finalize` 写的同一份模板，`step1_gpu_layer.py:743-814`、`:872-906`）；只重画 mask 时沿用上一次提交写好的模板。
+     - 线宽（v2）：设置值是逻辑像素 0–4，屏幕半径 = floor(线宽 × 设备像素比 + 0.5)，上限 8（设备像素比 > 2 时封顶并在状态里说明）。
+  2. **标签绑定**（新文件 `ui/step3_label_binding.py`，Qt 对象）：
+     - 输入：mount 的控制器、viewer 各层级尺寸、GPU 层、④a 的 `MaskSource`（细胞 / 核）与显示设置。
+     - **一个后台读取线程**（整个 ④ 唯一的新线程）：先对缺金字塔的源调用 `ensure_pyramid`（可取消），再读标签块（`read_label_tile`）。请求带「源的代次 + 相机 epoch」；线程取任务时，比最新 epoch 旧的直接丢弃并计数（「过期请求记录」）；结果经排队信号回到界面线程，代次已变的丢弃。
+     - 读哪些块：当前层级的可见块**外加一圈**；跟随相机的节奏与图像绑定相同（跳转立即，拖动节流 33 ms，停手补一次）。仍覆盖视野的已画块保留，换层级时旧层级的块按上面的规则暂留，不再覆盖视野的块释放。**不做屏幕外分块的内存缓存**（裁定 3）。
+     - 预算（v2）：一块 512² uint32 = 1 MB。**按代码估算（未实测，viewer 宽高取 1600×1000 逻辑像素）**：viewer 选层级的规则是「降采样不超过所需比例的最大一级」（`viewer/explore_view.py:4254-4263`），一个层级像素占 1 到不足 4 个屏幕像素；刚要切到更粗一级之前，1600×1000 的 viewer 一种 mask 的可见块约 14×9 ≈ 126 块 ≈ 126 MB——**64 MB 在这种缩放下连一种 mask 的可见块都放不下**（放大到层级像素 ≈ 屏幕像素时约 20 块 / 种）。须用户裁定（裁定 5）。无论哪种，超额时的顺序固定为：先淘汰旧层级的块 → 再淘汰外圈 → 目标层级的可见块仍放不下时，从视野中心向外画到上限为止，其余不画，状态写明「mask 显存不足，部分区域未显示」，终端给出所需与上限。
+     - CPU 数组：GPU 纹理之外，绑定手里的数组（已画的块 + 已读出、等待界面线程接收的结果 + 正在读的一块）计入同一预算；达到上限时线程暂不取新任务。内存金字塔（④a 的退路，约为 mask 像素的 6.6%）与两个屏幕目标**不计入**这个预算，单独列出。
+     - 粗层级且没有金字塔（「只有第 0 级」）：该层不请求、不画，状态给出原因（供 ④c 显示「缩小时无法显示 mask：原因」）。金字塔补生成期间同样按「暂时只有第 0 级」处理，生成完成后自动开始画粗层。
+     - 暂停（v2，待裁定 4）：建议**补生成也停止**（取消，未完成的 `.partial` 按 ④a 清理），恢复时重新开始；断开相机、清空未开始的请求，正在读的一块读完保留。恢复：从当前相机补一次。换源 / 关闭：取消、结束线程并等待其退出、释放纹理。
+     - 如实说明：只有一个线程，**补生成期间不读任何标签块，第 0 级也要等补生成结束或被取消**；状态写明「正在生成缩小用的 mask 层级」。
+  3. **mount**（`ui/step1_viewer_mount.py`）：构造参数 `labels=False`；为 True 时 GPU 层以 `labels=True` 构建，并随 GPU 后端创建 / 释放标签绑定；`pause_requests` / `resume_requests` / `source_changed` / `close` 转交给它。给 ④c 的公开入口：`set_mask_sources(sources)`、`set_mask_style(kind, …)`、`mask_status()`。没有 GPU（走 CPU 画面）时不建标签绑定，`mask_status()` 返回「mask 需要 GPU 显示」，终端打印原因。
+  4. `ui/main_window.py`：只改一处——Step3 的 mount 构造加 `labels=True`（`:1864`）。**本块产品里没有人调用 `set_mask_sources`**（④c 接入），所以用户看不到任何变化。
+- **白名单**：`core/step3_masks.py`（**最小扩围，v2**：`outline_reference` 的半径上限由 4 改为 8，其余不变）与 `tests/test_step3_masks.py`（对应用例）；`ui/step1_gpu_layer.py`；`ui/shaders/step1_gpu_labels.frag`（新）；`ui/step3_label_binding.py`（新）；`ui/step1_viewer_mount.py`；`ui/main_window.py`（上述一处）；新测试 `tests/test_step3_label_binding.py`（假 GPU 层：请求、过期丢弃、层级、暂停 / 恢复 / 关闭、线程退出、预算）与 `tests/test_step3_label_render.py`（真实 GL，读回像素；离屏跳过，`BLOCK01_REQUIRE_STEP1_GPU=1` 时不许跳过）；本文档。其他测试失败须停下说明。
+- **不改的范围**：`viewer/explore_view.py`、`viewer/scheduler.py`、`viewer/caches.py`、`viewer/raw_tile_provider.py`、图像绑定 `ui/step1_gpu_binding.py`、`_TextureLru` 与 512 MB 上限、Step1 与 montage 的 GPU 层行为、CPU 画面、`core/step3_masks.py` 除上述一处外（发现缺陷先停下说明）、任何界面与用户指南。
+- **风险**：
+  - GPU 层是 Step1 与 Step3 共用的类：新代码全部在 `labels=True` 之后，Step1 的回归以现有 GPU 测试与像素读回为准。
+  - 新线程的生命周期：关闭、换数据集、退出程序时必须结束；测试逐项锁定。
+  - 显存：标签纹理（预算见裁定 5）+ 两个屏幕目标（2560×1440 时约 29 MB，另计）；内存：同额 CPU 数组 + 内存金字塔（另计）。
+  - 本机的 GPU（Intel，经 D3D12 转译）与部署机不同；整数纹理属于 GL 3.3 核心功能，但仍以真机为准。
+  - 回退：Step3 的 mount 去掉 `labels=True` 即回到现在的行为。
+- **验收门**：
+  - 编号图（真实 GL，读回，v2）：GPU 画出的屏幕编号图**逐像素等于独立的 CPU 参考**——由视野矩形、屏幕尺寸和标签块的世界矩形逐像素换算（与图像着色器同一换算），不从 GPU 结果推导；覆盖编号超过 2^24、奇数尺寸、非整数比例、跨块的细胞。
+  - 轮廓与填充：在上面已验证的编号图上，轮廓像素逐像素等于 `outline_reference`，设备像素比 1、1.5、2 各测（逻辑线宽 0–4，屏幕半径按上面的取整规则）；填充色逐像素等于 `fill_colour` 再按透明度混合；编号 0 处图像不变；两层叠放顺序正确。
+  - 层级覆盖：放大（新细块盖旧粗块）、缩小（新粗块盖旧细块）、新块为空（编号 0 抹掉旧轮廓）各一例；目标层级缺块处由旧层级填补。
+  - ROI：斜边与凹多边形 ROI 外 mask 不上屏（与图像同一边界），只重画 mask 时同样成立。
+  - 同步：同一次提交里图像与 mask 用同一视野矩形；只改 mask 设置或标签块到达时不重新提交通道（通道提交计数不变）。
+  - 读取：只请求当前层级可见块加一圈；过期请求被丢弃并计数；换层级时旧块保留到被盖住；只有第 0 级时粗层不请求、状态给出原因；补生成完成后粗层开始显示。
+  - 生命周期：暂停不发请求（按裁定 4 处理补生成）、恢复补一次；换源 / 关闭后线程已退出、纹理已释放、迟到结果被丢弃。
+  - 预算：GPU 与 CPU 两侧都不超上限（CPU 侧含等待接收的结果）；超额按「旧层级 → 外圈 → 中心向外」的顺序，状态给出提示。
+  - Step3 图像不变（v2）：`labels=True`、尚未设置 mask 来源时，Step3 的画面与 `labels=False` **逐像素相同**（读回对比），通道提交计数相同。
+  - 无 GPU：不建标签绑定，`mask_status()` 给出「mask 需要 GPU 显示」。
+  - Step1 不变：`labels=False` 的层不建新目标与程序；Step1 与 montage 现有 GPU 测试、像素读回无新增失败；回归与 HEAD 逐条对比。
+  - ④b 只交付为**自动验收通过**（含本机真实 GL 读回）；用户真机验收随 ④c。
+- **请用户裁定**：
+  1. 细胞与核同时显示时，**核画在细胞上面**（建议），还是反过来？
+  2. 线宽按**逻辑像素**（在高分屏上乘以设备像素比，看起来与普通屏同样粗，建议），还是按物理像素？
+  3. 缩放换层级时，旧层级的 mask 块**暂留、目标层级优先覆盖**（不闪空，建议），还是只画当前层级（新块到之前那片暂时没有 mask）？
+  4. 暂停（离开 Step3）时补生成金字塔：**停止、恢复后重来**（建议，与「不在屏幕上就不读」一致），还是作为例外继续？
+  5. 标签纹理预算：(a) **上限改为 256 MB**，mask 与图像同一层级、精度一致（两种 mask 最坏约 250 MB；本机显存 6 GB，图像另有 512 MB）——建议；(b) 保持 64 MB，mask 改用「不细于屏幕」的层级（一个层级像素占 1–4 个屏幕像素，块数约为 (a) 的 1/16，缩小到切换点附近时轮廓会显得粗糙）；(c) 保持 64 MB 与同一层级，超额时按上面的顺序只画中心部分。
+- **用户裁定（2026-09-26，全部按建议）**：1 核画在细胞上面；2 线宽按逻辑像素；3 旧层级暂留、目标层级优先覆盖；4 暂停时补生成停止、恢复后重来；5 **标签纹理上限 256 MB**（mask 与图像同一层级），CPU 数组同额；超额顺序不变。
 
 ## 六、未决与 advisory
 

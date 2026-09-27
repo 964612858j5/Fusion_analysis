@@ -9,6 +9,9 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.83：块 S4-1 v2 获批（8 项裁定按 v2）。
+- v3.82：块 S4-1 按独立审核修订为 v2（产品输出目录 `step4/quantification_runs/…`；不输出圆度；周长改名 `boundary_pixel_count` 并写明定义；QuantReader / QuantBackend / QuantFinalizer 三个边界；「科学来源绝不退回」写成契约；S4-0 报告补记产品路径的来源缺陷）。
+- v3.81：块 S4-1 申请 v1（严格定量来源 + Numba 流式融合内核；新发现：产品路径的 Step4 找不到 `correction_config.json`，校正通道被静默按原始数据定量；「读 8.8 GB 要 10 s」的原因与按分块并行解压的实测）。
 - v3.80：S4-1P 结果的用户裁定（Numba 按通道并行作产品、保留 Rust 原型与切换条件、GPU 不在 S4-1、uint8 直接输入、形态对 skimage 验收、空标签不输出）。
 - v3.79：块 S4-1P 完成（整个区域 12–13 s，已经受 I/O 限制；旧的长短轴 / 偏心率有 float32 误差；累加器结构与空细胞约定待 S4-1 定）。
 - v3.78：块 S4-1P 获批（Rust 工具链授权、GPU 纳入；决定规则待结果出来后讨论）。
@@ -1616,7 +1619,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   4. **每个核一行的核表在 S4-2 一起交付。**
   5. **周长只保留新定义**（按标签判断、分块带 1 像素重叠）；旧的并集腐蚀周长不再输出——验收里的逐细胞对照因此不含周长，新周长另用独立的参考实现核对。
 - **执行记录 A 部分**（2026-09-27）：脚本 `scripts/benchmark_step4_baseline.py`；报告 `docs/benchmarks/step4/baseline_2026-09-27.md`。test1（2.5 亿像素、29 通道、40 843 细胞，通道全部不校正）：① 只 mean **215.5 s、峰值 8.63 GB**；② 快速统计全选 **1034 s（17.2 min）、峰值 8.66 GB**，其中通道统计 917 s（min / max 每通道约 10 s、std 约 6.6 s、mean / sum 约 2.5 s）、形态约 1 min、读通道约 1 s / 通道；③ median 约 15 s / 通道、p90 约 3 s / 通道（2 个通道实测，29 通道约 7 min + 1.4 min 为推算）。参考输出保存在 `~/fusionflux/bench_step4/test1/2026-09-27_bdbd29e/`。
-- **执行记录 B 部分**（2026-09-27）：用户新做的带校正工作区 `full_wsi_20260927_121444_6bad`（2 个 tophat 通道 CD3D、HsBAg；本机 cuCIM 不能用 GPU，没有 cuCIM 通道），StarDist + expansion 运行，56 874 细胞。只 mean：旧 Step4 **654 s**，其中**现场 tophat 481 s（每通道约 4 min）**；快速统计全选：旧 1503 s vs **对照 B（读 Step0 校正结果）1014 s**，读校正结果 2 个通道共 7.5 s（约为现场校正的 1/60）；峰值 8.4–8.6 GB。来源核对通过（原始读 27 次、校正结果 2 次）。**两份全选输出全部 153 列在 1e-5 内相同**——改读 Step0 结果不改变数值。参考输出 `~/fusionflux/bench_step4/test1_tophat/2026-09-27_bdbd29e/`。**S4-0 完成（自动验收：分项时间、两种峰值内存、三种配置、参考输出、来源记录齐全）。**
+- **执行记录 B 部分**（2026-09-27）：用户新做的带校正工作区 `full_wsi_20260927_121444_6bad`（2 个 tophat 通道 CD3D、HsBAg；本机 cuCIM 不能用 GPU，没有 cuCIM 通道），StarDist + expansion 运行，56 874 细胞。只 mean：旧 Step4 **654 s**，其中**现场 tophat 481 s（每通道约 4 min）**；快速统计全选：旧 1503 s vs **对照 B（读 Step0 校正结果）1014 s**，读校正结果 2 个通道共 7.5 s（约为现场校正的 1/60）；峰值 8.4–8.6 GB。来源核对通过（原始读 27 次、校正结果 2 次）。**两份全选输出全部 153 列在 1e-5 内相同**——改读 Step0 结果不改变数值。**补记（2026-09-27，S4-1 调查）**：「旧：原始 + 现场 tophat」是基准脚本**显式把** `step0/correction_config.json` 交给 worker 测出的；产品路径上 Step4 去输出目录（`step2/`）找这个文件、找不到，校正通道被**静默按原始数据定量**——旧产品不只是慢，还有来源错误（S4-1 修）。参考输出 `~/fusionflux/bench_step4/test1_tophat/2026-09-27_bdbd29e/`。**S4-0 完成（自动验收：分项时间、两种峰值内存、三种配置、参考输出、来源记录齐全）。**
 
 ### 块 S4-1P — CPU / GPU 内核探测（申请 v1，**用户 2026-09-27 批准**；已完成，**自动验收通过**；插在 S4-1 之前，不改产品代码）
 - **来由**：用户与 ChatGPT 的讨论（`~/nextstep.txt`，用户转述）有三点建议：Step4 一开始就做成 CPU / GPU 双后端，二者执行同一份累加器契约；CPU 后端必须认真优化，不能「没有 GPU 就回到 17 分钟」；正式实现之前先用一个小探测在真实数据块上比较 SciPy、Numba 融合内核与 Rust / Rayon 融合内核，由实测决定 CPU 后端用哪个。**采纳**，另按本机核实的事实补充与修正如下。
@@ -1692,6 +1695,83 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   6. **原始 uint8 不转 float32**（S4-1 契约）：内核支持混合输入类型（27 个 uint8 原始通道 + 2 个 float32 校正通道），累加器仍用 float64。
   7. **形态的验收改为对独立参考**：面积、质心、表达量与旧值（S4-0 参考）对照；长短轴、偏心率、方向与独立的 float64 参考（skimage `regionprops`）对照。这是修正科学错误，不算回归。输出的元数据写 `morphology_version = 2`。
   8. **空标签**（编号存在但 mask 里没有像素）：有效细胞 = `count > 0`；h5ad **不输出**空标签。来源记录写 `max_label_id`、`n_valid_cells`、`n_empty_labels`，数量少时另写 `empty_label_ids`。不再为兼容旧 CSV 保留 mean = NaN、min / max = 0 的假细胞。
+
+### 块 S4-1 — 严格定量来源 + 流式融合内核（全细胞形态 + 快速统计）（申请 v2，按独立审核修订，**用户 2026-09-27 批准**）
+- **必要性**：
+  - S4-0 / S4-1P 已证明：今天的 Step4 在 2.5 亿像素上峰值 8.6 GB、快速统计全选 17–25 min；同样的结果流式融合只要 12–13 s、峰值 1.2–1.9 GB。WSI（约 20 亿像素）上旧 Step4 按像素线性增长到约 70 GB，根本跑不了。
+  - **新发现（本次只读调查，产品缺陷）**：今天的产品路径里，Step4 页面去**输出目录**（默认 = `step2_dir`）找 `correction_config.json`（`ui/step4_page.py:274-276`），而这个文件在 `step0/`。找不到时 `_load_correction_config` 返回 `None`，worker 的 loader 也没有接上 `corrected_channels.zarr`——**tophat / cuCIM 通道被静默地按原始数据定量，既不读 Step0 的结果，也不现场校正**。S4-0 B 部分的「旧：原始 + 现场 tophat」是基准脚本手动把配置交给 worker 得到的，不是产品路径的实际行为。本块的严格来源同时修掉这个缺陷。
+- **只读调查结论**（HEAD `5d49bac`）：
+  1. **旧 worker**（`workers/feature_extract_worker.py`，406 行）：mask 读 `.dat` 或 float32 的 OME-TIFF 整张转 uint32（`:67-85`）；ROI 偏移靠三处猜 bbox（`:125-171`）；形态用整区域的 float32 坐标数组（`:191-232`，即 S4-1P 查出的长短轴 / 偏心率误差）；周长是并集腐蚀（`:234-241`）；每通道 `read_region` 整区域转 float32 后 `ndimage` 逐项扫（`:249-297`）；CSV 用 `%.6g`（`:336`）；h5ad 只在装了 anndata 时写（本机没装，从未写过）；空标签照样输出（mean = NaN、min / max = 0）。
+  2. **交接**：`_go_to_step4`（`ui/main_window.py:4840-4867`）只找 `global_mask.dat` / `global_mask.ome.tiff`，不知道 Step3 选的是哪个运行、哪个 ROI；多 ROI 的运行只能拿到第一个 ROI 的别名。`_step4._out_edit` 在 4 处被设为 `step2_dir`（`:2951`、`:3604`、`:4247`、`:4604`），所以所有运行的输出都写进同一个 `step2/cell_features.csv`，互相覆盖。
+  3. **Step3 已有可复用的运行解析**：`core/step3_masks.py` 的 `load_run` / `list_project_runs` / `run_regions` / `Entry(run, roi_name, bbox)`，Step3 当前选择存在 `main_window._step3_mask_key`。**LabelStore**（块 N2）在运行 meta 的 `label_store[<ROI>]` 里给出细胞 zarr 的路径、形状、分块、`n_objects`；ROI 的全图坐标在 `rois[i].bbox_fullres`。
+  4. **旧运行没有 `label_store`**：test1 的 6 个工作区里，`074333_6ea6` 的两个运行（S4-0 A 部分用的 `seg_20260927_074644_cellpose_wholecell_fusion` 在其中）没有；其余 4 个有。
+  5. **Step0 的来源记录**：工作区 `step0/step0_roi_result.json`（交接 manifest）给出 `raw_ome_path`、`correction_config_path`、`corrected_zarr_path`、`corrected_decisions`；`correction_config.json` 有 `channel_decisions`（28 个通道；DAPI 作核通道不在其中）与每通道参数；`corrected_channels.zarr` 根属性里另存一份 `correction_config` 与 `source_ome`、`mode: roi_only`，每个 ROI 一个组（组名是 ROI 名的空格换成 `_`，属性 `roi_name`、`bbox_fullres`），每个数组的属性有 `correction_method`、`correction_param_name / value`、`channel_index`、`source_shape`、`roi_bbox_fullres`、`bg_correction_algo_version`、`source_identity`。
+  6. `utils/calibration_source.open_corrected_channel_array` **不能直接复用**：它在指定的 ROI 组没有该通道时会**退到任意一个含同名通道的组**（`:84-92`），可能读到别的 ROI 的数组。本块写严格的查找（只认本 ROI 的组），可复用它的「身份以打开的数组为准」的做法。
+  7. **「读 8.8 GB 要约 10 s」的原因**（本次只读实测，热缓存，切片 29 通道 uint8、512² LZW、无 predictor）：
+     - 29 个通道压缩数据共 0.88 GB，单纯读字节 0.8 s；
+     - LZW 解压单线程 0.48 GB/s，imagecodecs 解压时释放 GIL，8 线程到 2.05 GB/s，16 线程不再增加；
+     - tifffile 的 `aszarr` 按区域读（S4-1P 与旧 Step4 的读法）：1 / 4 / 8 / 16 线程 14.9 / **7.5** / 9.0 / 9.1 s，**4 线程封顶**（每个 512² 分块的 Python 开销与 store 内部的串行化），再 `astype(float32)` 多约 1 s；
+     - **自己按 TIFF 分块取字节（`os.pread`）+ tifffile 的 `page.decode` 并行解压**：8 / 16 线程 **4.3 / 4.0 s**，与 `aszarr` 逐像素相同。
+     - 所以 S4-1P 的 10–12 s ≈ aszarr 封顶的 7.5 s + 转 float32 + 2 个校正通道（float32 lz4 zarr，约 2 GB）的读取。
+  8. 环境：numba 0.67（已在 `envs/fusion_mesmer/environment.yml`），无 tbb；没有 anndata（S4-2 装）、没有 pyarrow。产品代码里目前没有任何地方导入 numba。
+  9. 测试：Step4 只有 `tests/test_batch_step4_dialog.py`（只测批处理的目录发现与 CSV 计划表）；worker 与页面都没有测试。
+- **做法**：
+  1. **`core/quant_sources.py`（新，无 Qt）**：
+     - `resolve_quant_job(run_dir 或其中的文件, roi_name)` → 一个不可变的作业描述：细胞 LabelStore（只读 `label_store[roi]`，`complete` 必须为真、`cell` 不为 null；形状、dtype uint32 与打开的 zarr 一致）、ROI 的全图 bbox、切片路径（运行所属工作区 `roi_manifest.json` 的 `source_ome`）、每个通道的来源。
+     - **`QuantSourceResolver`**：Step0 的记录以工作区 `step0/step0_roi_result.json` 为入口。通道的决定取 `correction_config.json`；`original`（及不在表里的通道，如核通道）→ 读原始切片；`tophat` / `cucim` → **必须**读 `corrected_channels.zarr` 里本 ROI 组的同名数组，并核对：组属性 `roi_name` / `bbox_fullres` 包含本 ROI、数组形状 = 组的 ROI 形状、dtype float32、`correction_method` = 决定、参数 = 配置里该通道的有效参数、`channel_index` = 切片里该通道的序号、根属性 `source_ome` = 切片路径；另外 `correction_config.json`、zarr 根属性里的配置、manifest 的 `corrected_decisions` 三者对校正通道的决定必须一致。**任一项不符或缺失 → 作业开始前就报错**（列出通道与原因），不退回原始数据、不现场校正。新路径不导入 `OMETIFFLoader` 与任何校正函数。
+     - **`QuantReader` 边界**：定量内核只拿到「一块标签 + 一批通道的数组」，不知道 TIFF / zarr 的内部细节。产品实现：
+     - **原始读取**：`TiffTileReader` 按 TIFF 分块取字节（`os.pread`）、用 tifffile 的 `page.decode` 在线程池里解压，直接拼成 **uint8（或切片原有 dtype）** 的块，不转 float32。切片不是分块存储、或布局不是「每通道一页」时，退到 tifffile `aszarr` 按区域读（仍是同一来源，只是慢）——这不是来源退回，来源记录里写 `raw_reader`。以后的 NGFF 读取作为另一个 `QuantReader` 接入，不动内核与收尾。
+     - **科学契约（fail-closed）**：`original` → 原始切片；`tophat` / `cucim` → 只读 Step0 持久化的校正结果并逐项核对；任何必需的校正结果缺失或不符 → **定量开始前中止并明确报错**。绝不允许「校正结果不可用 → 退回原始」，也绝不允许「校正结果不可用 → Step4 现场重做校正」。**读取方式可以退（性能），科学来源绝不退。**
+     - 切片一致：所选运行的切片（`step3_masks.run_slide`）= 运行所属工作区的 `source_ome` = 当前打开的切片（与 Step3 的 `Load…` 规则相同：别的项目在同一张切片上的运行可以定量，别的切片的运行拒绝）。
+     - 每个通道的来源记录：`kind`（raw / corrected）、路径、数组身份（形状、dtype、`source_identity`、方法与参数、算法版本）、读取方式。
+  2. **`core/quant_engine.py`（新，无 Qt）**：
+     - 三个边界：`QuantReader`（上面）、**`QuantBackend`**（`accumulate(labels, halo_labels, channel_block, ...)` / `merge()`，只产出累加器）、**`QuantFinalizer`**（由累加器算出形态与统计、过滤空标签；与后端无关，换后端不改科学公式）。**`NumbaBackend`** 是产品实现（`@njit(parallel=True, cache=True)`，按 S4-1P 的 `numba_ch`：每个通道一个任务 + 几何一个任务，**全局一套累加器**，float64 累加）；`RustBackend`、`CUDABackend` 只在接口处留名（选到时报「未实现」），不写实现。
+     - 累加：几何 = count、Σx、Σy、Σx²、Σy²、Σxy（float64，**全图坐标**）、外接框、边界像素数；每个通道按所选统计只分配需要的数组（sum 总要；std 才要平方和；min / max 各自可选）。内核对 uint8 与 float32 各编译一份，一批通道按 dtype 分组调用。
+     - **按空间分块、按通道分批**：细胞标签每块只读一次（LabelStore zarr，带 1 像素的外圈供周长用）；分块边长、每批通道数、读线程数、Numba 线程数都是实测初值，不写成契约。
+     - **流水线**：一个读线程池预取「下一块 / 下一批」（队列深度 2，内存有上界），主计算线程同时累加当前批。
+     - **边界像素数（`morphology_version = 2`）**：细胞 L 的一个像素，只要它 3×3（8 邻域）里有一个像素的标签 ≠ L（其他细胞或背景；图像外按背景算）就计入；列名 **`boundary_pixel_count`**，来源记录写 `perimeter_definition = "8-neighbor label-aware boundary pixel count"`。它**不是**旧的 `perimeter`：旧代码先把所有细胞并成一个二值图再腐蚀，紧贴的两个细胞之间的边界不计入；也不是标准的欧氏 / Crofton 周长（以后另加）。分块靠 1 像素外圈保证与整图计算逐像素相同。
+     - **收尾**：有效细胞 = `count > 0`；标签编号 > `n_objects` → 报错（违反 LabelStore 契约）。形态：面积、质心（全图坐标）、外接框、长短轴、偏心率、方向（skimage 的约定：行轴与长轴的夹角，−π/2 … π/2）、等效直径、长宽比、extent、`boundary_pixel_count`。**不输出圆度**（边界像素数不是欧氏周长，4πA / P² 可能大于 1，易被误读；等 S4-2 定下周长语义再加）。表达量：所选的 mean / sum / std / min / max。
+  3. **`workers/feature_extract_worker.py`（重写）**：QThread 外壳，参数改为 `run_dir`（或其中的文件）、`roi_name`、`output_dir`、`statistics`、`file_prefix`；进度按「块 × 批」计；Stop 在批之间生效。输出：
+     - `<prefix>_cell_features.csv`：一行一个**有效**细胞；列 = `cell_id` + 形态（旧的 `perimeter` 列不再有，改为 `boundary_pixel_count`）+ `<通道>_<统计>`（通道名与今天相同：OME 名，`/` 与空格换成 `_`）；
+     - `<prefix>_cell_features_provenance.json`：`morphology_version = 2`、运行 / ROI / LabelStore、`max_label_id`、`n_valid_cells`、`n_empty_labels`（≤ 1000 个时另写 `empty_label_ids`）、每个通道的来源记录、统计项、分块参数、耗时与峰值内存、git 提交；
+     - 先写 `*.partial`，全部写完才改名；失败或 Stop 时删除，不留半成品。h5ad 在 S4-2。
+  4. **`ui/step4_page.py`**（见裁定 1–4）：`Mask` 一行改为 `Run`（运行文件夹 + Browse）与 `ROI` 下拉框（运行只有一个 ROI 时只显示名字）；切片改为只读显示（取自运行所属的工作区，不再可以另选）；统计项 5 个快速统计默认全选，去掉 median / p90；输出说明改为 CSV + 来源记录；旧运行（没有 `label_store`）或来源核对失败，在页面上显示原因，`Extract Features` 不可用。
+  5. **`ui/main_window.py`**：`_go_to_step4` 把 Step3 当前选择的（运行, ROI）交给 Step4（没有选择时用 Step2 刚完成的运行）；默认输出目录 `<运行所属工作区>/step4/quantification_runs/<segmentation_run_id>/<region>/`（`region` = ROI 名，空格换成 `_`，与校正结果 zarr 的组名同一规则；S4-2 的 h5ad 以后写进同一目录）；原来 4 处把 `_step4._out_edit` 设为 `step2_dir` 的地方改为不设（由选择决定）。
+  6. **`ui/batch_step4_dialog.py`**（见裁定 7）：只改两处——把找到的 mask 所在的运行文件夹交给新 worker；删去在输出目录及其上级找 `correction_config.json` 的逻辑（来源由 resolver 决定）。
+  7. **`scripts/verify_step4_s41.py`（新，不被产品导入）**：在带 tophat 的工作区上只读地跑产品 worker（输出到 `~/fusionflux/bench_step4/test1_tophat/<日期>_<哈希>_s41/`），做下面「真实数据」一节的全部对照，写报告 `docs/benchmarks/step4/s41_<日期>.md`。
+- **白名单**：`core/quant_sources.py`（新）、`core/quant_engine.py`（新）、`workers/feature_extract_worker.py`、`ui/step4_page.py`、`ui/main_window.py`（只限 `_go_to_step4` 与上面 4 处 `_step4` 的设置）、`ui/batch_step4_dialog.py`（只限上面两处）；测试：`tests/test_quant_sources.py`（新）、`tests/test_quant_engine.py`（新）、`tests/test_step4_worker.py`（新）、`tests/test_step4_page.py`（新）、`tests/test_batch_step4_dialog.py`（只在断言因上面两处改动而须改时，实施前报批）；`scripts/verify_step4_s41.py`（新）；`docs/benchmarks/step4/s41_<日期>.md`（新）；`docs/benchmarks/step4/baseline_2026-09-27.md`（只补记产品路径的来源缺陷，见下）；`UI_SURFACE_RULES.md`（新增 Step4 一节）、`docs/user_guide.md`、`docs/用户指南.md`、本文档。
+- **不改的范围**：`core/io_loader.py`（`OMETIFFLoader` 其他步骤照用）、`core/bg_correction.py`、`utils/calibration_source.py`、Step0–Step3 的行为与界面、viewer 及其读取 / 缓存 / 线程、Step2 的输出与 `.dat` 清理（④）、`core/step3_masks.py`（只调用）、Rust 探测、GPU。核 / 胞质、问卷界面、h5ad 新结构、CSV 可选属于 S4-2；分布统计属于 S4-3。**不装包。**
+- **风险**：
+  - 科学输出：新值必须与「来源等价的正确值」一致——验收锁定；长短轴 / 偏心率按用户裁定 7 改对 skimage。
+  - 自己按分块解压 TIFF 是 Step4 内部的新读取方式：只用于 Step4，与 `aszarr` 逐像素对照（合成切片 + 真实切片抽查），布局不符时退到 `aszarr`。
+  - Numba 首次编译约 2–3 s（`cache=True` 之后只有第一次）；缓存目录不可写时 numba 自己退到用户缓存目录。Numba 的线程层（本机无 tbb）只在一个线程里调用，不并发调用内核。
+  - 功能空档：median / p90 到 S4-3 才回来（裁定 3）；h5ad 到 S4-2（本机今天本来就没写过）；旧运行须重跑 Step2（裁定 2）。
+  - 回退：恢复这些文件。
+- **验收门**：
+  - **来源（合成项目）**：original → 原始、tophat → 校正结果；校正结果缺失、ROI 组不对、形状 / dtype / 方法 / 参数 / `channel_index` / `source_ome` 不符、三处决定不一致 → 各自报错且不产生输出；代码中新路径不调用 `OMETIFFLoader` 与校正函数；来源记录与实际读取一致（读原始 / 校正结果的次数计数）。
+  - **原始读取**：合成的分块 TIFF（奇数尺寸、边缘分块、多通道）上与 `aszarr` 逐像素相同；非分块 TIFF 走退路也相同；真实切片抽 10 个块逐像素相同（只读）。
+  - **内核（合成标签）**：与 float64 的 scipy / skimage 参考逐细胞一致：count、外接框、min、max、周长**完全相同**，sum / mean / std 相对误差 ≤ 1e-12，长短轴 / 偏心率 / 方向与 skimage `regionprops` ≤ 1e-8；**分块边长（含不整除的边长）、每批通道数、线程数改变时结果逐位相同**（周长的接缝）；空标签不输出且计数正确；标签 > `n_objects` 报错；只选部分统计时只输出所选列。
+  - **边界像素数**：与独立的 label-aware 3×3 参考实现（整图的 3×3 最大 / 最小值滤波判定「邻域里有不同标签」再按标签计数）逐细胞完全相同；**不与旧 CSV 的 `perimeter` 对照**（语义不同）。
+  - **worker**：CSV 与来源记录齐全；Stop 与写入失败不留 `*.partial`、不留半成品；旧运行（无 `label_store`）报出原因。
+  - **页面（离屏）**：运行 / ROI 的选择与 Step3 交接一致；5 个统计默认勾选；旧运行的原因显示在页面上且不能运行。
+  - **真实数据**（`scripts/verify_step4_s41.py`，带 tophat 的工作区，56 874 个标签）：
+    - 有效细胞 56 872，`empty_label_ids = [29630, 53238]`；来源记录为 27 个原始 + 2 个校正（CD3D、HsBAg）；
+    - 面积与参考 CSV（S4-0 对照 B）完全相同；质心与 29 通道 × 5 项统计相对差 ≤ 1e-5（受 CSV 6 位有效数字限制）；
+    - 长短轴、偏心率、方向与 skimage `regionprops`（整张 mask）逐细胞 ≤ 1e-6；
+    - `boundary_pixel_count` 与独立参考逐细胞完全相同；CSV 里没有圆度列；
+    - 报告总时间、分项时间（读 mask、读原始、读校正、计算、写出）与峰值内存。**目标**（不作硬门）：总时间 < 15 s、峰值 < 3 GB。
+  - **反向注入**：在任务临时目录的副本里至少注入——校正通道退回原始、跳过参数核对、边界计数不带外圈、float32 累加、校正结果缺失时退回原始（必须被来源测试抓到）、空标签照样输出、质心不加 ROI 偏移、`*.partial` 不清理、方向符号反了——每处至少一条测试变红。
+  - **回归**：Step4 相关与 `test_step3_masks.py`、`test_batch_step4_dialog.py` 等，每模块单独进程，与 `git archive HEAD` 逐条对比，无新增失败。
+  - **真机（用户）**：Step3 选带 tophat 的运行 → Step4 → 默认 5 项统计 → 运行：界面显示运行 / ROI / 切片，进度走完，输出目录里有 CSV 与来源记录，来源记录写明 2 个校正通道；选旧运行时页面说明原因。
+- **请用户裁定**（v1 的 8 项；v2 按独立审核的意见修订，**用户 2026-09-27 确认批准**，申请提交推送后实施）：
+  1. 输入：Step4 默认定量 Step3 当前选择的（运行, 该运行自己的 ROI），页面可另选；切片不能另选；继续核对所选运行的切片与当前打开的切片一致。——审核：同意。
+  2. 没有完整 `label_store` 的旧运行直接拒绝，提示重跑 Step2，不建兼容层。——审核：同意。
+  3. median / p90 在 S4-1 从界面去掉，S4-3 作为分布统计加回。——审核：同意。
+  4. S4-1 固定写 CSV + 来源记录 JSON，h5ad 在 S4-2；默认目录为稳定的产品路径 `<工作区>/step4/quantification_runs/<segmentation_run_id>/<region>/`（v1 的 `step4/<run_id>/<ROI>/` 改掉）。——审核：按此修订后同意。
+  5. 形态输出由矩与几何直接得到的项；**不输出圆度**。——审核：部分同意，按此修订。
+  6. 3×3（8 邻域）label-aware 边界像素计数，列名 `boundary_pixel_count`，来源记录写定义；不要求复现旧的并集腐蚀周长。——审核：按此修订。
+  7. 批处理对话框只做最小接线。——审核：同意。
+  8. Step4 内部按 TIFF 分块并行解压，封装为独立的 `QuantReader`；非分块、未知压缩或不支持的 TIFF 退到 tifffile 读法；性能可退，科学来源不退。——审核：同意。
 
 ## 六、未决与 advisory
 

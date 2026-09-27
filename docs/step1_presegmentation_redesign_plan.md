@@ -9,6 +9,8 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.97：块 S4-2 v2 获批（N3 之前的运行允许定量并提示风险；CSV 只在勾选时输出，批处理加勾选框）。
+- v3.96：块 S4-2 申请 v2（单一 h5ad、一行一个主对象；输出内存上界：通道分组 + FeatureMatrixSink、50 万对象的内存门；`Expression regions`；N3 之前的运行如何处理待裁定）。
 - v3.95：块 N3b 真机验收通过（20 块网格）。
 - v3.94：块 N3b 已实施（自动验收通过，待真机验收），写入执行记录与实施中的用户裁定（区域结束时一次裁决）。
 - v3.93：用户锁定两个 0.5、批准 N3b 的测试改动清单；N3a 提交推送，开始 N3b。
@@ -1905,72 +1907,64 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - **真机验收通过（用户 2026-09-27）**：工作区 `full_wsi_20260927_194511_cc8e`，StarDist + expansion，**4 × 5 = 20 块**（与本机测试的 3 × 4 不同）：接缝候选 24 076、重复组 10 298（丢弃版本 11 504，split / merge 366）、补回 173、可写不足一半而放弃 87、被裁边界像素的细胞 427（12 864 px）、因接缝冲突丢掉的核 97；细胞 56 892；核保留率 99.8 %（含「97 on tile seams」）；3 min 28.6 s、峰值 9.23 GB。Step3 里接缝处没有明显不合理的 mask。
   - advisory（与本块无关）：Step2 完成后自动进入 Step3 时，GUI 线程在 Step3 GPU 图层的 `resizeGL`（`step1_viewer_mount._start_gpu_backend` → `layer.show()`）停了 6.5 s（gui-watchdog）。
 
-### 块 S4-2 — 核 / 胞质、输出范围问卷、h5ad 新结构、CSV 可选（申请 v1；**用户 2026-09-27 裁定：改为只有一个 h5ad、一行一个主对象，不做单独的核表；排在 N3 之后，另行修订为 v2**）
-- **必要性**：Step4 调查一节的用户裁定 2、3、5 与 S4-0 裁定 3、4：有核时输出核与胞质的特征（由用户选择）；默认输出 h5ad（按约定的结构），CSV 可选；特征按「范围」组织成可折叠的问卷，只计算勾选的组合；每个核一行的核表在本块交付。
-- **只读调查结论**（HEAD `de80ec5`）：
-  1. **核的数据**：LabelStore 的 `nucleus`（uint32 zarr，与细胞同形状、同 1024² 分块）与 `nucleus_to_cell`（一维 uint32，长度 M + 1）。带 tophat 的工作区：56 874 个核，每个细胞正好 1 个核（expansion）。
-  2. **新发现（Step2 的缺陷，N2 契约被违反）**：全图逐像素核对「核像素所在的细胞 = 对应表[核]」，有 **457 个核像素（38 个核）不在它的细胞里**，全部在 Step2 切块的接缝上（x ≈ 8108 / 12162，y ≈ 5146 / 10292）。原因（按代码与数据推断）：N2 在**每个切块内部**核对包含关系，但合并到全图时，邻块的细胞在重叠带里覆盖了本块细胞的部分像素，核却原样写进核数组。极端情况是细胞 29630：它的像素被邻块全部覆盖（S4-1 里的两个空标签之一），它的核仍有像素；另有核 18071、53238 没有像素。影响：如果照契约 3 用「胞质 = 细胞 − 核」相减，这些细胞的胞质会得到负的像素数或错误的和。
-  3. **anndata**：`pip install --dry-run anndata` 只会装 `anndata 0.11.4` 与 `array-api-compat 1.15.0`，其余依赖（numpy 1.26.4、pandas 2.3.3、h5py 3.16.0 等）都已满足、版本不变。环境清单（`envs/fusion_mesmer/requirements-pip.txt`、`environment.yml`）须同步。**注意**：引擎身份的 `lock_hash` 是这两份锁文件的哈希（`seg_runner/runner.py:45`）；改动后，已有的 Step1 预分割结果交给 Step2 时，Step2 会打印一行「the engine differs from the Step1 run in: lock_hash」的警告（`segment_merge_worker.py:2223-2229`，只是警告，照常运行）。
-  4. 仓库里没有通用的折叠分组组件；Step0 的 `make_collapsible`（`ui/step0/search_ctrl.py:703`）用可勾选的 QGroupBox 当折叠开关，勾选框的语义容易被误读成「启用」，不适合问卷。
-  5. 批处理对话框按「输出目录里有没有 `*_cell_features.h5ad`」判断样本是否已完成（`batch_step4_dialog.py:110`）；今天没有 anndata，所以从来判断不出已完成。
+### 块 S4-2 — 核 / 胞质表达、输出范围问卷、单一 h5ad、CSV 可选（申请 v2，按用户裁定与独立审核修订，**用户 2026-09-27 批准**）
+- **v1 → v2 的来由**：v1（修订记录 v3.86）之后，用户裁定（2026-09-27）：**只要一个 h5ad**，一行一个主对象，核 / 胞质是同一个细胞的不同表达层，与全细胞一起进入下游注释；不做单独的核表（S4-0 裁定 4 由此改掉，以后需要时另议）；先修 Step2（块 N3，已完成、真机验收通过）。独立审核（ChatGPT，用户转述）另提出：主对象的 schema、**输出的内存上界**（不能为了建 h5ad 把所有 layer 同时摊在内存里）、问卷第二组改名为 `Expression regions`、float32 读回精度门。都采纳，写进下面。
+- **只读调查结论**（HEAD `c9f53a3`；v1 的调查仍成立，这里只列变化）：
+  1. N3 之后，新的 Step2 运行在构造上保证「每个核像素都在 `nucleus_to_cell` 所指的细胞里」，`label_store` 带 `seam_merge`（版本 1）；N3 之前的运行没有这一节，可能有接缝上的核错位（test1 上 17–38 个核、421–457 个像素）。
+  2. anndata 0.11.4：先 `write_h5ad` 一个只有 X / obs / var / uns 的骨架，再用 h5py 在 `layers/` 下按行块逐个写数据集（`encoding-type = array`、`encoding-version = 0.2.0`），`read_h5ad` 能原样读回（在临时目录里用下载的 wheel 验证，未装进环境）。所以 h5ad 可以**一次一个 layer、按行块**写出。
+  3. S4-1 的累加器在整遍扫描期间常驻内存：每个「区域 × 统计」一张 `通道数 × 细胞数` 的 float64 表。WSI 上（200 万细胞 × 29 通道）全选三个区域时约 10 张 → 约 4.6 GB，再加一份 float32 的输出副本，会把 S4-1 做到的 1.2 GB 峰值推回 10 GB 以上。
 - **做法**：
-  1. **区域的定义（逐像素，不依赖 Step2 的包含关系是否成立）**：
-     - 全细胞 c：`cell == c` 的像素（同 S4-1）；
-     - 细胞 c 的核区域：`cell == c` 且 `nucleus > 0` 且 `nucleus_to_cell[nucleus] == c` 的像素；
-     - 细胞 c 的胞质：`cell == c` 且不属于它的核区域的像素；
-     - 核 k 自身（核表）：`nucleus == k` 的全部像素；另记 `pixels_outside_cell`（不在它的细胞里的像素数）。
-     - 对应表契约成立时（每个核完全在它的细胞内），这与「细胞 − 核」完全相同；不成立的像素按上面的规则只算进它实际所在的细胞，不产生负数。来源记录写 `nucleus_pixels_outside_their_cell`（总像素数与核数）。
-  2. **累加（同一遍扫描）**：每块再读一次核标签（带 1 像素外圈）与对应表（整张读入内存，M + 1 个 uint32）。
-     - 细胞：同 S4-1；
-     - 细胞的核区域：count 与每通道的 sum / 平方和 / min / max（只为所选统计分配）；
-     - 胞质：count、sum、平方和 = 细胞 − 核区域（契约 3，二者是同一细胞像素的子集，相减精确）；**min / max 直接累加**；
-     - 每个核：几何（整数矩、外接框、边界像素数）、`pixels_outside_cell` 与每通道统计（只在勾选「核表」时）。
-     - 仍是按通道并行的一个内核（几何任务同时处理细胞与核），全局一套累加器。
-  3. **细胞层面的核汇总**（obs 列，勾选「Nuclear summary」时）：`n_nuclei`（对应表指向该细胞、且在细胞内至少有 1 个像素的核数）、`nuclear_area`（核区域像素数）、`nuclear_area_mean`、`nuclear_area_max`（按核在细胞内的像素数）、`nuclear_fraction`（核区域 / 细胞面积）、`cytoplasm_area`。
-  4. **h5ad**（`<base>.h5ad`，一行一个有效细胞）：
-     - `X` = 主区域（全细胞；纯核运行为核）按 mean → sum → std → min → max 取用户所选的第一个统计量；`uns["X_statistic"]`、`uns["primary_compartment"]`；
-     - `layers["<区域>_<统计>"]`（`cell_mean`、`nucleus_std`、`cytoplasm_max`……）：所选的每个组合各一张，**包括 X 的那一张**（X 常被下游原地归一化，layers 里留一份原值）；
-     - `obs`：`cell_id` 与形态列（S4-1 的 15 列）、核汇总列；索引为 `cell_id` 的字符串；
-     - `var`：通道名（OME 名）为索引，列 `slide_index`、`decision`、`source`（raw / corrected）、`correction_method`、`correction_param`；
-     - `uns`：`statistics`、`compartments`、`morphology_version`、`perimeter_definition`、`provenance_json`（完整来源记录的 JSON 字符串；h5ad 不能存 None，所以存字符串，另外仍写 `_provenance.json`）。
-     - 数值类型：X 与 layers 用 float32（scanpy 的常规），obs 的坐标与面积用 float64 / int。
-  5. **核表**（勾选时）：`<base>_nuclei.h5ad`，一行一个有像素的核：`obs` = `nucleus_id`、`cell_id`、形态列（同 S4-1 的定义，按核自身的像素）、`pixels_outside_cell`；`X` = 核自身的 mean（或所选的第一个统计量），其余统计在 `layers`。
-  6. **CSV 可选**（默认不勾）：勾选时另写 `<base>.csv`（细胞表：形态 + 核汇总 + 所有所选的「区域 × 统计 × 通道」列，列名 `<通道>_<区域>_<统计>`；全细胞仍用 S4-1 的 `<通道>_<统计>` 以便对照）；有核表时另写 `<base>_nuclei.csv`。
-  7. **输出范围问卷**（替换 Step4 页面的 `Intensity Statistics` 框）：几个**默认展开、可折叠**的分组（标题行左边一个 ▾ / ▸ 箭头按钮，只在 `ui/step4_page.py` 里实现，不做共享组件），组内逐项勾选：
+  1. **区域的定义**（逐像素；新运行上与「细胞 − 核」完全相同，旧运行上不会出现负数）：细胞 c = `cell == c`；c 的核区域 = `cell == c` 且 `nucleus > 0` 且 `nucleus_to_cell[nucleus] == c`；c 的胞质 = c 中其余像素。来源记录写 `nucleus_pixels_outside_their_cell`（像素数与核数；新运行应为 0）。
+  2. **累加（同一遍扫描）**：每块多读一次核标签（对应表整张读入，M + 1 个 uint32）。细胞同 S4-1；核区域：count 与每通道 sum / 平方和 / min / max（只分配所选的）；胞质：count / sum / 平方和 = 细胞 − 核区域（契约 3），**min / max 直接累加**；核汇总另记每个细胞的核数与各核在细胞内的像素数（用于平均 / 最大）。
+  3. **内存上界（新，审核 P0）**：
+     - **通道分组**：按一个累加器预算（初值 1.5 GB，可调、不作契约）把通道分成若干组，每组各扫一遍（每遍重读标签，本机约 0.8 s；原始通道的总读量不变）；小数据集一组就够，与现在一遍相同。
+     - **FeatureMatrixSink**：每组扫完立刻收尾，把这组通道的各「区域 × 统计」列写进磁盘上的临时 float32 矩阵（zarr，运行输出目录下的 `*.partial` 里），然后释放这组累加器。
+     - 写 h5ad 时一次只从 sink 读一个 layer 的一个行块。契约：**任何时刻都不在内存里同时持有全部所选 layer 的稠密副本**。
+  4. **h5ad（`<base>.h5ad`，一个文件，一行一个主对象）**：
+     - 有细胞的运行：一行一个有像素的细胞，`obs` 索引为 `cell_id` 的字符串；纯核运行：一行一个有像素的核，索引为 `nucleus_id`，只有 Nucleus 一个区域。`uns["primary_object"]` 与 `uns["primary_compartment"]` 为 `cell` 或 `nucleus`。
+     - `X` = 主区域在 mean → sum → std → min → max 里第一个被选的统计量；`uns["X_statistic"]`。
+     - `layers["<区域>_<统计>"]`：所选的每个组合各一张，**包括 X 的那一张**。
+     - `obs`：`cell_id`（或 `nucleus_id`）、形态（S4-1 的 15 列，勾选时）、核汇总（勾选时）：`n_nuclei`、`nuclear_area`、`nuclear_area_mean`、`nuclear_area_max`、`nuclear_fraction`、`cytoplasm_area`（都按「在细胞内的核像素」计；新运行上等于核的全部像素）。
+     - `var`：通道名（OME 名）为索引，列 `slide_index`、`decision`、`source`、`correction_method`、`correction_param`。
+     - `uns`：`statistics`、`expression_regions`、`morphology_version`、`perimeter_definition`、`seam_merge`（运行的 `label_store` 里那一节，旧运行写 `absent`）、`provenance_json`（完整来源记录的 JSON 字符串）；另外仍写 `_provenance.json`。
+     - 数值：计算全程 float64，只在写 X / layers 时转 float32；obs 的编号与计数用整数，坐标与形态用 float64。
+     - 写法：先写骨架（X、obs、var、uns），再逐个 layer 按行块写入；全部经 `*.partial`，写完才改名。
+  5. **CSV 可选（默认不勾）**：勾选时按行块从 sink 流式写出 `<base>.csv`；全细胞列仍用 S4-1 的 `<通道>_<统计>`，核 / 胞质列用 `<通道>_<区域>_<统计>`。
+  6. **输出范围问卷**（替换 `Intensity Statistics` 框；几个默认展开、可折叠的分组，标题行左边一个 ▾ / ▸ 箭头，只在 `ui/step4_page.py` 里实现）：
      - `Statistics`：Mean、Sum、Std dev、Min、Max（默认全选；至少一个）；
-     - `Compartments`：Whole cell（主区域，**必选、不可取消**）、Nucleus、Cytoplasm——运行没有核时后两项不可选并写明原因；纯核运行时主区域显示为 Nucleus，Cytoplasm 不可选；
-     - `Features`：Expression（必选，X 需要）、Morphology、Nuclear summary（需要核）；
-     - `Outputs`：h5ad（必选）、Per-nucleus table（需要核）、CSV（默认不勾）。
-     - 有核的运行默认勾上 Nucleus、Cytoplasm、Nuclear summary、Per-nucleus table；只计算勾选的组合（例如不勾 Cytoplasm 就不分配胞质的累加器）。
-     - 问卷下面一行写出将要输出的文件名与「X = cell mean」。
-  8. **写出的事务**：所有输出（h5ad、核表、CSV、来源记录）先写 `*.partial`，全部写完才依次改名；任一步失败，删除本次已写 / 已改名的全部文件。
-  9. **批处理**（最小改动，见裁定 6）。
-- **白名单**：`core/quant_sources.py`（读核标签与对应表）、`core/quant_engine.py`、`workers/feature_extract_worker.py`、`ui/step4_page.py`、`ui/batch_step4_dialog.py`（只限裁定 6 的一行）；测试：`tests/test_quant_sources.py`、`tests/test_quant_engine.py`、`tests/test_step4_worker.py`、`tests/test_step4_page.py`（这 4 个是 S4-1 新建的，按新行为改）、`tests/test_batch_step4_dialog.py`（只在裁定 6 的改动需要时）；`scripts/verify_step4_s41.py`（加核 / 胞质的真实数据核对，或另建 `scripts/verify_step4_s42.py`）；`docs/benchmarks/step4/s42_<日期>.md`（新）；环境：`fusion_mesmer` 里 `pip install --no-deps anndata==0.11.4 array-api-compat==1.15.0`，并用 `scripts/export_fusion_mesmer_env.sh` 更新 `envs/fusion_mesmer/` 的清单；`UI_SURFACE_RULES.md`、两份用户指南、本文档。
-- **不改的范围**：Step2（接缝缺陷另立块，见裁定 1）、Step0–Step3、viewer、`core/step3_masks.py`、`core/io_loader.py`、`core/bg_correction.py`；分布统计（S4-3）；Rust / GPU。
+     - `Expression regions`（只作用于表达量）：Whole cell（主区域，必选、不可取消；纯核运行显示为 Nucleus）、Nucleus、Cytoplasm——没有核时后两项不可选并写明原因；
+     - `Features`：Expression（必选）、Morphology、Nuclear summary（需要核）；
+     - `Outputs`：h5ad（必选）、CSV（默认不勾）。
+     - 有核的运行默认勾上 Nucleus、Cytoplasm、Morphology、Nuclear summary；只计算勾选的组合。下面一行写出输出文件名与「X = cell mean」。
+  7. **写出的事务**：h5ad、CSV、来源记录与 sink 都经 `*.partial`；任一步失败，删除本次已写 / 已改名的全部文件与 sink。
+  8. **批处理**（用户裁定：CSV 只在用户勾选时输出）：批处理对话框的统计项旁加一个 `Also write CSV` 勾选框，**默认不勾**，交给 worker 的 `write_csv`；默认只写 h5ad。
+  9. **环境**：`fusion_mesmer` 里 `pip install --no-deps anndata==0.11.4 array-api-compat==1.15.0`，用 `scripts/export_fusion_mesmer_env.sh` 更新 `envs/fusion_mesmer/` 的清单。接受 `lock_hash` 改变带来的那一行 Step2 警告，把「引擎身份不应因装一个 Step4 的文件格式库而改变」记为设计债务（advisory）。
+- **白名单**：`core/quant_sources.py`（读核标签与对应表）、`core/quant_engine.py`（核 / 胞质累加、通道分组、sink）、`workers/feature_extract_worker.py`（h5ad / CSV 写出）、`ui/step4_page.py`（问卷）、`ui/batch_step4_dialog.py`（只加 `Also write CSV` 勾选框并交给 worker）；测试：`tests/test_quant_sources.py`、`tests/test_quant_engine.py`、`tests/test_step4_worker.py`、`tests/test_step4_page.py`（S4-1 建的，按新行为改），`tests/test_batch_step4_dialog.py`（只在上面那一处需要时）；`scripts/verify_step4_s42.py`（新，不被产品导入）；`docs/benchmarks/step4/s42_<日期>.md`（新）；环境清单 `envs/fusion_mesmer/`；`UI_SURFACE_RULES.md`、两份用户指南、本文档。
+- **不改的范围**：Step0–Step3、Step2（N3 已完成）、viewer、`core/step3_masks.py`、`core/io_loader.py`、`core/bg_correction.py`；分布统计与周长 / 圆度（S4-3）；Rust / GPU。
 - **风险**：
-  - 科学输出：全细胞的值必须与 S4-1 逐位相同（回归锁定）；核 / 胞质用独立的整图参考核对。
-  - 装包改变环境与 `lock_hash`（见调查 3）：已有 Step1 结果交给 Step2 时多一行警告；回退 = `pip uninstall anndata array-api-compat` 并恢复清单。
-  - 内存：累加器随「细胞数 × 通道数 × 所选区域与统计」增长；本数据集约 0.3 GB，50 万细胞 × 29 通道、全选时约 2–3 GB（只分配勾选的）。
-  - 时间：多读一遍核标签（本机约 0.8 s）。
+  - 科学输出：全细胞的值必须与 S4-1 逐位相同（回归锁定）。
+  - 通道分组时多扫几遍标签（每遍约 0.8 s）；分组数只由预算与数据量决定，写进来源记录。
+  - 装包改变环境（回退：卸载两个包、恢复清单）。
+  - 写 h5ad 绕过 anndata 的整对象写法（骨架 + 逐个 layer）：验收以 `anndata.read_h5ad` 读回为准。
 - **验收门**：
-  - **合成数据（引擎）**：核 / 胞质的 count / sum / mean / std / min / max 与逐像素的 float64 参考（按上面的区域定义用 numpy 直接算）一致（count、min、max 完全相同，其余 ≤ 1e-12）；胞质 min / max 是直接累加的结果（一个核里的极值不会出现在胞质里）；**构造「核像素不在它的细胞里」与「细胞被全部覆盖、核仍在」两种情况**，结果符合逐像素定义、没有负数，`pixels_outside_cell` 与来源记录的计数正确；多核细胞的 `n_nuclei` / 面积汇总正确；核表的形态对 skimage；分块 / 批 / 线程不变性（同 S4-1）；不勾的区域不分配累加器。
-  - **h5ad**：用 anndata 读回——`X` 等于所选的主区域统计（各种勾选组合下 `X_statistic` 正确：只勾 std 时 X = cell_std）；layers 名称与内容；obs / var / uns 齐全；空标签不在其中；核表的行数与 `cell_id` 对应。
-  - **CSV**：不勾时不写；勾选时列与 h5ad 一致；全细胞列与 S4-1 逐字符相同。
-  - **事务**：写 h5ad / 核表 / CSV / 来源记录 / 改名任一步失败，不留任何本次的输出与 `*.partial`。
-  - **页面（离屏）**：分组默认展开、可折叠；没有核的运行 Nucleus / Cytoplasm / Nuclear summary / Per-nucleus table 不可选并有原因；纯核运行主区域为 Nucleus；Whole cell、Expression、h5ad 不可取消；至少一个统计量；文件名与 X 的说明随勾选变化。
-  - **真实数据**（带 tophat 的工作区）：全细胞的值与 S4-1 逐位相同；核 / 胞质与独立的整图参考一致；报告接缝上的 457 个像素 / 38 个核如何计入；总时间与峰值内存。
-  - **反向注入**：至少——胞质 min / max 用相减或用全细胞的值、核区域不检查 `nucleus_to_cell[nucleus] == c`、X 不按约定顺序取、layers 漏掉 X 的那一张、空标签进入 h5ad、CSV 不勾仍写出、改名中途失败留下部分文件、无核运行仍允许勾选 Nucleus。
-  - **回归**：同 S4-1 的 19 个模块，与 HEAD 逐条对比。
-  - **真机（用户）**：带核的运行：问卷默认项、运行、读回 h5ad（例如 `scanpy.read_h5ad`）；无核运行：核相关项不可选。
-- **请用户裁定**：
-  1. **Step2 接缝缺陷**：S4-2 用上面的逐像素定义（结果正确、不会出现负数，来源记录报告不一致的像素数），同时把 Step2 合并时的包含关系修复**另立一块**（建议排在 S4-2 之后、S4-3 之前；须重跑 Step2 才能消除这些像素）。另一选择：先修 Step2 再做 S4-2。建议前者。
-  2. **核表的存法**：单独一个 `<base>_nuclei.h5ad`（建议；行数不同，不能放进细胞表的 obsm / layers），或存进细胞 h5ad 的 `uns` 里的一张表（scanpy 不会把它当成 AnnData 使用）。
-  3. **数值类型**：X 与 layers 用 float32（建议；scanpy 常规，文件小一半），或 float64（与 CSV / 来源记录的精度一致，文件大一倍）。
-  4. **layers 里是否也放 X 的那一张**（建议放，下游原地归一化 X 后仍有原值）。
-  5. **有核运行的默认勾选**：Nucleus、Cytoplasm、Nuclear summary、Per-nucleus table 默认都勾（建议），还是默认只算全细胞。
-  6. **批处理**：新 worker 的默认输出是 h5ad（不写 CSV）。批处理原来产出 CSV；建议批处理调用时加上「写 CSV」（一处参数），行为对批处理用户不变，同时多出 h5ad（也让它的「已完成」判断第一次真正生效）。
-  7. **周长 / 圆度**：S4-1 的审核说「等 S4-2 把周长语义定稳再加圆度」。建议**本块不加**，放到 S4-3 与分布统计一起做（届时实现标准的 Crofton 周长并加圆度）；本块专注核 / 胞质与输出结构。
-  8. **装 anndata**（用户已原则批准）：按调查 3 装 `anndata 0.11.4` + `array-api-compat 1.15.0`（`--no-deps`）并更新清单，接受 `lock_hash` 改变带来的那一行 Step2 警告。
+  - **引擎（合成）**：核 / 胞质的 count、min、max 与逐像素的 float64 参考完全相同，sum / mean / std ≤ 1e-12；胞质的极值是直接累加的（核里的极值不会出现在胞质里）；构造「核像素不在它的细胞里」「细胞被抹掉、核仍在」两种旧运行的情况：结果符合逐像素定义、没有负数、计数正确；多核细胞的核汇总；**通道分组数不同（1 组 / 每通道一组）时结果逐位相同**；分块 / 批 / 线程的不变性同 S4-1；不勾的区域不分配累加器。
+  - **内存（审核 P0）**：用合成的累加器模拟 **50 万个对象 × 29 通道 × 3 个区域 × 5 项统计**的收尾与 h5ad 写出，峰值常驻内存 **< 3 GB**，并报告实际峰值；代码审查确认没有同时持有全部 layer 的稠密副本。
+  - **h5ad**：`anndata.read_h5ad` 读回：X 等于所选主区域统计（只勾 std 时 X = cell_std）；layers 名称与内容（与 float64 结果的相对差 ≤ 1e-6、没有 inf）；obs / var / uns 齐全；空标签不在其中；纯核运行一行一个核、`primary_object = nucleus`。
+  - **CSV**：不勾不写；勾选时全细胞列与 S4-1 逐字符相同。
+  - **事务**：写骨架、写 layer、写 CSV、写来源记录、改名任一步失败，不留任何本次的输出、sink 与 `*.partial`。
+  - **页面（离屏）**：分组默认展开、可折叠；没有核的运行核相关项不可选并有原因；纯核运行主区域为 Nucleus；Whole cell、Expression、h5ad 不可取消；至少一个统计量；文件名与 X 的说明随勾选变化。
+  - **真实数据**（N3 之后重跑的带核运行，以及一个 N3 之前的运行）：全细胞值与 S4-1 逐位相同；核 / 胞质与独立的整图参考一致；`nucleus_pixels_outside_their_cell`：新运行 0、旧运行如实报告；总时间与峰值内存；h5ad 能被 anndata（如装了 scanpy，也用 scanpy）读回。
+  - **反向注入**：至少——胞质 min / max 用相减或用全细胞的值、核区域不检查 `nucleus_to_cell[nucleus] == c`、X 不按约定顺序取、layers 漏掉 X 的那一张、空标签进入 h5ad、CSV 不勾仍写出、改名中途失败留下部分文件、没有核的运行仍允许勾选 Nucleus、sink 之外又保留一份全部 layer（内存门应变红）。
+  - **回归**：S4-1 的 19 个模块 + `test_batch_step4_dialog.py`，与 HEAD 逐条对比。
+  - **真机（用户）**：N3 之后的带核运行：问卷默认项、运行、用 anndata / scanpy 读回 h5ad；无核运行：核相关项不可选。
+- **用户裁定（2026-09-27）**：1 允许定量，但提示有风险；2 同意（1.5 GB / < 3 GB）；3 同意装 anndata；4 同意，**CSV 只在用户勾选时输出**（Step4 页面与批处理都默认不勾；批处理加一个勾选框）。申请提交推送后开始实施。
+- **请用户裁定**（v2 原文）：
+  1. **N3 之前的带核运行**：允许做核 / 胞质定量（逐像素定义保证不出负数），来源记录与页面提示「这个结果做于接缝修复之前，接缝上有 N 个核像素不在自己的细胞里，建议重跑 Step2」（建议）；或者对这类运行禁用 Nucleus / Cytoplasm。
+  2. **内存门**：累加器预算初值 1.5 GB（超出就分组多扫），50 万对象模拟的峰值门 < 3 GB。
+  3. **装 anndata**：按上面的清单安装并更新清单，接受那一行 Step2 警告（设计债务记为 advisory）。
+  4. 其余沿用 v1 的建议：X 与 layers 用 float32、layers 里也放 X 的那一张、~~批处理加 `write_csv=True`~~（改为勾选框，默认不勾）、周长 / 圆度放到 S4-3。
+
+- **v1（已被 v2 取代）** 的全文见修订记录 v3.86 对应的提交 `c7f43c7`（与 v2 的主要差别：两个 h5ad（细胞表 + 核表）、没有输出内存上界、问卷第二组叫 `Compartments`）。
 
 ## 六、未决与 advisory
 

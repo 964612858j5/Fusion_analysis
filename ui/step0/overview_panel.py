@@ -477,7 +477,12 @@ class FullFusionWorker(QThread):
                 }]
                 mode_desc = "full WSI"
 
-            self.progress.emit(0, len(regions),
+            # PROGRESS IN TILES (block B3): each region is 1000 units, split
+            # evenly over its tiles. Counting regions only left a one-ROI
+            # `2 x 2` run at 0 / 1 until its last tile was written.
+            units = 1000
+            total_units = max(1, len(regions)) * units
+            self.progress.emit(0, total_units,
                                f"Starting fusion — {mode_desc}")
 
             zarr_paths = {}   # {name: zarr_path}
@@ -496,7 +501,7 @@ class FullFusionWorker(QThread):
                 zarr_path = os.path.join(output_dir, region["zarr_name"])
 
                 self.progress.emit(
-                    reg_i, len(regions),
+                    reg_i * units, total_units,
                     f"[{rname}]  bbox y=[{ry0},{ry1}) x=[{rx0},{rx1})  "
                     f"({rh}×{rw} px)  creating zarr…"
                 )
@@ -552,7 +557,7 @@ class FullFusionWorker(QThread):
                         return
 
                     self.progress.emit(
-                        reg_i, len(regions),
+                        reg_i * units + (i * units) // max(1, n_tiles), total_units,
                         f"[{rname}] Tile [{i+1}/{n_tiles}]  "
                         f"reading {len(all_channels)} channels…"
                     )
@@ -599,7 +604,7 @@ class FullFusionWorker(QThread):
                     avg = sum(tile_times) / len(tile_times)
                     eta = avg * (n_tiles - i - 1)
                     self.progress.emit(
-                        reg_i, len(regions),
+                        reg_i * units + ((i + 1) * units) // max(1, n_tiles), total_units,
                         f"[{rname}] ✓ Tile [{i+1}/{n_tiles}]  "
                         f"{elapsed:.1f}s  ETA {eta/60:.1f} min"
                     )
@@ -607,7 +612,7 @@ class FullFusionWorker(QThread):
                 # Apply polygon mask (zero out pixels outside polygon)
                 if region["polygon_fullres"] is not None:
                     self.progress.emit(
-                        reg_i, len(regions),
+                        (reg_i + 1) * units - 1, total_units,
                         f"[{rname}] Applying polygon mask…"
                     )
                     poly_mask = self._poly_mask(
@@ -658,7 +663,7 @@ class FullFusionWorker(QThread):
                 })
 
                 self.progress.emit(
-                    reg_i + 1, len(regions),
+                    (reg_i + 1) * units, total_units,
                     f"✓ [{rname}] fusion complete → {zarr_path}"
                 )
 

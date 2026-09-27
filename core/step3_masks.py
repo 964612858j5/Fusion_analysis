@@ -66,6 +66,23 @@ class Run:
     meta: Dict[str, Any]
     meta_path: str
     active: bool = False
+    #: Block B3: the ROI workspace the run belongs to (real path) and a
+    #: short label for it ("Full WSI · 2026-09-27 09:55").
+    workspace: str = ""
+    workspace_label: str = ""
+
+
+@dataclasses.dataclass(frozen=True)
+class Entry:
+    """One choice of Step3's run list (block B3): a run and ONE of its
+    regions, displayed where that region is -- not the current ROI's."""
+    run: "Run"
+    roi_name: str
+    bbox: Tuple[int, int, int, int]
+
+    @property
+    def key(self):
+        return f"{self.run.run_dir}\x1f{self.roi_name}"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -196,7 +213,9 @@ def list_runs(roi_dir):
                            or _created_from_name(os.path.basename(run_dir))),
             run_dir=run_dir, meta=meta, meta_path=meta_path)
     active = str(index.get("active_segmentation_run") or "")
-    out = [dataclasses.replace(r, active=(r.run_id == active)) for r in runs.values()]
+    label = _workspace_label(manifest)
+    out = [dataclasses.replace(r, active=(r.run_id == active), workspace=roi_dir,
+                               workspace_label=label) for r in runs.values()]
     out.sort(key=lambda r: r.created_at, reverse=True)
     return out
 
@@ -224,6 +243,152 @@ def choose_run(runs, requested_dir=None, current=None):
         if r.active:
             return r
     return runs[0]
+
+
+# ── Step3 as a general result viewer (block B3) ─────────────────────────
+
+def _workspace_label(manifest):
+    name = str(manifest.get("display_name") or manifest.get("roi_id") or "ROI")
+    created = str(manifest.get("created_at") or "")[:16].replace("T", " ")
+    return f"{name} · {created}" if created else name
+
+
+def workspace_slide(roi_dir):
+    """The slide an ROI workspace was made on (its manifest's `source_ome`)."""
+    manifest = _load_json(os.path.join(roi_dir, "roi_manifest.json")) or {}
+    return str(manifest.get("source_ome") or "")
+
+
+def run_slide(run):
+    """The slide `run` was segmented on: its metadata's raw OME (ROI mode),
+    else its workspace's `source_ome`; "" when neither says."""
+    meta = run.meta
+    for paths in [dict(meta.get("paths") or {})] + [dict((r or {}).get("paths") or {})
+                                                     for r in meta.get("rois") or []]:
+        if paths.get("raw_ome"):
+            return str(paths["raw_ome"])
+    return workspace_slide(run.workspace) if run.workspace else ""
+
+
+def same_slide(a, b):
+    return bool(a) and bool(b) and _real(a) == _real(b)
+
+
+def list_project_runs(roi_dir, slide_path):
+    """The finished runs of EVERY ROI workspace of the project `roi_dir`
+    belongs to that were made on `slide_path`: the current workspace's first
+    (its own order), then the others newest first. A workspace made on
+    another slide is left out."""
+    roi_dir = _real(roi_dir)
+    current = list_runs(roi_dir)
+    others = []
+    rois_dir = os.path.dirname(roi_dir)
+    if os.path.basename(rois_dir) == "rois" and os.path.isdir(rois_dir):
+        for name in sorted(os.listdir(rois_dir)):
+            ws = os.path.join(rois_dir, name)
+            if not os.path.isdir(ws) or _real(ws) == roi_dir:
+                continue
+            for run in list_runs(ws):
+                if same_slide(run_slide(run), slide_path):
+                    others.append(run)
+    others.sort(key=lambda r: r.created_at, reverse=True)
+    return current + others
+
+
+def load_run(path):
+    """A run from a directory the user chose (or its `segmentation_meta.json`
+    / `run_metadata.json`), anywhere: `Run`, or the reason it is not one."""
+    path = _real(path)
+    if os.path.isfile(path):
+        path = os.path.dirname(path)
+    meta, meta_path = _run_meta(path)
+    if meta is None:
+        return "no segmentation_meta.json / run_metadata.json in that folder"
+    # <workspace>/step2/segmentation_runs/<run>
+    ws = os.path.dirname(os.path.dirname(os.path.dirname(path)))
+    manifest = _load_json(os.path.join(ws, "roi_manifest.json")) or {}
+    if not manifest:
+        ws = ""
+    return Run(run_id=str(meta.get("run_id") or meta.get("result_id") or path),
+               method=str(meta.get("method") or ""),
+               created_at=str(meta.get("created_at") or _created_from_name(os.path.basename(path))),
+               run_dir=path, meta=meta, meta_path=meta_path, active=False,
+               workspace=_real(ws) if ws else "", workspace_label=_workspace_label(manifest)
+               if manifest else "")
+
+
+def run_regions(run):
+    """[(roi_name, bbox)] of `run`'s own regions: every ROI of an ROI-mode
+    run (bbox from its record, else its own meta); the whole-image run's
+    workspace bbox. A region whose bbox the run does not record is left out."""
+    meta = run.meta
+    rois = meta.get("rois")
+    out = []
+    if isinstance(rois, list):
+        for entry in rois:
+            if not isinstance(entry, dict) or not entry.get("roi_name"):
+                continue
+            name = str(entry["roi_name"])
+            bbox = _bbox(entry.get("bbox_fullres"))
+            if bbox is None:
+                region = _load_json(os.path.join(run.run_dir,
+                                                 f"segmentation_meta_{name}.json")) or {}
+                bbox = _bbox(region.get("bbox")) or _bbox(region.get("roi_bbox_fullres"))
+            if bbox is None:
+                ws_manifest = _load_json(os.path.join(run.workspace, "roi_manifest.json")) \
+                    if run.workspace else None
+                bbox = _bbox((ws_manifest or {}).get("bbox_fullres")) if len(rois) == 1 else None
+            if bbox is not None:
+                out.append((name, bbox))
+    elif meta.get("mode") == "full_wsi" and run.workspace:
+        manifest = _load_json(os.path.join(run.workspace, "roi_manifest.json")) or {}
+        bbox = _bbox(manifest.get("bbox_fullres"))
+        if bbox is not None:
+            out.append((str(manifest.get("display_name") or "Full WSI"), bbox))
+    return out
+
+
+def entries(runs):
+    """Every (run, region) of `runs`, in the runs' order."""
+    return [Entry(run, name, bbox) for run in runs for name, bbox in run_regions(run)]
+
+
+def choose_entry(items, requested_dir=None, current_key=None, workspace=None, roi_name=None):
+    """The entry Step3 shows: the run named explicitly (`requested_dir`; its
+    region called `roi_name` if it has one, else its first) -> the current
+    choice -> the active run of the current `workspace` -> that workspace's
+    newest -> the newest of the rest. None for no entries."""
+    items = list(items or [])
+    if not items:
+        return None
+
+    def of_run(pred):
+        found = [e for e in items if pred(e.run)]
+        if not found:
+            return None
+        return next((e for e in found if e.roi_name == roi_name), found[0])
+    if requested_dir:
+        want = _real(requested_dir)
+        hit = of_run(lambda r: r.run_dir == want)
+        if hit is not None:
+            return hit
+    if current_key:
+        for e in items:
+            if e.key == current_key:
+                return e
+    ws = _real(workspace) if workspace else None
+    hit = of_run(lambda r: r.active and r.workspace == ws)
+    if hit is None:
+        hit = of_run(lambda r: r.workspace == ws)
+    return hit if hit is not None else items[0]
+
+
+def inside(bbox, outer):
+    """Does region `bbox` lie within `outer` (both y0, y1, x0, x1)?"""
+    if bbox is None or outer is None:
+        return True
+    return (bbox[0] >= outer[0] and bbox[1] <= outer[1]
+            and bbox[2] >= outer[2] and bbox[3] <= outer[3])
 
 
 # ── masks ────────────────────────────────────────────────────────────────

@@ -9,6 +9,9 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.71：块 B3 真机验收通过。
+- v3.70：块 B3 获批并实施（自动验收通过，待真机验收），写入执行记录。
+- v3.69：块 B3 申请 v1（Step1 Save 进度与按钮位置；Step3 通用结果查看器；回到 Step1 时 Pre-seg Results 图像消失）。
 - v3.68：第 ③ 步真机验收通过；Step3 重设计的各步全部完成。
 - v3.67：第 ③ 步已实施（自动验收通过，待真机验收），写入执行记录。
 - v3.66：第 ③ 步申请 v2 获批（一行；运行下拉框移到标签栏右侧角落；patch 选中与 Step1 共用）。
@@ -1514,6 +1517,50 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 测试：`tests/test_patch_strip.py`（6 条：外观与改动前逐字相同的样式表 / 尺寸 / 间距 / 菜单宽度、7 个上限与菜单全列、点击与菜单都发 `chosen`、选中 / 名字 / 样式、无 patch 时禁用与提示、列表对象不被替换）；`tests/test_step3_patch_strip.py`（4 条：一行的组成与顺序、运行下拉框是标签栏角落控件且不在标签页内容里、与 Step1 同名同色并跟随列表变化、Step3 点击后 Step3 viewer 空降且与 Step1 viewer 对同一 patch 的空降位置相同、选中共用与会话保存、viewer 未打开时的选中）。**直接用到按钮条内部名字的 16 个现有测试文件一条未改、全部通过。**
   - 反向注入 8 处，各使至少 1 条变红：Step3 点击不更新 Step1 的标记、不保存会话、Step3 条不随列表重建、运行下拉框不在角落、Step3 点击移动了 Step1 的 viewer、内联上限改为 6、列表对象被替换、菜单按钮样式漂移。
   - 回归：40 个模块（上述 16 个 patch 相关文件、界面规则契约、Step3 各模块、Step1 viewer / 相机 / 暂停 / Navigator 权限 / 通道面板 / montage / GPU 接管相关模块），每模块单独进程，与 `git archive HEAD`（`1177185`）逐条对比：**38 个既有模块两边结果完全相同，无新增失败**（两边相同：`test_global_channel_dock.py`、`test_step1_channel_panel.py` 各 1 条字体，`test_tissue_navigator_viewport_sync.py::test_mapping_slide_local_to_full`，`test_step1_montage_view.py` 第 27 条后崩溃）；新增 2 个模块 10 条全部通过。
+  - **真机验收通过（用户 2026-09-27）**。
+
+### 块 B3 — 三个测试中发现的问题（申请 v1，**用户 2026-09-27 批准**，4 项裁定全部按建议；已实施，**真机验收通过**；插在 Step4 之前）
+- **必要性**：用户 2026-09-27 真机测试中报告，要求在 Step4 之前修掉。
+- **问题 1：Step1 Save 的进度条始终 0 %；`Save Fusion Settings` 出现在 Pre-segmentation 标签页下**
+  - 调查：Save 生成 fused.zarr 的 `FullFusionWorker`（`ui/step0/overview_panel.py:242`）只按**区域**报进度：每处都是 `progress.emit(reg_i, len(regions), …)`，切块完成时只改文字、不改完成数（`:554`、`:601`）。「区域」是 ROI（Full WSI 就是 1 个区域），用户每次选的 `2 × 2` 是区域里的**切块网格**（4 块）：4 块逐一完成时进度一直是 0 / 1，直到整个区域写完才变 1 / 1，而进度框随即关闭——所以看到的始终是 0 %。`Save Fusion Settings` 放在 Step1 页面的底部栏（`main_window.py:1009`，块 A 的裁定：在 Channels 框正下方、跟随它的宽度），不属于左栏的某个标签页，所以切到 Pre-segmentation 时仍然显示。
+  - 做法：进度改为按切块汇报：完成数 = 区域序号 × 1000 + 本区域已完成切块数 / 切块总数 × 1000，总数 = 区域数 × 1000，每块完成时发一次（文字不变）。`Save Fusion Settings` 只在左栏当前是 `Fusion` 标签时显示，切到 `Pre-segmentation` 时隐藏，**保留它的位置**（不让下面的内容跳动，见裁定 1）。
+- **问题 2：Step3 看不到之前其他会话的分割结果；Step3 应是通用的分割结果查看器**
+  - 调查：每次在 Step0 保存 Full WSI 都新建一个 ROI 工作区（`~/fusion_data/test1/rois/` 下现有 6 个，其中 2 个有运行）；Step3 只列**当前**工作区的运行（④a `list_runs(roi_dir)`），并且按当前 ROI 的名字与 bbox 解析 mask（`resolve_masks(run, roi_name, roi_bbox, …)`）。所以之前会话的结果看不到。
+  - 做法：
+    - 运行下拉框列出**当前项目所有 ROI 工作区**里的已完成运行（当前工作区的在前，其余按时间新到旧），每项写明来自哪个工作区；每个运行按它**自己的**区域解析 mask（多 ROI 的运行每个 ROI 一项），不再要求等于当前 ROI。
+    - 下拉框旁加一个 `Load…` 按钮（在标签栏右侧角落，与下拉框一起）：选一个运行目录（或它的 `segmentation_meta.json`），可以来自别的项目；载入后加入列表并选中。
+    - **只接受在当前打开的切片上做的结果**：运行 metadata 里的原始切片路径（`paths.raw_ome`，按真实路径比较）或所在工作区的 `source_ome` 与当前切片相同；否则不显示并写明原因（「这个结果是在另一张切片上做的」）。区域必须在切片范围内，金字塔仍按 ④a 的完整校验。
+    - 选择规则：显式指定（Step2 完成对话框、`Load…`）→ 当前选择 → 当前工作区的 active → 当前工作区最新 → 其他最新。
+  - 请用户裁定 2–4（见下）。
+- **问题 3：从 Step2 回到 Step1，Pre-seg Results 的 patch 图像消失，只剩细胞 / 核的轮廓；点 Overlay / Fusion / Membrane / DAPI 后恢复**
+  - 调查：离开 Step1 时 `_step1_whole_slide_step_changed` 调 `_close_montage_supply()`（`main_window.py:2096`）：关掉 montage 的供给与它的 GPU 层（块 D 的设计：离开 Step1 释放缓存与线程）；轮廓是 montage 视图上单独的一层，不随之清除。回到 Step1 时**没有任何地方重新请求 montage 的图像**——`_request_montage_images` 只在切换右栏标签、缩放层级、patch 变化、模式 / 图层按钮时调用（`:1306-1310`、`:5409`、`:5607`）。所以回来后只剩轮廓，点任一按钮就触发重新请求。与方法（StarDist + expansion）无关。
+  - 做法：进入 Step1 时（Step1 页面已在屏幕上之后，下一轮事件循环），如果右栏当前是 `Pre-seg Results`，调一次 `_request_montage_images()`——它会重建供给与 GPU 层并按当前的模式 / 图层画出来。不改 montage 的供给、GPU 层或释放规则。
+- **白名单**：`ui/step0/overview_panel.py`（只改 `FullFusionWorker` 的进度数值）；`ui/main_window.py`（`Save Fusion Settings` 随左栏标签显示 / 隐藏；进入 Step1 时补请求 montage；Step3 的运行列表、`Load…` 与接线）；`core/step3_masks.py`（跨工作区列运行、按运行自己的区域解析、切片一致性检查、`Load…` 的目录解析）；`ui/step3_mask_bar.py`（`Load…` 按钮）；`ui/step3_page.py`（角落控件放两个）；`UI_SURFACE_RULES.md`（Step1：`Save Fusion Settings` 只在 `Fusion` 标签下；Step3：列表范围与 `Load…`）；`docs/user_guide.md`、`docs/用户指南.md`；测试：新测试 `tests/test_b3_fixes.py`（或分放进各自的新测试文件），以及 `tests/test_step3_masks.py`、`tests/test_step3_mask_wiring.py`、`tests/test_step3_mask_bar.py` 中**因列表范围与解析规则改变而须改的用例**（实施前列出报批）；本文档。
+- **不改的范围**：fusion 的计算与写盘；montage 的供给、GPU 层与释放；Step3 的 GPU 渲染与标签绑定；Step2；打开别的项目 / 别的切片（S2 冻结）。
+- **风险**：
+  - 问题 2 改变了 ④a 的选择与解析规则（当前 ROI → 运行自己的区域）：已有的 ④a / ④c 测试须相应改写（报批）；
+  - 别的工作区的结果区域若不在当前 ROI 内，Step3 的画面按 Step1 的规则只显示当前 ROI（ROI 外是空的），mask 在那里也看不到（见裁定 4）；
+  - 回退：各自恢复。
+- **验收门**：
+  - 问题 1：合成数据的 fusion（1 个 ROI × `2 × 2` 切块、2 个 ROI × `2 × 2` 切块）：进度按切块单调上升、最后到 100 %；`Save Fusion Settings` 在 `Fusion` 标签下可见、在 `Pre-segmentation` 下隐藏且位置不变，切回来再出现。
+  - 问题 2：合成项目（两个工作区，同一切片；另一个项目；另一张切片的结果）：列表包含两个工作区的运行、写明来源、当前工作区在前；按运行自己的区域解析；`Load…` 载入别的项目里同一切片的运行并选中；另一张切片的结果被拒绝并写明原因；选择规则各情形。
+  - 问题 3：进入 Step2 再回 Step1，Pre-seg Results 的图像重新请求并画出（供给与 GPU / CPU 画面重新建立），无需点任何按钮。
+  - 回归：Step1 / Step3 / montage / fusion 相关模块与 HEAD 逐条对比，无新增失败。
+  - 真机（用户）：三个问题各自复现步骤下不再出现。
+- **请用户裁定**：
+  1. 切到 `Pre-segmentation` 时 `Save Fusion Settings` **隐藏但保留位置**（建议：下面的内容不跳动），还是隐藏并把高度让给上面的内容？
+  2. 运行列表的范围：(a) **自动列出当前项目所有 ROI 工作区的运行 + `Load…` 载入别处的**（建议）；(b) 只列当前工作区，其余都用 `Load…`。
+  3. 只接受**在当前切片上做的**结果（按原始切片的真实路径判断），别的切片的结果拒绝并写明原因——确认？（要看别的切片，须先在 Step0 打开那张切片。）
+  4. 结果的区域不在当前 ROI 内时（例如在另一个 ROI 上做的）：(a) 照样列出，提示「这个结果有一部分在当前 ROI 之外，那里不显示」（建议）；(b) 不列出。
+- **用户裁定（2026-09-27）**：全部同意（1 隐藏并保留位置；2 自动列出项目所有工作区 + `Load…`；3 只接受当前切片的结果；4 照样列出并提示）。
+- **执行记录**（2026-09-27，未提交）：
+  - 问题 1：`ui/step0/overview_panel.py` `FullFusionWorker.run` 的进度改为每个区域 1000 个单位、按切块均分（开始、每块开始 / 完成、多边形掩膜、区域完成各一处），文字不变；`main_window`：`Save Fusion Settings` 的尺寸策略设 `retainSizeWhenHidden`，左栏 `currentChanged` → `_follow_step1_left_tab`（只在 `Fusion` 下显示）。
+  - 问题 2：`core/step3_masks.py` 新增 `Run.workspace` / `workspace_label`、`Entry`（运行 + 它的一个区域，键 = 运行目录 + 区域名）、`workspace_slide` / `run_slide` / `same_slide`、`list_project_runs`（当前工作区在前，其他工作区只收同一切片的）、`load_run`（任意运行目录或它的 meta 文件）、`run_regions`（运行自己的区域）、`entries`、`choose_entry`、`inside`；④a 原有函数不变。`main_window._step3_refresh_masks` 改用这些（按运行自己的区域解析；区域不在当前 ROI 内时提示）；`_step3_load_run` 与可替换的 `_step3_pick_run_folder`（产品用系统目录对话框）；另一张切片 / 不是运行目录 → 提示 `Not loaded: …`，下次刷新清除；换数据集时清空已载入的运行。`ui/step3_mask_bar.py`：`Load…` 按钮、`load_requested`、角落控件 `corner()`（下拉框 + `Load…`）、`current_run_dir()` 从键里取目录。
+  - 问题 3：`main_window._step1_whole_slide_step_changed`：进入 Step1 后下一轮事件循环调一次 `_request_montage_images()`（montage 不在屏幕上时它自己拒绝）。
+  - 文档：`UI_SURFACE_RULES.md`（Step1：`Save Fusion Settings` 只属于 `Fusion` 标签；Step3：通用结果查看器、列表范围、`Load…`、按运行自己的区域）；两份用户指南 Step3 一节的运行下拉框。
+  - 测试：新测试 `tests/test_b3_fixes.py`（7 条：1 个 ROI × 2 × 2 与 2 个 ROI × 2 × 2 的进度按切块上升到 100 %、`Save Fusion Settings` 随标签隐藏 / 显示且保留位置、项目所有工作区的列表与排序（另一切片的工作区不列）、Step3 列出之前会话的结果、`Load…` 另一项目的同一切片结果并选中、另一切片的结果与非运行目录被拒绝并提示、区域在当前 ROI 之外的提示、回到 Step1 重新请求 montage 图像）。**用户授权改的 2 条**：`test_step3_mask_wiring.py` 的「别的 ROI 的运行」改为按它自己的区域显示；`test_step3_patch_strip.py` 的角落控件断言改为「包含下拉框与 `Load…`」。
+  - 反向注入 9 处，各使至少 1 条变红：进度仍按区域、回到 Step1 不重新请求、按钮始终显示、隐藏时不保留位置、只列当前工作区、列出别的切片、`Load…` 不查切片、不提示区域在 ROI 外、拒绝提示不清除。
+  - 回归：46 个模块（Step1 保存 / fusion 发布 / fusion 隔离 / 预分割界面、patch 相关、Step3 各模块、Step1 viewer / 相机 / Navigator / 通道面板 / montage / GPU 接管、界面规则契约等），每模块单独进程，与 `git archive HEAD`（`343117e`）逐条对比：**45 个既有模块两边结果完全相同，无新增失败**（两边相同：两条字体、`test_mapping_slide_local_to_full`、montage 第 27 条后崩溃；授权改写的 2 条在各自一侧都通过）；新增 `test_b3_fixes` 7 条通过。
   - **真机验收通过（用户 2026-09-27）**。
 
 ## 六、未决与 advisory

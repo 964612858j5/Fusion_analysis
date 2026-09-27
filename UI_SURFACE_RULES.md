@@ -97,9 +97,11 @@ row, and the duplicate Tissue Preview button in the step bar.
   button is gone from the screen. It is as wide as the Channels frame and
   directly under it, following the column as its handle is dragged, and as
   tall as the BORDER of Step0's Per-Channel Decision frame (not the title
-  above it), level with that border. The Channels frame takes the column's
-  height, and the two steps' Channels frames start and end on the same
-  lines.
+  above it), level with that border. It belongs to the `Fusion` tab
+  (block B3, user ruling 2026-09-27): while `Pre-segmentation` is up it is
+  hidden and its place is kept, so nothing below moves. The Channels frame
+  takes the column's height, and the two steps' Channels frames start and
+  end on the same lines.
   The column behaves as Step0's (fourth round): the same scroll bar, and
   dragging the handle stops where a Step1 row still fits, so the frame's
   right edge, the scroll bar, the weight box and `Save Fusion Settings` are
@@ -236,13 +238,22 @@ row, and the duplicate Tissue Preview button in the step bar.
   click lands Step3's viewer on the patch and is THE patch selection, the one
   Step1's strip marks and its session keeps), then the mask controls (block
   4c, user rulings 2026-09-26/27), then the `Overlay` / `Fusion` pair (the
-  SAME mode as Step1's pair) at its right end. The run drop-down sits at the
-  right of the TAB BAR's row, beside the `Viewer` tab and outside its
-  content. The mask controls: the run drop-down (the current ROI workspace's
-  finished Step2 runs, `method · date time`, `(active)` marked, newest
-  first; one disabled `No segmentation results for this ROI` when there are
-  none; the run named by Step2's finished dialog, else the current choice,
-  else the active run, else the newest); `Cell mask ▾` and `Nucleus mask ▾`
+  SAME mode as Step1's pair) at its right end. The run drop-down and
+  `Load…` sit at the right of the TAB BAR's row, beside the `Viewer` tab
+  and outside its content. Step3 is a GENERAL RESULT VIEWER (block B3, user
+  rulings 2026-09-27): the run drop-down lists the finished Step2 runs of
+  EVERY ROI workspace of the project made on the open slide -- the current
+  workspace's first, the others newest first and labelled `[workspace ·
+  time]` -- plus any run brought in with `Load…` (a run folder from any
+  project, accepted only when it was made on the open slide; otherwise the
+  hint says `Not loaded: …` and why); each run is shown on ITS OWN region
+  (a run of several ROIs is one item per ROI), and a region reaching outside
+  the current ROI is said in the hint. Items read `method · date time`,
+  `(active)` for the current workspace's active run; one disabled `No
+  segmentation results for this ROI` when there are none; the choice: the
+  run named by Step2's finished dialog or by `Load…`, else the current
+  choice, else the current workspace's active run, else its newest, else
+  the newest of the rest. `Cell mask ▾` and `Nucleus mask ▾`
   in the mode buttons' look, each with a swatch of its colour and a
   drop-down panel -- `Show` (both on by default), a row of preset colours
   and `Custom…` (the colour is the OUTLINE's; `Fill uses one colour per

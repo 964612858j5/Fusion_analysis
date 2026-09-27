@@ -1291,6 +1291,13 @@ class MainWindow(QMainWindow):
         # "Pre-segmentation" (user ruling, 2026-09-24): patches, methods and
         # a trial run before the full segmentation. Was "Method & Parameters".
         left_tabs.addTab(method_params_tab, "Pre-segmentation")
+        # `Save Fusion Settings` belongs to the Fusion tab (block B3, user
+        # ruling 2026-09-27): hidden while Pre-segmentation is up, its place
+        # KEPT so nothing below it moves.
+        keep = self._btn_save_fusion_settings.sizePolicy()
+        keep.setRetainSizeWhenHidden(True)
+        self._btn_save_fusion_settings.setSizePolicy(keep)
+        left_tabs.currentChanged.connect(self._follow_step1_left_tab)
         right_tabs.addTab(pw, "Viewer")
         right_tabs.addTab(patch_results_tab, "Patch Results")
         # Block E: the old Patch Results tab is kept, not shown (Pre-seg
@@ -1607,6 +1614,7 @@ class MainWindow(QMainWindow):
         bar = Step3MaskBar(self)
         bar.run_chosen.connect(self._step3_on_run_chosen)
         bar.style_changed.connect(self._step3_on_mask_style)
+        bar.load_requested.connect(lambda: self._step3_load_run())
         self._step3_mask_bar = bar
         strip = PatchStrip(self)
         strip.chosen.connect(lambda idx: self._select_step3_patch(idx))
@@ -1619,7 +1627,7 @@ class MainWindow(QMainWindow):
             header_spacing=header_spacing, weight_widgets=(reset, load),
             mode_widgets=(self._btn_step3_mode_overlay, self._btn_step3_mode_fusion),
             mask_widgets=(strip.holder(), bar.buttons["cell"], bar.buttons["nucleus"]),
-            mask_hint=bar.hint, corner_widget=bar.run_combo)
+            mask_hint=bar.hint, corner_widget=bar.corner())
         self._rebuild_step3_patch_strip()
 
     def _load_weights_dialog(self, parent):
@@ -1945,10 +1953,19 @@ class MainWindow(QMainWindow):
         return roi_dir, roi.get("name") or "", roi.get("bbox_fullres")
 
     @staticmethod
-    def _step3_run_label(run):
+    def _step3_run_label(entry, current_ws=None, several=False):
+        """`method · run time`, `(active)` for the current workspace's active
+        run, the region for a run of several, the workspace for another one."""
+        run = entry.run
         created = str(run.created_at or "")[:16].replace("T", " ")
         label = f"{run.method or 'unknown method'} · {created}" if created else run.method
-        return label + ("  (active)" if run.active else "")
+        if several:
+            label += f" · {entry.roi_name}"
+        if run.active and run.workspace == current_ws:
+            label += "  (active)"
+        if run.workspace != current_ws:
+            label += f"  [{run.workspace_label or 'loaded'}]"
+        return label
 
     @staticmethod
     def _step3_source_key(sources):
@@ -1959,45 +1976,64 @@ class MainWindow(QMainWindow):
                       (src.mask_path, tuple(src.bbox), src.pyramid_path))
                      for kind, src in sorted(sources.items()))
 
+    def _step3_slide_path(self):
+        return str(getattr(getattr(self, "loader", None), "filepath", "") or "")
+
     def _step3_refresh_masks(self, requested_dir=None):
-        """Read the ROI workspace's runs, choose one, resolve its masks and
-        hand them to Step3's viewer -- only when they differ from the ones
-        it draws, so a refresh that keeps the choice clears nothing."""
+        """Step3 as a general result viewer (block B3): the runs of EVERY ROI
+        workspace of the project made on the open slide, plus the ones loaded
+        with `Load…`; each shown on its own region. Choose one, resolve its
+        masks and hand them to the viewer -- only when they differ from the
+        ones it draws, so a refresh that keeps the choice clears nothing."""
         bar = self.__dict__.get("_step3_mask_bar")
         if bar is None:
             return None
         roi_dir, roi_name, roi_bbox = self._step3_mask_context()
+        current_ws = os.path.realpath(roi_dir) if roi_dir else ""
         if self.__dict__.get("_step3_mask_roi_dir") != roi_dir:
-            self._step3_mask_run_id = None          # another workspace: no current choice
+            self._step3_mask_key = None             # another workspace: no current choice
         self._step3_mask_roi_dir = roi_dir
+        self._step3_mask_refusal = None             # a new look at the list
+        slide = self._step3_slide_path()
         try:
-            runs = step3_masks.list_runs(roi_dir) if roi_dir and os.path.isdir(roi_dir) else []
+            runs = (step3_masks.list_project_runs(roi_dir, slide)
+                    if roi_dir and os.path.isdir(roi_dir) else [])
         except Exception as exc:                            # noqa: BLE001
             print(f"[Step3] segmentation runs could not be listed: {exc}")
             runs = []
-        run = step3_masks.choose_run(runs, requested_dir=requested_dir,
-                                     current=self.__dict__.get("_step3_mask_run_id"))
+        listed = {r.run_dir for r in runs}
+        runs += [r for r in self.__dict__.get("_step3_loaded_runs") or []
+                 if r.run_dir not in listed]
+        items = step3_masks.entries(runs)
+        entry = step3_masks.choose_entry(items, requested_dir=requested_dir,
+                                         current_key=self.__dict__.get("_step3_mask_key"),
+                                         workspace=current_ws, roi_name=roi_name)
         self._step3_mask_runs = runs
-        self._step3_mask_run_id = run.run_id if run is not None else None
-        bar.set_runs([(self._step3_run_label(r), r.run_dir) for r in runs],
-                     run.run_dir if run is not None else None)
+        self._step3_mask_key = entry.key if entry is not None else None
+        several = {r.run_dir: len(step3_masks.run_regions(r)) > 1 for r in runs}
+        bar.set_runs([(self._step3_run_label(e, current_ws, several[e.run.run_dir]), e.key)
+                      for e in items], entry.key if entry is not None else None)
         mount = self.__dict__.get("_step3_mount")
         stack = getattr(getattr(mount, "host", None), "stack", None) if mount else None
         resolved = {"cell": None, "nucleus": None, "reasons": {}}
         self._step3_mask_problem = None
-        if run is not None and stack is None:
+        self._step3_mask_note = None
+        if entry is not None and stack is None:
             self._step3_mask_problem = "Masks need the whole-slide viewer"
-        elif run is not None:
+        elif entry is not None:
             provider = stack.provider
             shapes = [provider.level_shape(level) for level in range(provider.num_levels)]
             try:
-                resolved = step3_masks.resolve_masks(run, roi_name, roi_bbox, shapes)
+                resolved = step3_masks.resolve_masks(entry.run, entry.roi_name, entry.bbox, shapes)
             except Exception as exc:                        # noqa: BLE001
                 resolved = {"cell": None, "nucleus": None,
                             "reasons": {"cell": str(exc), "nucleus": str(exc)}}
             if resolved["cell"] is None and resolved["nucleus"] is None:
                 why = resolved["reasons"].get("cell") or resolved["reasons"].get("nucleus") or ""
                 self._step3_mask_problem = f"Mask not shown: {why} — re-run Step2"
+            elif not step3_masks.inside(entry.bbox, step3_masks._bbox(roi_bbox)):
+                self._step3_mask_note = ("Part of this result lies outside the current ROI; "
+                                         "it is not shown there")
         sources = {kind: resolved.get(kind) for kind in ("cell", "nucleus")}
         for kind in ("cell", "nucleus"):
             bar.set_mask_available(kind, sources[kind] is not None)
@@ -2006,10 +2042,48 @@ class MainWindow(QMainWindow):
             if self._step3_source_key(wanted) != self._step3_source_key(mount.mask_sources()):
                 mount.set_mask_sources(wanted)
         self._step3_update_mask_hint()
-        return run
+        return entry
 
-    def _step3_on_run_chosen(self, run_dir):
-        self._step3_refresh_masks(requested_dir=run_dir)
+    def _step3_on_run_chosen(self, key):
+        """A list choice: the entry's key (a plain run folder is taken too)."""
+        run_dir, _sep, roi = str(key).partition("\x1f")
+        if roi:
+            self._step3_mask_key = key
+            self._step3_refresh_masks()
+        else:
+            self._step3_refresh_masks(requested_dir=run_dir)
+
+    def _step3_pick_run_folder(self):
+        """Where `Load…` asks for a folder: the system dialog. A seam -- a
+        test answers directly instead of opening a modal box."""
+        start = os.path.dirname(os.path.dirname(self.__dict__.get("_step3_mask_roi_dir") or "")) \
+            or os.getcwd()
+        return QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Load a Step2 result (its run folder)", start)
+
+    def _step3_load_run(self):
+        """`Load…`: any Step2 run folder -- another workspace, another
+        project -- as long as it was made on the open slide."""
+        path = self._step3_pick_run_folder()
+        if not path:
+            return False
+        run = step3_masks.load_run(path)
+        if isinstance(run, str):
+            self._step3_mask_refusal = f"Not loaded: {run}"
+        elif not step3_masks.same_slide(step3_masks.run_slide(run), self._step3_slide_path()):
+            made_on = step3_masks.run_slide(run) or "an unrecorded slide"
+            self._step3_mask_refusal = (f"Not loaded: this result was made on another slide "
+                                        f"({os.path.basename(made_on)})")
+        else:
+            self._step3_mask_refusal = None
+            loaded = [r for r in self.__dict__.get("_step3_loaded_runs") or []
+                      if r.run_dir != run.run_dir]
+            self._step3_loaded_runs = loaded + [run]
+            self._step3_refresh_masks(requested_dir=run.run_dir)
+            return True
+        print(f"[Step3] {self._step3_mask_refusal}")
+        self._step3_update_mask_hint()
+        return False
 
     def _step3_on_segmentation_done(self, _output_dir):
         """Step2 finished in the background: a new run for the list, the
@@ -2025,9 +2099,12 @@ class MainWindow(QMainWindow):
     def _step3_clear_masks(self):
         """The dataset moved: no list, no choice, no hint."""
         self._step3_mask_runs = []
-        self._step3_mask_run_id = None
+        self._step3_mask_key = None
+        self._step3_loaded_runs = []            # loaded for the old dataset's slide
         self._step3_mask_roi_dir = None
         self._step3_mask_problem = None
+        self._step3_mask_note = None
+        self._step3_mask_refusal = None
         mount = self.__dict__.get("_step3_mount")
         if mount is not None:
             # the mount keeps its masks across a close; these are the old
@@ -2042,6 +2119,9 @@ class MainWindow(QMainWindow):
 
     def _step3_mask_hint_text(self):
         """The one line the hint shows, most important first."""
+        refusal = self.__dict__.get("_step3_mask_refusal")
+        if refusal:
+            return refusal
         if not self.__dict__.get("_step3_mask_runs"):
             return "No segmentation results for this ROI — run Step2"
         problem = self.__dict__.get("_step3_mask_problem")
@@ -2063,7 +2143,7 @@ class MainWindow(QMainWindow):
             return f"Zoomed out, masks cannot be shown: {here[0]}"
         if status.get("budget"):
             return "Mask memory is full: part of the view has no mask"
-        return ""
+        return self.__dict__.get("_step3_mask_note") or ""
 
     def _step3_update_mask_hint(self):
         bar = self.__dict__.get("_step3_mask_bar")
@@ -2094,7 +2174,22 @@ class MainWindow(QMainWindow):
         if active != 1:
             # Leaving Step1 empties the montage's caches and ends its thread.
             self._close_montage_supply()
-        return self._step1_whole_slide_step_changed_inner(active)
+        result = self._step1_whole_slide_step_changed_inner(active)
+        if active == 1:
+            # ...and COMING BACK draws it again (block B3): nothing else asks
+            # for the montage's pictures on a step change, so only its
+            # outlines -- a layer of their own -- were left. Once the page is
+            # on screen (the request refuses a hidden montage).
+            QTimer.singleShot(0, self._request_montage_images)
+        return result
+
+    def _follow_step1_left_tab(self, index):
+        """`Save Fusion Settings` only under the Fusion tab (block B3)."""
+        tabs = self.__dict__.get("_step1_left_tabs")
+        btn = self.__dict__.get("_btn_save_fusion_settings")
+        if tabs is None or btn is None:
+            return
+        btn.setVisible(tabs.tabText(index) == "Fusion")
 
     def _step1_whole_slide_step_changed_inner(self, active):
         """Follow the step: Step1 composes only while it is on screen.

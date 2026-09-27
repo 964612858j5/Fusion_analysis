@@ -60,7 +60,9 @@ def test_one_row_and_the_run_list_beside_the_tab(app, tmp_path, monkeypatch):
         assert row == [strip.holder(), bar.buttons["cell"], bar.buttons["nucleus"], bar.hint,
                        w._btn_step3_mode_overlay, w._btn_step3_mode_fusion]
         tabs = w._step3._right_tabs
-        assert tabs.cornerWidget() is bar.run_combo
+        corner = tabs.cornerWidget()
+        assert corner is bar.corner()                                    # run list + Load… (B3)
+        assert corner.isAncestorOf(bar.run_combo) and corner.isAncestorOf(bar.load_button)
         assert not tabs.widget(0).isAncestorOf(bar.run_combo)            # not in the tab's content
     finally:
         w.close()

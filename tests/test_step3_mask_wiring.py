@@ -174,17 +174,18 @@ def test_the_method_decides_which_buttons_work(app, tmp_path, monkeypatch, metho
         w.close()
 
 
-def test_a_run_of_another_roi_disables_both_and_says_why(app, tmp_path, monkeypatch):
-    rdir, _ = _project(tmp_path, runs=(("seg_x", "cellpose_wholecell_fusion",
-                                        "2026-09-26T08:00:00"),), roi_name="ROI_9")
+def test_a_run_of_another_roi_is_shown_on_its_own_region(app, tmp_path, monkeypatch):
+    """Block B3: Step3 is a general result viewer -- a run of another ROI
+    (same slide) is shown where ITS region is, not refused."""
+    rdir, runs = _project(tmp_path, runs=(("seg_x", "cellpose_wholecell_fusion",
+                                           "2026-09-26T08:00:00"),), roi_name="ROI_9")
     rig = _window(app, tmp_path, monkeypatch, rdir)
     w, bar = rig.w, rig.w._step3_mask_bar
     try:
         sv._enter(rig, 3)
-        assert not bar.buttons["cell"].isEnabled() and not bar.buttons["nucleus"].isEnabled()
-        hint = bar.hint.full_text()
-        assert hint.startswith("Mask not shown:") and "ROI_1" in hint and "re-run Step2" in hint
-        assert w._step3_mount.mask_sources() is None
+        assert bar.buttons["cell"].isEnabled()
+        assert _cell_path(w) == os.path.realpath(runs["seg_x"].mask)
+        assert tuple(w._step3_mount.mask_sources()["cell"].bbox) == BBOX
     finally:
         w.close()
 

@@ -193,7 +193,8 @@ class ElidedLabel(QtWidgets.QLabel):
 class Step3MaskBar(QtCore.QObject):
     """The row's four controls and their signals."""
 
-    run_chosen = pyqtSignal(str)            # a run directory
+    run_chosen = pyqtSignal(str)            # an entry's key (a run folder and a region)
+    load_requested = pyqtSignal()           # `Load…` (block B3)
     style_changed = pyqtSignal(str, dict)   # kind, the fields that changed
 
     def __init__(self, parent=None):
@@ -204,6 +205,13 @@ class Step3MaskBar(QtCore.QObject):
             "QComboBox{color:#ddd;background:#182230;border:1px solid #354a63;"
             "border-radius:4px;padding:1px 6px;font-size:10px;}")
         self.run_combo.activated.connect(self._run_activated)
+        # Block B3: any Step2 result of the open slide, from anywhere.
+        self.load_button = QtWidgets.QPushButton("Load…")
+        self.load_button.setStyleSheet(MODE_BUTTON_QSS)
+        self.load_button.setToolTip("Load a Step2 result made on this slide "
+                                    "(its run folder), from any project")
+        self.load_button.clicked.connect(self.load_requested.emit)
+        self._corner = None
         self.buttons = {kind: MaskButton(kind) for kind in (CELL, NUCLEUS)}
         for kind, button in self.buttons.items():
             button.panel.changed.connect(lambda change, k=kind: self.style_changed.emit(k, change))
@@ -213,6 +221,18 @@ class Step3MaskBar(QtCore.QObject):
     def row_widgets(self):
         """The three controls before the hint, in order."""
         return (self.run_combo, self.buttons[CELL], self.buttons[NUCLEUS])
+
+    def corner(self):
+        """The run drop-down and `Load…`, for the tab bar's corner."""
+        if self._corner is None:
+            corner = QtWidgets.QWidget()
+            lay = QtWidgets.QHBoxLayout(corner)
+            lay.setContentsMargins(0, 0, 4, 0)
+            lay.setSpacing(4)
+            lay.addWidget(self.run_combo)
+            lay.addWidget(self.load_button)
+            self._corner = corner
+        return self._corner
 
     def set_runs(self, items, current_dir=None):
         """`items` = [(label, run_dir)], newest first; `current_dir` selected."""
@@ -231,7 +251,11 @@ class Step3MaskBar(QtCore.QObject):
         combo.blockSignals(False)
 
     def current_run_dir(self):
-        return self.run_combo.currentData() or ""
+        """The chosen run's folder (an entry's key is `folder \\x1f region`)."""
+        return str(self.run_combo.currentData() or "").partition("\x1f")[0]
+
+    def current_key(self):
+        return str(self.run_combo.currentData() or "")
 
     def set_mask_available(self, kind, available):
         self.buttons[kind].setEnabled(bool(available))

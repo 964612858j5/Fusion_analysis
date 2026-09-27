@@ -9,6 +9,11 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.62：块 N2 v4 获批；第六节后续顺序按独立审核建议更新（Step4 之后：WSI 阻塞项清理 → TMA 基础 → QualityMask → TMA 批处理 → 真实数据剖析 → Rust 基础）。
+- v3.61：块 N2 按独立审核修订为 v4（归属措辞：核唯一属于一个细胞、细胞可有多核；科学输出的事务规则；LabelStore 作统一语义入口；对应表按块写入与 2^32 保护；丢弃分三类并记保留率；新核通路与 HQ 解耦；I/O 失败事务与切块边界两项验收）；清理第六节中被块 K / M / S5 取代的过期条目。
+- v3.60：块 N2 按裁定 A（多核全保留）/ B（不写核 OME-TIFF）修订为 v3：核独立编号 + 「核 → 细胞」对应表。
+- v3.59：块 N2 按用户裁定修订为 v2（核与细胞一一对应、骑跨即丢弃、实测配对速度无需 Rust；以 zarr 为准的标签存储与编号契约，对标未来 Step4 的流式定量；不再写核 OME-TIFF；核的临时 memmap 用后即删）；后续计划按用户排定的顺序改写。
+- v3.58：块 N2 申请 v1（所有计算了核的方法保留核 mask：expansion 带回核；nuclear-guided 的核改为独立归属与编号；新标志 keeps_nuclei；Step3 分类表更新）。
 - v3.57：块 ④c 真机验收（第 1–4、6 项通过，第 5 项真机未验）；记录 expansion 方法的核 mask 被 Step2 丢弃，用户裁定另立块。
 - v3.56：块 ④c 已实施（自动验收通过，待真机验收），写入执行记录。
 - v3.55：块 ④c v2 获批（4 项裁定同意，含 ④b 错误状态的最小扩围）。
@@ -1365,12 +1370,114 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 回归：与 `git archive HEAD`（`d24bc7e`）逐条对比，**无新增失败**。离屏 31 个模块（含界面规则契约 `test_ui_surface_contract`、Step1 → Step2 交接、Step3 / Step1 viewer / GPU / 标签相关模块），两边相同：`test_global_channel_dock.py` 1 条（字体）、`test_step1_montage_view.py` 第 27 条后崩溃。真实 GL（每条单独进程）：GPU 接管 / 总览跳过 / 请求门 / 标签渲染 / 标签 mount 共 92 条 + 本块接线 10 条，两边相同的唯一失败仍是 `test_the_mounted_widget_framebuffer_holds_real_gpu_pixels`（厂商名，环境原因）。
   - **真机验收（用户 2026-09-27，同时是 ④a、④b 的真机验收）**：第 1–4 项通过；第 6 项退出程序无段错误（本机 ④b 测试进程中的退出段错误未在产品中出现）；第 5 项（无金字塔的旧运行现场补生成）**真机未验**，只有自动测试覆盖。真机中发现：`cellpose_nuclei_expansion` 的新运行在 Step3 没有核 mask——Step2 丢弃了引擎算出的核（`segment_merge_worker.py:2125`），按 ④a 批准的分类表核按钮禁用；用户裁定所有计算了核的方法都必须保留核 mask 并能在 Step3 显示，另立块（见第六节）。第 5 项的复制件由任务临时目录里的脚本 `make_pyramidless_copy.py` 生成（复制一个 ROI 工作区、去掉 `.dat` 与 `label_pyramid_*.zarr`、把复制件全部 JSON 里的项目路径改写到复制件并核对无残留；原项目只读）。
 
+### 块 N2 — 所有计算了核的方法都保留核 mask，并能在 Step3 显示（申请 v4，按用户裁定与独立审核修订，**用户 2026-09-27 批准**，实施中）
+- **必要性**：用户裁定（2026-09-27，④c 真机验收中发现）：凡是计算了核的方法，都必须保留核 mask，并能在 Step3 的 `Nucleus mask` 里显示。
+- **只读调查结论**：
+  - 8 个方法都在引擎子进程里分割（`_runs_on_engine`，`segment_merge_worker.py:1979`）；引擎按方法返回 `{cell, nucleus}`（`seg_runner/engines.py` `run()`）。各方法的核：
+
+    | 方法 | 引擎算核吗 | Step2 现在 | Step3 现在 |
+    |---|---|---|---|
+    | cellpose_wholecell_fusion、mesmer_whole_cell | 否（只预测整细胞） | — | 只有细胞（正确） |
+    | cellpose_nuclei_dapi、stardist_nuclei_dapi、mesmer_nuclei | 是，核**就是**主输出 | 存为 `global_mask*` | 显示为核（正确） |
+    | cellpose_nuclei_expansion、stardist_nuclei_expansion | 是：先得核，再扩张成细胞 | **丢弃核**，只存扩张后的细胞（`:2125`「expansion: the expanded cells only」） | 核按钮禁用 |
+    | mesmer_nuclear_guided | 是：整细胞与核各预测一次 | 存核，但**用细胞的编号表重编号**（见下） | 显示的核很可能不对 |
+    | HQ / HQ2 / CDS（不维护） | 是 | 存核（核编号 = 细胞编号） | 显示 |
+
+  - **核的重编号用的是细胞的编号表**：两个切块循环（ROI `:2621-2629`、全图 `:3483-3490`）都是 `remapped_nuclei = lut[where(nuclei <= n_raw, nuclei, 0)]`，其中 `lut` 与 `n_raw` 来自细胞 mask。这只在「核编号 = 它所属细胞的编号」时成立：HQ 系成立；expansion 也成立（扩张不改编号）。但 **mesmer_nuclear_guided 的核与细胞是 Mesmer 两次独立预测的两套编号**：核 k 会被接到细胞 k 的全局编号上（错的细胞），细胞 k 不在本块时核被丢掉，编号大于细胞数的核也被丢掉。本机没有 Mesmer 模型，无法实测；依据是引擎代码（两次独立的 `predict`）。
+  - 核的写盘整套绑在 `is_hq` 上（`is_hq = HQ 系 or nuclear-guided`，`:2343`）：核的 memmap、`global_nuclei_mask*.zarr`、核的 OME-TIFF（float32）、金字塔，但同一个标志也驱动 HQ 的质检表与 HQ 专用 metadata（`_hq_meta_fields`，`:2904`），expansion 不能直接并进 `is_hq`。
+  - Step4 不读任何核文件（`feature_extract_worker.py` 等处无引用），保存核不改变 Step4。
+  - 「从 .npy 恢复」的运行只读回每块的主 mask（`:2450-2466`），拿不到核。
+  - Step1 预分割（`core/preseg_run.py`）已经同时保留细胞与核，不在本块范围。
+- **用户裁定（2026-09-27）**：
+  1. 凡是计算了核的方法都必须保留核 mask，并能在 Step3 显示。核与整细胞 mask **骑跨**（不被一个细胞完全包含）时丢弃该核。须考虑速度与资源；必要时可用 Rust，不强制。
+  2. **一个细胞可以同时保留多个核**（正常生物学现象）。因此（按审核修正措辞）：**每个保留的核唯一归属于一个细胞；一个细胞可以有 0、1 或多个核**——「核 → 细胞」是单值映射，「细胞 → 核」是一对多。
+  3. **不再写核的 OME-TIFF**（expansion 与 nuclear-guided）；外部软件需要时，作为下一阶段的「按需流式导出」。
+  4. Step4 将来要读核（核形态、核面积、核表达量、胞质表达量），并可能用 Rust 重构：Step2 的保存格式对标未来的 Step4；本次允许扩大 Step2 的白名单。
+  5. 顺序：本块 → Step3 剩余的第 ③ 步 → Step4 → 下一阶段优化（第六节）。
+- **归属规则**（只用于新的核通路：两个 expansion 与 nuclear-guided；在每个切块里、细胞归属与重编号之前做）：
+  - 核 n 的全部像素都落在**同一个**细胞 c 里（像素下的细胞编号只有 c 一种，且不为 0）→ 保留，所属细胞 = c。否则丢弃，分三类计数：`multiple_cells`（跨两个以上细胞）、`partial_background`（一个细胞 + 背景）、`outside_cells`（完全在背景）。
+  - 同一细胞里的多个核**全部保留**。
+  - 核的去留**跟随它的细胞**：细胞被本切块保留（现有的归属规则），它的核才保留——跨切块不会重复、也不会有核失去细胞。
+  - expansion 天然满足（核 ⊂ 扩张后的同编号细胞），规则等于核对；nuclear-guided 靠它把 Mesmer 两套独立编号接起来。
+  - **速度（实测，本机）**：4096² 切块、约 1.2 万个核，只在核像素上对打包的（核, 细胞）编号取 `np.unique` 判定包含，约 32 ms；推理每块几十秒以上，**不需要 Rust**。额外内存约为核像素数 × 8 字节。
+  - 严格的「完全包含」规则可能让两次独立预测的边界差 1–2 像素的核被丢弃：nuclear-guided 的真机验收除了看画面，**必须报告保留率**（见验收门）；若某真实数据集保留率明显偏低，不是代码缺陷，而是这条科学规则需要重新讨论。
+- **LabelStore：统一的语义入口**（对标未来的 Step4 / Rust；文件名保持历史兼容，**metadata 才是语义权威**）：
+  - 每个区域的 metadata（`segmentation_meta_<ROI>.json`、运行汇总里该 ROI 的记录，全图模式同理）新增：
+
+    ```
+    label_store:
+      version: 1
+      complete: true
+      cell:            {path, dtype: uint32, shape, chunks: [1024, 1024], n_objects}  或 null
+      nucleus:         {path, dtype: uint32, shape, chunks: [1024, 1024], n_objects}  或 null
+      nucleus_to_cell: {path, dtype: uint32, length: M + 1, chunks}                    或 null
+      relation:        {nucleus_to_cell: many_to_one} 或 null
+      nuclei: {predicted, kept, retained_fraction,
+               dropped: {multiple_cells, partial_background, outside_cells}}           或 null
+    ```
+
+  - 各类方法的结构：
+
+    | 方法 | `cell` | `nucleus` | `nucleus_to_cell` |
+    |---|---|---|---|
+    | 整细胞（cellpose_wholecell_fusion、mesmer_whole_cell） | `global_mask*` | null | null |
+    | 纯核（cellpose / stardist / mesmer 的纯核方法） | null | `global_mask*` | null |
+    | expansion、nuclear-guided | `global_mask*` | `global_nuclei_mask*` | `global_nuclei_cell*` |
+    | HQ / HQ2 / CDS（不维护） | 不写 `label_store`，保持原样 | | |
+
+  - **编号契约**：细胞编号区域内连续 1 … N、核编号区域内连续 1 … M（0 为背景，各自互不相同）；每个保留的核完全在它的细胞内；`nucleus_to_cell[k]` = 核 k 的细胞编号（第 0 项为 0）。**N 或 M 达到 2^32 时直接报错**，不允许 uint32 回绕。
+  - **二维数组**：细胞与核两个 zarr v2、uint32、同一形状、同一分块 1024 × 1024、同一压缩（Blosc lz4），分块 (i, j) 覆盖同一批像素；Rust 用 `zarrs` 即可读。
+  - **一维对应表**：zarr v2、uint32、分块 1 048 576 项；每个切块产出一个 `numpy.uint32` 数组，按块追加写入（`resize` + 写入末尾），内存里只有当前切块的数组与一个小缓冲——**不用 Python 整数列表累积**。
+  - 三个数组的属性里写同样的契约摘要（`label_store_version`、`kind`、编号规则、对象数）。
+  - Step3（`core/step3_masks.py`）：**有 `label_store` 时以它为准**（不再按方法猜 `global_mask` 是什么）；没有时（旧运行）沿用现在的分类表。未来的 Step4 也只读 `label_store`。
+- **科学输出的事务**（与标签金字塔不同：金字塔是显示用的派生物，失败不影响运行；核与对应表是科学输出）：
+  - 声明保留核的方法，一个区域的科学输出 = 细胞数组 + 核数组 + 对应表 + `label_store`。核数组与对应表先写到 `*.partial`，全部写完才改名；`label_store`（`complete: true`）最后写。
+  - **任一项写失败**（磁盘满、I/O 错误等）→ 本次运行失败，**不登记**（不进 `roi_index`、不写汇总的完成状态），清理本次的 `*.partial`；已有的其他运行不受影响。Stop 同理（沿用现有规则）。
+  - 核的标签金字塔仍按块 N 的规则：失败只打印，不影响运行。
+- **不整图展开、临时文件**：新核通路里没有对整图的 `astype` / `np.array`：核 memmap → zarr 按 1024 行一条写（与细胞相同）；核的临时 memmap（`global_nuclei_mask*.dat`）在核 zarr、对应表与金字塔都完成后**删除**（没有读取方）；失败或 Stop 时同样删除。细胞 mask 与 DAPI 现有的 OME 导出与 `.dat` 留到下一阶段。
+- **做法**：
+  1. 新文件 `core/nuclei_pairing.py`（无 Qt）：`pair_nuclei(cell_local, nuclei_local)` → 保留的核（局部连续编号）、每个核的局部所属细胞（uint32 数组）、四项计数。
+  2. `_segment_tile_contract`：两个 expansion 方法与 nuclear-guided 返回 `{"mask": 细胞, "nuclei": 配对后的核, "nuclei_cell": 所属细胞, "nuclei_counts": 计数}`。
+  3. 新标志 `keeps_secondary_nuclei`（两个 expansion、nuclear-guided）驱动新的核通路：配对、核 memmap、合并（按细胞的 `lut` 决定去留：所属细胞的 `lut` 为 0 的核丢弃；保留的核按局部编号顺序接到核的全局序列后面，另一个计数器；全局所属细胞 = `lut[局部所属细胞]`，按块追加到对应表）、事务写出、`label_store`、临时文件删除。**HQ / HQ2 / CDS 走 `is_hq` 的原路径，完全不动**；需要核 memmap 的条件写成 `is_hq or keeps_secondary_nuclei`。nuclear-guided 原来走的 `is_hq` 核分支改为走新通路（它原来的「用细胞编号表映射核」就是要修的缺陷）。ROI 与全图两条循环同样改。
+  4. metadata：`label_store`；nuclear-guided 的 `nuclei_mask_path`（原指核 OME）改为空；新增 `nuclei_zarr_path`、`nuclei_cell_table_path`。
+  5. Step3：见上（`label_store` 优先）；旧运行没有核文件 → 核按钮禁用，原因「this run was made before nuclei were kept — re-run Step2」。
+  6. 「从 .npy 恢复」的运行：没有核，`label_store.nucleus` 为 null 并写明原因。
+- **白名单（按裁定 4 扩大）**：`workers/segment_merge_worker.py`；`core/nuclei_pairing.py`（新）；`utils/mesmer_utils.py`（仅 `mesmer_metadata` 的核路径字段，若需要）；`core/step3_masks.py`（`label_store` 优先与分类表）；测试：`tests/test_step3_masks.py`、新测试 `tests/test_nuclei_pairing.py`、`tests/test_step2_keeps_nuclei.py`，以及现有 Step2 测试中**因不再写核 OME-TIFF 而须改的断言**（实施前列出具体用例报批）；`docs/user_guide.md`、`docs/用户指南.md`；本文档。其他测试失败须停下说明。
+- **不改的范围**：引擎（`seg_runner/`）、Step1 预分割、HQ / HQ2 / CDS 的行为、细胞 mask 的归属与编号、细胞 mask 与 DAPI 的 OME 导出与 `.dat`、Step4、Step3 界面与 GPU、Step2 的缓存 / 切块策略 / 引擎通信。
+- **风险**：
+  - Step2 是科学输出：细胞 mask 必须与改动前逐像素相同——验收锁定。
+  - nuclear-guided 无法在本机用真实 Mesmer 验证（无模型）：用替身引擎的合成输出测试；真机验收（含保留率）随 Mesmer 暂缓项。
+  - 已有的 expansion 结果不会自动多出核，须重跑；已有的 nuclear-guided 结果里的核是按旧（有缺陷的）规则保存的，Step3 仍会显示，须重跑。
+  - 回退：恢复这些文件。
+- **验收门**：
+  - 配对函数（合成标签）：完全包含 → 保留并记下所属细胞；`multiple_cells`、`partial_background`、`outside_cells` 各自正确计数并丢弃；同一细胞两个核 → 都保留、各有编号、都指向该细胞；独立编号（核编号大于细胞数、与细胞编号无关）正确。
+  - expansion（真实 Cellpose / StarDist 引擎、合成图像，ROI 与全图两种模式）：细胞 mask 与改动前**逐像素相同**；核与细胞同形状同分块、uint32；核编号 1 … M 连续且唯一；对应表长度 M + 1；逐像素「核像素所在的细胞 = 对应表[核编号]」；核金字塔通过 ④a 的完整校验；`label_store` 完整且计数与实际一致；临时核 `.dat` 已删除；没有核 OME-TIFF；④a `resolve_masks` 按 `label_store` 得到细胞与核两个源。
+  - nuclear-guided（替身引擎返回独立编号的两套标签，含三类丢弃、同一细胞多核、核编号大于细胞数、跨切块的细胞）：上面的契约全部成立；细胞 mask 与改动前逐像素相同；`label_store.nuclei` 的保留率与计数正确。
+  - **切块边界**：核碰到读取区边缘、细胞跨过本块的归属区、细胞归邻块所有——配对 → 归属 → 核的全局编号不会错误保留或重复核（每个核恰好出现一次，且在它的细胞里）。
+  - **普通 I/O 失败的事务**：细胞与核数组写成、对应表写到一半时注入普通写入错误 → 运行不登记、`label_store` 不存在或不是 complete、`*.partial` 被清理，不会留下「看起来成功但科学输出不完整」的运行；已有运行不受影响。
+  - 纯核与整细胞方法：`label_store` 按表写出（`cell` / `nucleus` 各自为 null）；HQ 系：输出与改动前逐像素相同（回归），不写 `label_store`。
+  - 旧运行（无 `label_store`、无核文件）：Step3 按原分类表，核按钮禁用并给出原因；「从 .npy 恢复」的运行：无核并写明原因。
+  - 资源：新核通路不对整图调用 `astype` / `np.array`（代码审查 + 一次合成大图的内存峰值检查）；对应表按块写入。
+  - Stop：中途停止不登记、不留半成品。
+  - 回归：Step2 / 标签金字塔 / Step3 相关模块与 HEAD 逐条对比，无新增失败。
+  - 真机（用户）：重跑 `cellpose_nuclei_expansion`（和 / 或 `stardist_nuclei_expansion`），Step3 的 `Nucleus mask` 可用，核在细胞内部、与组织对齐，同一细胞里的多个核各有轮廓；终端与 metadata 给出预测数、保留数、三类丢弃数与保留率。
+
 ## 六、未决与 advisory
 
 ### 后续计划（用户 2026-09-26 排定；都未启动，每块须单独申请）
-0. **所有计算了核的方法都保留核 mask，并能在 Step3 显示**（用户 2026-09-27 裁定；④c 真机验收中发现 expansion 方法的核被 Step2 丢弃）。先只读调查，再申请。
-1. **Step2：旧路径 ROI 模式中途 Stop 仍登记成功**（没有契约的参数文件；契约路径已在 V2 第 3 步修好）。
-2. **Step3 重设计**（调查与裁定见第五节「Step3 重设计」；先做块 N）：做成和 Step1 一样的布局和设置——左侧通道面板，右侧组织图像，可叠加分割 mask，可拖动、缩放，Tissue Navigator 空降和 patch；用户可以画 ROI，但不产生任何下游影响。
+0. **顺序（用户 2026-09-27；Step4 之后的部分按独立审核的建议，用户同意）**：
+   ① 块 N2（所有计算了核的方法保留核 mask；LabelStore 数据契约，对标未来的 Step4）→
+   ② Step3 剩余的第 ③ 步（patch 按钮条组件化 + patch 空降）→
+   ③ Step4 改为流式定量（逐块读细胞 / 核 zarr 与通道，按细胞累加 count、坐标矩、强度和与平方和、最小 / 最大、边界计数，最后一次算出面积、质心、形状、均值、标准差等；胞质可由细胞合计减去核合计得到；中位数 / 分位数列为高级慢速统计，默认不开；周长 / 边界的分块接缝规则在 Step4 开工时定；以后可能用 Rust 重构）→
+   ④ 必要的 WSI 阻塞项清理：禁止整图展开（细胞 mask 与 DAPI 的 OME 导出改为流式、按需导出）；Step4 改读 zarr 后默认删除临时 `.dat`；Step2 通道缓存改为按字节预算（现在 `SharedChannelStore(max_cache_items=32)` 按条数）→
+   ⑤ TMA 基础 →
+   ⑥ QualityMask（模糊 / 折叠检测）→
+   ⑦ TMA 批处理 →
+   ⑧ 用真实数据做性能剖析 →
+   ⑨ Rust 重构 viewer / Step2 的基础。
+   另有来自同一意见、尚未排入上面序列的：自适应切块规划（按实测峰值显存调整，目标 70–80 %）、ResourceGovernor（统一 viewer / Step2 / Step4 的资源预算）、引擎通信改为共享内存 / 固定的内存映射环形缓冲、更深的 NGFF——在 ⑧ 的剖析结果出来后再定。
+1. ~~Step2：旧路径 ROI 模式中途 Stop 仍登记成功~~（**已由块 K 修好**，块 M 之后 8 个方法都走引擎）。
+2. **Step3 重设计**（调查与裁定见第五节「Step3 重设计」）：块 N、2a–2c、S5、④a–④c 已完成；剩第 ③ 步（patch 按钮条组件化 + patch 空降）。ROI 在 Step3 冻结、patch 可编辑并全局同步（块 S5 的裁定取代了早先的「可画 ROI 不产生下游影响」）。
 3. **项目 / 会话架构**（最后做）：打开别的项目并切换一切（S2 的调查结论见块 S）；切换数据集后 Step2 仍留着上一个项目的 fused.zarr 和参数路径、正在跑的分割不停止——这一条随会话恢复一起治理。
 4. **Step4 优化**（用户 2026-09-26 排定，在 Step3 之后）：Step2 每次运行留下两个未压缩的临时内存映射 `global_mask_<ROI>.dat`、`global_dapi_<ROI>.dat`（本项目一次运行 955 MB + 478 MB，占运行目录约 95%），另有重复的 `global_mask_*.ome.tiff`（float32）和 `global_dapi_*.ome.tiff`。Step4 旧代码仍把 `global_mask.dat` 当作 mask 路径的备选（`ui/main_window.py:4313/4322`、`workers/feature_extract_worker.py:70`、`ui/batch_step4_dialog.py:78`），须先让 Step4 改读 zarr，再清理这些文件。
 5. **长期**（Step4 优化完成后再议，用户 2026-09-26）：原始切片与 Step0 / Step1 的图像是否改用 OME-NGFF 多级 zarr（Odon 的数据结构）。评估：原始切片本身已是 1/4/16 金字塔（512 分块、LZW）；可能的收益是 LZ4 解压更快、更多粗层级（大切片的总览）；代价是一次转换（本机约一两分钟、多占约一倍磁盘，全切片更久）和所有读取方（Step0/1 viewer、Step2、Step3、Step4）改为支持 zarr，属于 P0 规则须单独审批的 Viewer 读取与缓存范围。建议先用现有基准测出瓶颈（解压 / 合成 / 上传）再立项。
@@ -1382,12 +1489,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
 ### 已知的已有问题（advisory，未排期）
 - **StarDist 同一输入多次运行偶发不一致**（块 M 回归中确认，HEAD 上已有）：偶尔约 0.5% 像素的标签差 1，使逐像素相等的测试（`test_seg_runner.py::test_stardist_in_subprocess_equals_direct_call` 等）时过时不过。
 - **Cellpose 用 CPU 极慢**：本机 Cellpose-SAM 在 CPU 上一个 256×256 内部块约 230 s；全图（15437×16215）按此外推约两周。Use GPU 关闭只适合作为兜底或很小的 ROI。
-- **旧路径 Stop 不能立即停止**这一条已由块 M 解决（8 个方法都走引擎）。
-- **旧路径（手动模式、旧参数文件）点 Stop 不能立即停止**：推理在 Step2 worker 线程里直接调用模型，要等当前切块推理结束才走到 Stop 检查点；契约路径在引擎子进程里跑，约 0.2 秒停止。**用户 2026-09-26 决定不改（范围太大）**。只读调查结论留作参考：
-  - 可行做法是手动模式的 Cellpose 3 个、StarDist 2 个方法改走 `seg_runner` 引擎子进程，复用契约路径的启动、逐块、Stop 机制；Mesmer 手动模式（膜通道、`selected_channels`、额外拉伸、`tile_size`）引擎表达不了，HQ 系不维护。
-  - 合成图像实测（同参数，旧路径 vs 引擎逐块 + Step2 拼接）：Cellpose nuclei、nuclei + expansion、StarDist ×2 逐像素相同；Cellpose whole-cell 不同（72 vs 69 个细胞，前景 IoU 0.97），因为旧路径给 `[fusion, DAPI]` 且不指定 `channel_axis`，引擎按 7.11 契约给 `[fusion, fusion, DAPI]`。
-  - 还需裁定的点：引擎不理会 Cellpose 的 use GPU 勾选和 StarDist 的模型名；切块推理失败会从「零 mask 后继续」变为整次运行报错。
-  - 临时办法：Tile Grid 分得更细，Stop 最多等一个小切块。
+- 「旧路径 Stop 不能立即停止」已由块 M 解决（8 个方法都走引擎子进程，约 0.2 秒停止）；原调查结论见块 M 之前的修订记录。
 - **运行资源监控器在判定「推理退回 CPU」时崩溃**（块 K 回归中发现，2026-09-26）：`utils/runtime_resource_monitor.py:336` 的 `_cpu_fallback_reasons()` 用到 `likely_gpu_inference`、`gpu_peak_util`，它们只是 `diagnose()` 的局部变量，抛 `NameError`。只在 `likely_cpu_fallback` 为真时走到（推理期间 GPU 显存增长 ≥128 MB、GPU 利用率 <10%、CPU ≥70%）；Step2 在收尾 `_finish_runtime_monitor()` 时调用，此时输出已写完，运行却以错误结束、不登记。离屏 4 个并行进程时可复现；真机上 GPU 繁忙或推理退回 CPU 时可能遇到。未修，等用户裁定。
 - 用户主动 Stop 后，Step2 用标题为「Error」的对话框报告「Stopped by user.」。
 - Step1 读交接时把 Step0 界面上的「Output」输入框改写为 `<roi>/step1`（`_set_gui_work_dir`）；之后在 Step0 直接 Load，可能把 step1 当成项目根目录、在其下再建 `rois/`。

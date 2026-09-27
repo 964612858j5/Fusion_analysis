@@ -35,7 +35,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt5")
 from PyQt5 import QtCore, QtWidgets  # noqa: E402
 
-from block01.core import label_ownership, preseg_contract, preseg_input  # noqa: E402
+from block01.core import label_ownership, nuclei_pairing, preseg_contract, preseg_input  # noqa: E402
 from block01.seg_runner import engines as seg_engines  # noqa: E402
 from block01.seg_runner.client import EngineProcess  # noqa: E402
 
@@ -158,6 +158,15 @@ def _registered(worker):
     return any(worker.result_id in (r.get("run_id"), r.get("result_id")) for r in runs)
 
 
+def _assert_nuclei(output_dir, sfx, nuclei, table):
+    """Block N2: the nuclei and the nucleus -> cell table equal the oracle's."""
+    import zarr
+    nz = zarr.open(os.path.join(output_dir, f"global_nuclei_mask{sfx}.zarr"), mode="r")
+    tz = zarr.open(os.path.join(output_dir, f"global_nuclei_cell{sfx}.zarr"), mode="r")
+    np.testing.assert_array_equal(np.asarray(nz), nuclei)
+    np.testing.assert_array_equal(np.asarray(tz), table)
+
+
 def _assert_nothing_left(worker, pgid=None):
     assert worker._engine is None
     assert not os.path.exists(os.path.join(worker.output_dir, "runner_io"))
@@ -166,10 +175,18 @@ def _assert_nothing_left(worker, pgid=None):
             os.killpg(pgid, 0)
 
 
+#: Block N2: the methods whose nuclei are kept next to the cells.
+SECONDARY_NUCLEI = ("cellpose_nuclei_expansion", "stardist_nuclei_expansion",
+                    "mesmer_nuclear_guided")
+
+
 def _oracle(method, img):
     """The same runner, tile by tile, pasted with the shared ownership code
-    the way Step2 pastes (whole read window, ids above the primary's max
-    dropped from the nuclei)."""
+    the way Step2 pastes (whole read window). Block N2: for the methods that
+    keep nuclei, each tile's nuclei are paired to their cells
+    (`nuclei_pairing`), kept when their cell is kept, numbered on their own
+    across tiles, and the nucleus -> cell table built alongside.
+    Returns (primary, nuclei, n_cells, nucleus_to_cell)."""
     from block01.utils.tile_scheduler import TileScheduler
     import tempfile
 
@@ -179,6 +196,8 @@ def _oracle(method, img):
     prim = np.zeros((H, W), np.uint32)
     nuclei = np.zeros((H, W), np.uint32)
     offset = 0
+    n_offset = 0
+    table = [np.zeros(1, np.uint32)]
     tmp = tempfile.mkdtemp()
     tiles = TileScheduler(H, W, ROWS, COLS, HALO).tiles
     tasks = []
@@ -201,7 +220,8 @@ def _oracle(method, img):
         with open(ep.states[f"t{i}"]["detail"], encoding="utf-8") as f:
             rec = json.load(f)
         local = np.load(rec[primary]["path"]).astype(np.uint32)
-        nuc = np.load(rec["nucleus"]["path"]) if method == "mesmer_nuclear_guided" else None
+        nuc = (np.load(rec["nucleus"]["path"]).astype(np.uint32)
+               if method in SECONDARY_NUCLEI else None)
         n_raw = int(local.max())
         if n_raw == 0:
             continue
@@ -211,13 +231,21 @@ def _oracle(method, img):
         if len(keep) == 0:
             continue
         lut = label_ownership.ownership_lut(local, keep, offset)
-        for dst, arr in ((prim, local), (nuclei, nuc)):
-            if arr is None:
-                continue
-            out = lut[np.where(arr <= n_raw, arr, 0).astype(np.uint32)]
-            np.copyto(dst[ry0:ry1, rx0:rx1], out, where=out > 0)
+        out = lut[local]
+        np.copyto(prim[ry0:ry1, rx0:rx1], out, where=out > 0)
+        if nuc is not None:
+            kept_n, cell_of, _counts, _dropped = nuclei_pairing.pair_nuclei(local, nuc)
+            parents = lut[cell_of.astype(np.int64)]
+            parents[0] = 0
+            stay = np.nonzero(parents[1:] > 0)[0] + 1
+            new_ids = np.zeros(cell_of.size, np.uint32)
+            new_ids[stay] = n_offset + np.arange(1, stay.size + 1)
+            nout = new_ids[kept_n.astype(np.int64)]
+            np.copyto(nuclei[ry0:ry1, rx0:rx1], nout, where=nout > 0)
+            table.append(parents[stay].astype(np.uint32))
+            n_offset += stay.size
         offset += len(keep)
-    return prim, nuclei, offset
+    return prim, nuclei, offset, np.concatenate(table)
 
 
 # ── equality, 8 methods × 2 loops ─────────────────────────────────────
@@ -238,13 +266,12 @@ def test_a_hand_over_equals_the_runner_with_shared_ownership(app, tmp_path, meth
     worker.run()
     assert got["error"] == [] and len(got["finished"]) == 1
     sfx = "_A" if loop == "roi" else ""
-    prim, nuclei, total = _oracle(method, img)
+    prim, nuclei, total, table = _oracle(method, img)
     assert total > 0 and got["finished"][0] == total
     mask = np.asarray(zarr.open(os.path.join(worker.output_dir, f"global_mask{sfx}.zarr"), mode="r"))
     np.testing.assert_array_equal(mask, prim)
-    if method == "mesmer_nuclear_guided":
-        nz = zarr.open(os.path.join(worker.output_dir, f"global_nuclei_mask{sfx}.zarr"), mode="r")
-        np.testing.assert_array_equal(np.asarray(nz), nuclei)
+    if method in SECONDARY_NUCLEI:
+        _assert_nuclei(worker.output_dir, sfx, nuclei, table)
     assert _registered(worker)
     _assert_nothing_left(worker)
 

@@ -39,13 +39,15 @@ NUCLEUS = "nucleus"
 # Step2's `global_mask*`, "nuclei" its `global_nuclei_mask*`.
 _PRIMARY_IS_CELL = frozenset({
     "cellpose_wholecell_fusion", "mesmer_whole_cell",
-    "cellpose_nuclei_expansion", "stardist_nuclei_expansion",
 })
 _PRIMARY_IS_NUCLEUS = frozenset({
     "cellpose_nuclei_dapi", "stardist_nuclei_dapi", "mesmer_nuclei",
 })
+# Block N2: the expansions keep their nuclei too (runs from before it have no
+# nuclei file: their nucleus mask is "not kept, re-run Step2").
+_EXPANSIONS = frozenset({"cellpose_nuclei_expansion", "stardist_nuclei_expansion"})
 _PRIMARY_CELL_AND_NUCLEI = frozenset({
-    "mesmer_nuclear_guided",
+    "mesmer_nuclear_guided", "cellpose_nuclei_expansion", "stardist_nuclei_expansion",
     "cellpose_nuclei_hq", "cellpose_nuclei_hq2", "cellpose_nuclei_csd",
 })
 
@@ -243,8 +245,8 @@ def _nuclei_beside(mask_path):
 
 
 def _locate(run, roi_name, roi_bbox):
-    """(mask path, bbox, recorded pyramids {"cell", "nucleus"}) of the run's
-    primary mask for this ROI, or a reason string."""
+    """(mask path, bbox, recorded pyramids {"cell", "nucleus"}, label store or
+    None) of the run's primary mask for this ROI, or a reason string."""
     meta = run.meta
     rois = meta.get("rois")
     if isinstance(rois, list):
@@ -270,16 +272,45 @@ def _locate(run, roi_name, roi_bbox):
             return (f"the run's ROI '{roi_name}' is at {list(bbox)}, the current ROI "
                     f"is at {list(roi_bbox)}")
         recorded = dict(entry.get("label_pyramid") or {})
+        store = entry.get("label_store")
     elif meta.get("mode") == "full_wsi":
         mask = meta.get("zarr_path") or dict(meta.get("paths") or {}).get("mask_zarr")
         bbox = tuple(roi_bbox)
         recorded = dict(meta.get("label_pyramid") or {})
+        store = meta.get("label_store")
     else:
         return "the run's metadata has neither ROI results nor a whole-image result"
     if not mask:
         return "the run records no uint32 mask (zarr)"
     mask = mask if os.path.isabs(mask) else os.path.join(run.run_dir, mask)
-    return mask, bbox, recorded
+    return mask, bbox, recorded, (store if isinstance(store, dict) else None)
+
+
+def _from_store(run, store, bbox, recorded, view_level_shapes, out):
+    """Block N2: the label store says which array is the cells and which the
+    nuclei -- no guessing from the method. A file's pyramid is the one block
+    N recorded for it (`global_mask*` as "cell", `global_nuclei_mask*` as
+    "nucleus")."""
+    reasons = out["reasons"]
+    if store.get("complete") is not True:
+        reasons[CELL] = reasons[NUCLEUS] = "the run's label store is incomplete — re-run Step2"
+        return out
+    for kind in (CELL, NUCLEUS):
+        entry = store.get(kind)
+        if not entry or not entry.get("path"):
+            reasons[kind] = f"this run has no {kind} mask"
+            continue
+        path = entry["path"]
+        path = path if os.path.isabs(path) else os.path.join(run.run_dir, path)
+        why = _open_mask(path, bbox)
+        if why:
+            reasons[kind] = why
+            continue
+        role = "nuclei" if os.path.basename(path).startswith("global_nuclei_mask") else "primary"
+        out[kind] = _source(kind, path, bbox,
+                            recorded.get("nucleus" if role == "nuclei" else "cell"),
+                            _RECORDED_KIND[role], view_level_shapes)
+    return out
 
 
 def _open_mask(path, bbox):
@@ -394,9 +425,7 @@ def resolve_masks(run, roi_name, roi_bbox, view_level_shapes):
         return out
     other = NUCLEUS if primary_kind == CELL else CELL
     if not has_nuclei:
-        reasons[other] = (f"{method} keeps no nucleus mask (its output is the expanded cells)"
-                          if method in ("cellpose_nuclei_expansion", "stardist_nuclei_expansion")
-                          else f"{method} makes no {other} mask")
+        reasons[other] = f"{method} makes no {other} mask"
     roi_bbox = _bbox(roi_bbox)
     if roi_bbox is None:
         reasons[primary_kind] = "the current ROI has no bbox"
@@ -409,7 +438,10 @@ def resolve_masks(run, roi_name, roi_bbox, view_level_shapes):
         if has_nuclei:
             reasons[NUCLEUS] = located
         return out
-    mask, bbox, recorded = located
+    mask, bbox, recorded, store = located
+    if store is not None:
+        out["reasons"].clear()
+        return _from_store(run, store, bbox, recorded, view_level_shapes, out)
     why = _open_mask(mask, bbox)
     if why:
         reasons[primary_kind] = why
@@ -421,6 +453,8 @@ def resolve_masks(run, roi_name, roi_bbox, view_level_shapes):
     if has_nuclei:
         nuclei = _nuclei_beside(_real(mask))
         why = _open_mask(nuclei, bbox) if nuclei else "no nucleus mask beside the cell mask"
+        if why and method in _EXPANSIONS and (not nuclei or not os.path.exists(nuclei)):
+            why = "this run was made before nuclei were kept — re-run Step2"
         if why:
             reasons[NUCLEUS] = why
         else:

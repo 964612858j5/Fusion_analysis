@@ -9,6 +9,8 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.64：块 N2 真机验收通过。
+- v3.63：块 N2 已实施（自动验收通过，待真机验收），写入执行记录；附带用户授权修复整图模式下 Mesmer metadata 的 `UnboundLocalError`。
 - v3.62：块 N2 v4 获批；第六节后续顺序按独立审核建议更新（Step4 之后：WSI 阻塞项清理 → TMA 基础 → QualityMask → TMA 批处理 → 真实数据剖析 → Rust 基础）。
 - v3.61：块 N2 按独立审核修订为 v4（归属措辞：核唯一属于一个细胞、细胞可有多核；科学输出的事务规则；LabelStore 作统一语义入口；对应表按块写入与 2^32 保护；丢弃分三类并记保留率；新核通路与 HQ 解耦；I/O 失败事务与切块边界两项验收）；清理第六节中被块 K / M / S5 取代的过期条目。
 - v3.60：块 N2 按裁定 A（多核全保留）/ B（不写核 OME-TIFF）修订为 v3：核独立编号 + 「核 → 细胞」对应表。
@@ -1370,7 +1372,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 回归：与 `git archive HEAD`（`d24bc7e`）逐条对比，**无新增失败**。离屏 31 个模块（含界面规则契约 `test_ui_surface_contract`、Step1 → Step2 交接、Step3 / Step1 viewer / GPU / 标签相关模块），两边相同：`test_global_channel_dock.py` 1 条（字体）、`test_step1_montage_view.py` 第 27 条后崩溃。真实 GL（每条单独进程）：GPU 接管 / 总览跳过 / 请求门 / 标签渲染 / 标签 mount 共 92 条 + 本块接线 10 条，两边相同的唯一失败仍是 `test_the_mounted_widget_framebuffer_holds_real_gpu_pixels`（厂商名，环境原因）。
   - **真机验收（用户 2026-09-27，同时是 ④a、④b 的真机验收）**：第 1–4 项通过；第 6 项退出程序无段错误（本机 ④b 测试进程中的退出段错误未在产品中出现）；第 5 项（无金字塔的旧运行现场补生成）**真机未验**，只有自动测试覆盖。真机中发现：`cellpose_nuclei_expansion` 的新运行在 Step3 没有核 mask——Step2 丢弃了引擎算出的核（`segment_merge_worker.py:2125`），按 ④a 批准的分类表核按钮禁用；用户裁定所有计算了核的方法都必须保留核 mask 并能在 Step3 显示，另立块（见第六节）。第 5 项的复制件由任务临时目录里的脚本 `make_pyramidless_copy.py` 生成（复制一个 ROI 工作区、去掉 `.dat` 与 `label_pyramid_*.zarr`、把复制件全部 JSON 里的项目路径改写到复制件并核对无残留；原项目只读）。
 
-### 块 N2 — 所有计算了核的方法都保留核 mask，并能在 Step3 显示（申请 v4，按用户裁定与独立审核修订，**用户 2026-09-27 批准**，实施中）
+### 块 N2 — 所有计算了核的方法都保留核 mask，并能在 Step3 显示（申请 v4，按用户裁定与独立审核修订，**用户 2026-09-27 批准**；已实施，**真机验收通过**）
 - **必要性**：用户裁定（2026-09-27，④c 真机验收中发现）：凡是计算了核的方法，都必须保留核 mask，并能在 Step3 的 `Nucleus mask` 里显示。
 - **只读调查结论**：
   - 8 个方法都在引擎子进程里分割（`_runs_on_engine`，`segment_merge_worker.py:1979`）；引擎按方法返回 `{cell, nucleus}`（`seg_runner/engines.py` `run()`）。各方法的核：
@@ -1461,6 +1463,16 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - Stop：中途停止不登记、不留半成品。
   - 回归：Step2 / 标签金字塔 / Step3 相关模块与 HEAD 逐条对比，无新增失败。
   - 真机（用户）：重跑 `cellpose_nuclei_expansion`（和 / 或 `stardist_nuclei_expansion`），Step3 的 `Nucleus mask` 可用，核在细胞内部、与组织对齐，同一细胞里的多个核各有轮廓；终端与 metadata 给出预测数、保留数、三类丢弃数与保留率。
+- **执行记录**（2026-09-27，未提交）：
+  - `core/nuclei_pairing.py`（新，无 Qt）：`pair_nuclei(cells, nuclei)` → 保留的核（局部 1 … K）、每个核的局部所属细胞、四项计数、各丢弃原因的原始编号；`owned_drop_counts` 按被丢弃核自己的质心归属计数（重叠区不重复）。
+  - `workers/segment_merge_worker.py`：`SECONDARY_NUCLEI_METHODS`（两个 expansion、nuclear-guided）与 `_keeps_secondary_nuclei()`（只在引擎路径上）；`_segment_tile_contract` 对这三个方法返回配对后的核、所属细胞、原始核与丢弃编号；两条循环里：丢弃计数放在第一处提前 `continue` 之前（没有保留细胞的切块也计入）；核的去留跟随细胞的 `lut`，按块接到核的全局序列、对应表按块 `append` 到 `*.partial`；核数组按 1024 × 1024 **分块**写进 `*.partial`（实施中改的：照抄细胞的 4096 行整行写法在 5.9 万像素宽的切片上一条约 1 GB），写完才改名；HQ 系仍走原路径（`hq_nuclei = is_hq and not nuclear-guided`）；`label_store`（按方法的四种结构，`nuclei` 一节含预测 / 保留 / 保留率 / 三类丢弃），写进区域 meta、ROI 记录与汇总；`nuclei_zarr_path`、`nuclei_cell_table_path`；细胞数 / 核数达到 2^32 报错；nuclear-guided 不再写核 OME-TIFF；核的临时 `.dat` 用后删除；`run()` 的 `finally` 统一清理未改名的 `*.partial`；终端打印核的统计。
+  - **白名单外、用户 2026-09-27 授权的修复**：整图模式里 `del model` 之后写 Mesmer metadata 又读 `model`（HEAD 上就有，所有 Mesmer 方法的整图运行都会在最后以 `UnboundLocalError` 失败、不登记）——改为在 `del model` 之前记下 device status。
+  - `core/step3_masks.py`：有 `label_store` 时以它为准（`complete` 不为真 → 两种都不显示，提示重跑）；expansion 归入「细胞 + 核文件」；旧的 expansion 运行提示「this run was made before nuclei were kept — re-run Step2」。
+  - 文档：两份用户指南（Step2 产出：核 zarr 与对应表、保留规则、旧结果须重跑；Step3：按钮变灰的几种情况）。
+  - 测试：`tests/test_nuclei_pairing.py`（5 条）；`tests/test_step2_keeps_nuclei.py`（8 条：替身引擎的 nuclear-guided，ROI 与整图两种模式的完整契约（含三类丢弃、同一细胞多核、跨切块、核编号大于细胞数，细胞 mask 等于归属代码的结果），对应表写到一半的 I/O 失败，核数组写到一半的 I/O 失败（最终文件名不出现），Stop，从 `.npy` 恢复，核写出的内存峰值 < 16 MB（60 MB 的图），真实 Cellpose 引擎上的 expansion）；`tests/test_step3_masks.py` 加 3 条（`label_store` 优先、不完整、旧 expansion 的提示）；**白名单外、用户授权**：`tests/test_step2_runner_path.py` 的 `_oracle` 按新规则生成核与对应表的参考，核的比对扩到两个 expansion（新增 `_assert_nuclei`），`tests/test_step2_engine_unified.py` 同步——真实 Cellpose / StarDist 引擎上 expansion 的核与对应表在整图与 ROI 两种模式下都与参考逐像素一致，细胞 mask 不变。
+  - 反向注入 11 处，各使至少 1 条变红：部分落在背景的核被保留、核不跟随细胞的归属、丢弃计数不按归属、临时 `.dat` 不删、核数组直接写最终文件名（首轮未被抓到，补了「核数组写到一半失败」一条后抓到）、`*.partial` 不清理、Step3 忽略 `label_store`、接受不完整的 `label_store`、整图展开写核、核编号每块从 1 重新开始。
+  - 回归：32 个模块（Step2 全部相关模块、HQ / HQ2 / CDS 的 worker 测试、标签归属、标签金字塔、预分割、remap 提升、Step3 数据层 / 接线 / 标签绑定 / viewer），每模块单独进程、顺序运行，与 `git archive HEAD`（`02ba00d`）逐条对比，**无新增失败**。两边相同：`test_hq_marker_segmentation.py` 2 条（HQ 不维护）、`test_seg_runner_engines.py` 3 条（2 条 Mesmer 无模型、1 条 StarDist 偶发）。本侧一次：`test_step2_runner_path.py::test_a_hand_over_equals_the_runner_with_shared_ownership[stardist_nuclei_dapi-full]` 0.46 % 像素差 1（StarDist 偶发，已知；本块未改纯核方法的路径），单独重跑 3 次都通过。
+  - **真机验收通过（用户 2026-09-27）**。nuclear-guided 的真机验收（含保留率）随 Mesmer 暂缓项。
 
 ## 六、未决与 advisory
 

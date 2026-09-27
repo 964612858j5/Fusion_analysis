@@ -74,14 +74,13 @@ def test_a_manual_run_equals_the_runner(app, tmp_path, method, loop):
     got = rp._collect(worker)
     worker.run()
     assert got["error"] == [] and len(got["finished"]) == 1
-    prim, nuclei, total = rp._oracle(method, img)
+    prim, nuclei, total, table = rp._oracle(method, img)
     assert total > 0 and got["finished"][0] == total
     sfx = "_A" if loop == "roi" else ""
     mask = np.asarray(zarr.open(os.path.join(worker.output_dir, f"global_mask{sfx}.zarr"), mode="r"))
     np.testing.assert_array_equal(mask, prim)
-    if method == "mesmer_nuclear_guided":
-        nz = zarr.open(os.path.join(worker.output_dir, f"global_nuclei_mask{sfx}.zarr"), mode="r")
-        np.testing.assert_array_equal(np.asarray(nz), nuclei)
+    if method in rp.SECONDARY_NUCLEI:
+        rp._assert_nuclei(worker.output_dir, sfx, nuclei, table)
     eng = _meta(worker)["seg_engine"]
     assert eng["engine"] == seg_engines.METHOD_ENGINE[method] and eng["step1_identity"] is None
     assert rp._registered(worker)

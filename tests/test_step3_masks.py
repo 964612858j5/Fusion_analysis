@@ -652,3 +652,54 @@ def test_fill_colours_are_fixed_per_id():
         got = rgba[ids == v][0]
         assert list(got) == want
     assert not (rgba[0, 1] == rgba[0, 2]).all()
+
+
+# ── the label store (block N2) ───────────────────────────────────────────
+
+def _with_store(rdir, r, store):
+    meta_path = os.path.join(r.dir, "segmentation_meta.json")
+    meta = json.load(open(meta_path))
+    meta["rois"][0]["label_store"] = store
+    json.dump(meta, open(meta_path, "w"))
+
+
+def _array(path):
+    return {"path": path, "dtype": "uint32", "shape": [176, 208], "chunks": [1024, 1024],
+            "n_objects": 1}
+
+
+def test_the_label_store_decides_what_each_array_is(tmp_path):
+    rdir = _workspace(tmp_path)
+    r = _run(rdir, "seg_x", "cellpose_wholecell_fusion", nuclei=True)   # method: no nuclei
+    _with_store(rdir, r, {"version": 1, "complete": True,
+                          "cell": _array(r.mask), "nucleus": _array(r.nuc),
+                          "nucleus_to_cell": {"path": "t", "length": 2}, "relation": {}})
+    got = sm.resolve_masks(_only(rdir), "ROI_1", BBOX, SHAPES)
+    assert got["cell"].mask_path == os.path.realpath(r.mask)
+    assert got["nucleus"].mask_path == os.path.realpath(r.nuc)
+    assert got["nucleus"].pyramid is not None and got["nucleus"].pyramid_kind == "nucleus"
+    # a nuclei-only store: the primary file IS the nucleus mask
+    _with_store(rdir, r, {"version": 1, "complete": True, "cell": None,
+                          "nucleus": _array(r.mask)})
+    got = sm.resolve_masks(_only(rdir), "ROI_1", BBOX, SHAPES)
+    assert got["cell"] is None and "no cell mask" in got["reasons"]["cell"]
+    assert got["nucleus"].mask_path == os.path.realpath(r.mask)
+    assert got["nucleus"].pyramid is not None and got["nucleus"].pyramid_kind == "cell"
+
+
+def test_an_incomplete_label_store_shows_nothing(tmp_path):
+    rdir = _workspace(tmp_path)
+    r = _run(rdir, "seg_x", "mesmer_nuclear_guided", nuclei=True)
+    _with_store(rdir, r, {"version": 1, "complete": False, "cell": _array(r.mask),
+                          "nucleus": _array(r.nuc)})
+    got = sm.resolve_masks(_only(rdir), "ROI_1", BBOX, SHAPES)
+    assert got["cell"] is None and got["nucleus"] is None
+    assert "incomplete" in got["reasons"]["cell"] and "re-run Step2" in got["reasons"]["nucleus"]
+
+
+def test_an_expansion_run_from_before_n2_says_re_run(tmp_path):
+    rdir = _workspace(tmp_path)
+    _run(rdir, "seg_x", "cellpose_nuclei_expansion")
+    got = sm.resolve_masks(_only(rdir), "ROI_1", BBOX, SHAPES)
+    assert got["cell"] is not None and got["nucleus"] is None
+    assert got["reasons"]["nucleus"] == "this run was made before nuclei were kept — re-run Step2"

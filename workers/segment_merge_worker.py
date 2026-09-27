@@ -23,7 +23,7 @@ import zarr
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from ..core import label_ownership, label_pyramid, preseg_contract, preseg_input
+from ..core import label_ownership, label_pyramid, nuclei_pairing, preseg_contract, preseg_input
 from ..core.io_loader import OMETIFFLoader
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
@@ -64,7 +64,7 @@ from ..utils.tile_scheduler import TileScheduler
 from ..utils.tile_strategy import suggest_tile_strategy
 from ..seg_runner import protocol as runner_protocol
 from ..seg_runner.client import EngineProcess, EngineStartError
-from ..seg_runner.engines import METHOD_ENGINE, METHOD_OUTPUTS
+from ..seg_runner.engines import EXPANSION_METHODS, METHOD_ENGINE, METHOD_OUTPUTS
 from ..utils.mesmer_utils import mesmer_metadata
 from ..utils import segmentation_param_schema as param_schema
 from .hq_marker_segmentation import (
@@ -147,6 +147,9 @@ class SegmentMergeWorker(QThread):
         self._source_aware_per_channel = None
         self._resolve_channel_remap()
         self.recovery_npy_dir = recovery_npy_dir
+        #: Block N2: the `*.partial` outputs not yet renamed, removed by
+        #: `run()` on its way out whatever happened.
+        self._nuclei_partials = []
         self.rois             = rois
         self.param_file       = self._abs(param_file) if param_file else ""
         self.parameter_source = "index" if self.param_file and parameter_source == "index" else "manual"
@@ -626,6 +629,156 @@ class SegmentMergeWorker(QThread):
                 if log:
                     log.warning(msg)
         return out
+
+    # ── the nuclei of the methods that compute them (block N2) ─────────
+    #: The methods whose nuclei are a SECOND output next to the cells: the
+    #: two expansions and nuclear-guided. Their nuclei are paired to their
+    #: cells (`core.nuclei_pairing`), numbered on their own and mapped to a
+    #: cell by the nucleus -> cell table. HQ / HQ2 / CDS keep their own path.
+    SECONDARY_NUCLEI_METHODS = frozenset(EXPANSION_METHODS) | {MESMER_NUCLEAR_GUIDED}
+    UINT32_LIMIT = 2 ** 32 - 1
+    TABLE_CHUNK = 1 << 20
+
+    def _keeps_secondary_nuclei(self):
+        return self.method in self.SECONDARY_NUCLEI_METHODS and self._runs_on_engine()
+
+    def _nuclei_begin(self, out_prefix):
+        """One region's nucleus bookkeeping: the global nucleus counter, the
+        nucleus -> cell table (written block by block to `*.partial`) and the
+        drop counts. Every partial path is registered for the run's cleanup."""
+        stem = f"global_nuclei_cell_{out_prefix}" if out_prefix else "global_nuclei_cell"
+        table_path = os.path.join(self.output_dir, stem + ".zarr")
+        partial = table_path + ".partial"
+        shutil.rmtree(partial, ignore_errors=True)
+        self._nuclei_partials.append(partial)
+        table = zarr.open(partial, mode="w", shape=(1,), chunks=(self.TABLE_CHUNK,),
+                          dtype="<u4", fill_value=0)
+        table[0] = 0
+        return {"offset": 0, "table": table, "table_path": table_path, "table_partial": partial,
+                "dropped": {"multiple_cells": 0, "partial_background": 0, "outside_cells": 0}}
+
+    def _nuclei_count_drops(self, state, local_raw, dropped_ids, own_local):
+        """Count the tile's dropped nuclei that this tile owns (by their own
+        centroid) -- before any `continue`, so a tile without kept cells
+        still counts the nuclei it dropped."""
+        for reason, n in nuclei_pairing.owned_drop_counts(local_raw, dropped_ids,
+                                                          own_local).items():
+            state["dropped"][reason] += n
+
+    def _nuclei_add_tile(self, state, lut, local_nuclei, local_cell):
+        """The tile's nuclei, renumbered: a nucleus stays when its cell does
+        (`lut[cell] > 0`) and takes the next global nucleus id; its global
+        cell is `lut[cell]`, appended to the table. Returns the renumbered
+        nucleus window (0 where nothing is kept)."""
+        local_cell = np.asarray(local_cell, np.int64)
+        parents = np.zeros(local_cell.shape, np.uint32)
+        inside = local_cell < lut.size
+        parents[inside] = lut[local_cell[inside]]
+        parents[0] = 0
+        kept = np.nonzero(parents[1:] > 0)[0] + 1
+        new_ids = np.zeros(local_cell.size, np.uint32)
+        if kept.size:
+            if state["offset"] + kept.size > self.UINT32_LIMIT:
+                raise RuntimeError("more than 2^32 - 1 nuclei in one region: uint32 ids would wrap")
+            new_ids[kept] = state["offset"] + np.arange(1, kept.size + 1, dtype=np.uint64)
+            state["table"].append(parents[kept].astype(np.uint32))
+            state["offset"] += int(kept.size)
+        return new_ids[np.asarray(local_nuclei, np.int64)]
+
+    def _nuclei_finish(self, state, nuclei_mmap_ro, full_h, full_w, out_prefix, BLOCK=1024):
+        """Write the region's nuclei and its table, each through `*.partial`
+        and renamed only when whole; returns their paths. A failure raises
+        (the run then fails: nuclei are a scientific output, not a display
+        one) and leaves the partials for the run's cleanup."""
+        stem = f"global_nuclei_mask_{out_prefix}" if out_prefix else "global_nuclei_mask"
+        nuclei_path = os.path.join(self.output_dir, stem + ".zarr")
+        partial = nuclei_path + ".partial"
+        shutil.rmtree(partial, ignore_errors=True)
+        self._nuclei_partials.append(partial)
+        nz = zarr.open(partial, mode="w", shape=(full_h, full_w), dtype="uint32",
+                       chunks=(1024, 1024))
+        with self.step2_profiler.time_stage("write_mask_zarr", method=self.method,
+                                            output_path=self._abs(nuclei_path)):
+            # ONE CHUNK AT A TIME (1024 x 1024, 4 MB), aligned to the array's
+            # chunks: a whole-width stripe of a 59k-wide slide would be ~1 GB.
+            for y in range(0, full_h, BLOCK):
+                if self._stop:
+                    raise _ContractStopped()
+                for x in range(0, full_w, BLOCK):
+                    nz[y:y + BLOCK, x:x + BLOCK] = nuclei_mmap_ro[y:y + BLOCK, x:x + BLOCK]
+        contract = {"label_store_version": 1, "kind": "nucleus",
+                    "ids": "1..M consecutive, 0 = background; each lies in one cell",
+                    "n_objects": int(state["offset"]),
+                    "nucleus_to_cell": os.path.basename(state["table_path"])}
+        nz.attrs.update(contract)
+        state["table"].attrs.update({"label_store_version": 1, "kind": "nucleus_to_cell",
+                                     "ids": "index = nucleus id, value = its cell id; [0] = 0",
+                                     "length": int(state["offset"]) + 1})
+        for final, part in ((nuclei_path, partial),
+                            (state["table_path"], state["table_partial"])):
+            if os.path.lexists(final):
+                shutil.rmtree(final)
+            os.replace(part, final)
+            self._nuclei_partials.remove(part)
+        return nuclei_path, state["table_path"]
+
+    def _label_store(self, cell_path, nucleus_path, table_path, n_cells, nuclei_state,
+                     shape):
+        """The region's semantic entry (block N2): which array holds the
+        cells, which the nuclei, and how nuclei map to cells. File names stay
+        historical; this is the authority. None for HQ / HQ2 / CDS."""
+        if self.method not in METHOD_ENGINE:
+            return None
+        if int(n_cells) > self.UINT32_LIMIT:
+            raise RuntimeError("more than 2^32 - 1 cells in one region: uint32 ids would wrap")
+
+        def array(path, n):
+            return {"path": self._abs(path), "dtype": "uint32", "shape": [int(v) for v in shape],
+                    "chunks": [1024, 1024], "n_objects": int(n)}
+        outputs = METHOD_OUTPUTS[self.method]
+        primary_is_cell = "cell" in outputs
+        store = {"version": 1, "complete": True, "cell": None, "nucleus": None,
+                 "nucleus_to_cell": None, "relation": None, "nuclei": None}
+        if primary_is_cell:
+            store["cell"] = array(cell_path, n_cells)
+        else:
+            store["nucleus"] = array(cell_path, n_cells)     # a nuclei-only method's primary
+        if nuclei_state is not None and nucleus_path:
+            m = int(nuclei_state["offset"])
+            dropped = dict(nuclei_state["dropped"])
+            predicted = m + sum(dropped.values())
+            store["nucleus"] = array(nucleus_path, m)
+            store["nucleus_to_cell"] = {"path": self._abs(table_path), "dtype": "uint32",
+                                        "length": m + 1, "chunks": [self.TABLE_CHUNK]}
+            store["relation"] = {"nucleus_to_cell": "many_to_one"}
+            store["nuclei"] = {"predicted": predicted, "kept": m,
+                               "retained_fraction": (m / predicted) if predicted else None,
+                               "dropped": dropped}
+        elif self.method in self.SECONDARY_NUCLEI_METHODS:
+            store["nuclei"] = {"unavailable": "this run recovered tiles from .npy; "
+                                              "the nuclei cannot be recovered"}
+        return store
+
+    def _log_nuclei(self, out_prefix, store):
+        info = (store or {}).get("nuclei") or {}
+        if "predicted" not in info:
+            return
+        frac = info["retained_fraction"]
+        msg = (f"[Step2] nuclei {out_prefix or 'whole image'}: predicted {info['predicted']:,}, "
+               f"kept {info['kept']:,}"
+               + (f" ({frac:.1%})" if frac is not None else "")
+               + f"; dropped: {info['dropped']['multiple_cells']:,} over several cells, "
+               f"{info['dropped']['partial_background']:,} partly on background, "
+               f"{info['dropped']['outside_cells']:,} outside any cell")
+        print(msg)
+        if self._logger:
+            self._logger.info(msg)
+
+    def _cleanup_nuclei_partials(self):
+        """Whatever did not finish -- a Stop, a failure -- leaves nothing."""
+        for path in list(getattr(self, "_nuclei_partials", [])):
+            shutil.rmtree(path, ignore_errors=True)
+        self._nuclei_partials = []
 
     def _record_step2_geometry(self, full_h, full_w, nuclei_zarr_path="",
                                global_mask_zarr_path=""):
@@ -2119,10 +2272,17 @@ class SegmentMergeWorker(QThread):
         if masks[primary] is None:
             raise RuntimeError(f"the engine returned no {primary} mask for {tid}")
         mask = masks[primary].astype(np.uint32, copy=False)
-        if method == MESMER_NUCLEAR_GUIDED:
-            # Its nuclear output, as the old path hands it over.
-            return {"mask": mask, "nuclei": masks["nucleus"], "qc_rows": []}
-        return mask          # expansion: the expanded cells only, as before
+        if method in self.SECONDARY_NUCLEI_METHODS:
+            # Block N2: the nuclei come back too, each paired to the ONE cell
+            # holding all of it (dropped otherwise), numbered 1..K.
+            raw = masks.get("nucleus")
+            if raw is None:
+                raise RuntimeError(f"the engine returned no nucleus mask for {tid}")
+            raw = raw.astype(np.uint32, copy=False)
+            kept, nucleus_cell, counts, dropped = nuclei_pairing.pair_nuclei(mask, raw)
+            return {"mask": mask, "nuclei": kept, "nuclei_cell": nucleus_cell,
+                    "nuclei_raw": raw, "nuclei_dropped": dropped, "qc_rows": []}
+        return mask
 
     def _close_contract_engine(self):
         """Worker thread, at the end of every run: no engine process and no
@@ -2342,6 +2502,11 @@ class SegmentMergeWorker(QThread):
         is_mesmer_guided = self.method == MESMER_NUCLEAR_GUIDED
         is_mesmer = self.method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
         is_hq = self.method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD) or is_mesmer_guided
+        # Block N2: nuclear-guided and the expansions keep their nuclei on the
+        # new path (paired, own ids, nucleus -> cell table); HQ keeps its own.
+        keeps_nuclei = self._keeps_secondary_nuclei()
+        hq_nuclei = is_hq and not is_mesmer_guided
+        nuclei_state = self._nuclei_begin(out_prefix) if keeps_nuclei else None
         hq_channels, hq_group = ([], None)
         mesmer_group = None
         nuclei_mmap = None
@@ -2357,7 +2522,7 @@ class SegmentMergeWorker(QThread):
                 hq_channels, hq_group = self._validate_hq_config(out_prefix)
         if is_mesmer:
             mesmer_group = self._validate_mesmer_config(out_prefix)
-        if is_hq:
+        if hq_nuclei or keeps_nuclei:
             nuclei_mmap_path = os.path.join(
                 self.output_dir, f'global_nuclei_mask_{out_prefix}.dat'
             )
@@ -2449,6 +2614,7 @@ class SegmentMergeWorker(QThread):
 
             if self.recovery_npy_dir is not None:
                 local_nuclei = None
+                local_nuclei_cell = local_nuclei_raw = local_nuclei_dropped = None
                 local_qc_rows = []
                 local_hq2_layers = {}
                 local_hq2_metadata = {}
@@ -2504,12 +2670,16 @@ class SegmentMergeWorker(QThread):
                         output_labels=csd_output,
                     )
                     local_nuclei = None
+                    local_nuclei_cell = local_nuclei_raw = local_nuclei_dropped = None
                     local_qc_rows = []
                     local_hq2_layers = {}
                     local_hq2_metadata = {}
                     if isinstance(local_result, dict):
                         local_mask = local_result["mask"]
                         local_nuclei = local_result.get("nuclei")
+                        local_nuclei_cell = local_result.get("nuclei_cell")
+                        local_nuclei_raw = local_result.get("nuclei_raw")
+                        local_nuclei_dropped = local_result.get("nuclei_dropped")
                         local_qc_rows = local_result.get("qc_rows") or []
                         local_hq2_layers = local_result.get("hq2_layers") or {}
                         local_hq2_metadata = local_result.get("hq2_metadata") or {}
@@ -2524,6 +2694,7 @@ class SegmentMergeWorker(QThread):
                     log.error(f"  Tile [{row},{col}] failed: {traceback.format_exc()}")
                     local_mask = np.zeros((ry1-ry0, rx1-rx0), dtype=np.uint32)
                     local_nuclei = None
+                    local_nuclei_cell = local_nuclei_raw = local_nuclei_dropped = None
                     local_qc_rows = []
                     local_hq2_layers = {}
                     local_hq2_metadata = {}
@@ -2551,6 +2722,10 @@ class SegmentMergeWorker(QThread):
             local_oy1 = oy1 - ry0
             local_ox0 = ox0 - rx0
             local_ox1 = ox1 - rx0
+            if keeps_nuclei and local_nuclei_raw is not None:
+                self._nuclei_count_drops(nuclei_state, local_nuclei_raw, local_nuclei_dropped,
+                                         (local_oy0, local_oy1, local_ox0, local_ox1))
+            local_nuclei_raw = local_nuclei_dropped = None
             _t = time.perf_counter()
             with self.step2_profiler.time_stage("postprocess", **tile_profile_base):
                 raw_own_mask = crop_valid_region(local_mask, tile, copy=True)
@@ -2620,7 +2795,10 @@ class SegmentMergeWorker(QThread):
 
                     remapped = lut[local_mask]
                     remapped_nuclei = None
-                    if is_hq and local_nuclei is not None:
+                    if keeps_nuclei and local_nuclei is not None:
+                        remapped_nuclei = self._nuclei_add_tile(nuclei_state, lut, local_nuclei,
+                                                                local_nuclei_cell)
+                    elif hq_nuclei and local_nuclei is not None:
                         safe_nuclei = np.where(local_nuclei <= n_raw, local_nuclei, 0).astype(np.uint32, copy=False)
                         remapped_nuclei = lut[safe_nuclei]
                     remapped_hq2_layers = {}
@@ -2661,7 +2839,7 @@ class SegmentMergeWorker(QThread):
                 dst = mmap[ry0:ry1, rx0:rx1]
                 np.copyto(dst, remapped, where=(remapped > 0))
                 del remapped
-                if is_hq and nuclei_mmap is not None and remapped_nuclei is not None:
+                if nuclei_mmap is not None and remapped_nuclei is not None:
                     ndst = nuclei_mmap[ry0:ry1, rx0:rx1]
                     np.copyto(ndst, remapped_nuclei, where=(remapped_nuclei > 0))
                     del remapped_nuclei
@@ -2737,7 +2915,7 @@ class SegmentMergeWorker(QThread):
         dapi_mmap_ro = np.memmap(dapi_mmap_path, dtype='uint16', mode='r',
                                  shape=(full_h, full_w))
         nuclei_mmap_ro = None
-        if is_hq and nuclei_mmap_path:
+        if (hq_nuclei or keeps_nuclei) and nuclei_mmap_path:
             nuclei_mmap_ro = np.memmap(nuclei_mmap_path, dtype='uint32', mode='r',
                                        shape=(full_h, full_w))
 
@@ -2794,8 +2972,14 @@ class SegmentMergeWorker(QThread):
 
         nuclei_ome_path = ""
         nuclei_zarr_path = ""
+        nuclei_table_path = ""
         qc_table_path = ""
-        if is_hq and nuclei_mmap_ro is not None:
+        if keeps_nuclei and nuclei_mmap_ro is not None:
+            # Block N2: zarr only (no float32 OME-TIFF), through `*.partial`.
+            nuclei_zarr_path, nuclei_table_path = self._nuclei_finish(
+                nuclei_state, nuclei_mmap_ro, full_h, full_w, out_prefix)
+            del nuclei_mmap_ro
+        elif hq_nuclei and nuclei_mmap_ro is not None:
             nuclei_zarr_path = os.path.join(
                 self.output_dir, f'global_nuclei_mask_{out_prefix}.zarr'
             )
@@ -2832,6 +3016,11 @@ class SegmentMergeWorker(QThread):
 
         self._record_step2_geometry(full_h, full_w, nuclei_zarr_path, out_zarr_path)
         pyramids = self._write_label_pyramids(out_zarr_path, nuclei_zarr_path, bbox, full_h, full_w)
+        label_store = self._label_store(out_zarr_path, nuclei_zarr_path, nuclei_table_path,
+                                        total_cells, nuclei_state, (full_h, full_w))
+        self._log_nuclei(out_prefix, label_store)
+        if keeps_nuclei and nuclei_mmap_path and os.path.exists(nuclei_mmap_path):
+            os.remove(nuclei_mmap_path)          # nobody reads it; the zarr is the store
 
         hq2_paths = {}
         if is_hq2:
@@ -2845,6 +3034,9 @@ class SegmentMergeWorker(QThread):
         meta = {
             'mode':            'roi',
             'label_pyramid':   pyramids,
+            'label_store':     label_store,
+            'nuclei_zarr_path': self._abs(nuclei_zarr_path),
+            'nuclei_cell_table_path': self._abs(nuclei_table_path),
             'run_id':          self.result_id,
             'roi_id':          self.roi_id,
             'roi_display_name': out_prefix,
@@ -3059,6 +3251,9 @@ class SegmentMergeWorker(QThread):
                         "roi_shape": region_meta.get("roi_shape"),
                         "label_pyramid": region_meta.get("label_pyramid")
                                          or {"cell": None, "nucleus": None},
+                        "label_store": region_meta.get("label_store"),
+                        "nuclei_zarr_path": region_meta.get("nuclei_zarr_path") or "",
+                        "nuclei_cell_table_path": region_meta.get("nuclei_cell_table_path") or "",
                     })
                     self.progress.emit(
                         roi_i + 1, len(self.rois),
@@ -3106,6 +3301,7 @@ class SegmentMergeWorker(QThread):
                     "display_name": self.seg_config.get("display_name", self.method),
                     "rois": roi_meta_all,
                     "label_pyramid": {m["roi_name"]: m.get("label_pyramid") for m in roi_meta_all},
+                    "label_store": {m["roi_name"]: m.get("label_store") for m in roi_meta_all},
                     "total_cells": total_cells_all,
                     "seg_config": self.seg_config,
                     "config_path": self._abs(config_path),
@@ -3216,6 +3412,11 @@ class SegmentMergeWorker(QThread):
             is_mesmer_guided = self.method == MESMER_NUCLEAR_GUIDED
             is_mesmer = self.method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
             is_hq = self.method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD) or is_mesmer_guided
+            # Block N2: nuclear-guided and the expansions keep their nuclei on the
+            # new path (paired, own ids, nucleus -> cell table); HQ keeps its own.
+            keeps_nuclei = self._keeps_secondary_nuclei()
+            hq_nuclei = is_hq and not is_mesmer_guided
+            nuclei_state = self._nuclei_begin("") if keeps_nuclei else None
             hq_channels, hq_group = ([], None)
             mesmer_group = None
             nuclei_mmap = None
@@ -3231,7 +3432,7 @@ class SegmentMergeWorker(QThread):
                     hq_channels, hq_group = self._validate_hq_config()
             if is_mesmer:
                 mesmer_group = self._validate_mesmer_config()
-            if is_hq:
+            if hq_nuclei or keeps_nuclei:
                 nuclei_mmap_path = os.path.join(self.output_dir, 'global_nuclei_mask.dat')
                 nuclei_mmap = np.memmap(nuclei_mmap_path, dtype='uint32', mode='w+',
                                         shape=(full_h, full_w))
@@ -3317,6 +3518,7 @@ class SegmentMergeWorker(QThread):
 
                 if self.recovery_npy_dir is not None:
                     local_nuclei = None
+                    local_nuclei_cell = local_nuclei_raw = local_nuclei_dropped = None
                     local_qc_rows = []
                     local_hq2_layers = {}
                     local_hq2_metadata = {}
@@ -3371,12 +3573,16 @@ class SegmentMergeWorker(QThread):
                             output_labels=csd_output,
                         )
                         local_nuclei = None
+                        local_nuclei_cell = local_nuclei_raw = local_nuclei_dropped = None
                         local_qc_rows = []
                         local_hq2_layers = {}
                         local_hq2_metadata = {}
                         if isinstance(local_result, dict):
                             local_mask = local_result["mask"]
                             local_nuclei = local_result.get("nuclei")
+                            local_nuclei_cell = local_result.get("nuclei_cell")
+                            local_nuclei_raw = local_result.get("nuclei_raw")
+                            local_nuclei_dropped = local_result.get("nuclei_dropped")
                             local_qc_rows = local_result.get("qc_rows") or []
                             local_hq2_layers = local_result.get("hq2_layers") or {}
                             local_hq2_metadata = local_result.get("hq2_metadata") or {}
@@ -3391,6 +3597,7 @@ class SegmentMergeWorker(QThread):
                         self.error.emit(f'Tile [{row},{col}] inference failed: {e}')
                         local_mask = np.zeros((ry1-ry0, rx1-rx0), dtype=np.uint32)
                         local_nuclei = None
+                        local_nuclei_cell = local_nuclei_raw = local_nuclei_dropped = None
                         local_qc_rows = []
                         local_hq2_layers = {}
                         local_hq2_metadata = {}
@@ -3408,6 +3615,10 @@ class SegmentMergeWorker(QThread):
                 local_oy1 = oy1 - ry0
                 local_ox0 = ox0 - rx0
                 local_ox1 = ox1 - rx0
+                if keeps_nuclei and local_nuclei_raw is not None:
+                    self._nuclei_count_drops(nuclei_state, local_nuclei_raw, local_nuclei_dropped,
+                                             (local_oy0, local_oy1, local_ox0, local_ox1))
+                local_nuclei_raw = local_nuclei_dropped = None
                 _t = time.perf_counter()
                 with self.step2_profiler.time_stage("postprocess", **tile_profile_base):
                     raw_own_mask = crop_valid_region(local_mask, tile, copy=True)
@@ -3482,7 +3693,10 @@ class SegmentMergeWorker(QThread):
 
                     remapped = lut[local_mask]
                     remapped_nuclei = None
-                    if is_hq and local_nuclei is not None:
+                    if keeps_nuclei and local_nuclei is not None:
+                        remapped_nuclei = self._nuclei_add_tile(nuclei_state, lut, local_nuclei,
+                                                                local_nuclei_cell)
+                    elif hq_nuclei and local_nuclei is not None:
                         safe_nuclei = np.where(local_nuclei <= n_raw, local_nuclei, 0).astype(np.uint32, copy=False)
                         remapped_nuclei = lut[safe_nuclei]
                     remapped_hq2_layers = {}
@@ -3513,7 +3727,7 @@ class SegmentMergeWorker(QThread):
                     dst = mmap[ry0:ry1, rx0:rx1]
                     np.copyto(dst, remapped, where=(remapped > 0))
                     del remapped
-                    if is_hq and nuclei_mmap is not None and remapped_nuclei is not None:
+                    if nuclei_mmap is not None and remapped_nuclei is not None:
                         ndst = nuclei_mmap[ry0:ry1, rx0:rx1]
                         np.copyto(ndst, remapped_nuclei, where=(remapped_nuclei > 0))
                         del remapped_nuclei
@@ -3570,6 +3784,12 @@ class SegmentMergeWorker(QThread):
                 self.step2_profiler.log_tile_stage(None, "tile_prefetch_wait", metrics.get("prefetch_wait_seconds", 0.0), **metrics)
             self._close_tile_scheduler(scheduler)
 
+            # The Mesmer device status is read BEFORE the model goes: the
+            # metadata below needs it, and `del model` used to leave that read
+            # an unbound name (every whole-image Mesmer run then failed at its
+            # very end; found in block N2, user-authorised fix).
+            mesmer_device_status = (model.get("mesmer_device_status")
+                                    if isinstance(model, dict) else None)
             if self.recovery_npy_dir is None:
                 del model
                 gc.collect()
@@ -3602,7 +3822,7 @@ class SegmentMergeWorker(QThread):
             dapi_mmap_ro = np.memmap(dapi_mmap_path, dtype='uint16', mode='r',
                                      shape=(full_h, full_w))
             nuclei_mmap_ro = None
-            if is_hq and nuclei_mmap_path:
+            if (hq_nuclei or keeps_nuclei) and nuclei_mmap_path:
                 nuclei_mmap_ro = np.memmap(nuclei_mmap_path, dtype='uint32', mode='r',
                                            shape=(full_h, full_w))
 
@@ -3658,7 +3878,12 @@ class SegmentMergeWorker(QThread):
             nuclei_ome_path = ""
             nuclei_zarr_path = ""
             qc_table_path = ""
-            if is_hq and nuclei_mmap_ro is not None:
+            nuclei_table_path = ""
+            if keeps_nuclei and nuclei_mmap_ro is not None:
+                nuclei_zarr_path, nuclei_table_path = self._nuclei_finish(
+                    nuclei_state, nuclei_mmap_ro, full_h, full_w, "")
+                del nuclei_mmap_ro
+            elif hq_nuclei and nuclei_mmap_ro is not None:
                 nuclei_zarr_path = os.path.join(self.output_dir, 'global_nuclei_mask.zarr')
                 nz = zarr.open(
                     nuclei_zarr_path, mode='w',
@@ -3697,6 +3922,11 @@ class SegmentMergeWorker(QThread):
             self._record_step2_geometry(full_h, full_w, nuclei_zarr_path, out_zarr_path)
             pyramids = self._write_label_pyramids(out_zarr_path, nuclei_zarr_path, None,
                                                   full_h, full_w)
+            label_store = self._label_store(out_zarr_path, nuclei_zarr_path, nuclei_table_path,
+                                            total_cells, nuclei_state, (full_h, full_w))
+            self._log_nuclei("", label_store)
+            if keeps_nuclei and nuclei_mmap_path and os.path.exists(nuclei_mmap_path):
+                os.remove(nuclei_mmap_path)
 
             hq2_paths = {}
             if is_hq2:
@@ -3712,6 +3942,9 @@ class SegmentMergeWorker(QThread):
             meta = {
                 'mode':           'full_wsi',
                 'label_pyramid':  pyramids,
+                'label_store':    label_store,
+                'nuclei_zarr_path': self._abs(nuclei_zarr_path),
+                'nuclei_cell_table_path': self._abs(nuclei_table_path),
                 'result_id':      self.result_id,
                 'method':         self.method,
                 'display_name':   self.seg_config.get("display_name", self.method),
@@ -3749,7 +3982,7 @@ class SegmentMergeWorker(QThread):
                 meta.update(mesmer_metadata(
                     self.method,
                     self.seg_config,
-                    getattr(model, "get", lambda _k, _d=None: _d)("mesmer_device_status") if isinstance(model, dict) else None,
+                    mesmer_device_status,
                     output_mask_path=self._abs(ome_path),
                     extra={
                         "nuclei_mask_path": self._abs(nuclei_ome_path),
@@ -3835,4 +4068,5 @@ class SegmentMergeWorker(QThread):
                     pass
             self.error.emit(tb)
         finally:
+            self._cleanup_nuclei_partials()
             self._close_contract_engine()

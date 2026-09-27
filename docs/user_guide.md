@@ -178,7 +178,9 @@ Take the parameters tuned in Step 1 and **actually circle every single cell in t
 4. Choose the **Output** location, then click **▶ Run Segmentation & Merge** to start. The progress bar shows which tile is being processed.
 5. To stop midway, click **⏹ Stop**; if it gets interrupted, **Recovery Mode** can resume merging from the saved intermediate files instead of starting over.
 
-**Output:** the whole-image cell mask `global_mask` (a huge uint32 array / OME-TIFF). In the mask, each cell has a unique number (1, 2, 3…), and the background is 0.
+**Output:** the whole-image mask `global_mask` (a huge uint32 array / OME-TIFF). In the mask, each object has a unique number (1, 2, 3…), and the background is 0. For whole-cell and expansion methods it holds the cells; for nuclei-only methods it holds the nuclei.
+
+**Nuclei are kept too** by the methods that compute them next to the cells (`Cellpose nuclei (DAPI) + expansion`, `StarDist nuclei + expansion`, `Mesmer nuclear-guided whole-cell`): `global_nuclei_mask` holds the nuclei, each with its own number, and `global_nuclei_cell` says which cell each nucleus belongs to. A nucleus is kept only when it lies wholly inside one cell; a cell may have several nuclei. The terminal and the run's metadata report how many nuclei were predicted, kept and dropped (over several cells, partly on background, outside any cell). Results made before this update have no nuclei file — re-run Step 2 to get them.
 
 <!-- image placeholder: images/09_step2_tiles_and_run.png — Step 2's Tile Grid settings + Run button + progress bar -->
 <!-- image placeholder: images/10_step2_mask_result.png — a cell mask for a region (each cell a differently colored blob) -->
@@ -203,7 +205,7 @@ Check the Step 2 result against the tissue: the whole slide with the cell mask o
 5. In the Tissue Navigator opened from Step 3, **ROIs are locked** (they come from Step 0 / Step 1 and cannot be drawn, deleted or changed here), while **patches can be added, moved, renamed and deleted** — patch changes are saved and show up in Step 0 and Step 1 too.
 6. **The cell mask on the whole slide.** The row above the picture:
    - the **run** drop-down: the Step 2 results of the current ROI (method, date and time; the active one is marked). Step 3 shows the run you opened from Step 2's finished dialog; otherwise the one you chose last, the active one, or the newest;
-   - **`Cell mask ▾`** and **`Nucleus mask ▾`**: click to set `Show`, the colour (a preset or `Custom…`), `Opacity`, `Width` (1–4) and `Outline` / `Fill`. The colour is the outline's; `Fill` gives every cell its own colour. A button is greyed out when the run has no such mask (e.g. a nuclei-only method has no cell mask);
+   - **`Cell mask ▾`** and **`Nucleus mask ▾`**: click to set `Show`, the colour (a preset or `Custom…`), `Opacity`, `Width` (1–4) and `Outline` / `Fill`. The colour is the outline's; `Fill` gives every cell its own colour. A button is greyed out when the run has no such mask (e.g. a nuclei-only method has no cell mask, a whole-cell method no nucleus mask, and an expansion result from before nuclei were kept says to re-run Step 2);
    - a **hint** on the right of it says why a mask is not shown, e.g. no Step 2 result yet, a result that does not belong to this ROI (re-run Step 2), `Masks need the GPU display`, `Preparing zoomed-out masks…` (an older result is being prepared, once), or that masks cannot be shown zoomed out. Hover over it for the whole text.
    Masks follow pan, zoom and every jump. Your mask settings are kept while the program runs; nothing is written to your project, except that an older result without zoomed-out levels gets them the first time (in its own run folder).
 

@@ -138,6 +138,11 @@ def _takes_load_overview(factory):
 class Step1WholeSlideMount(QtCore.QObject):
     """The whole-slide viewer's life inside Step1's Viewer tab."""
 
+    #: Block 4c: what `mask_status()` answers may have changed (the label
+    #: binding planned, a pyramid build started or ended, a read failed, or
+    #: the binding came or went). Step3's hint line follows it.
+    mask_status_changed = QtCore.pyqtSignal()
+
     def __init__(self, window, host=None, parent=None, *, gpu=True,
                  gpu_layer_factory=None, camera_reason="step1", labels=False):
         super().__init__(parent)
@@ -466,19 +471,26 @@ class Step1WholeSlideMount(QtCore.QObject):
             controller=controller, layer=layer,
             level_shapes=[provider.level_shape(level) for level in range(provider.num_levels)],
             tile_size=controller.grid.tile_size, parent=self)
+        self.label_binding.status_changed.connect(self.mask_status_changed.emit)
         for kind, style in self._mask_styles.items():
             self.label_binding.set_style(kind, **style)
         if self._paused:
             self.label_binding.pause()
         if self._mask_sources is not None:
             self.label_binding.set_sources(self._mask_sources)
+        self.mask_status_changed.emit()
         return True
 
     def _stop_label_binding(self):
         binding, self.label_binding = self.label_binding, None
         if binding is not None:
+            try:
+                binding.status_changed.disconnect(self.mask_status_changed.emit)
+            except (TypeError, RuntimeError):
+                pass
             binding.dispose()
             binding.setParent(None)
+            self.mask_status_changed.emit()
         return binding is not None
 
     def set_mask_sources(self, sources):
@@ -490,7 +502,18 @@ class Step1WholeSlideMount(QtCore.QObject):
             self.label_binding.set_sources(self._mask_sources or {})
         elif self._labels_wanted and sources:
             print(f"[Step3] masks not drawn: {self.mask_status()['reason']}")
+        self.mask_status_changed.emit()
         return self.label_binding is not None
+
+    def mask_sources(self):
+        """The masks last set (None for none): what the owner compares a
+        refresh against, so an unchanged selection is not set again."""
+        return dict(self._mask_sources) if self._mask_sources else None
+
+    def mask_styles(self):
+        """The display settings this mount keeps and re-applies to every new
+        label binding, as {kind: {field: value}}."""
+        return {kind: dict(style) for kind, style in self._mask_styles.items()}
 
     def set_mask_style(self, kind, **style):
         """Visibility, colour, alpha, width (logical px) or mode of one mask."""

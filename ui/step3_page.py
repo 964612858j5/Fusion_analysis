@@ -11,9 +11,9 @@ and writes no file, and owns no state: the window builds the controls from
 the same style sources as Step1's and hands them in (`assemble`), and the one
 public channel dock is mounted into `channels_host()` like every other step.
 
-Right-hand side: the Overlay / Fusion pair over the viewer slot. Until the
-second whole-slide viewer is connected (block 2c-2) the slot shows a notice;
-the mask comes after that (plan step 4).
+Right-hand side: one row over the viewer slot -- the mask controls (block
+4c: the run drop-down, `Cell mask ▾`, `Nucleus mask ▾`, the hint line) and
+the Overlay / Fusion pair at its right end.
 """
 
 from PyQt5 import QtWidgets
@@ -44,13 +44,14 @@ class Step3Page(QWidget):
     # ── built once, by the window ─────────────────────────────────────
     def assemble(self, *, title_bar, tab_qss, free_tab_bar, frame_qss,
                  header_widgets, header_margins, header_spacing,
-                 weight_widgets, mode_widgets):
+                 weight_widgets, mode_widgets, mask_widgets=(), mask_hint=None):
         """Lay out what the window built, where Step1 has it.
 
         `title_bar` is Step1's kind of bar (name + Tissue Navigator);
         `tab_qss` / `free_tab_bar` are Step1's tab look; `frame_qss` is the
         `Channels` frame's; the widget lists are Step1's controls, already
-        connected to Step1's actions.
+        connected to Step1's actions. `mask_widgets` and `mask_hint` open
+        the viewer's top row (block 4c); the hint takes the spare width.
         """
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 11)            # Step1's page insets
@@ -107,7 +108,14 @@ class Step3Page(QWidget):
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(0, 0, 0, 0)
         mode_row = QHBoxLayout()
-        mode_row.addStretch()
+        mode_row.setSpacing(4)
+        for widget in mask_widgets:
+            mode_row.addWidget(widget)
+        if mask_hint is not None:
+            mode_row.addSpacing(6)
+            mode_row.addWidget(mask_hint, 1)
+        else:
+            mode_row.addStretch()
         for widget in mode_widgets:
             mode_row.addWidget(widget)
         mode_row.addSpacing(8)

@@ -105,6 +105,8 @@ from .shared_camera import snapshot_from
 from .step1_viewer_mount import Step1WholeSlideMount
 from .step2_page import Step2Page
 from .step3_page import Step3Page
+from .step3_mask_bar import Step3MaskBar
+from ..core import step3_masks
 from .step4_page import Step4Page
 
 STEP1_PATCH_PREVIEW_MAX_PX = 1024
@@ -1474,6 +1476,7 @@ class MainWindow(QMainWindow):
         self._step2 = Step2Page()
         self._step2.go_back.connect(self._go_to_step1)
         self._step2.segmentation_done.connect(self._on_step2_complete)
+        self._step2.segmentation_done.connect(self._step3_on_segmentation_done)
         self._step2.open_qc_requested.connect(self._go_to_step3)
         self._stack.addWidget(self._step2)
 
@@ -1626,12 +1629,19 @@ class MainWindow(QMainWindow):
         self._btn_step3_mode_fusion.setChecked(mode == STEP1_PREVIEW_FUSION)
         self._step3_cb_all = show_all
 
+        # Block 4c: the mask row before the pair -- run, cell, nucleus, hint.
+        bar = Step3MaskBar(self)
+        bar.run_chosen.connect(self._step3_on_run_chosen)
+        bar.style_changed.connect(self._step3_on_mask_style)
+        self._step3_mask_bar = bar
+
         page.assemble(
             title_bar=title_bar, tab_qss=_STEP1_TAB_QSS, free_tab_bar=_free_the_tab_bar,
             frame_qss=channel_template.frame_qss(),
             header_widgets=(show_all, intensity), header_margins=header_margins,
             header_spacing=header_spacing, weight_widgets=(reset, load),
-            mode_widgets=(self._btn_step3_mode_overlay, self._btn_step3_mode_fusion))
+            mode_widgets=(self._btn_step3_mode_overlay, self._btn_step3_mode_fusion),
+            mask_widgets=bar.row_widgets(), mask_hint=bar.hint)
 
     def _load_weights_dialog(self, parent):
         """Load weights from a Step1 session, asked from `parent` (block F's
@@ -1864,6 +1874,7 @@ class MainWindow(QMainWindow):
             mount = Step1WholeSlideMount(self, parent=self, camera_reason="step3",
                                          labels=True)
             mount.camera_sink = self._on_step3_camera
+            mount.mask_status_changed.connect(self._step3_update_mask_hint)
             self._step3_mount = mount
             # THE NAVIGATOR CLICK must not depend on Step1's viewer having
             # been built: a restart that goes straight to Step3 never builds
@@ -1897,6 +1908,7 @@ class MainWindow(QMainWindow):
         mount.restore_legacy()
         self._step3.set_viewer_notice(
             f"The whole-slide view could not open: {reason}")
+        self._step3_refresh_masks(self._step3_take_requested_run())
         return False
 
     def _step3_follow_step(self, active):
@@ -1924,6 +1936,7 @@ class MainWindow(QMainWindow):
             if mount.host.stack is None:
                 return self._step3_viewer_failed(mount, path, "the source could not be reopened")
             self._step3_viewer_shown(mount)
+            self._step3_refresh_masks(self._step3_take_requested_run())
             return True
         reason = "the slide could not be opened"
         try:
@@ -1936,12 +1949,159 @@ class MainWindow(QMainWindow):
         mount.set_mode(self._step1_preview_mode)
         self._step3_viewer_shown(mount)
         self._wire_step1_tissue_navigation()
+        self._step3_refresh_masks(self._step3_take_requested_run())
         return True
+
+    # ── Step3's masks (block 4c) ──────────────────────────────────────
+    def _step3_take_requested_run(self):
+        """The run named on the way in, once."""
+        requested = self.__dict__.get("_step3_requested_run")
+        self._step3_requested_run = None
+        return requested
+
+    def _step3_mask_context(self):
+        """(roi_dir, roi_name, roi_bbox) of the current ROI workspace."""
+        roi_dir = str((self.step0_output or {}).get("roi_dir") or "")
+        roi = self.__dict__.get("_active_roi") or {}
+        return roi_dir, roi.get("name") or "", roi.get("bbox_fullres")
+
+    @staticmethod
+    def _step3_run_label(run):
+        created = str(run.created_at or "")[:16].replace("T", " ")
+        label = f"{run.method or 'unknown method'} · {created}" if created else run.method
+        return label + ("  (active)" if run.active else "")
+
+    @staticmethod
+    def _step3_source_key(sources):
+        """What makes two mask selections the same: per kind, the mask, its
+        region and its pyramid's place."""
+        sources = sources or {}
+        return tuple((kind, None if src is None else
+                      (src.mask_path, tuple(src.bbox), src.pyramid_path))
+                     for kind, src in sorted(sources.items()))
+
+    def _step3_refresh_masks(self, requested_dir=None):
+        """Read the ROI workspace's runs, choose one, resolve its masks and
+        hand them to Step3's viewer -- only when they differ from the ones
+        it draws, so a refresh that keeps the choice clears nothing."""
+        bar = self.__dict__.get("_step3_mask_bar")
+        if bar is None:
+            return None
+        roi_dir, roi_name, roi_bbox = self._step3_mask_context()
+        if self.__dict__.get("_step3_mask_roi_dir") != roi_dir:
+            self._step3_mask_run_id = None          # another workspace: no current choice
+        self._step3_mask_roi_dir = roi_dir
+        try:
+            runs = step3_masks.list_runs(roi_dir) if roi_dir and os.path.isdir(roi_dir) else []
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Step3] segmentation runs could not be listed: {exc}")
+            runs = []
+        run = step3_masks.choose_run(runs, requested_dir=requested_dir,
+                                     current=self.__dict__.get("_step3_mask_run_id"))
+        self._step3_mask_runs = runs
+        self._step3_mask_run_id = run.run_id if run is not None else None
+        bar.set_runs([(self._step3_run_label(r), r.run_dir) for r in runs],
+                     run.run_dir if run is not None else None)
+        mount = self.__dict__.get("_step3_mount")
+        stack = getattr(getattr(mount, "host", None), "stack", None) if mount else None
+        resolved = {"cell": None, "nucleus": None, "reasons": {}}
+        self._step3_mask_problem = None
+        if run is not None and stack is None:
+            self._step3_mask_problem = "Masks need the whole-slide viewer"
+        elif run is not None:
+            provider = stack.provider
+            shapes = [provider.level_shape(level) for level in range(provider.num_levels)]
+            try:
+                resolved = step3_masks.resolve_masks(run, roi_name, roi_bbox, shapes)
+            except Exception as exc:                        # noqa: BLE001
+                resolved = {"cell": None, "nucleus": None,
+                            "reasons": {"cell": str(exc), "nucleus": str(exc)}}
+            if resolved["cell"] is None and resolved["nucleus"] is None:
+                why = resolved["reasons"].get("cell") or resolved["reasons"].get("nucleus") or ""
+                self._step3_mask_problem = f"Mask not shown: {why} — re-run Step2"
+        sources = {kind: resolved.get(kind) for kind in ("cell", "nucleus")}
+        for kind in ("cell", "nucleus"):
+            bar.set_mask_available(kind, sources[kind] is not None)
+        if mount is not None:
+            wanted = sources if any(sources.values()) else None
+            if self._step3_source_key(wanted) != self._step3_source_key(mount.mask_sources()):
+                mount.set_mask_sources(wanted)
+        self._step3_update_mask_hint()
+        return run
+
+    def _step3_on_run_chosen(self, run_dir):
+        self._step3_refresh_masks(requested_dir=run_dir)
+
+    def _step3_on_segmentation_done(self, _output_dir):
+        """Step2 finished in the background: a new run for the list, the
+        current choice kept -- only while Step3 is on screen."""
+        if self.__dict__.get("_current_step") == 3:
+            self._step3_refresh_masks()
+
+    def _step3_on_mask_style(self, kind, change):
+        mount = self.__dict__.get("_step3_mount")
+        if mount is not None:
+            mount.set_mask_style(kind, **change)
+
+    def _step3_clear_masks(self):
+        """The dataset moved: no list, no choice, no hint."""
+        self._step3_mask_runs = []
+        self._step3_mask_run_id = None
+        self._step3_mask_roi_dir = None
+        self._step3_mask_problem = None
+        mount = self.__dict__.get("_step3_mount")
+        if mount is not None:
+            # the mount keeps its masks across a close; these are the old
+            # dataset's and must not come back when it reopens
+            mount.set_mask_sources(None)
+        bar = self.__dict__.get("_step3_mask_bar")
+        if bar is not None:
+            bar.set_runs([])
+            for kind in ("cell", "nucleus"):
+                bar.set_mask_available(kind, False)
+            self._step3_update_mask_hint()
+
+    def _step3_mask_hint_text(self):
+        """The one line the hint shows, most important first."""
+        if not self.__dict__.get("_step3_mask_runs"):
+            return "No segmentation results for this ROI — run Step2"
+        problem = self.__dict__.get("_step3_mask_problem")
+        if problem:
+            return problem
+        mount = self.__dict__.get("_step3_mount")
+        if mount is None:
+            return ""
+        status = mount.mask_status()
+        if status.get("error"):
+            return f"Masks: {status['error']}"
+        if not status.get("available"):
+            return status.get("reason") or ""
+        kinds = [status.get(kind) or {} for kind in ("cell", "nucleus")]
+        if any(k.get("building") for k in kinds):
+            return "Preparing zoomed-out masks…"
+        here = [k.get("coarse_unavailable") for k in kinds if k.get("unavailable_here")]
+        if here:
+            return f"Zoomed out, masks cannot be shown: {here[0]}"
+        if status.get("budget"):
+            return "Mask memory is full: part of the view has no mask"
+        return ""
+
+    def _step3_update_mask_hint(self):
+        bar = self.__dict__.get("_step3_mask_bar")
+        if bar is None:
+            return ""
+        text = self._step3_mask_hint_text()
+        if text != bar.hint.full_text():
+            bar.set_hint(text)
+            if text:
+                print(f"[Step3] mask: {text}")            # once per change, not per frame
+        return text
 
     def _close_step3_viewer(self):
         """The dataset moved: Step3's viewer closes; the next entry reopens."""
         mount = self.__dict__.get("_step3_mount")
         self._step3_mount_refused_for = None
+        self._step3_clear_masks()
         if mount is None:
             return False
         try:
@@ -4520,6 +4680,9 @@ class MainWindow(QMainWindow):
         a hidden page)."""
         if not self._step3_entry_ready(output_dir):
             return
+        # Block 4c: a run named by the caller (Step2's finished dialog) is
+        # the one Step3 shows; the breadcrumb names none.
+        self._step3_requested_run = output_dir or None
         if self._current_step == 1:
             self._stop_all_loaders()
         # Breadcrumb navigation passes no output_dir; fall back to the completed

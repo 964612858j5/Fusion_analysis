@@ -9,6 +9,8 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.57：块 ④c 真机验收（第 1–4、6 项通过，第 5 项真机未验）；记录 expansion 方法的核 mask 被 Step2 丢弃，用户裁定另立块。
+- v3.56：块 ④c 已实施（自动验收通过，待真机验收），写入执行记录。
 - v3.55：块 ④c v2 获批（4 项裁定同意，含 ④b 错误状态的最小扩围）。
 - v3.54：块 ④c 按独立审核修订为 v2（Show 打开可补读；两种 mask 默认显示；④b 错误状态的最小扩围；来源不变不重设；颜色只用于轮廓；默认选择按规则验收；复制件须改写路径；设置在 mount 重建后重新应用；不闪空的前提；退出段错误在部署机出现即生命周期不通过）。
 - v3.53：块 ④c 申请 v1（运行下拉框、细胞 / 核 mask 各一个下拉面板、提示文字；进入 Step3 / Step2 新结果 / 换数据集的刷新；兼作 ④a、④b 的真机验收）。
@@ -1303,7 +1305,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
     - 真实 GL（本机，**每条测试单独进程**，避开驱动的上下文数限制）：Step1 的 8 个 GPU 模块共 150 条 + 本块 25 条。两边相同的唯一失败：`test_step1_gpu_takeover.py::test_the_mounted_widget_framebuffer_holds_real_gpu_pixels`（断言厂商名含「nvidia」，本机经 D3D12 显示为「Microsoft Corporation」，环境原因）。名字带空格的 7 条参数化用例另行单独补跑，两边都通过。
   - 真机：本块用户看不到变化（没有人调用 `set_mask_sources`），真机验收随 ④c；届时一并确认上面的退出段错误在部署机上是否存在。
 
-### 块 ④c — Step3 的 mask 界面与接线（申请 v2，按独立审核修订，**用户 2026-09-27 批准**，实施中）
+### 块 ④c — Step3 的 mask 界面与接线（申请 v2，按独立审核修订，**用户 2026-09-27 批准**；已实施，**真机验收通过（第 1–4、6 项；第 5 项真机未验）**）
 - **必要性**：④a（数据层）与 ④b（GPU 渲染）已就位，但产品里没有人选运行、没有人把 mask 交给 viewer，用户看不到任何 mask。本块按第 ④ 步裁定 5、6 加界面并接线，是第 ④ 步的最后一块，**也是 ④a、④b 的真机验收**。
 - **只读调查结论**：
   - Step3 页面（`ui/step3_page.py`）只负责摆放；右栏顶部现在一行只有右端的 `Overlay` / `Fusion`（`assemble(mode_widgets=...)`，`:111-117`），控件由 `main_window._build_step3_page` 构建（`main_window.py:1566-1633`）。现有测试没有锁定这一行的内容。
@@ -1351,10 +1353,22 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   2. 线宽 1–4，不提供 0，隐藏用 `Show`。
   3. 提示文字：截断 + 悬停全文 + 终端只在提示变化时打印。
   4. 批准上面 ④b 模块的最小扩围（只改错误状态的通知、换源清除、迟到错误丢弃）。
+- **执行记录**（2026-09-27，未提交）：
+  - `ui/step3_label_binding.py`（④b 扩围，只改错误状态）：读取结果先查代次再记错误（旧来源的迟到错误直接丢弃并计入 `late_dropped`）；读取失败与画不出时发出 `status_changed`；`set_sources` 清除上一个来源的错误。
+  - `ui/step1_viewer_mount.py`：信号 `mask_status_changed`（转发标签绑定的 `status_changed`，标签绑定建立 / 释放、设置来源时也发出）；只读的 `mask_sources()` / `mask_styles()`，供窗口比较与测试。
+  - `ui/step3_mask_bar.py`（新）：运行下拉框、`Cell mask ▾` / `Nucleus mask ▾`（带颜色色块，下拉面板：`Show`、7 个预设色 + `Custom…`、`Opacity`、`Width` 1–4、`Outline` / `Fill`、「Fill uses one colour per cell」）、截断并悬停显示全文的提示；只有控件，不读文件。`Custom…` 的取色经一个可替换的入口（产品用系统对话框，测试直接返回颜色）。
+  - `ui/step3_page.py`：`assemble` 接收 `mask_widgets` 与 `mask_hint`，与 `Overlay` / `Fusion` 同一行，提示占剩余宽度。
+  - `ui/main_window.py`：构建这一行；`_step3_refresh_masks`（列运行 → `choose_run` → 按 `_active_roi` 与 viewer 层级 `resolve_masks` → 按钮可用状态 → **来源有变化才** `set_mask_sources`）；触发点：viewer 打开 / 恢复 / 打开失败之后（带 `_go_to_step3` 显式给出的目录，只用一次）、下拉框选择、在 Step3 页面上收到 `segmentation_done`；换数据集时清空列表、按钮与提示，**并清掉 mount 记住的 mask 来源**（mount 关闭后仍保留来源，否则重开时会把旧数据集的 mask 用到新数据上——实施中发现，属本块范围）；提示按申请的优先级，终端只在内容变化时打印一次。
+  - 文档：`UI_SURFACE_RULES.md` Step3 一节（新的一行；删除「no mask yet」）；两份用户指南 Step3 一节（第 6 条改为 mask 的用法；「正在重建」的提示改为只差 patch 按钮；产出说明补生成的金字塔）。
+  - 测试：`tests/test_step3_mask_bar.py`（5 条）：默认值（两种都显示、绿 / 青、75 %、1、Outline、线宽范围 1–4）；每个控件只发一次、只含自己的字段；预设色、自定义色（含取消）与按钮色块；运行列表的空状态、选中、选择信号；按钮禁用；提示截断与悬停全文。`tests/test_step3_mask_wiring.py`（10 条，真实窗口 + 合成项目）：进入时选 active；完成对话框的运行；列表中选择；导航条回来保持选择；Step3 上收到新结果时列表加一项、选择不变、**不再次设置来源**，普通再次进入也不设置，不在 Step3 时不刷新；纯核 / nuclear-guided / expansion 三种方法的按钮；别的 ROI 的运行两个都禁用并提示原因与「re-run Step2」；无运行的提示与只打印一次；换数据集清空列表与 mount 的来源；面板设置到达 mount；GPU：mount 重建后标签绑定的**实际**设置与来源都恢复。`tests/test_step3_label_binding.py` 加 2 条：读取失败立即提示、换到正常来源后错误消失；旧来源的迟到错误不出现。
+  - 反向注入 11 处，各使至少 1 条变红：总是重设来源、换数据集不清来源、任何页面都刷新、忽略完成对话框的运行、不提示读不出、每次都打印、换源不清错误、错误不发信号、先记错误再查代次、线宽允许 0、提示无悬停全文。
+  - 回归：与 `git archive HEAD`（`d24bc7e`）逐条对比，**无新增失败**。离屏 31 个模块（含界面规则契约 `test_ui_surface_contract`、Step1 → Step2 交接、Step3 / Step1 viewer / GPU / 标签相关模块），两边相同：`test_global_channel_dock.py` 1 条（字体）、`test_step1_montage_view.py` 第 27 条后崩溃。真实 GL（每条单独进程）：GPU 接管 / 总览跳过 / 请求门 / 标签渲染 / 标签 mount 共 92 条 + 本块接线 10 条，两边相同的唯一失败仍是 `test_the_mounted_widget_framebuffer_holds_real_gpu_pixels`（厂商名，环境原因）。
+  - **真机验收（用户 2026-09-27，同时是 ④a、④b 的真机验收）**：第 1–4 项通过；第 6 项退出程序无段错误（本机 ④b 测试进程中的退出段错误未在产品中出现）；第 5 项（无金字塔的旧运行现场补生成）**真机未验**，只有自动测试覆盖。真机中发现：`cellpose_nuclei_expansion` 的新运行在 Step3 没有核 mask——Step2 丢弃了引擎算出的核（`segment_merge_worker.py:2125`），按 ④a 批准的分类表核按钮禁用；用户裁定所有计算了核的方法都必须保留核 mask 并能在 Step3 显示，另立块（见第六节）。第 5 项的复制件由任务临时目录里的脚本 `make_pyramidless_copy.py` 生成（复制一个 ROI 工作区、去掉 `.dat` 与 `label_pyramid_*.zarr`、把复制件全部 JSON 里的项目路径改写到复制件并核对无残留；原项目只读）。
 
 ## 六、未决与 advisory
 
 ### 后续计划（用户 2026-09-26 排定；都未启动，每块须单独申请）
+0. **所有计算了核的方法都保留核 mask，并能在 Step3 显示**（用户 2026-09-27 裁定；④c 真机验收中发现 expansion 方法的核被 Step2 丢弃）。先只读调查，再申请。
 1. **Step2：旧路径 ROI 模式中途 Stop 仍登记成功**（没有契约的参数文件；契约路径已在 V2 第 3 步修好）。
 2. **Step3 重设计**（调查与裁定见第五节「Step3 重设计」；先做块 N）：做成和 Step1 一样的布局和设置——左侧通道面板，右侧组织图像，可叠加分割 mask，可拖动、缩放，Tissue Navigator 空降和 patch；用户可以画 ROI，但不产生任何下游影响。
 3. **项目 / 会话架构**（最后做）：打开别的项目并切换一切（S2 的调查结论见块 S）；切换数据集后 Step2 仍留着上一个项目的 fused.zarr 和参数路径、正在跑的分割不停止——这一条随会话恢复一起治理。

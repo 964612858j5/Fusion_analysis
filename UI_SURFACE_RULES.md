@@ -229,13 +229,26 @@ row, and the duplicate Tissue Preview button in the step bar.
   `Tissue Navigator`; LEFT, the `Fusion` tab with Step1's `Channels` frame --
   `Show all` (Step1's sweep) and `Intensity…`, the rule, `Reset weights` and
   `Load weights`, then the one dock with Step1's rows, in a host of Step3's
-  own; RIGHT, the `Viewer` tab with the `Overlay` / `Fusion` pair (the SAME
-  mode as Step1's pair) over Step3's own whole-slide viewer (block 2c-2): a
+  own; RIGHT, the `Viewer` tab with ONE row over Step3's viewer -- the mask
+  controls (block 4c, user rulings 2026-09-26/27), then the `Overlay` /
+  `Fusion` pair (the SAME mode as Step1's pair) at its right end. The mask
+  controls, left to right: the run drop-down (the current ROI workspace's
+  finished Step2 runs, `method · date time`, `(active)` marked, newest
+  first; one disabled `No segmentation results for this ROI` when there are
+  none; the run named by Step2's finished dialog, else the current choice,
+  else the active run, else the newest); `Cell mask ▾` and `Nucleus mask ▾`
+  in the mode buttons' look, each with a swatch of its colour and a
+  drop-down panel -- `Show` (both on by default), a row of preset colours
+  and `Custom…` (the colour is the OUTLINE's; `Fill uses one colour per
+  cell`), `Opacity` (75 %), `Width` 1-4 (1; outline only) and `Outline` /
+  `Fill` (Outline) -- disabled when the run has no such mask; then one hint
+  line, cut to fit with its whole text on hover and printed to the terminal
+  once per change. The viewer is Step3's own (block 2c-2): a
   second Step1 viewer, resident, paused while Step3 is not on screen (and
   Step1's paused while Step3 is), sharing Step1's camera; a navigator click
   moves the viewer of the step on screen. When it cannot open, the slot's
   notice says why. `← Back to Step 2` below. No Save, no pre-segmentation, no
-  patch strip (a later block), no mask yet. The column joins the one
+  patch strip (a later block). The column joins the one
   channel-column share. A refusal to open Step3 is said in a (non-modal)
   dialog on the page the user is on. The Tissue Navigator in Step3 (block
   S5, user ruling 2026-09-26): the ROIs are Step0/Step1's and FROZEN -- no

@@ -466,3 +466,56 @@ def test_undelivered_results_count_against_the_budget(app, tmp_path, made, monke
 def test_the_screen_radius_is_the_logical_width_times_the_dpr_rounded(width, dpr, radius):
     from block01.ui.step1_gpu_layer import label_radius
     assert label_radius(width, dpr) == radius                # floor(w * dpr + 0.5), 0..8
+
+
+# ── errors (block 4c's minimal extension) ────────────────────────────────
+
+def test_a_read_failure_is_reported_at_once_and_a_new_source_clears_it(app, tmp_path, made,
+                                                                       monkeypatch):
+    srcs, _ = _sources(tmp_path / "a")
+    good, _ = _sources(tmp_path / "b")
+    real = sm.read_label_tile
+    bad_path = srcs["cell"].mask_path
+
+    def failing(source, *a):
+        if source.mask_path == bad_path:
+            raise OSError("disk went away")
+        return real(source, *a)
+    monkeypatch.setattr(sm, "read_label_tile", failing)
+    b, ctl, _ = made()
+    changes = []
+    b.status_changed.connect(lambda: changes.append(b.mask_status()["error"]))
+    b.set_sources(srcs)
+    ctl.move(0, {(3, 3)}, kind="NAVIGATOR_JUMP")
+    assert wait(app, lambda: b.mask_status()["error"])
+    assert "disk went away" in b.mask_status()["error"]
+    assert any(e and "disk went away" in e for e in changes)      # it was signalled
+    b.set_sources(good)
+    assert b.mask_status()["error"] is None
+    assert wait(app, lambda: _idle(b) and b._resident)
+    assert b.mask_status()["error"] is None
+
+
+def test_an_old_sources_late_error_is_dropped(app, tmp_path, made, monkeypatch):
+    srcs, _ = _sources(tmp_path / "a")
+    good, _ = _sources(tmp_path / "b")
+    gate, started = threading.Event(), threading.Event()
+    real = sm.read_label_tile
+    bad_path = srcs["cell"].mask_path
+
+    def failing_late(source, *a):
+        if source.mask_path == bad_path:
+            started.set()
+            gate.wait(5)
+            raise OSError("old source failed")
+        return real(source, *a)
+    monkeypatch.setattr(sm, "read_label_tile", failing_late)
+    b, ctl, _ = made()
+    b.set_sources(srcs)
+    ctl.move(0, {(3, 3)}, kind="NAVIGATOR_JUMP")
+    assert started.wait(5)
+    b.set_sources(good)                                   # the old read is still under way
+    gate.set()
+    assert wait(app, lambda: _idle(b) and b._resident)
+    assert b.mask_status()["error"] is None
+    assert b.stats()["late_dropped"] >= 1

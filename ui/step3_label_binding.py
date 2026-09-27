@@ -140,6 +140,7 @@ class Step3LabelBinding(QtCore.QObject):
         self._sources = {kind: (sources or {}).get(kind) for kind in KINDS}
         self._reasons = {kind: None for kind in KINDS}
         self._budget_note = None
+        self._last_error = None             # the old source's error is not this one's
         if not self._paused:
             self._queue_builds(self._sources)
         self._push()
@@ -493,11 +494,17 @@ class Step3LabelBinding(QtCore.QObject):
             return
         key = job["key"]
         self.counts["read"] += 1
+        # THE GENERATION FIRST: an old source's late result -- an error
+        # included -- is not this source's news.
+        if job["gen"] != self._generation:
+            self.counts["late_dropped"] += 1
+            return
         if isinstance(result, Exception):
             self._last_error = f"label tile {key[2:]} could not be read: {result}"
             print(f"[Step3] {self._last_error}")
+            self.status_changed.emit()
             return
-        if job["gen"] != self._generation or key not in self._wanted:
+        if key not in self._wanted:
             self.counts["late_dropped"] += 1
             return
         if not isinstance(result, step3_masks.LabelTile):
@@ -559,3 +566,4 @@ class Step3LabelBinding(QtCore.QObject):
         except (Step1GpuLayerError, RuntimeError) as exc:
             self._last_error = f"masks could not be drawn: {exc}"
             print(f"[Step3] {self._last_error}")
+            self.status_changed.emit()

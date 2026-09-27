@@ -53,7 +53,8 @@ def test_outputs_and_provenance(tmp_path):
     lab = np.where(lab == 5, 0, lab).astype(np.uint32)   # label 5 becomes empty
     z[:] = lab
     out = str(tmp_path / "out")
-    res = few.run_extraction(p["run_dir"], out, statistics=["mean", "max"], file_prefix="s1")
+    res = few.run_extraction(p["run_dir"], out, statistics=["mean", "max"], file_prefix="s1",
+                             write_csv=True)
     header, rows = _rows(res["csv"])
     assert os.path.basename(res["csv"]) == "s1_cell_features.csv"
     assert header[:16] == ["cell_id"] + list(qe.MORPHOLOGY_COLUMNS)
@@ -81,7 +82,8 @@ def test_outputs_and_provenance(tmp_path):
 def test_a_corrected_channel_is_quantified_from_step0s_product(tmp_path):
     p = build_project(tmp_path, corrected_value=7.25)
     out = str(tmp_path / "out")
-    res = few.run_extraction(p["run_dir"], out, statistics=["mean", "min", "max"])
+    res = few.run_extraction(p["run_dir"], out, statistics=["mean", "min", "max"],
+                             write_csv=True)
     header, rows = _rows(res["csv"])
     for name in ("CD3_mean", "CD3_min", "CD3_max"):
         vals = {float(r[header.index(name)]) for r in rows}
@@ -116,20 +118,24 @@ def test_stop_writes_nothing(tmp_path):
     assert not os.path.exists(out) or not os.listdir(out)
 
 
-@pytest.mark.parametrize("fail", ["csv", "provenance"])
+@pytest.mark.parametrize("fail", ["csv", "h5ad", "provenance"])
 def test_a_failing_write_leaves_no_half_output(tmp_path, monkeypatch, fail):
-    p = build_project(tmp_path)
+    p = build_project(tmp_path, nuclei=True)
     out = str(tmp_path / "out")
 
     def boom(*a, **k):
         raise OSError(28, "No space left on device")
     if fail == "csv":
         monkeypatch.setattr(few.np, "savetxt", boom)
+    elif fail == "h5ad":
+        import h5py
+        monkeypatch.setattr(h5py.Group, "create_dataset", boom)
     else:
         monkeypatch.setattr(few.json, "dump", boom)
     with pytest.raises(OSError):
-        few.run_extraction(p["run_dir"], out)
-    assert os.listdir(out) == []
+        few.run_extraction(p["run_dir"], out, write_csv=True,
+                           regions=["nucleus", "cytoplasm"])
+    assert not os.path.exists(out) or os.listdir(out) == []
 
 
 def test_a_failing_rename_of_the_provenance_removes_the_table(tmp_path, monkeypatch):
@@ -143,8 +149,8 @@ def test_a_failing_rename_of_the_provenance_removes_the_table(tmp_path, monkeypa
         return real(a, b)
     monkeypatch.setattr(few.os, "replace", replace)
     with pytest.raises(OSError):
-        few.run_extraction(p["run_dir"], out)
-    assert os.listdir(out) == []
+        few.run_extraction(p["run_dir"], out, write_csv=True)
+    assert not os.path.exists(out) or os.listdir(out) == []
 
 
 def _run_thread(worker):
@@ -177,8 +183,7 @@ def test_the_thread_finishes(tmp_path):
     out = str(tmp_path / "out")
     got = _run_thread(few.FeatureExtractWorker(p["run_dir"], out))
     assert got["error"] is None and got["done"] == (out, "cell_features")
-    assert os.path.isfile(os.path.join(out, "cell_features.csv"))
-    assert os.path.isfile(os.path.join(out, "cell_features_provenance.json"))
+    assert sorted(os.listdir(out)) == ["cell_features.h5ad", "cell_features_provenance.json"]
 
 
 def test_the_default_output_folder(tmp_path):
@@ -186,3 +191,114 @@ def test_the_default_output_folder(tmp_path):
     job = qs.resolve_quant_job(p["run_dir"])
     assert few.default_output_dir(job) == os.path.join(
         p["ws"], "step4", "quantification_runs", "seg_20260927_120000_test", "Full_WSI")
+
+
+
+# ── block S4-2: one h5ad, optional CSV ───────────────────────────────────
+
+def _read(path):
+    import anndata
+    return anndata.read_h5ad(path)
+
+
+def test_one_h5ad_per_run_with_every_layer(tmp_path):
+    p = build_project(tmp_path, nuclei=True)
+    out = str(tmp_path / "out")
+    res = few.run_extraction(p["run_dir"], out, regions=["nucleus", "cytoplasm"],
+                             features=["morphology", "nuclear_summary"])
+    assert res["csv"] is None and sorted(os.listdir(out)) == [
+        "cell_features.h5ad", "cell_features_provenance.json"]
+    ad = _read(res["h5ad"])
+    lab = p["labels"]["Full WSI"]
+    present = sorted(int(v) for v in np.unique(lab) if v)
+    assert list(ad.obs["cell_id"]) == present and list(ad.obs_names) == [str(v) for v in present]
+    assert list(ad.var_names) == ["DAPI", "CD3", "CD8", "PanCK"]
+    assert list(ad.var["source"]) == ["raw", "corrected", "raw", "raw"]
+    assert ad.var.loc["CD3", "correction_method"] == "tophat"
+    assert ad.uns["X_statistic"] == "mean" and ad.uns["primary_object"] == "cell"
+    assert list(ad.uns["expression_regions"]) == ["cell", "nucleus", "cytoplasm"]
+    assert ad.uns["seam_merge"]["version"] == 1
+    want = {f"{r}_{s}" for r in ("cell", "nucleus", "cytoplasm") for s in qe.FAST_STATS}
+    assert set(ad.layers.keys()) == want
+    assert ad.X.dtype == np.float32
+    np.testing.assert_array_equal(ad.X, ad.layers["cell_mean"])
+    for col in list(qe.MORPHOLOGY_COLUMNS) + list(qe.NUCLEAR_SUMMARY_COLUMNS):
+        assert col in ad.obs.columns, col
+    assert ad.obs["area"].dtype == np.int64
+    assert not np.isinf(np.asarray(ad.layers["cytoplasm_max"])).any()
+    prov = json.load(open(res["provenance"]))
+    assert prov["X"] == "cell_mean" and prov["outputs"]["csv"] is None
+    assert prov["nuclei"]["nucleus_pixels_outside_their_cell"]["pixels"] == 0
+    assert json.loads(ad.uns["provenance_json"])["X"] == "cell_mean"
+
+
+def test_x_follows_the_first_chosen_statistic(tmp_path):
+    p = build_project(tmp_path)
+    res = few.run_extraction(p["run_dir"], str(tmp_path / "out"), statistics=["std", "max"])
+    ad = _read(res["h5ad"])
+    assert ad.uns["X_statistic"] == "std"
+    np.testing.assert_array_equal(ad.X, ad.layers["cell_std"])
+    assert set(ad.layers.keys()) == {"cell_std", "cell_max"}
+
+
+def test_a_nuclei_only_run_is_one_row_per_nucleus(tmp_path):
+    p = build_project(tmp_path, nuclei_only=True)
+    res = few.run_extraction(p["run_dir"], str(tmp_path / "out"))
+    ad = _read(res["h5ad"])
+    assert ad.uns["primary_object"] == "nucleus" and "nucleus_id" in ad.obs.columns
+    assert "nucleus_mean" in ad.layers and "cell_mean" not in ad.layers
+
+
+def test_an_old_run_is_quantified_and_its_risk_recorded(tmp_path):
+    p = build_project(tmp_path, nuclei=True, corrupt_nuclei=True, seam_merge=False)
+    res = few.run_extraction(p["run_dir"], str(tmp_path / "out"),
+                             regions=["nucleus", "cytoplasm"])
+    ad = _read(res["h5ad"])
+    assert ad.uns["seam_merge"] == "absent"
+    prov = json.load(open(res["provenance"]))
+    assert prov["seam_merge"] == "absent"
+    assert prov["nuclei"]["nucleus_pixels_outside_their_cell"]["pixels"] >= 1
+    assert res["nucleus_outside"]["pixels"] >= 1
+
+
+def test_the_csv_is_written_only_when_asked_and_matches_the_h5ad(tmp_path):
+    p = build_project(tmp_path, nuclei=True)
+    out = str(tmp_path / "out")
+    res = few.run_extraction(p["run_dir"], out, regions=["nucleus"], write_csv=True)
+    header, rows = _rows(res["csv"])
+    assert "DAPI_mean" in header and "DAPI_nucleus_mean" in header
+    ad = _read(res["h5ad"])
+    col = header.index("CD8_nucleus_max")
+    got = np.array([float(r[col]) if r[col] != "nan" else np.nan for r in rows])
+    want = np.asarray(ad.layers["nucleus_max"])[:, 2].astype(np.float64)
+    np.testing.assert_allclose(got, want, rtol=1e-5, equal_nan=True)
+
+
+def test_regions_a_run_cannot_give_are_refused_before_any_output(tmp_path):
+    p = build_project(tmp_path)
+    out = str(tmp_path / "out")
+    with pytest.raises(ValueError, match="no nuclei"):
+        few.run_extraction(p["run_dir"], out, regions=["nucleus"])
+    assert not os.path.exists(out)
+
+
+
+def test_the_csv_keeps_full_precision_while_the_h5ad_is_float32(tmp_path):
+    """The CSV is written from float64 values (S4-1's numbers exactly); the
+    h5ad's layers are float32."""
+    import tempfile
+    p = build_project(tmp_path, corrected_value=None)
+    res = few.run_extraction(p["run_dir"], str(tmp_path / "out"), write_csv=True)
+    header, rows = _rows(res["csv"])
+    job = qs.resolve_quant_job(p["run_dir"])
+    reader = qs.JobReader(job)
+    try:
+        exact, _t = qe.quantify(job, reader, qe.FAST_STATS, sink_path=tempfile.mkdtemp(),
+                                settings=qe.QuantSettings(sink_dtype="f8"))
+    finally:
+        reader.close()
+    ci = header.index("CD3_std")
+    want = ["%.6g" % v for v in exact.sink.read("cell_std")[:, 1]]
+    assert [r[ci] for r in rows] == want
+    assert json.load(open(res["provenance"]))["settings"]["sink_dtype"] == "f8"
+    assert _read(res["h5ad"]).layers["cell_std"].dtype == np.float32

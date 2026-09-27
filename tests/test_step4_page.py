@@ -107,8 +107,8 @@ def test_the_job_runs_from_the_page_into_the_users_folder(tmp_path):
     for _ in range(50):
         _app.processEvents()
     assert page._errors == []
-    assert page._announced and os.path.isfile(os.path.join(mine, "cell_features.csv"))
-    assert os.path.isfile(os.path.join(mine, "cell_features_provenance.json"))
+    assert page._announced
+    assert sorted(os.listdir(mine)) == ["cell_features.h5ad", "cell_features_provenance.json"]
     assert page._btn_run.isEnabled()
 
 
@@ -122,3 +122,105 @@ def test_mainwindow_hands_step3s_choice_to_step4():
     assert choice(mw, "/runs/named") == ("/runs/named", None)
     empty = types.SimpleNamespace(step2_output=None, step3_output=None)
     assert choice(empty) == ("", None)
+
+
+
+# ── block S4-2: the output scope questionnaire ───────────────────────────
+
+def test_the_groups_are_open_and_fold():
+    page = _page()
+    page.show()
+    try:
+        for key, (arrow, body) in page._groups.items():
+            assert arrow.isChecked() and body.isVisible(), key
+            arrow.setChecked(False)
+            assert not body.isVisible(), key
+            arrow.setChecked(True)
+            assert body.isVisible(), key
+    finally:
+        page.close()
+
+
+def test_a_run_without_nuclei_greys_out_what_needs_them(tmp_path):
+    p = build_project(tmp_path)
+    page = _page()
+    page.set_run(p["run_dir"], open_slide=p["slide"])
+    for cb in (page._region_checks["nucleus"], page._region_checks["cytoplasm"],
+               page._feature_checks["nuclear_summary"]):
+        assert not cb.isEnabled() and not cb.isChecked()
+        assert "no nuclei" in cb.toolTip()
+    assert page.scope() == (["mean", "sum", "std", "min", "max"], [], ["morphology"], False)
+
+
+def test_a_run_with_nuclei_checks_them_by_default(tmp_path):
+    p = build_project(tmp_path, nuclei=True)
+    page = _page()
+    page.set_run(p["run_dir"], open_slide=p["slide"])
+    stats, regions, features, csv = page.scope()
+    assert regions == ["nucleus", "cytoplasm"]
+    assert features == ["morphology", "nuclear_summary"] and csv is False
+    assert not page._risk_lbl.isVisibleTo(page) and page._risk_lbl.text() == ""
+
+
+def test_the_always_there_items_cannot_be_unchecked(tmp_path):
+    page = _page()
+    for cb in (page._region_checks["cell"], page._feature_checks["expression"],
+               page._output_checks["h5ad"]):
+        assert cb.isChecked() and not cb.isEnabled()
+
+
+def test_a_nuclei_only_run_names_its_primary_region(tmp_path):
+    p = build_project(tmp_path, nuclei_only=True)
+    page = _page()
+    page.set_run(p["run_dir"], open_slide=p["slide"])
+    assert page._region_checks["cell"].text() == "Nucleus"
+    assert not page._region_checks["cytoplasm"].isEnabled()
+    assert "X = nucleus mean" in page._prefix_info.text()
+
+
+def test_the_outputs_line_follows_the_choice(tmp_path):
+    p = build_project(tmp_path)
+    page = _page()
+    page.set_run(p["run_dir"], open_slide=p["slide"])
+    assert "cell_features.h5ad" in page._prefix_info.text()
+    assert "cell_features.csv" not in page._prefix_info.text()
+    assert "X = cell mean" in page._prefix_info.text()
+    page._output_checks["csv"].setChecked(True)
+    page._stat_checks["mean"].setChecked(False)
+    assert "cell_features.csv" in page._prefix_info.text()
+    assert "X = cell sum" in page._prefix_info.text()
+    page._prefix_edit.setText("s1")
+    assert "s1_cell_features.h5ad" in page._prefix_info.text()
+    for cb in page._stat_checks.values():
+        cb.setChecked(False)
+    assert "choose at least one statistic" in page._prefix_info.text()
+
+
+def test_an_old_run_shows_the_risk(tmp_path):
+    p = build_project(tmp_path, nuclei=True, seam_merge=False)
+    page = _page()
+    page.set_run(p["run_dir"], open_slide=p["slide"])
+    assert page._risk_lbl.text().startswith("Risk:") and page._btn_run.isEnabled()
+    page._region_checks["nucleus"].setChecked(False)
+    page._region_checks["cytoplasm"].setChecked(False)
+    page._feature_checks["nuclear_summary"].setChecked(False)
+    assert page._risk_lbl.text() == ""
+
+
+def test_the_page_runs_the_chosen_scope(tmp_path):
+    p = build_project(tmp_path, nuclei=True)
+    page = _page()
+    page.set_run(p["run_dir"], open_slide=p["slide"])
+    mine = str(tmp_path / "scope_out")
+    page._out_edit.setText(mine)
+    page._output_checks["csv"].setChecked(True)
+    page._region_checks["cytoplasm"].setChecked(False)
+    page._run()
+    page._worker.wait(60000)
+    for _ in range(50):
+        _app.processEvents()
+    assert page._errors == []
+    import anndata
+    ad = anndata.read_h5ad(os.path.join(mine, "cell_features.h5ad"))
+    assert "nucleus_mean" in ad.layers and "cytoplasm_mean" not in ad.layers
+    assert os.path.isfile(os.path.join(mine, "cell_features.csv"))

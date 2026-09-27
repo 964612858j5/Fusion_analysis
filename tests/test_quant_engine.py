@@ -27,11 +27,18 @@ ORIGIN = (1000, 20000)       # region origin in slide pixels
 class ArrayReader:
     """A QuantReader over in-memory arrays (region coordinates)."""
 
-    def __init__(self, labels, channels):
+    def __init__(self, labels, channels, nuclei=None, table=None):
         self.labels_arr = labels
         self.data = channels         # list of arrays, one per channel
+        self.nuc, self.table = nuclei, table
         self.shape = labels.shape
         self.reads = {"raw": 0, "corrected": 0}
+
+    def nuclei(self, y0, y1, x0, x1):
+        return None if self.nuc is None else np.ascontiguousarray(self.nuc[y0:y1, x0:x1])
+
+    def nucleus_table(self):
+        return self.table
 
     def channel_dtype(self, ch):
         return self.data[ch.index].dtype
@@ -48,8 +55,10 @@ class ArrayReader:
 
 
 class Job:
-    def __init__(self, labels, channels, n_objects):
+    def __init__(self, labels, channels, n_objects, has_nuclei=False, compartment="cell"):
         self.shape = labels.shape
+        self.has_nuclei = has_nuclei
+        self.compartment = compartment
         self.bbox = (ORIGIN[0], ORIGIN[0] + labels.shape[0], ORIGIN[1], ORIGIN[1] + labels.shape[1])
         self.n_objects = n_objects
         self.channels = tuple(
@@ -77,9 +86,15 @@ def make_case(seed=0, shape=(173, 211), n=60):
     return lab, chans, n + 2
 
 
-def run(lab, chans, n_objects, stats=qe.FAST_STATS, **kw):
-    job = Job(lab, chans, n_objects)
-    res, timing = qe.quantify(job, ArrayReader(lab, chans), stats,
+def run(lab, chans, n_objects, stats=qe.FAST_STATS, nuclei=None, table=None, regions=(),
+        features=("morphology",), compartment="cell", tmp=None, **kw):
+    """The engine in float64 (sink_dtype f8): exact comparisons."""
+    import tempfile
+    job = Job(lab, chans, n_objects, has_nuclei=nuclei is not None, compartment=compartment)
+    kw.setdefault("sink_dtype", "f8")
+    res, timing = qe.quantify(job, ArrayReader(lab, chans, nuclei, table), stats,
+                              regions=list(regions), features=features,
+                              sink_path=str(tmp) if tmp else tempfile.mkdtemp(),
                               settings=qe.QuantSettings(**kw))
     return res, timing
 
@@ -203,7 +218,7 @@ def test_accumulators_do_not_grow_with_threads():
     lab, chans, n = make_case(seed=5)
     _r, t1 = run(lab, chans, n, compute_threads=1)
     _r, t16 = run(lab, chans, n, compute_threads=16)
-    assert t1["accumulator_bytes"] == t16["accumulator_bytes"]
+    assert t1["accumulator_bytes_per_group"] == t16["accumulator_bytes_per_group"]
 
 
 def test_empty_labels_are_listed_not_output():
@@ -242,12 +257,201 @@ def test_stop_ends_the_job():
     def stop():
         calls.append(1)
         return len(calls) > 2
+    import tempfile
     with pytest.raises(qe.QuantStopped):
         qe.quantify(Job(lab, chans, n), ArrayReader(lab, chans), qe.FAST_STATS,
-                    settings=qe.QuantSettings(tile=16), should_stop=stop)
+                    sink_path=tempfile.mkdtemp(), settings=qe.QuantSettings(tile=16),
+                    should_stop=stop)
 
 
 def test_other_backends_are_named_not_implemented():
     for cls in (qe.RustBackend, qe.CUDABackend):
         with pytest.raises(NotImplementedError):
             cls(10, 2, qe.FAST_STATS)
+
+
+
+# ── block S4-2: nucleus / cytoplasm, channel groups, the sink ────────────
+
+def make_nuclei(lab, seed=0, corrupt=True):
+    """A nucleus inside most cells (two in some), ids of their own; with
+    `corrupt`, the defects of runs made before Step2's seam fix: a nucleus
+    partly in a neighbour / background, and one whose cell has no pixels."""
+    from scipy import ndimage as ndi
+    rng = np.random.default_rng(seed)
+    nuc = np.zeros(lab.shape, np.uint32)
+    table = [0]
+    for k in range(1, int(lab.max()) + 1):
+        core = ndi.binary_erosion(lab == k, iterations=2)
+        yy, xx = np.nonzero(core)
+        if yy.size < 4 or rng.random() < 0.15:          # some cells without a nucleus
+            continue
+        pick = rng.choice(yy.size, size=min(yy.size, 6), replace=False)
+        nuc[yy[pick[:3]], xx[pick[:3]]] = len(table)
+        table.append(k)
+        if yy.size > 12 and k % 4 == 0:                 # a second nucleus
+            nuc[yy[pick[3:]], xx[pick[3:]]] = len(table)
+            table.append(k)
+    table = np.asarray(table, np.uint32)
+    if corrupt:
+        n = 1
+        ys, xs = np.nonzero(nuc == n)
+        nuc[min(lab.shape[0] - 1, ys[0] + 30), xs[0]] = n  # a pixel far from its cell
+        table = np.concatenate([table, [int(lab.max())]]).astype(np.uint32)
+        orphan = table.size - 1                          # a nucleus of a cell with no pixels
+        nuc[0:2, 0:2] = orphan
+        lab[lab == table[orphan]] = 0
+    return nuc, table
+
+
+def region_reference(lab, nuc, table, img, ids):
+    """float64, pixel by pixel: {region: {stat: values}} over `ids`."""
+    from scipy import ndimage as ndi
+    inside = (lab > 0) & (nuc > 0) & (table[nuc] == lab)
+    masks = {"cell": lab, "nucleus": np.where(inside, lab, 0),
+             "cytoplasm": np.where((lab > 0) & ~inside, lab, 0)}
+    f = img.astype(np.float64)
+    out = {}
+    for region, m in masks.items():
+        cnt = ndi.sum(np.ones_like(f), m, ids)
+        with np.errstate(invalid="ignore"):
+            ref = {"sum": ndi.sum(f, m, ids), "mean": ndi.mean(f, m, ids),
+                   "std": ndi.standard_deviation(f, m, ids),
+                   "min": ndi.minimum(f, m, ids), "max": ndi.maximum(f, m, ids)}
+        for k in ref:
+            ref[k] = np.where(cnt > 0, ref[k], np.nan)
+        out[region] = ref
+    return out, inside
+
+
+def layer(res, name, ci):
+    return res.sink.read(name)[:, ci].astype(np.float64)
+
+
+def test_nucleus_and_cytoplasm_equal_the_pixel_reference(tmp_path):
+    lab, chans, n = make_case(seed=11)
+    nuc, table = make_nuclei(lab)
+    res, _t = run(lab, chans, n, nuclei=nuc, table=table, regions=("nucleus", "cytoplasm"),
+                  tile=37, tmp=tmp_path / "s")
+    ids = res.ids.astype(int)
+    for ci, img in enumerate(chans):
+        ref, _inside = region_reference(lab, nuc, table, img, ids)
+        for region in ("cell", "nucleus", "cytoplasm"):
+            for stat in qe.FAST_STATS:
+                got = layer(res, f"{region}_{stat}", ci)
+                want = ref[region][stat]
+                assert np.array_equal(np.isnan(got), np.isnan(want)), (region, stat)
+                ok = ~np.isnan(want)
+                if stat in ("min", "max"):
+                    np.testing.assert_array_equal(got[ok], want[ok], err_msg=f"{region} {stat}")
+                else:
+                    np.testing.assert_allclose(got[ok], want[ok], rtol=1e-12, atol=1e-9,
+                                               err_msg=f"{region} {stat}")
+
+
+def test_the_cytoplasm_extremes_are_its_own_not_the_nucleus_ones(tmp_path):
+    lab = np.zeros((20, 20), np.uint32)
+    lab[2:12, 2:12] = 1
+    nuc = np.zeros_like(lab)
+    nuc[5:8, 5:8] = 1
+    table = np.array([0, 1], np.uint32)
+    img = np.full((20, 20), 10, np.uint8)
+    img[6, 6] = 250                                      # the brightest pixel is nuclear
+    img[6, 5] = 1                                        # the darkest too
+    res, _t = run(lab, [img], 1, nuclei=nuc, table=table, regions=("nucleus", "cytoplasm"),
+                  tile=8, tmp=tmp_path / "s")
+    assert layer(res, "cell_max", 0)[0] == 250 and layer(res, "cytoplasm_max", 0)[0] == 10
+    assert layer(res, "cell_min", 0)[0] == 1 and layer(res, "cytoplasm_min", 0)[0] == 10
+    assert layer(res, "nucleus_max", 0)[0] == 250
+
+
+def test_old_run_defects_follow_the_pixel_definition_without_negatives(tmp_path):
+    lab, chans, n = make_case(seed=12)
+    nuc, table = make_nuclei(lab, corrupt=True)
+    res, _t = run(lab, chans, n, nuclei=nuc, table=table, regions=("nucleus", "cytoplasm"),
+                  features=("morphology", "nuclear_summary"), tmp=tmp_path / "s")
+    _ref, inside = region_reference(lab, nuc, table, chans[0], res.ids.astype(int))
+    outside = (nuc > 0) & ~inside
+    assert res.nucleus_outside["pixels"] == int(outside.sum())
+    assert res.nucleus_outside["nuclei"] == len(np.unique(nuc[outside]))
+    assert (res.obs["cytoplasm_area"] >= 0).all()
+    np.testing.assert_array_equal(res.obs["nuclear_area"] + res.obs["cytoplasm_area"],
+                                  res.obs["area"])
+
+
+def test_the_nuclear_summary(tmp_path):
+    lab, chans, n = make_case(seed=13)
+    nuc, table = make_nuclei(lab, corrupt=False)
+    res, _t = run(lab, chans, n, nuclei=nuc, table=table, regions=(),
+                  features=("nuclear_summary",), tmp=tmp_path / "s")
+    ids = res.ids.astype(int)
+    inside = (lab > 0) & (nuc > 0) & (table[nuc] == lab)
+    for i, c in enumerate(ids):
+        mine = [k for k in range(1, table.size) if table[k] == c and (inside & (nuc == k)).any()]
+        areas = [int((inside & (nuc == k)).sum()) for k in mine]
+        assert res.obs["n_nuclei"][i] == len(mine)
+        assert res.obs["nuclear_area"][i] == sum(areas)
+        if mine:
+            assert res.obs["nuclear_area_max"][i] == max(areas)
+            assert res.obs["nuclear_area_mean"][i] == pytest.approx(sum(areas) / len(mine))
+        else:
+            assert np.isnan(res.obs["nuclear_area_mean"][i])
+    assert (res.obs["n_nuclei"] >= 2).any()
+    assert "area" not in res.obs                          # morphology not chosen
+
+
+@pytest.mark.parametrize("budget", [1, 1 << 40])
+def test_channel_groups_do_not_change_the_result(tmp_path, budget):
+    lab, chans, n = make_case(seed=14)
+    nuc, table = make_nuclei(lab)
+    base, tb = run(lab, chans, n, nuclei=nuc, table=table, regions=("nucleus", "cytoplasm"),
+                   tmp=tmp_path / "a")
+    res, tr = run(lab, chans, n, nuclei=nuc, table=table, regions=("nucleus", "cytoplasm"),
+                  accumulator_budget=budget, tmp=tmp_path / "b")
+    assert tr["channel_groups"] == (len(chans) if budget == 1 else 1)
+    for name in base.layers:
+        np.testing.assert_array_equal(res.sink.read(name), base.sink.read(name), err_msg=name)
+
+
+def test_unchosen_regions_are_not_allocated():
+    acc = qe.ChannelAcc.empty(10, 2, ["mean"], ["cell"])
+    assert acc.ns is None and acc.ymn is None and acc.ss is None and acc.mn is None
+    acc = qe.ChannelAcc.empty(10, 2, ["mean", "max"], ["cell", "cytoplasm"])
+    assert acc.ns is not None and acc.nmx is None and acc.ymx is not None and acc.ymn is None
+
+
+def test_a_nuclei_only_run_is_one_row_per_nucleus(tmp_path):
+    lab, chans, n = make_case(seed=15)
+    res, _t = run(lab, chans, n, compartment="nucleus", tmp=tmp_path / "s")
+    assert res.id_column == "nucleus_id" and res.regions == ["nucleus"]
+    assert res.layers[0] == "nucleus_mean" and res.x_layer == "nucleus_mean"
+    with pytest.raises(ValueError):
+        run(lab, chans, n, compartment="nucleus", regions=("cytoplasm",), tmp=tmp_path / "t")
+
+
+def test_regions_need_nuclei(tmp_path):
+    lab, chans, n = make_case(seed=16)
+    with pytest.raises(ValueError, match="no nuclei"):
+        run(lab, chans, n, regions=("nucleus",), tmp=tmp_path / "s")
+    with pytest.raises(ValueError, match="no nuclei"):
+        run(lab, chans, n, features=("nuclear_summary",), tmp=tmp_path / "t")
+
+
+def test_the_float32_sink_is_within_1e_6(tmp_path):
+    lab, chans, n = make_case(seed=17)
+    nuc, table = make_nuclei(lab, corrupt=False)
+    exact, _t = run(lab, chans, n, nuclei=nuc, table=table, regions=("nucleus", "cytoplasm"),
+                    tmp=tmp_path / "a")
+    f32, _t = run(lab, chans, n, nuclei=nuc, table=table, regions=("nucleus", "cytoplasm"),
+                  sink_dtype="f4", tmp=tmp_path / "b")
+    for name in exact.layers:
+        a, b = exact.sink.read(name), f32.sink.read(name).astype(np.float64)
+        assert b.dtype == np.float64 and not np.isinf(b).any()
+        ok = ~np.isnan(a)
+        np.testing.assert_allclose(b[ok], a[ok], rtol=1e-6, atol=0, err_msg=name)
+
+
+def test_x_is_the_first_chosen_statistic(tmp_path):
+    lab, chans, n = make_case(seed=18)
+    res, _t = run(lab, chans, n, stats=["max", "std"], tmp=tmp_path / "s")
+    assert res.x_layer == "cell_std" and res.layers == ["cell_std", "cell_max"]

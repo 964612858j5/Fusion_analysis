@@ -9,6 +9,8 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.99：块 S4-2 真机验收通过；记录真机中发现的 StarDist 巨大误检（另立块）。
+- v3.98：块 S4-2 已实施（自动验收通过，待真机验收），写入执行记录。
 - v3.97：块 S4-2 v2 获批（N3 之前的运行允许定量并提示风险；CSV 只在勾选时输出，批处理加勾选框）。
 - v3.96：块 S4-2 申请 v2（单一 h5ad、一行一个主对象；输出内存上界：通道分组 + FeatureMatrixSink、50 万对象的内存门；`Expression regions`；N3 之前的运行如何处理待裁定）。
 - v3.95：块 N3b 真机验收通过（20 块网格）。
@@ -1963,6 +1965,21 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   2. **内存门**：累加器预算初值 1.5 GB（超出就分组多扫），50 万对象模拟的峰值门 < 3 GB。
   3. **装 anndata**：按上面的清单安装并更新清单，接受那一行 Step2 警告（设计债务记为 advisory）。
   4. 其余沿用 v1 的建议：X 与 layers 用 float32、layers 里也放 X 的那一张、~~批处理加 `write_csv=True`~~（改为勾选框，默认不勾）、周长 / 圆度放到 S4-3。
+
+- **执行记录**（2026-09-27，未提交）：
+  - 环境：`fusion_mesmer` 里 `pip install --no-deps anndata==0.11.4 array-api-compat==1.15.0`；`scripts/export_fusion_mesmer_env.sh` 更新 `requirements-pip.txt`、`environment.yml`（导出脚本顺带把 `prefix` 改成本机路径，已还原）；`README.md` 的 pip 包数 216 → 218。
+  - `core/quant_sources.py`：`QuantJob` 增加 `nucleus_path`、`table_path`、`n_nuclei`、`seam_merge`、`has_nuclei`（细胞运行且保留了核）；核数组的形状 / dtype 与对应表长度 M + 1 不符就拒绝；`JobReader.nuclei()` 与 `nucleus_table()`。
+  - `core/quant_engine.py`：区域（主对象 / 核 / 胞质，逐像素定义）；`Geometry` 与每个通道组的 `ChannelAcc`（只分配所选区域与统计用得到的表）；内核的通道任务多了核 / 胞质两个分支（胞质的 min / max 直接累加，count / sum / 平方和 = 细胞 − 核）；**通道分组**（`accumulator_budget` 1.5 GB，超出就分组多扫）；`FeatureMatrixSink`（zarr，每个 layer 一张 (对象, 通道) 的表）；`QuantFinalizer.expression` **逐个 layer 生成**、写进 sink 后立即释放（实施中改的：一次返回一组的全部 layer 时，50 万对象会同时持有约 1.7 GB）；核汇总；`QuantResult`（id 列、obs、sink、layers、`nucleus_outside`）；第一遍顺带统计每个核在细胞内 / 外的像素数。
+  - `workers/feature_extract_worker.py`：`run_extraction(regions, features, write_csv)`；`_write_h5ad`：anndata 写骨架（X、obs、var、uns），再用 h5py 逐个 layer、按行块写入；CSV 按行块从 sink 流式写出；sink 放在输出目录的 `.<base>_features.partial`，与所有 `*.partial` 一起在成功 / 失败 / Stop 时清理，失败时删掉本次已改名的文件（新建的空输出目录也删掉）；**勾选 CSV 时 sink 用 float64**（实施中发现：从 float32 读会让 CSV 与 S4-1 在第 6 位有效数字上不同），h5ad 仍写 float32；来源记录增加 `primary_object`、`expression_regions`、`features`、`X`、`layers`、`nuclei`（含 `nucleus_pixels_outside_their_cell`）、`seam_merge`、`channel_groups`、`sink_dtype`。
+  - `ui/step4_page.py`：`What to quantify` 问卷（四组，箭头折叠；Whole cell / Expression / h5ad 固定勾选且灰；没有核时 Nucleus / Cytoplasm / Nuclear summary 灰并在 tooltip 写原因，有核时默认勾；纯核结果主区域显示为 Nucleus）；输出文件与 `X = …` 一行；**接缝修复之前的带核结果**选了核相关项时显示橙色 `Risk:`，不阻止运行；完成对话框列出文件，旧结果另写受影响的核像素数。**实施中发现并修正**：运行前重新解析作业会把问卷重置成默认勾选（用户取消的 Cytoplasm 又被勾回）——改为只在换了运行 / 区域时套用默认值。
+  - `ui/batch_step4_dialog.py`：`Also write CSV` 勾选框（默认不勾）交给 worker。
+  - 测试：`tests/test_quant_sources.py` 29 条（合成项目可带核，含两种旧运行缺陷）、`tests/test_quant_engine.py` 29 条（核 / 胞质对逐像素参考、胞质极值是自己的、旧运行缺陷不出负数且计数正确、核汇总、通道分组 1 组 / 每通道一组逐位相同、不勾的区域不分配、纯核运行、需要核的项在无核运行上拒绝、float32 sink ≤ 1e-6、X 取第一个统计量）、`tests/test_step4_worker.py` 19 条（单一 h5ad 的结构与读回、X 跟随统计量、纯核一行一个核、旧运行定量并记录风险、CSV 只在勾选时写且与 h5ad 一致、CSV 保持全精度而 h5ad 为 float32、写 CSV / h5ad / 来源记录或改名失败不留输出）、`tests/test_step4_page.py` 16 条（分组展开与折叠、无核变灰、有核默认勾、固定项、纯核主区域、输出行随勾选变化、旧运行的风险提示、页面按所选范围运行且不重置用户的选择）；`tests/test_batch_step4_dialog.py` 未改、6 条通过。
+  - 反向注入 12 处：胞质极值用全细胞的、核区域不查对应表、X 不取第一个统计量、layers 漏掉 X 的那一张、空标签进入 h5ad、不勾仍写 CSV、改名失败留下已改名的文件、无核运行可勾 Nucleus、运行时重置用户的选择、CSV 从 float32 读、通道分组共用一列累加器——各使至少 1 条测试变红；「收尾先把所有 layer 攒在内存里」由内存门抓到（峰值 4.42 GB > 3 GB）。
+  - 真实数据与内存门：报告 `docs/benchmarks/step4/s42_2026-09-27.md`——全范围 9.9 s、峰值 1.76 GB；与独立参考最大相对差 6e-8、NaN 位置一致；接缝修复之后的运行核错位 0，之前的运行 457 px / 38 个核；只做全细胞并勾 CSV 时与 S4-1 的 CSV 逐字符相同；50 万对象 × 29 通道 × 3 区域 × 5 统计：峰值 2.81 GB（门 < 3 GB）。
+  - 文档：`UI_SURFACE_RULES.md` 的 Step4 条目（问卷、风险提示、批处理的勾选框）；两份用户指南的 Step4 一节（区域定义与用途、单一 h5ad 的结构、CSV 可选、旧结果的风险）。
+  - 回归：S4-1 的 19 个模块（Step4 五个模块、`test_main_window_step1_5`、`test_step0_step1_handoff_contract`、`test_step3_masks`、Step0→Step1→Step2 交接与会话的各模块）+ `test_ui_surface_contract.py`，每模块单独进程，与 `git archive HEAD`（`afda34a`）逐条对比：本侧 20 个模块**全部通过**，无新增失败。
+  - **真机验收通过（用户 2026-09-27）**：接缝修复之后的带核运行 `seg_20260927_194616_stardist_nuclei_expansion`，输出 `cell_features.h5ad` 与来源记录（默认不写 CSV）。
+  - 真机中发现（与 S4-2 无关，另立块）：该运行右上角有一个 414 万像素的巨大「细胞」（标签 7592）。4 × 5 网格重跑并保存每块的原始预测证实：它是 StarDist 在几乎全是背景的切块（tile_004）上直接输出的星凸多边形（像素数与最终标签完全相同）；tile_004 / tile_006 另有 3 个同类巨大标签因碰到内部窗口边被 N3 排除。重跑时还撞上了运行资源监控器的 `NameError`（已知 advisory）。
 
 - **v1（已被 v2 取代）** 的全文见修订记录 v3.86 对应的提交 `c7f43c7`（与 v2 的主要差别：两个 h5ad（细胞表 + 核表）、没有输出内存上界、问卷第二组叫 `Compartments`）。
 

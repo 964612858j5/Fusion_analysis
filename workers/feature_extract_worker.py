@@ -1,22 +1,28 @@
 """
-block01/workers/feature_extract_worker.py — Step4's per-cell quantification
-(block S4-1).
+block01/workers/feature_extract_worker.py — Step4's per-object quantification
+(blocks S4-1, S4-2).
 
 One region of one Step2 run: its LabelStore labels, every slide channel read
-from where Step0 decided (`core/quant_sources.py`, fail-closed), one streaming
-pass (`core/quant_engine.py`). Writes
+from where Step0 decided (`core/quant_sources.py`, fail-closed), a streaming
+pass per channel group (`core/quant_engine.py`). Writes
 
-  <base>.csv              one row per cell WITH pixels: cell_id, morphology,
-                          <channel>_<statistic>
+  <base>.h5ad             ONE AnnData, one row per primary object (a cell; a
+                          nucleus in a nuclei-only run): X = the primary
+                          region's first chosen statistic, layers
+                          "<region>_<stat>" (X's included), obs = id,
+                          morphology, nuclear summary, var = channel sources
+  <base>.csv              only when asked: the same table, streamed
   <base>_provenance.json  what was quantified from where, and how
 
-both through `*.partial` files renamed only when everything is written; a
-failure or a Stop leaves neither.
+all through `*.partial` files renamed only when everything is written; a
+failure or a Stop leaves none of them (nor the on-disk feature sink).
 """
 
+import dataclasses
 import datetime
 import json
 import os
+import shutil
 import subprocess
 import time
 import traceback
@@ -28,9 +34,10 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from ..core import quant_engine as qe
 from ..core import quant_sources as qs
 
-INTEGER_COLUMNS = {"cell_id", "area", "bbox_min_y", "bbox_min_x", "bbox_max_y",
-                   "bbox_max_x", "boundary_pixel_count"}
+INTEGER_COLUMNS = qe.INTEGER_COLUMNS
 EMPTY_IDS_LISTED_UP_TO = 1000
+CSV_BLOCK_ROWS = 65536
+H5AD_BLOCK_ROWS = 65536
 
 
 def output_base(file_prefix=None):
@@ -66,12 +73,66 @@ def _peak_rss_bytes():
 
 
 def _write_csv(path, result):
-    fmt = ["%d" if c in INTEGER_COLUMNS else "%.6g" for c in result.columns]
-    np.savetxt(path, result.values, delimiter=",", header=",".join(result.columns),
-               comments="", fmt=fmt)
+    """The table, a row block at a time from the sink."""
+    names = result.columns
+    fmt = ["%d" if c in INTEGER_COLUMNS else "%.6g" for c in names]
+    n = int(result.ids.size)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(",".join(names) + "\n")
+        for r0 in range(0, n, CSV_BLOCK_ROWS):
+            np.savetxt(f, result.block(r0, min(n, r0 + CSV_BLOCK_ROWS)), delimiter=",",
+                       fmt=fmt)
 
 
-def _provenance(job, result, stats, reader, settings, timing, csv_name, seconds):
+def _write_h5ad(path, job, result, prov):
+    """ONE AnnData: a skeleton (X, obs, var, uns) written by anndata, then
+    every layer appended with h5py a row block at a time from the sink (the
+    on-disk layout anndata reads: encoding-type array, version 0.2.0) -- no
+    step holds all layers in memory."""
+    import anndata as ad
+    import h5py
+    import pandas as pd
+    obs = pd.DataFrame({result.id_column: result.ids.astype(np.int64)},
+                       index=pd.Index(result.ids.astype(str)))
+    for name, values in result.obs.items():
+        if name in INTEGER_COLUMNS and np.isfinite(values).all():
+            obs[name] = values.astype(np.int64)
+        else:
+            obs[name] = np.asarray(values, np.float64)
+    var = pd.DataFrame(index=pd.Index([c.name for c in job.channels]))
+    var["slide_index"] = [int(c.index) for c in job.channels]
+    var["decision"] = [c.decision for c in job.channels]
+    var["source"] = [c.kind for c in job.channels]
+    var["correction_method"] = [str((c.identity or {}).get("correction_method") or "")
+                                for c in job.channels]
+    var["correction_param"] = [str((c.identity or {}).get("correction_param_value") or "")
+                               for c in job.channels]
+    adata = ad.AnnData(X=result.sink.read(result.x_layer).astype(np.float32), obs=obs, var=var)
+    adata.uns["primary_object"] = result.regions[0]
+    adata.uns["primary_compartment"] = result.regions[0]
+    adata.uns["X_statistic"] = result.stats[0]
+    adata.uns["statistics"] = list(result.stats)
+    adata.uns["expression_regions"] = list(result.regions)
+    adata.uns["morphology_version"] = qe.MORPHOLOGY_VERSION
+    adata.uns["perimeter_definition"] = qe.PERIMETER_DEFINITION
+    adata.uns["seam_merge"] = dict(job.seam_merge) if job.seam_merge else "absent"
+    adata.uns["provenance_json"] = json.dumps(prov)
+    adata.write_h5ad(path)
+    del adata
+    n, c = int(result.ids.size), len(job.channels)
+    with h5py.File(path, "a") as f:
+        group = f.require_group("layers")
+        for name in result.layers:
+            ds = group.create_dataset(name, shape=(n, c), dtype="f4",
+                                      chunks=(max(1, min(n, H5AD_BLOCK_ROWS)), max(1, c)))
+            ds.attrs["encoding-type"] = "array"
+            ds.attrs["encoding-version"] = "0.2.0"
+            for r0 in range(0, n, H5AD_BLOCK_ROWS):
+                r1 = min(n, r0 + H5AD_BLOCK_ROWS)
+                ds[r0:r1] = result.sink.read(name, r0, r1).astype(np.float32)
+
+
+def _provenance(job, result, stats, reader, settings, timing, outputs, seconds, features):
     empty = [int(v) for v in result.empty_label_ids]
     prov = {
         "schema": "block01.step4.quantification",
@@ -81,7 +142,16 @@ def _provenance(job, result, stats, reader, settings, timing, csv_name, seconds)
         "morphology_version": qe.MORPHOLOGY_VERSION,
         "perimeter_definition": qe.PERIMETER_DEFINITION,
         "primary_compartment": job.compartment,
+        "primary_object": result.regions[0],
         "statistics": list(stats),
+        "expression_regions": list(result.regions),
+        "features": sorted(features),
+        "X": result.x_layer,
+        "layers": list(result.layers),
+        "nuclei": ({"path": job.nucleus_path, "table": job.table_path, "n_nuclei": job.n_nuclei,
+                    "nucleus_pixels_outside_their_cell": result.nucleus_outside}
+                   if job.has_nuclei else None),
+        "seam_merge": job.seam_merge or "absent",
         "segmentation_run": {"run_id": job.run_id, "run_dir": job.run_dir,
                              "method": job.method, "workspace": job.workspace},
         "region": {"roi_name": job.roi_name, "bbox_fullres": list(job.bbox),
@@ -102,60 +172,97 @@ def _provenance(job, result, stats, reader, settings, timing, csv_name, seconds)
         "settings": {"tile": settings.tile, "batch_bytes": settings.batch_bytes,
                      "read_threads": settings.read_threads,
                      "compute_threads": settings.compute_threads,
-                     "queue_depth": settings.queue_depth},
+                     "queue_depth": settings.queue_depth,
+                     "accumulator_budget": settings.accumulator_budget,
+                     "sink_dtype": settings.sink_dtype},
+        "channel_groups": result.channel_groups,
         "timing_seconds": {k: (round(v, 3) if isinstance(v, float) else v)
                            for k, v in timing.items()},
         "total_seconds": round(seconds, 3),
         "process_peak_rss_bytes": _peak_rss_bytes(),
-        "outputs": {"csv": csv_name},
+        "outputs": outputs,
     }
     if len(empty) <= EMPTY_IDS_LISTED_UP_TO:
         prov["empty_label_ids"] = empty
     return prov
 
 
-def run_extraction(run_path, output_dir, roi_name=None, statistics=None, file_prefix=None,
+def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions=None,
+                   features=("morphology",), write_csv=False, file_prefix=None,
                    open_slide=None, settings=None, progress=None, should_stop=None):
-    """Quantify one region and write its outputs: {"csv", "provenance"}.
-    Raises QuantSourceError (nothing quantified), QuantStopped, or any I/O
-    error -- never leaving a `*.partial` or half an output behind."""
+    """Quantify one region and write its outputs: {"h5ad", "csv" (or None),
+    "provenance"}. Raises QuantSourceError (nothing quantified),
+    QuantStopped, or any I/O error -- never leaving a `*.partial`, the sink or
+    half an output behind."""
     t_start = time.perf_counter()
     settings = settings or qe.QuantSettings()
+    if write_csv and settings.sink_dtype != "f8":
+        # the CSV keeps full precision (S4-1's numbers, character for
+        # character); the h5ad's layers are still written as float32
+        settings = dataclasses.replace(settings, sink_dtype="f8")
     stats = qe.normalize_statistics(statistics or qe.FAST_STATS)
+    features = set(features or ())
     job = qs.resolve_quant_job(run_path, roi_name, open_slide)
-    reader = qs.JobReader(job, read_threads=settings.read_threads)
-    try:
-        result, timing = qe.quantify(job, reader, stats, settings=settings,
-                                     progress=progress, should_stop=should_stop)
-    finally:
-        reader.close()
-    if should_stop is not None and should_stop():
-        raise qe.QuantStopped()
-    os.makedirs(output_dir, exist_ok=True)
+    qe.normalize_regions(regions or [], job)                     # refuse before any output
+    if "nuclear_summary" in features and not job.has_nuclei:
+        raise ValueError("this run has no nuclei beside its cells: no nuclear summary")
     base = output_base(file_prefix)
-    csv_path = os.path.join(output_dir, f"{base}.csv")
+    made_dir = not os.path.isdir(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    sink_dir = os.path.join(output_dir, f".{base}_features.partial")
+    h5_path = os.path.join(output_dir, f"{base}.h5ad")
+    csv_path = os.path.join(output_dir, f"{base}.csv") if write_csv else None
     prov_path = os.path.join(output_dir, f"{base}_provenance.json")
-    partials = [csv_path + ".partial", prov_path + ".partial"]
+    finals = [p for p in (h5_path, csv_path, prov_path) if p]
+    partials = [p + ".partial" for p in finals]
+    renamed = []
+    ok = False
     try:
-        t0 = time.perf_counter()
-        _write_csv(partials[0], result)
-        timing["write_csv"] = time.perf_counter() - t0
-        prov = _provenance(job, result, stats, reader, settings, timing,
-                           os.path.basename(csv_path), time.perf_counter() - t_start)
-        with open(partials[1], "w", encoding="utf-8") as f:
-            json.dump(prov, f, indent=2)
-        os.replace(partials[0], csv_path)
+        shutil.rmtree(sink_dir, ignore_errors=True)
+        reader = qs.JobReader(job, read_threads=settings.read_threads)
         try:
-            os.replace(partials[1], prov_path)
-        except OSError:
-            os.remove(csv_path)          # a table without its provenance is half an output
-            raise
+            result, timing = qe.quantify(job, reader, stats, regions=regions, features=features,
+                                         sink_path=sink_dir, settings=settings,
+                                         progress=progress, should_stop=should_stop)
+        finally:
+            reader.close()
+        if should_stop is not None and should_stop():
+            raise qe.QuantStopped()
+        outputs = {"h5ad": os.path.basename(h5_path),
+                   "csv": os.path.basename(csv_path) if csv_path else None}
+        t0 = time.perf_counter()
+        if csv_path:
+            _write_csv(csv_path + ".partial", result)
+        timing["write_csv"] = time.perf_counter() - t0
+        prov = _provenance(job, result, stats, reader, settings, timing, outputs,
+                           time.perf_counter() - t_start, features)
+        t0 = time.perf_counter()
+        _write_h5ad(h5_path + ".partial", job, result, prov)
+        prov["timing_seconds"]["write_h5ad"] = round(time.perf_counter() - t0, 3)
+        prov["total_seconds"] = round(time.perf_counter() - t_start, 3)
+        prov["process_peak_rss_bytes"] = _peak_rss_bytes()
+        with open(prov_path + ".partial", "w", encoding="utf-8") as f:
+            json.dump(prov, f, indent=2)
+        for final, part in zip(finals, partials):
+            os.replace(part, final)
+            renamed.append(final)
+        ok = True
     finally:
         for p in partials:
             if os.path.exists(p):
                 os.remove(p)
-    return {"csv": csv_path, "provenance": prov_path, "job": job,
-            "n_cells": int(result.cell_ids.size)}
+        if not ok:
+            for p in renamed:                 # part of the outputs is half an output
+                if os.path.exists(p):
+                    os.remove(p)
+        shutil.rmtree(sink_dir, ignore_errors=True)
+        if not ok and made_dir:
+            try:
+                os.rmdir(output_dir)
+            except OSError:
+                pass
+    return {"h5ad": h5_path, "csv": csv_path, "provenance": prov_path, "job": job,
+            "n_cells": int(result.ids.size), "nucleus_outside": result.nucleus_outside}
 
 
 class FeatureExtractWorker(QThread):
@@ -173,12 +280,16 @@ class FeatureExtractWorker(QThread):
     error = pyqtSignal(str)
 
     def __init__(self, run_path, output_dir, roi_name=None, statistics=None,
-                 file_prefix=None, open_slide=None, settings=None):
+                 file_prefix=None, open_slide=None, settings=None, regions=None,
+                 features=("morphology",), write_csv=False):
         super().__init__()
         self.run_path = run_path
         self.output_dir = output_dir
         self.roi_name = roi_name
         self.statistics = list(statistics or qe.FAST_STATS)
+        self.regions = list(regions or [])
+        self.features = tuple(features or ())
+        self.write_csv = bool(write_csv)
         self.file_prefix = file_prefix
         self.open_slide = open_slide
         self.settings = settings
@@ -199,16 +310,17 @@ class FeatureExtractWorker(QThread):
             self.progress.emit(0, 1, "Checking the run and Step0's channel sources…")
             self.outputs = run_extraction(
                 self.run_path, self.output_dir, roi_name=self.roi_name,
-                statistics=self.statistics, file_prefix=self.file_prefix,
+                statistics=self.statistics, regions=self.regions, features=self.features,
+                write_csv=self.write_csv, file_prefix=self.file_prefix,
                 open_slide=self.open_slide, settings=self.settings,
                 progress=lambda d, t, m: self.progress.emit(d, max(1, t), m),
                 should_stop=lambda: self._stop)
-            self.progress.emit(1, 1, f"{self.outputs['n_cells']:,} cells → "
-                                     f"{self.outputs['csv']}")
+            self.progress.emit(1, 1, f"{self.outputs['n_cells']:,} objects → "
+                                     f"{self.outputs['h5ad']}")
             self.extraction_done.emit(self.output_dir, self.base_name)
         except qe.QuantStopped:
             self.error.emit("Stopped by user.")
-        except (qs.QuantSourceError, qe.QuantLabelError) as exc:
+        except (qs.QuantSourceError, qe.QuantLabelError, ValueError) as exc:
             self.error.emit(str(exc))
         except Exception:                                       # noqa: BLE001
             self.error.emit(traceback.format_exc())

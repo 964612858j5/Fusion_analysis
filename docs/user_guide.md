@@ -44,7 +44,7 @@ Step 0          Step 1          Step 2          Step 3        Step 4
 | **Step 1** | Fusion + Tuning | Merge channels into one "cell-outline image"; tune the best segmentation parameters on small patches | Segmentation parameter file |
 | **Step 2** | Segmentation + Merge | Use the chosen parameters to circle **every cell in the whole region** | Whole-image cell mask |
 | **Step 3** | QC Viewer | Check the cells against the tissue | Confirm / not confirm |
-| **Step 4** | Feature Extraction | Measure each cell's value in each channel, export the table | `cell_features.csv` + provenance |
+| **Step 4** | Feature Extraction | Measure each cell's value in each channel, export the table | `cell_features.h5ad` (+ CSV when ticked) |
 
 > **Core idea**: the earlier steps are all "preparation and trial". The truly heavy lifting is Step 2 (processing the entire big image), and the final Step 4 produces the table.
 
@@ -217,7 +217,7 @@ Check the Step 2 result against the tissue: the whole slide with the cell mask o
 ### Step 4 · Feature Extraction
 
 **What it does:**
-Time to **produce the table.** Step 4 goes through every cell of one Step 2 result, **measures its brightness in each channel and its shape**, all in one pass over the image, and saves a table ready for analysis.
+Time to **produce the table.** Step 4 goes through every cell of one Step 2 result and measures, in one pass over the image, **its brightness in each channel** — for the whole cell and, when the result kept nuclei, separately for its **nucleus** and its **cytoplasm** — **and its shape**. It saves one table ready for analysis.
 
 **Where the numbers come from:** each channel is read from where Step 0 decided — a channel kept `original` from the raw slide; a channel corrected with TopHat / cuCIM **only** from the correction Step 0 saved. If that saved correction is missing or does not match (another region, other parameters, another slide), Step 4 **stops before measuring anything** and says why — it never falls back to raw pixels and never recomputes the correction. Re-save Step 0's correction in that case.
 
@@ -225,13 +225,24 @@ Time to **produce the table.** Step 4 goes through every cell of one Step 2 resu
 
 1. **Run** and **Region**: Step 4 opens on the result you chose in Step 3 (or the latest Step 2 result). `Browse` picks another run folder; a run with several regions lets you choose one. The **Slide** is the run's own and cannot be changed. The line under it says how many cells and how many channels are read raw or from Step 0's correction. A red line says why a result cannot be measured — e.g. a result from before Step 2 kept a label store (re-run Step 2), a result made on another slide, or a missing Step 0 correction.
    - A nuclei-only result (e.g. StarDist nuclei) has no cell mask: its nuclei are measured as the objects.
-2. Tick the statistics (each is computed for every channel): **Mean, Sum, Std dev, Min, Max** — all ticked by default. (Median and percentiles are not available in this version.)
-3. **Output dir** defaults to `<workspace>/step4/quantification_runs/<run>/<region>/`; you can change it. Click `▶ Extract Features`.
+2. **What to quantify** — four groups (click the arrow to fold one); only what is ticked is computed:
+   - **Statistics**: Mean, Sum, Std dev, Min, Max (all ticked by default).
+   - **Expression regions** (for the expression values): Whole cell (always), **Nucleus**, **Cytoplasm**. Nucleus = the pixels of the cell's own nuclei; cytoplasm = the rest of the cell. They are available (and ticked) when the result kept nuclei beside its cells (the expansion and nuclear-guided methods). Useful e.g. for transcription factors (FOXP3, Ki67 → nucleus) next to membrane markers (CD3 → whole cell / cytoplasm).
+   - **Features**: Expression (always), Morphology (ticked), Nuclear summary (per cell: number of nuclei, their area in the cell, mean / largest nucleus, nuclear fraction, cytoplasm area).
+   - **Outputs**: h5ad (always), **CSV** (only when you tick it).
+   - An orange **Risk** line appears for a result made before Step 2's tile-seam fix (2026-09-27) when you measure nuclei / cytoplasm: a few nuclei on tile seams may lie partly outside their cell, so those cells' nucleus / cytoplasm values carry that error; the numbers are still produced and the provenance file counts the affected pixels. Re-run Step 2 to remove it.
+3. **Output dir** defaults to `<workspace>/step4/quantification_runs/<run>/<region>/`; you can change it. The line under it names the files and what `X` holds (e.g. `X = cell mean`). Click `▶ Extract Features`.
 
 **Output:**
-- `cell_features.csv`: one row per cell **with pixels** (a label number without pixels is left out), `cell_id` first, then the shape columns, then one column per "channel × statistic". Shape columns: `area`, `centroid_y` / `centroid_x` and the bounding box `bbox_min_y`, `bbox_min_x`, `bbox_max_y`, `bbox_max_x` (max exclusive) in slide pixels, `major_axis`, `minor_axis`, `eccentricity`, `orientation` (as in scikit-image `regionprops`), `equivalent_diameter`, `aspect_ratio` (major / minor; empty when the minor axis is 0), `extent`, and `boundary_pixel_count` — the cell's pixels that touch another cell or the background in their 3 × 3 neighbourhood. It is **not** the old `perimeter` column (which missed the border between two touching cells) and not a geometric perimeter length.
-- `cell_features_provenance.json`: what was measured and from where — the run and region, every channel's source (raw slide or Step 0's correction, with its method and parameter), the label numbers without pixels, and the time taken.
+- `cell_features.h5ad` — **one** AnnData for scanpy, one row per cell (per nucleus for a nuclei-only result):
+  - `X`: the whole cell's first ticked statistic, in the order mean → sum → std → min → max (`uns["X_statistic"]` says which);
+  - `layers`: every ticked combination, named `<region>_<statistic>` — `cell_mean`, `nucleus_mean`, `cytoplasm_max` … (X's own one included, so the raw values survive a normalisation of X); a region without pixels (a cell without a nucleus) gives NaN;
+  - `obs`: `cell_id`, the shape columns and the nuclear summary; `var`: each channel with its source (raw / Step 0's correction, method and parameter); `uns`: what X is, the regions, and the full provenance.
+- `cell_features.csv` (only when ticked): the same table, one row per cell; the whole-cell columns are named `<channel>_<statistic>`, the others `<channel>_<region>_<statistic>`.
+- Shape columns: `area`, `centroid_y` / `centroid_x` and the bounding box `bbox_min_y`, `bbox_min_x`, `bbox_max_y`, `bbox_max_x` (max exclusive) in slide pixels, `major_axis`, `minor_axis`, `eccentricity`, `orientation` (as in scikit-image `regionprops`), `equivalent_diameter`, `aspect_ratio` (major / minor; empty when the minor axis is 0), `extent`, and `boundary_pixel_count` — the cell's pixels that touch another cell or the background in their 3 × 3 neighbourhood. It is **not** the old `perimeter` column (which missed the border between two touching cells) and not a geometric perimeter length.
+- `cell_features_provenance.json`: what was measured and from where — the run and region, every channel's source, the label numbers without pixels, nucleus pixels outside their cell (for older results), and the time taken.
 - Earlier versions' axis lengths and eccentricity had a rounding error far from the image origin; values from this version differ from old tables there (by design).
+- **Batch...** writes the h5ad for every sample; tick `Also write CSV` there for the CSV too.
 
 <!-- image placeholder: images/12_step4_feature_options.png — Step 4's statistics checkboxes + path settings -->
 <!-- image placeholder: images/13_step4_output_table.png — what cell_features.csv looks like when opened: rows = cells, columns = per-channel means -->
@@ -248,7 +259,7 @@ Time to **produce the table.** Step 4 goes through every cell of one Step 2 resu
 3. Step 1: adjust channel weights for clear outlines → choose method → try params with Phase1+Phase2 → save
 4. Step 2: confirm params → set tile size → Run, let it finish
 5. Step 3: spot-check a few regions, confirm circling is accurate
-6. Step 4: check the run → ▶ Extract Features → get cell_features.csv
+6. Step 4: check the run → ▶ Extract Features → get cell_features.h5ad
 ```
 
 > There are also **Skip → Step 2 / 3 / 4** buttons at the top: if some intermediate results are already done, you can jump straight ahead.

@@ -1,10 +1,12 @@
 # pip part of fusion_mesmer; install with: pip install --no-deps -r requirements-pip.txt
 --extra-index-url https://download.pytorch.org/whl/cu121
 absl-py==2.4.0
+anndata==0.11.4
 annotated-types==0.7.0
 anyio==4.13.0
 argon2-cffi==25.1.0
 argon2-cffi-bindings==25.1.0
+array-api-compat==1.15.0
 arrow==1.4.0
 asciitree==0.3.3
 asttokens==3.0.1

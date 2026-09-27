@@ -78,6 +78,16 @@ class QuantJob:
     slide: str
     channels: Tuple[ChannelSource, ...]
     step0: Dict[str, Any]
+    # block S4-2: the run's nuclei beside its cells (None for a whole-cell or
+    # a nuclei-only run), and whether Step2 reconciled its seams (block N3)
+    nucleus_path: Optional[str] = None
+    table_path: Optional[str] = None
+    n_nuclei: int = 0
+    seam_merge: Optional[Dict[str, Any]] = None
+
+    @property
+    def has_nuclei(self):
+        return self.compartment == CELL and self.nucleus_path is not None
 
     @property
     def shape(self):
@@ -135,6 +145,31 @@ def _label_store(run, roi_name):
     if store.get("complete") is not True:
         raise QuantSourceError("the run's label store is incomplete — re-run Step2")
     return store
+
+
+def _nuclei_of(store, compartment, shape, run_dir):
+    """(nucleus array path, nucleus -> cell table path, M) of a cell run that
+    kept its nuclei; (None, None, 0) otherwise."""
+    if compartment != CELL or not store.get(NUCLEUS) or not store.get("nucleus_to_cell"):
+        return None, None, 0
+    import zarr
+    n_entry, t_entry = store[NUCLEUS], store["nucleus_to_cell"]
+
+    def path(p):
+        return p if os.path.isabs(p) else os.path.join(run_dir, p)
+    npath, tpath = path(n_entry.get("path") or ""), path(t_entry.get("path") or "")
+    try:
+        nz, tz = zarr.open(npath, mode="r"), zarr.open(tpath, mode="r")
+    except Exception as exc:                                    # noqa: BLE001
+        raise QuantSourceError(f"the run's nuclei cannot be opened: {exc}")
+    m = int(n_entry.get("n_objects", -1))
+    if str(nz.dtype) != "uint32" or tuple(nz.shape) != tuple(shape):
+        raise QuantSourceError(f"the nucleus array is {nz.dtype} {tuple(nz.shape)}, "
+                               f"the region is uint32 {tuple(shape)}")
+    if m < 0 or str(tz.dtype) != "uint32" or tuple(tz.shape) != (m + 1,):
+        raise QuantSourceError(f"the nucleus -> cell table is {tz.dtype} {tuple(tz.shape)}, "
+                               f"not uint32 ({m + 1},)")
+    return os.path.realpath(npath), os.path.realpath(tpath), m
 
 
 def _slide_channels(slide):
@@ -219,6 +254,7 @@ def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):
     n_objects = int(entry.get("n_objects", -1))
     if n_objects < 0:
         raise QuantSourceError("the label store records no object count")
+    nucleus_path, table_path, n_nuclei = _nuclei_of(store, compartment, shape, run.run_dir)
 
     # -- the slide: the run's, its workspace's, the open one
     ws = run.workspace
@@ -296,6 +332,9 @@ def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):
                     roi_name=roi_name, region=region_folder(roi_name), bbox=tuple(bbox),
                     compartment=compartment, label_path=os.path.realpath(label_path),
                     n_objects=n_objects, slide=os.path.realpath(slide), channels=tuple(channels),
+                    nucleus_path=nucleus_path, table_path=table_path, n_nuclei=n_nuclei,
+                    seam_merge=store.get("seam_merge") if isinstance(store.get("seam_merge"), dict)
+                    else None,
                     step0={"handoff": os.path.realpath(handoff_path),
                            "correction_config": os.path.realpath(cfg_path),
                            "corrected_product": os.path.realpath(zpath) if zpath else None,
@@ -462,6 +501,7 @@ class JobReader:
         self.job = job
         self.shape = job.shape
         self._labels = zarr.open(job.label_path, mode="r")
+        self._nuclei = zarr.open(job.nucleus_path, mode="r") if job.nucleus_path else None
         self._raw = TiffTileReader(job.slide, threads=read_threads)
         self._corrected = {}
         for ch in job.channels:
@@ -476,6 +516,19 @@ class JobReader:
 
     def channel_dtype(self, ch):
         return np.dtype(np.float32) if ch.kind == "corrected" else self._raw.dtype
+
+    def nuclei(self, y0, y1, x0, x1):
+        """uint32 nucleus ids of the tile (no ring), or None."""
+        if self._nuclei is None:
+            return None
+        return np.ascontiguousarray(self._nuclei[y0:y1, x0:x1], dtype=np.uint32)
+
+    def nucleus_table(self):
+        """The whole nucleus -> cell table (M + 1 uint32), or None."""
+        if self.job.table_path is None:
+            return None
+        import zarr
+        return np.asarray(zarr.open(self.job.table_path, mode="r")[:], np.uint32)
 
     def labels(self, y0, y1, x0, x1):
         """uint32 (y1 - y0 + 2, x1 - x0 + 2): the tile and a one-pixel ring;

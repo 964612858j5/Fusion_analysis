@@ -310,12 +310,26 @@ row, and the duplicate Tissue Preview button in the step bar.
   result has no cell mask)`), and a red reason line when the run cannot be
   quantified (an old run without a label store, another slide, a missing or
   mismatching Step0 corrected product) -- then `Extract Features` is
-  disabled. `Intensity Statistics`: Mean, Sum, Std dev, Min, Max, all
-  checked by default; no Median / 90th percentile and no `X matrix in h5ad`
-  line. `Output`: the folder (default
+  disabled. `What to quantify` (block S4-2, user ruling 2026-09-27; it
+  replaced `Intensity Statistics`): four groups, open by default, each folded
+  by the arrow on its title line -- `Statistics` (Mean, Sum, Std dev, Min,
+  Max; all checked by default), `Expression regions  (for the expression
+  values only)` (Whole cell -- `Nucleus` for a nuclei-only result -- always
+  on and greyed; Nucleus, Cytoplasm), `Features` (Expression always on and
+  greyed; Morphology, checked; Nuclear summary), `Outputs` (h5ad always on
+  and greyed; CSV, unchecked -- written only when checked). Nucleus,
+  Cytoplasm and Nuclear summary are greyed with the reason in the tooltip
+  when the result has no nuclei beside its cells, and checked by default when
+  it has; the user's choice is kept while the same result stays chosen. An
+  orange `Risk:` line appears when a result made before Step 2's tile-seam
+  fix is quantified with nucleus / cytoplasm / nuclear summary (it does not
+  block the run). No Median / 90th percentile. `Output`: the folder (default
   `<workspace>/step4/quantification_runs/<run>/<region>/`, editable) and the
-  prefix; the outputs line names the CSV and `_provenance.json`. Progress,
-  `← Back to Step 3`, `Batch...`, `⏹ Stop`, `▶ Extract Features` as before.
+  prefix; one line names the output files (h5ad, `_provenance.json`, the CSV
+  when checked) and says `X = cell mean` (the primary region and the first
+  checked statistic). Progress, `← Back to Step 3`, `Batch...`, `⏹ Stop`,
+  `▶ Extract Features` as before. The `Batch...` dialog has `Also write CSV`
+  next to its statistics, unchecked.
 * **Step1's Save progress** (block L1, user ruling 2026-09-25) -- the modal
   progress dialog alone (with Cancel). The bar that used to sit at the
   bottom of the page is kept, hidden, and never shown; its words go to the

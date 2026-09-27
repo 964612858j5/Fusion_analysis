@@ -251,6 +251,10 @@ class BatchStep4Dialog(QDialog):
             cb.setChecked(default)
             sl.addWidget(cb)
             self._stat_checkboxes[key] = cb
+        # Block S4-2: the h5ad is always written; a CSV only when asked
+        self._csv_cb = QCheckBox("Also write CSV")
+        self._csv_cb.setChecked(False)
+        sl.addWidget(self._csv_cb)
         sl.addStretch()
         self._force_cb = QCheckBox("Overwrite existing results")
         self._force_cb.setChecked(False)
@@ -487,6 +491,7 @@ class BatchStep4Dialog(QDialog):
             output_dir=task["output_dir"],
             statistics=self._batch_stats,
             file_prefix=task["prefix"],
+            write_csv=self._csv_cb.isChecked(),
         )
         worker.progress.connect(
             lambda cur, tot, msg, r=row: self._set_status(r, f"running... {msg}"))

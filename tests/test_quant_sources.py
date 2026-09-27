@@ -55,8 +55,55 @@ def write_slide(path, data, tiled=True):
                      **kw)
 
 
+def _nuclei_for(lab, n_cells, corrupt):
+    """One nucleus per cell (a 3 x 3 core where the cell has one), a second
+    one in every 5th cell; ids of their own. `corrupt` adds the two defects
+    of runs made before Step2's seam fix: a nucleus reaching outside its
+    cell, and a nucleus whose cell has no pixels left."""
+    from scipy import ndimage as ndi
+    nuc = np.zeros(lab.shape, np.uint32)
+    table = [0]
+    for k in range(1, n_cells + 1):
+        core = ndi.binary_erosion(lab == k, iterations=1)
+        yy, xx = np.nonzero(core)
+        if yy.size == 0:
+            continue
+        cy, cx = int(np.median(yy)), int(np.median(xx))
+        m = np.zeros(lab.shape, bool)
+        m[max(0, cy - 1):cy + 2, max(0, cx - 1):cx + 2] = True
+        m &= core
+        if not m.any():
+            continue
+        nuc[m] = len(table)
+        table.append(k)
+        if k % 5 == 0 and yy.size > 20:
+            m2 = np.zeros(lab.shape, bool)
+            m2[yy[0], xx[0]] = True
+            m2 &= core & (nuc == 0)
+            if m2.any():
+                nuc[m2] = len(table)
+                table.append(k)
+    if corrupt:
+        # a nucleus reaching into background / another cell
+        ids = [n for n in range(1, len(table)) if (nuc == n).sum() >= 4]
+        n = ids[0]
+        ys, xs = np.nonzero(nuc == n)
+        y, x = ys.max() + 1, xs.max() + 1
+        while y < lab.shape[0] and lab[y, xs.max()] == table[n]:
+            y += 1
+        if y < lab.shape[0]:
+            nuc[y, xs.max()] = n
+        # an orphan: its cell loses every pixel
+        orphan_cell = table[ids[1]]
+        lab[lab == orphan_cell] = 0
+        nuc[(nuc == ids[1])] = ids[1]
+        nuc[(lab == 0) & (nuc == ids[1])] = ids[1]
+    return nuc, np.asarray(table, np.uint32)
+
+
 def build_project(root, *, decisions=None, n_cells=40, seed=0, rois=None, nuclei_only=False,
-                  label_store=True, tiled=True, corrected_value=None):
+                  label_store=True, tiled=True, corrected_value=None, nuclei=False,
+                  corrupt_nuclei=False, seam_merge=True):
     """A project with one ROI workspace and one Step2 run. Returns a dict of
     paths and the arrays behind them."""
     root = str(root)
@@ -104,10 +151,15 @@ def build_project(root, *, decisions=None, n_cells=40, seed=0, rois=None, nuclei
                "corrected_decisions": corrected, "raw_ome_path": slide},
               open(os.path.join(step0, "step0_roi_result.json"), "w"))
     labels = {}
+    nuclei_arrays = {}
     roi_records = []
     for i, (roi_name, bbox) in enumerate(rois):
         shape = (bbox[1] - bbox[0], bbox[3] - bbox[2])
         lab = _blobs(shape, n_cells, seed + 1 + i)
+        nuc = table = None
+        if nuclei:
+            nuc, table = _nuclei_for(lab, n_cells, corrupt_nuclei)
+            nuclei_arrays[roi_name] = (nuc, table)
         labels[roi_name] = lab
         path = os.path.join(run_dir, f"global_mask_{roi_name}.zarr")
         z = zarr.open(path, mode="w", shape=shape, chunks=(64, 64), dtype="uint32")
@@ -116,6 +168,20 @@ def build_project(root, *, decisions=None, n_cells=40, seed=0, rois=None, nuclei
                  "chunks": [64, 64], "n_objects": n_cells}
         store = {"version": 1, "complete": True, "cell": None if nuclei_only else entry,
                  "nucleus": entry if nuclei_only else None}
+        if nuclei:
+            npath = os.path.join(run_dir, f"global_nuclei_mask_{roi_name}.zarr")
+            tpath = os.path.join(run_dir, f"global_nuclei_cell_{roi_name}.zarr")
+            nz = zarr.open(npath, mode="w", shape=shape, chunks=(64, 64), dtype="uint32")
+            nz[:] = nuc
+            tz = zarr.open(tpath, mode="w", shape=table.shape, chunks=(1024,), dtype="uint32")
+            tz[:] = table
+            store["nucleus"] = {"path": npath, "dtype": "uint32", "shape": list(shape),
+                                "chunks": [64, 64], "n_objects": int(table.size - 1)}
+            store["nucleus_to_cell"] = {"path": tpath, "dtype": "uint32",
+                                        "length": int(table.size)}
+            if seam_merge:
+                store["seam_merge"] = {"version": 1, "duplicate_overlap_threshold": 0.5,
+                                       "minimum_writable_fraction": 0.5}
         rec = {"roi_name": roi_name, "bbox_fullres": list(bbox)}
         if label_store:
             rec["label_store"] = store
@@ -126,6 +192,7 @@ def build_project(root, *, decisions=None, n_cells=40, seed=0, rois=None, nuclei
     json.dump(meta, open(os.path.join(run_dir, "segmentation_meta.json"), "w"))
     return {"root": root, "slide": slide, "slide_data": slide_data, "ws": ws, "step0": step0,
             "run_dir": run_dir, "labels": labels, "corrected": corrected_data,
+            "nuclei": nuclei_arrays,
             "zarr": zpath, "cfg": cfg_path, "rois": rois}
 
 
@@ -358,3 +425,30 @@ def test_a_corrected_region_inside_a_larger_group_is_read_at_its_offset(tmp_path
                                       p["corrected"][("Full WSI", "CD3")][5:105, 8:118])
     finally:
         r.close()
+
+
+def test_a_run_with_nuclei_names_them_in_the_job(tmp_path):
+    p = build_project(tmp_path, nuclei=True)
+    job = qs.resolve_quant_job(p["run_dir"])
+    nuc, table = p["nuclei"]["Full WSI"]
+    assert job.has_nuclei and job.n_nuclei == table.size - 1
+    assert job.seam_merge["version"] == 1
+    r = qs.JobReader(job, read_threads=2)
+    try:
+        np.testing.assert_array_equal(r.nucleus_table(), table)
+        np.testing.assert_array_equal(r.nuclei(5, 40, 7, 60), nuc[5:40, 7:60])
+    finally:
+        r.close()
+
+
+def test_a_run_made_before_the_seam_fix_says_so(tmp_path):
+    p = build_project(tmp_path, nuclei=True, seam_merge=False)
+    assert qs.resolve_quant_job(p["run_dir"]).seam_merge is None
+
+
+def test_a_nucleus_table_of_the_wrong_length_is_refused(tmp_path):
+    p = build_project(tmp_path, nuclei=True)
+    _edit_json(os.path.join(p["run_dir"], "segmentation_meta.json"),
+               lambda d: d["rois"][0]["label_store"]["nucleus"].update(n_objects=3))
+    with pytest.raises(qs.QuantSourceError, match="nucleus -> cell table"):
+        qs.resolve_quant_job(p["run_dir"])

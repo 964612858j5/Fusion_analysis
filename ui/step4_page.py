@@ -104,10 +104,64 @@ class Step4Page(QWidget):
                 f"{len(job.channels) - n_corr} raw, {n_corr} from Step 0's correction")
             self._reason_lbl.setText("")
             self._reason_lbl.setVisible(False)
-        self._update_run_button()
+        self._apply_job_to_scope(job)
 
     def _update_run_button(self):
         self._btn_run.setEnabled(self._job is not None and not self._running)
+
+    # ── output scope (block S4-2) ─────────────────────────────────────
+
+    NO_NUCLEI = 'this result has no nuclei beside its cells'
+
+    def _apply_job_to_scope(self, job):
+        """What the chosen result can give: nucleus / cytoplasm and the
+        nuclear summary need a cell run that kept its nuclei (checked by
+        default then); a nuclei-only run's primary object is the nucleus."""
+        has_nuc = bool(job is not None and job.has_nuclei)
+        nuclei_only = bool(job is not None and job.compartment == qs.NUCLEUS)
+        key = None if job is None else (job.run_dir, job.roi_name, has_nuc, job.compartment)
+        if key is not None and key == self.__dict__.get("_scope_key"):
+            self._update_scope()             # the same result again: keep the user's choice
+            return
+        self._scope_key = key
+        self._region_checks['cell'].setText('Nucleus' if nuclei_only else 'Whole cell')
+        for cb in (self._region_checks['nucleus'], self._region_checks['cytoplasm'],
+                   self._feature_checks['nuclear_summary']):
+            cb.blockSignals(True)
+            cb.setEnabled(has_nuc)
+            cb.setChecked(has_nuc)
+            cb.setToolTip('' if has_nuc else
+                          ('the primary objects are already nuclei' if nuclei_only
+                           else self.NO_NUCLEI))
+            cb.blockSignals(False)
+        self._update_scope()
+
+    def scope(self):
+        """(statistics, regions, features, write_csv) as checked."""
+        stats = [k for k, cb in self._stat_checks.items() if cb.isChecked()]
+        regions = [k for k in ('nucleus', 'cytoplasm')
+                   if self._region_checks[k].isEnabled() and self._region_checks[k].isChecked()]
+        features = [k for k in ('morphology', 'nuclear_summary')
+                    if self._feature_checks[k].isEnabled() and self._feature_checks[k].isChecked()]
+        return stats, regions, features, self._output_checks['csv'].isChecked()
+
+    def _update_scope(self):
+        stats, regions, features, csv = self.scope()
+        base = output_base(self._prefix_edit.text().strip())
+        files = [f'{base}.h5ad', f'{base}_provenance.json'] + ([f'{base}.csv'] if csv else [])
+        job = self._job
+        primary = 'nucleus' if (job is not None and job.compartment == qs.NUCLEUS) else 'cell'
+        x = f'X = {primary} {stats[0]}' if stats else '⚠  choose at least one statistic'
+        self._prefix_info.setText('Outputs:  ' + '   '.join(files) + '     ·     ' + x)
+        risky = bool(job is not None and job.has_nuclei and job.seam_merge is None
+                     and (regions or 'nuclear_summary' in features))
+        self._risk_lbl.setText(
+            'Risk: this result was made before Step 2\'s tile-seam fix — a few nuclei on tile '
+            'seams may lie partly outside their cell, so the nucleus / cytoplasm values of '
+            'those cells carry that error (the provenance file counts them). Re-run Step 2 '
+            'to remove it.' if risky else '')
+        self._risk_lbl.setVisible(risky)
+        self._update_run_button()
 
     # ── UI ────────────────────────────────────────────────────────────
 
@@ -180,37 +234,77 @@ class Step4Page(QWidget):
         il.addWidget(self._reason_lbl)
         root.addWidget(inp)
 
-        # ── Statistics selection ───────────────────────────────────────
-        stat_box = _box('Intensity Statistics  (multi-select)', '#e5c07b')
-        stl = QVBoxLayout(stat_box)
+        # ── Output scope questionnaire (block S4-2) ─────────────────────
+        # Groups open by default, each folded by the arrow on its title line.
+        # Only the checked combinations are computed.
+        scope = _box('What to quantify', '#e5c07b')
+        sl = QVBoxLayout(scope)
 
-        # Note label
-        note = QLabel('Each checked statistic is computed for every channel, all in one pass, '
-                      'and saved in the CSV.')
-        note.setStyleSheet('color:#888;font-size:10px;')
-        stl.addWidget(note)
+        def _group(title):
+            head = QHBoxLayout()
+            arrow = QtWidgets.QToolButton()
+            arrow.setArrowType(Qt.DownArrow)
+            arrow.setAutoRaise(True)
+            arrow.setCheckable(True)
+            arrow.setChecked(True)
+            name = QLabel(title)
+            name.setStyleSheet('font-size:11px;font-weight:bold;color:#ddd;')
+            head.addWidget(arrow)
+            head.addWidget(name)
+            head.addStretch()
+            sl.addLayout(head)
+            body = QWidget()
+            row = QHBoxLayout(body)
+            row.setContentsMargins(24, 0, 0, 4)
+            sl.addWidget(body)
 
-        # Checkboxes — (key, display_label, default_checked)
-        _stat_defs = [
-            ('mean',   'Mean',            True),
-            ('sum',    'Sum (total int.)', True),
-            ('std',    'Std dev',         True),
-            ('min',    'Min',             True),
-            ('max',    'Max',             True),
-        ]
-        self._stat_checks = {}
-        chk_row = QHBoxLayout()
-        for key, label, default in _stat_defs:
-            cb = QtWidgets.QCheckBox(label)
-            cb.setChecked(default)
-            cb.setStyleSheet('font-size:11px;')
-            chk_row.addWidget(cb)
-            self._stat_checks[key] = cb
-        chk_row.addStretch()
-        stl.addLayout(chk_row)
+            def fold(opened, arrow=arrow, body=body):
+                arrow.setArrowType(Qt.DownArrow if opened else Qt.RightArrow)
+                body.setVisible(opened)
+            arrow.toggled.connect(fold)
+            return row, arrow, body
 
+        def _checks(row, defs):
+            out = {}
+            for key, label, default in defs:
+                cb = QtWidgets.QCheckBox(label)
+                cb.setChecked(default)
+                cb.setStyleSheet('font-size:11px;')
+                cb.toggled.connect(lambda _on: self._update_scope())
+                row.addWidget(cb)
+                out[key] = cb
+            row.addStretch()
+            return out
 
-        root.addWidget(stat_box)
+        self._groups = {}
+        row, arrow, body = _group('Statistics')
+        self._groups['statistics'] = (arrow, body)
+        self._stat_checks = _checks(row, [
+            ('mean', 'Mean', True), ('sum', 'Sum (total int.)', True),
+            ('std', 'Std dev', True), ('min', 'Min', True), ('max', 'Max', True)])
+        row, arrow, body = _group('Expression regions  (for the expression values only)')
+        self._groups['regions'] = (arrow, body)
+        self._region_checks = _checks(row, [
+            ('cell', 'Whole cell', True), ('nucleus', 'Nucleus', False),
+            ('cytoplasm', 'Cytoplasm', False)])
+        row, arrow, body = _group('Features')
+        self._groups['features'] = (arrow, body)
+        self._feature_checks = _checks(row, [
+            ('expression', 'Expression', True), ('morphology', 'Morphology', True),
+            ('nuclear_summary', 'Nuclear summary', False)])
+        row, arrow, body = _group('Outputs')
+        self._groups['outputs'] = (arrow, body)
+        self._output_checks = _checks(row, [('h5ad', 'h5ad', True), ('csv', 'CSV', False)])
+        for cb in (self._region_checks['cell'], self._feature_checks['expression'],
+                   self._output_checks['h5ad']):
+            cb.setEnabled(False)                     # always there
+            cb.setToolTip('Always computed / written')
+        self._risk_lbl = QLabel('')
+        self._risk_lbl.setWordWrap(True)
+        self._risk_lbl.setStyleSheet('color:#e5a050;font-size:11px;')
+        self._risk_lbl.setVisible(False)
+        sl.addWidget(self._risk_lbl)
+        root.addWidget(scope)
         out = _box('Output', '#98c379')
         ol  = QVBoxLayout(out)
         self._out_edit = _file_row(
@@ -225,21 +319,15 @@ class Step4Page(QWidget):
         prefix_row = QHBoxLayout()
         prefix_row.addWidget(QLabel('Filename prefix (optional):'))
         self._prefix_edit = QtWidgets.QLineEdit()
-        self._prefix_edit.setPlaceholderText('Leave blank for the default: cell_features.csv')
+        self._prefix_edit.setPlaceholderText('Leave blank for the default: cell_features.h5ad')
         self._prefix_edit.setStyleSheet('font-size:11px;')
         prefix_row.addWidget(self._prefix_edit, stretch=1)
         ol.addLayout(prefix_row)
 
-        self._prefix_info = QLabel('Outputs:  cell_features.csv   cell_features_provenance.json')
+        self._prefix_info = QLabel('')
         self._prefix_info.setStyleSheet('color:#888;font-size:10px;')
         ol.addWidget(self._prefix_info)
-
-        def _update_prefix_info():
-            p = self._prefix_edit.text().strip()
-            base = output_base(p)
-            self._prefix_info.setText(f'Outputs:  {base}.csv   {base}_provenance.json')
-
-        self._prefix_edit.textChanged.connect(_update_prefix_info)
+        self._prefix_edit.textChanged.connect(lambda _t: self._update_scope())
         root.addWidget(out)
 
         # ── Progress ──────────────────────────────────────────────────
@@ -303,6 +391,7 @@ class Step4Page(QWidget):
         nav.addWidget(self._btn_run)
 
         root.addLayout(nav)
+        self._apply_job_to_scope(None)
 
     # ── helpers ───────────────────────────────────────────────────────
 
@@ -329,7 +418,7 @@ class Step4Page(QWidget):
             return
         out_dir = self._out_edit.text().strip() or default_output_dir(self._job)
 
-        stats = [k for k, cb in self._stat_checks.items() if cb.isChecked()]
+        stats, regions, features, write_csv = self.scope()
         if not stats:
             QMessageBox.warning(self, 'No statistics selected',
                                 'Please select at least one intensity statistic.')
@@ -343,6 +432,9 @@ class Step4Page(QWidget):
             statistics  = stats,
             file_prefix = prefix,
             open_slide  = self._open_slide or None,
+            regions     = regions,
+            features    = features,
+            write_csv   = write_csv,
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.extraction_done.connect(self._on_finished)
@@ -368,12 +460,21 @@ class Step4Page(QWidget):
         self._running = False
         self._btn_stop.setEnabled(False)
         self._update_run_button()
-        csv_p = os.path.join(out_dir, f'{base_name}.csv')
-        prov_p = os.path.join(out_dir, f'{base_name}_provenance.json')
+        outs = (self._worker.outputs or {}) if self._worker is not None else {}
+        files = [outs.get('h5ad') or os.path.join(out_dir, f'{base_name}.h5ad')]
+        if outs.get('csv'):
+            files.append(outs['csv'])
+        files.append(outs.get('provenance') or os.path.join(out_dir,
+                                                            f'{base_name}_provenance.json'))
+        note = ''
+        outside = (outs.get('nucleus_outside') or {}).get('pixels', 0)
+        if outside:
+            note = (f'\n\nRisk: {outside:,} nucleus pixels lie outside their cell (a result '
+                    f'made before Step 2\'s tile-seam fix); re-run Step 2 to remove them.')
         self._announce('Feature extraction complete',
-                       f'Outputs:\n\n  {csv_p}\n  {prov_p}\n\n'
-                       f'The provenance file says which channels were read raw and which '
-                       f'from Step 0\'s correction.')
+                       'Outputs:\n\n' + '\n'.join(f'  {f}' for f in files) +
+                       '\n\nThe provenance file says which channels were read raw and which '
+                       'from Step 0\'s correction.' + note)
 
     def _announce(self, title, text):
         """The finished box (a seam: offscreen tests do not open it)."""

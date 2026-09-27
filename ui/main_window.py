@@ -2947,8 +2947,6 @@ class MainWindow(QMainWindow):
 
         self.step1_done = False
         self._step2._out_edit.setText(self.step0_output.get("step2_dir") or OUTPUT_DIR)
-        self._step4._ome_edit.setText(OME_TIFF_FILE)
-        self._step4._out_edit.setText(self.step0_output.get("step2_dir") or OUTPUT_DIR)
         # SAVE-ONLY: stay in Step0; the user enters Step1 explicitly.
         self._update_next_button()
         self._log_step1_layout("Step0 complete (save-only, no auto-jump)")
@@ -3600,8 +3598,6 @@ class MainWindow(QMainWindow):
         self.step0_done = False
         self._step1_context_ready = False
         self._step2._out_edit.setText(step2_dir or out_dir)
-        self._step4._ome_edit.setText(ome_path)
-        self._step4._out_edit.setText(step2_dir or out_dir)
         print(f"[Step1] bootstrapped from disk output_dir={step0_dir}")
         print(f"[Step1] raw_ome={ome_path}")
         if not os.path.exists(os.path.join(step0_dir, "patch_config.json")):
@@ -4243,8 +4239,6 @@ class MainWindow(QMainWindow):
             )
         else:
             self._step2._out_edit.setText(step2_dir or out_dir)
-        self._step4._ome_edit.setText(raw_ome)
-        self._step4._out_edit.setText(step2_dir or out_dir)
         self._update_next_button()
         self.prev_status.setText("Loaded previous Step1 session.")
         print(f"[Step1] restored patches={len(patches)}")
@@ -4600,8 +4594,6 @@ class MainWindow(QMainWindow):
                 )
             else:
                 self._step2._out_edit.setText(step2_dir or out_dir)
-            self._step4._ome_edit.setText(raw_ome)
-            self._step4._out_edit.setText(step2_dir or out_dir)
             self._update_next_button()
             self.prev_status.setText("Loaded previous Step1 session.")
             print(f"[Step1] restored patches={len(patches)}")
@@ -4842,28 +4834,25 @@ class MainWindow(QMainWindow):
             self._stop_all_loaders()
         if self._current_step == 3:
             self.step3_done = True
-        if self.is_sequential_flow and self.step3_output:
-            seq_out = self.step3_output.get("output_dir")
-            if seq_out:
-                mask = os.path.join(seq_out, 'global_mask.dat')
-                if not os.path.exists(mask):
-                    mask = os.path.join(seq_out, 'global_mask.ome.tiff')
-                self._step4.set_paths(
-                    mask_path=mask if os.path.exists(mask) else '',
-                    ome_tiff_path=(self.step1_output or {}).get("ome_tiff_path", OME_TIFF_FILE),
-                    output_dir=seq_out,
-                )
-        if output_dir:
-            mask = os.path.join(output_dir, 'global_mask.dat')
-            if not os.path.exists(mask):
-                mask = os.path.join(output_dir, 'global_mask.ome.tiff')
-            self._step4.set_paths(
-                mask_path     = mask if os.path.exists(mask) else '',
-                ome_tiff_path = OME_TIFF_FILE,
-                output_dir    = output_dir,
-            )
+        run_dir, roi_name = self._step4_choice(output_dir)
+        if run_dir:
+            self._step4.set_run(run_dir, roi_name, open_slide=self._step3_slide_path())
         self._stack.setCurrentIndex(4)
         self._set_step_active(4)
+
+    def _step4_choice(self, output_dir=None):
+        """Block S4-1: what Step4 quantifies -- a run folder named by the
+        caller, else Step3's chosen (run, region), else the latest Step2
+        result; ("", None) keeps the page's own choice."""
+        if output_dir:
+            return output_dir, None
+        key = self.__dict__.get("_step3_mask_key")
+        if key:
+            run_dir, _sep, roi_name = str(key).partition("\x1f")
+            return run_dir, (roi_name or None)
+        latest = ((self.step3_output or {}).get("output_dir")
+                  or (self.step2_output or {}).get("output_dir"))
+        return (latest or ""), None
 
     # (#11) _go_next_step removed — the "Next" button it served is gone; step
     # navigation is via the top-nav step names (_go_to_stepN).

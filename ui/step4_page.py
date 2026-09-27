@@ -8,12 +8,15 @@ from PyQt5 import QtWidgets
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QGroupBox, QProgressBar, QMessageBox, QFileDialog,
+    QGroupBox, QProgressBar, QMessageBox, QFileDialog, QComboBox,
 )
 
-from ..config import OUTPUT_DIR, OME_TIFF_FILE
-from ..core.bg_correction import _load_correction_config
-from ..workers.feature_extract_worker import FeatureExtractWorker
+from ..config import OUTPUT_DIR
+from ..core import quant_engine as qe
+from ..core import quant_sources as qs
+from ..workers.feature_extract_worker import (
+    FeatureExtractWorker, default_output_dir, output_base,
+)
 
 # ══════════════════════════════════════════════════════════════════════
 #  Step 4 Page  — Cell Feature Extraction
@@ -26,18 +29,85 @@ class Step4Page(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._worker = None
+        self._running = False
+        self._open_slide = ""
+        self._job = None            # the resolved QuantJob, or None
         self._build_ui()
 
     # ── public API ────────────────────────────────────────────────────
 
-    def set_paths(self, mask_path, ome_tiff_path, output_dir):
-        """Called from MainWindow after Step 2 finishes."""
-        if mask_path:
-            self._mask_edit.setText(mask_path)
-        if ome_tiff_path:
-            self._ome_edit.setText(ome_tiff_path)
-        if output_dir:
-            self._out_edit.setText(output_dir)
+    def set_run(self, run_dir, roi_name=None, open_slide=None):
+        """The (run, region) Step4 quantifies -- MainWindow hands over
+        Step3's choice. The slide is the run's own; `open_slide` is the one
+        open in the program (a run of another slide is refused)."""
+        if open_slide is not None:
+            self._open_slide = open_slide or ""
+        self._run_edit.blockSignals(True)
+        self._run_edit.setText(run_dir or "")
+        self._run_edit.blockSignals(False)
+        self._load_run(roi_name)
+
+    def refusal(self):
+        """Why `Extract Features` is unavailable ('' when it is available)."""
+        return self._reason_lbl.text() if self._job is None else ""
+
+    def _load_run(self, roi_name=None):
+        """Fill the region list for the run in the field, then resolve."""
+        path = self._run_edit.text().strip()
+        self._roi_combo.blockSignals(True)
+        self._roi_combo.clear()
+        regions = []
+        if path:
+            try:
+                regions = qs.run_regions(qs.open_run(path))
+            except qs.QuantSourceError as exc:
+                self._set_job(None, str(exc))
+                self._roi_combo.blockSignals(False)
+                return
+        for name, _bbox in regions:
+            self._roi_combo.addItem(name, name)
+        if roi_name is not None and self._roi_combo.findData(roi_name) >= 0:
+            self._roi_combo.setCurrentIndex(self._roi_combo.findData(roi_name))
+        self._roi_combo.setEnabled(len(regions) > 1)
+        self._roi_combo.blockSignals(False)
+        self._resolve()
+
+    def _resolve(self, set_output=True):
+        path = self._run_edit.text().strip()
+        if not path:
+            self._set_job(None, "Choose a Step 2 result (its run folder).")
+            return
+        roi = self._roi_combo.currentData()
+        try:
+            job = qs.resolve_quant_job(path, roi, self._open_slide or None)
+        except qs.QuantSourceError as exc:
+            self._set_job(None, str(exc))
+            return
+        self._set_job(job, "")
+        if set_output:
+            self._out_edit.setText(default_output_dir(job))
+
+    def _set_job(self, job, reason):
+        self._job = job
+        if job is None:
+            self._slide_lbl.setText("—")
+            self._source_lbl.setText("")
+            self._reason_lbl.setText(reason)
+            self._reason_lbl.setVisible(bool(reason))
+        else:
+            n_corr = sum(1 for c in job.channels if c.kind == "corrected")
+            self._slide_lbl.setText(job.slide)
+            what = "nuclei (this result has no cell mask)" if job.compartment == qs.NUCLEUS \
+                else "cells"
+            self._source_lbl.setText(
+                f"{job.n_objects:,} labelled {what} · {len(job.channels)} channels: "
+                f"{len(job.channels) - n_corr} raw, {n_corr} from Step 0's correction")
+            self._reason_lbl.setText("")
+            self._reason_lbl.setVisible(False)
+        self._update_run_button()
+
+    def _update_run_button(self):
+        self._btn_run.setEnabled(self._job is not None and not self._running)
 
     # ── UI ────────────────────────────────────────────────────────────
 
@@ -80,19 +150,34 @@ class Step4Page(QWidget):
         inp = _box('Input Files', '#61afef')
         il  = QVBoxLayout(inp)
 
-        self._mask_edit = _file_row(
-            il, 'Mask (.dat/.ome.tiff):',
-            'global_mask.dat  or  global_mask.ome.tiff',
-            lambda: self._browse_file(self._mask_edit,
-                                      'Mask file (*.dat *.tiff *.tif)')
+        self._run_edit = _file_row(
+            il, 'Run:',
+            'a Step 2 result (its run folder)',
+            self._browse_run,
         )
-        self._ome_edit = _file_row(
-            il, 'OME-TIFF (original):',
-            'original multichannel OME-TIFF',
-            lambda: self._browse_file(self._ome_edit,
-                                      'OME-TIFF (*.tif *.tiff)')
-        )
-        self._ome_edit.setText(OME_TIFF_FILE)
+        self._run_edit.editingFinished.connect(lambda: self._load_run())
+        roi_row = QHBoxLayout()
+        roi_row.addWidget(QLabel('Region:'))
+        self._roi_combo = QComboBox()
+        self._roi_combo.setStyleSheet('font-size:11px;')
+        self._roi_combo.currentIndexChanged.connect(lambda _i: self._resolve())
+        roi_row.addWidget(self._roi_combo, stretch=1)
+        il.addLayout(roi_row)
+        slide_row = QHBoxLayout()
+        slide_row.addWidget(QLabel('Slide:'))
+        self._slide_lbl = QLabel('—')
+        self._slide_lbl.setStyleSheet('color:#ccc;font-size:11px;')
+        self._slide_lbl.setToolTip("The run's own slide: intensities are read from it, and "
+                                   "from Step 0's saved correction for corrected channels")
+        slide_row.addWidget(self._slide_lbl, stretch=1)
+        il.addLayout(slide_row)
+        self._source_lbl = QLabel('')
+        self._source_lbl.setStyleSheet('color:#888;font-size:10px;')
+        il.addWidget(self._source_lbl)
+        self._reason_lbl = QLabel('Choose a Step 2 result (its run folder).')
+        self._reason_lbl.setWordWrap(True)
+        self._reason_lbl.setStyleSheet('color:#e06c75;font-size:11px;')
+        il.addWidget(self._reason_lbl)
         root.addWidget(inp)
 
         # ── Statistics selection ───────────────────────────────────────
@@ -100,22 +185,18 @@ class Step4Page(QWidget):
         stl = QVBoxLayout(stat_box)
 
         # Note label
-        note = QLabel(
-            'The first checked item becomes the X matrix in h5ad (scanpy default).\n'
-            'All checked items are saved in CSV.  p90 is slowest.'
-        )
+        note = QLabel('Each checked statistic is computed for every channel, all in one pass, '
+                      'and saved in the CSV.')
         note.setStyleSheet('color:#888;font-size:10px;')
         stl.addWidget(note)
 
         # Checkboxes — (key, display_label, default_checked)
         _stat_defs = [
             ('mean',   'Mean',            True),
-            ('median', 'Median',          False),
-            ('sum',    'Sum (total int.)', False),
-            ('std',    'Std dev',         False),
-            ('min',    'Min',             False),
-            ('max',    'Max',             False),
-            ('p90',    '90th percentile', False),
+            ('sum',    'Sum (total int.)', True),
+            ('std',    'Std dev',         True),
+            ('min',    'Min',             True),
+            ('max',    'Max',             True),
         ]
         self._stat_checks = {}
         chk_row = QHBoxLayout()
@@ -128,22 +209,6 @@ class Step4Page(QWidget):
         chk_row.addStretch()
         stl.addLayout(chk_row)
 
-        # "X matrix =" info label, updates when checkboxes change
-        self._x_lbl = QLabel('X matrix in h5ad:  mean')
-        self._x_lbl.setStyleSheet('color:#e5c07b;font-size:10px;')
-        stl.addWidget(self._x_lbl)
-
-        def _update_x_lbl():
-            first = next(
-                (k for k, cb in self._stat_checks.items() if cb.isChecked()),
-                None
-            )
-            self._x_lbl.setText(
-                f'X matrix in h5ad:  {first}' if first
-                else '⚠  Select at least one statistic'
-            )
-        for cb in self._stat_checks.values():
-            cb.stateChanged.connect(_update_x_lbl)
 
         root.addWidget(stat_box)
         out = _box('Output', '#98c379')
@@ -155,25 +220,24 @@ class Step4Page(QWidget):
                 QFileDialog.getExistingDirectory(self, 'Select output dir')
             )
         )
-        self._out_edit.setText(OUTPUT_DIR)
 
         # Filename prefix row
         prefix_row = QHBoxLayout()
         prefix_row.addWidget(QLabel('Filename prefix (optional):'))
         self._prefix_edit = QtWidgets.QLineEdit()
-        self._prefix_edit.setPlaceholderText('Leave blank for default: cell_features.csv / .h5ad')
+        self._prefix_edit.setPlaceholderText('Leave blank for the default: cell_features.csv')
         self._prefix_edit.setStyleSheet('font-size:11px;')
         prefix_row.addWidget(self._prefix_edit, stretch=1)
         ol.addLayout(prefix_row)
 
-        self._prefix_info = QLabel('Outputs:  cell_features.csv   cell_features.h5ad')
+        self._prefix_info = QLabel('Outputs:  cell_features.csv   cell_features_provenance.json')
         self._prefix_info.setStyleSheet('color:#888;font-size:10px;')
         ol.addWidget(self._prefix_info)
 
         def _update_prefix_info():
             p = self._prefix_edit.text().strip()
-            base = f'{p}_cell_features' if p else 'cell_features'
-            self._prefix_info.setText(f'Outputs:  {base}.csv   {base}.h5ad')
+            base = output_base(p)
+            self._prefix_info.setText(f'Outputs:  {base}.csv   {base}_provenance.json')
 
         self._prefix_edit.textChanged.connect(_update_prefix_info)
         root.addWidget(out)
@@ -235,17 +299,24 @@ class Step4Page(QWidget):
             'QPushButton:disabled{background:#333;color:#555;}'
         )
         self._btn_run.clicked.connect(self._run)
+        self._btn_run.setEnabled(False)
         nav.addWidget(self._btn_run)
 
         root.addLayout(nav)
 
     # ── helpers ───────────────────────────────────────────────────────
 
-    def _browse_file(self, edit, filt):
-        p, _ = QFileDialog.getOpenFileName(self, 'Select file',
-                                            OUTPUT_DIR, filt)
+    def _pick_run_folder(self):
+        """The system dialog (a seam: a test answers directly)."""
+        return QFileDialog.getExistingDirectory(
+            self, 'A Step 2 result (its run folder)',
+            self._run_edit.text().strip() or OUTPUT_DIR)
+
+    def _browse_run(self):
+        p = self._pick_run_folder()
         if p:
-            edit.setText(p)
+            self._run_edit.setText(p)
+            self._load_run()
 
     def _open_batch(self):
         from .batch_step4_dialog import BatchStep4Dialog
@@ -253,16 +324,10 @@ class Step4Page(QWidget):
         dlg.exec_()
 
     def _run(self):
-        mask_path = self._mask_edit.text().strip()
-        ome_path  = self._ome_edit.text().strip()
-        out_dir   = self._out_edit.text().strip() or OUTPUT_DIR
-
-        if not mask_path or not os.path.exists(mask_path):
-            QMessageBox.warning(self, 'Missing input', 'Please select a valid mask file.')
+        self._resolve(set_output=False)     # the files may have changed since
+        if self._job is None:
             return
-        if not ome_path or not os.path.exists(ome_path):
-            QMessageBox.warning(self, 'Missing input', 'Please select the original OME-TIFF.')
-            return
+        out_dir = self._out_edit.text().strip() or default_output_dir(self._job)
 
         stats = [k for k, cb in self._stat_checks.items() if cb.isChecked()]
         if not stats:
@@ -271,23 +336,20 @@ class Step4Page(QWidget):
             return
 
         prefix = self._prefix_edit.text().strip()
-        correction_config = _load_correction_config(
-            os.path.join(out_dir, 'correction_config.json')
-        )
-
         self._worker = FeatureExtractWorker(
-            mask_path     = mask_path,
-            ome_tiff_path = ome_path,
-            output_dir    = out_dir,
-            statistics    = stats,
-            file_prefix   = prefix,
-            correction_config = correction_config,
+            run_path    = self._job.run_dir,
+            roi_name    = self._job.roi_name,
+            output_dir  = out_dir,
+            statistics  = stats,
+            file_prefix = prefix,
+            open_slide  = self._open_slide or None,
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.extraction_done.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
 
-        self._btn_run.setEnabled(False)
+        self._running = True
+        self._update_run_button()
         self._btn_stop.setEnabled(True)
         self._prog_bar.setValue(0)
         self._worker.start()
@@ -303,25 +365,32 @@ class Step4Page(QWidget):
 
     def _on_finished(self, out_dir, base_name):
         self._prog_bar.setValue(100)
-        self._btn_run.setEnabled(True)
+        self._running = False
         self._btn_stop.setEnabled(False)
+        self._update_run_button()
         csv_p = os.path.join(out_dir, f'{base_name}.csv')
-        h5_p  = os.path.join(out_dir, f'{base_name}.h5ad')
-        QMessageBox.information(
-            self, 'Feature extraction complete',
-            f'Outputs:\n\n'
-            f'  {csv_p}\n'
-            f'  {h5_p}\n\n'
-            f'Load {base_name}.h5ad in scanpy for downstream analysis.'
-        )
+        prov_p = os.path.join(out_dir, f'{base_name}_provenance.json')
+        self._announce('Feature extraction complete',
+                       f'Outputs:\n\n  {csv_p}\n  {prov_p}\n\n'
+                       f'The provenance file says which channels were read raw and which '
+                       f'from Step 0\'s correction.')
+
+    def _announce(self, title, text):
+        """The finished box (a seam: offscreen tests do not open it)."""
+        QMessageBox.information(self, title, text)
 
     def _on_error(self, msg):
         self._prog_bar.setValue(0)
-        self._btn_run.setEnabled(True)
+        self._running = False
         self._btn_stop.setEnabled(False)
-        self._prog_lbl.setText('✗ Error — see terminal')
-        QMessageBox.critical(self, 'Error', msg)
+        self._update_run_button()
+        self._prog_lbl.setText(f'✗ {msg.splitlines()[-1] if msg else "Error"}')
         print(f'[Step4 Error]\n{msg}')
+        self._report_error(msg)
+
+    def _report_error(self, msg):
+        """The error box (a seam: offscreen tests do not open it)."""
+        QMessageBox.critical(self, 'Step 4', msg)
 
 
 # ══════════════════════════════════════════════════════════════════════

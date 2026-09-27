@@ -9,6 +9,8 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.85：块 S4-1 真机验收通过。
+- v3.84：块 S4-1 已实施（自动验收通过，待真机验收），写入执行记录与实施中的两项用户裁定（纯核运行按核定量；批处理的 median 不改）。
 - v3.83：块 S4-1 v2 获批（8 项裁定按 v2）。
 - v3.82：块 S4-1 按独立审核修订为 v2（产品输出目录 `step4/quantification_runs/…`；不输出圆度；周长改名 `boundary_pixel_count` 并写明定义；QuantReader / QuantBackend / QuantFinalizer 三个边界；「科学来源绝不退回」写成契约；S4-0 报告补记产品路径的来源缺陷）。
 - v3.81：块 S4-1 申请 v1（严格定量来源 + Numba 流式融合内核；新发现：产品路径的 Step4 找不到 `correction_config.json`，校正通道被静默按原始数据定量；「读 8.8 GB 要 10 s」的原因与按分块并行解压的实测）。
@@ -1696,7 +1698,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   7. **形态的验收改为对独立参考**：面积、质心、表达量与旧值（S4-0 参考）对照；长短轴、偏心率、方向与独立的 float64 参考（skimage `regionprops`）对照。这是修正科学错误，不算回归。输出的元数据写 `morphology_version = 2`。
   8. **空标签**（编号存在但 mask 里没有像素）：有效细胞 = `count > 0`；h5ad **不输出**空标签。来源记录写 `max_label_id`、`n_valid_cells`、`n_empty_labels`，数量少时另写 `empty_label_ids`。不再为兼容旧 CSV 保留 mean = NaN、min / max = 0 的假细胞。
 
-### 块 S4-1 — 严格定量来源 + 流式融合内核（全细胞形态 + 快速统计）（申请 v2，按独立审核修订，**用户 2026-09-27 批准**）
+### 块 S4-1 — 严格定量来源 + 流式融合内核（全细胞形态 + 快速统计）（申请 v2，按独立审核修订，**用户 2026-09-27 批准**；已实施，**真机验收通过**）
 - **必要性**：
   - S4-0 / S4-1P 已证明：今天的 Step4 在 2.5 亿像素上峰值 8.6 GB、快速统计全选 17–25 min；同样的结果流式融合只要 12–13 s、峰值 1.2–1.9 GB。WSI（约 20 亿像素）上旧 Step4 按像素线性增长到约 70 GB，根本跑不了。
   - **新发现（本次只读调查，产品缺陷）**：今天的产品路径里，Step4 页面去**输出目录**（默认 = `step2_dir`）找 `correction_config.json`（`ui/step4_page.py:274-276`），而这个文件在 `step0/`。找不到时 `_load_correction_config` 返回 `None`，worker 的 loader 也没有接上 `corrected_channels.zarr`——**tophat / cuCIM 通道被静默地按原始数据定量，既不读 Step0 的结果，也不现场校正**。S4-0 B 部分的「旧：原始 + 现场 tophat」是基准脚本手动把配置交给 worker 得到的，不是产品路径的实际行为。本块的严格来源同时修掉这个缺陷。
@@ -1772,6 +1774,26 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   6. 3×3（8 邻域）label-aware 边界像素计数，列名 `boundary_pixel_count`，来源记录写定义；不要求复现旧的并集腐蚀周长。——审核：按此修订。
   7. 批处理对话框只做最小接线。——审核：同意。
   8. Step4 内部按 TIFF 分块并行解压，封装为独立的 `QuantReader`；非分块、未知压缩或不支持的 TIFF 退到 tifffile 读法；性能可退，科学来源不退。——审核：同意。
+
+- **实施中的用户裁定（2026-09-27）**：
+  9. **纯核方法的运行**（LabelStore 只有 `nucleus`）：把核当作主对象定量，来源记录写 `primary_compartment = nucleus`，页面写明「nuclei (this result has no cell mask)」（与旧 Step4 的行为一致，不出现功能空档）。
+  10. **批处理对话框的 median 勾选项不改**（白名单保持「两处」）：勾了 median 的那一行会失败并显示原因「not a fast statistic: ['median'] — Step 4 computes mean, sum, std, min and max」。
+- **执行记录**（2026-09-27，未提交）：
+  - `core/quant_sources.py`（新，无 Qt）：`resolve_quant_job` → `QuantJob`（只读 LabelStore；`complete`、dtype、形状、`n_objects` 核对；ROI bbox；运行 / 工作区 / 当前打开的切片三者一致）；**fail-closed 的来源**：Step0 交接 → `correction_config.json` → 校正结果，逐项核对（本 ROI 的组、组的 bbox 覆盖区域、形状、float32、方法、有效参数、`channel_index`、`source_ome`、handoff / 配置 / zarr 三处决定一致），任何一项不符就在定量前抛 `QuantSourceError`，不退回原始、不现场校正（模块不导入 `OMETIFFLoader` 与校正函数，只用 `resolve_effective_correction_params` 算有效参数）。`QuantReader` 边界：`TiffTileReader`（按 TIFF 分块取字节、tifffile `page.decode` 并行解压，保持切片 dtype；OME 的后续页是轻量 frame，须先 `aspage()` 才能判断布局；布局不符退到 tifffile zarr，来源记录写 `raw_reader`）与 `JobReader`（带 1 像素背景外圈的标签、按来源分批读通道并计数）。
+  - `core/quant_engine.py`（新，无 Qt）：`QuantBackend` / `NumbaBackend`（`@njit(parallel=True, nogil=True, cache=True)`，每个通道一个任务 + 几何一个任务，全局一套累加器，强度 float64 累加；只为所选统计分配数组）/ `RustBackend`、`CUDABackend`（只留名，报未实现）；`QuantFinalizer`；`quantify`（生产者线程预读下一块 / 下一批，队列深度 2；Stop 在批之间生效）。**实施中的改进**：几何矩改为 **int64 精确累加**，中心矩用 Python 整数算 n·Σx² − (Σx)²——没有抵消误差，圆形细胞两个方差精确相等时与 skimage 一样取 −π/4（首版 float64 的 `Σx²/n − cx²` 在这种细胞上方向差 π/4，被测试抓到）。
+  - `workers/feature_extract_worker.py`（重写）：`run_extraction`（CSV 整数列用 `%d`，其余 `%.6g`；来源记录 JSON；`*.partial` 写完才改名，来源记录改名失败时连同已改名的 CSV 一起删除）与 QThread 外壳（来源 / 标签错误给原因而不是 traceback；非快速统计给出说明）。
+  - `ui/step4_page.py`：`Run` + Browse、`Region` 下拉框、只读 `Slide`、来源摘要、红色原因行（此时 `Extract Features` 不可用）；5 个快速统计默认全选；输出说明为 CSV + `_provenance.json`；运行时保留用户改过的输出目录；完成 / 出错的对话框走可替换的接缝（离屏测试不弹框）。
+  - `ui/main_window.py`：`_go_to_step4` + `_step4_choice`（调用方给的运行 → Step3 当前选择的（运行, 区域）→ 最近的 Step2 结果；都没有时保留页面自己的选择）；删去 4 处把 `_step4` 的 OME / 输出框设为 `step2_dir` 的代码。
+  - `ui/batch_step4_dialog.py`：把找到的 mask 所在的运行文件夹交给新 worker；删去 `_find_correction_config`。
+  - 文档：`UI_SURFACE_RULES.md` 新增 Step4 页面一条；两份用户指南的 Step4 一节（来源规则、Run / Region、统计项、输出列与 `boundary_pixel_count` 的定义、来源记录、旧长短轴的差异）。
+  - **测试**（新）：`tests/test_quant_sources.py` 26 条、`tests/test_quant_engine.py` 18 条、`tests/test_step4_worker.py` 11 条、`tests/test_step4_page.py` 8 条，全部通过；`tests/test_batch_step4_dialog.py` 未改、6 条通过。
+    - 说明一处与申请措辞的差别：分块边长改变时，**float32 通道**的 sum / mean / std 的累加顺序随分块变化，逐位不一定相同（测试按相对误差 1e-12）；其余所有列（uint8 通道的全部统计、count、外接框、min / max、边界像素数、几何）逐位相同。每批通道数与线程数改变时全部逐位相同。
+    - 偏心率 = √(1 − λ₂/λ₁)：近圆细胞上平方根把 1e-14 的舍入放大到约 1e-7，测试对偏心率平方按 1e-12、对偏心率按 1e-6（真实数据门）核对。
+  - **反向注入** 12 处（任务临时目录的副本），每处至少 1 条变红：校正结果缺失时退回原始、跳过参数核对、任意含同名通道的组都接受、边界计数不带外圈、float32 累加、空标签照样输出、质心不加区域原点、方向符号反了、`*.partial` 不清理、原始分块的偏移错一位、页面运行时覆盖用户的输出目录、忽略 Step3 的选择。
+  - **回归**：19 个模块（上面 5 个 Step4 模块，以及 `test_main_window_step1_5`、`test_step0_step1_handoff_contract`、`test_step3_masks`、`test_step0_authoritative_save_barrier`、`test_step1_step2_handoff_e2e`、`test_step1_session_button`、`test_step1_load_weights`、`test_b3_fixes`、`test_step3_page`、`test_step1_handoff_invalidation`、`test_step1_dataset_switch`、`test_no_real_project_writes`、`test_step1_to_step2_handoff`、`test_step0_step1_surface_details`）每模块单独进程，与 `git archive HEAD`（`70b4565`）逐条对比：两边都没有失败，**无新增失败**；`test_ui_surface_contract.py` 两边 8 条通过。
+  - **真实数据**（`scripts/verify_step4_s41.py`，报告 `docs/benchmarks/step4/s41_2026-09-27.md`）：总时间 **8.6 / 8.3 s**、峰值 **1.16 GB**（S4-0 对照 B：1014 s / 8.6 GB）；有效细胞 56 872、空标签 [29630, 53238]；27 raw + 2 corrected；面积与 S4-0 参考完全相同，质心与 29 通道 × 5 项统计 147 列相对差 > 1e-5 的为 0；长短轴 / 偏心率 / 方向对 skimage 最大 7e-14；`boundary_pixel_count` 对独立参考 56 872 个细胞完全相同；原始读取抽查 10 块逐像素相同。仍受读盘限制（计算 1.4 s，读 6.8 s）。
+  - **真机验收通过（用户 2026-09-27）。**
+  - advisory：① 批处理对话框按旧的 `Scan*/` 目录找样本，与现在的项目结构不符（TMA 批处理时重做）；② Step2 完成对话框的「→ Feature Extraction (Step 4)」按钮仍发 `open_qc_requested`（进 Step3，已有问题，未处理）；③ `core/bg_correction` 在导入时做 CuPy 的 GPU 自检（本机因 nvrtc 失败并打印两行），Step4 的来源解析因导入参数函数而触发它——产品里主窗口本来就导入了这个模块，不增加开销。
 
 ## 六、未决与 advisory
 

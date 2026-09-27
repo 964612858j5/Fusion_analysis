@@ -24,7 +24,6 @@ from PyQt5.QtWidgets import (
 )
 
 from ..config import OUTPUT_DIR
-from ..core.bg_correction import _load_correction_config
 from ..workers.feature_extract_worker import FeatureExtractWorker
 
 # ── column layout ──────────────────────────────────────────────────────
@@ -122,25 +121,6 @@ def discover_samples(root_dir):
             "mask_ok": mask is not None,
         })
     return results
-
-
-def _find_correction_config(output_dir):
-    """Look for correction_config.json in output_dir, then a few parents."""
-    cur = output_dir
-    for _ in range(4):
-        if not cur:
-            break
-        cfg = os.path.join(cur, "correction_config.json")
-        if os.path.exists(cfg):
-            try:
-                return _load_correction_config(cfg)
-            except Exception:
-                return None
-        parent = os.path.dirname(cur.rstrip(os.sep))
-        if parent == cur:
-            break
-        cur = parent
-    return None
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -494,25 +474,19 @@ class BatchStep4Dialog(QDialog):
         self._set_status(row, "running...")
         self.table.selectRow(row)  # highlight the sample being processed
 
-        # Match single-sample Step4Page: let the worker parse channel names
-        # from the OME-TIFF itself (avoids a duplicate load).
-        ch_names = None
-
-        correction_config = _find_correction_config(task["output_dir"])
-
         print(f"[BATCH] [{self._batch_idx + 1}/{len(self._batch_tasks)}] {task['prefix']}", flush=True)
         print(f"[BATCH]   OME-TIFF:   {task['ome_tiff']}", flush=True)
         print(f"[BATCH]   Mask:       {task['mask']}", flush=True)
         print(f"[BATCH]   Output dir: {task['output_dir']}", flush=True)
 
+        # Block S4-1: the worker quantifies the mask's run (its LabelStore,
+        # its slide, Step0's channel sources) -- it decides where every
+        # channel is read from; no correction config is looked up here.
         worker = FeatureExtractWorker(
-            mask_path=task["mask"],
-            ome_tiff_path=task["ome_tiff"],
+            run_path=os.path.dirname(task["mask"]),
             output_dir=task["output_dir"],
-            channel_names=ch_names,
             statistics=self._batch_stats,
             file_prefix=task["prefix"],
-            correction_config=correction_config,
         )
         worker.progress.connect(
             lambda cur, tot, msg, r=row: self._set_status(r, f"running... {msg}"))

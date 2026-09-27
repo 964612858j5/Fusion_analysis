@@ -301,6 +301,21 @@ row, and the duplicate Tissue Preview button in the step bar.
   StarDist model is shown, read-only (`2D_versatile_fluo`). Run on a params
   file with settings the engine does not use lists them with the reason;
   the buttons are `Run per contract` and `Cancel` only.
+* **Step4's page** (block S4-1, user ruling 2026-09-27) -- one column.
+  `Input Files`: `Run:` (a Step2 run folder + Browse) and `Region:` (the
+  run's regions; disabled when it has one), both handed over from Step3's
+  choice when Step4 opens; `Slide:` read-only (the run's own slide -- there
+  is no OME-TIFF field any more), a one-line source summary (`N labelled
+  cells · C channels: R raw, K from Step 0's correction`, or `nuclei (this
+  result has no cell mask)`), and a red reason line when the run cannot be
+  quantified (an old run without a label store, another slide, a missing or
+  mismatching Step0 corrected product) -- then `Extract Features` is
+  disabled. `Intensity Statistics`: Mean, Sum, Std dev, Min, Max, all
+  checked by default; no Median / 90th percentile and no `X matrix in h5ad`
+  line. `Output`: the folder (default
+  `<workspace>/step4/quantification_runs/<run>/<region>/`, editable) and the
+  prefix; the outputs line names the CSV and `_provenance.json`. Progress,
+  `← Back to Step 3`, `Batch...`, `⏹ Stop`, `▶ Extract Features` as before.
 * **Step1's Save progress** (block L1, user ruling 2026-09-25) -- the modal
   progress dialog alone (with Cancel). The bar that used to sit at the
   bottom of the page is kept, hidden, and never shown; its words go to the

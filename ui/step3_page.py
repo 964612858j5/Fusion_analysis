@@ -44,14 +44,17 @@ class Step3Page(QWidget):
     # ── built once, by the window ─────────────────────────────────────
     def assemble(self, *, title_bar, tab_qss, free_tab_bar, frame_qss,
                  header_widgets, header_margins, header_spacing,
-                 weight_widgets, mode_widgets, mask_widgets=(), mask_hint=None):
+                 weight_widgets, mode_widgets, mask_widgets=(), mask_hint=None,
+                 corner_widget=None):
         """Lay out what the window built, where Step1 has it.
 
         `title_bar` is Step1's kind of bar (name + Tissue Navigator);
         `tab_qss` / `free_tab_bar` are Step1's tab look; `frame_qss` is the
         `Channels` frame's; the widget lists are Step1's controls, already
         connected to Step1's actions. `mask_widgets` and `mask_hint` open
-        the viewer's top row (block 4c); the hint takes the spare width.
+        the viewer's top row (block 4c; the patch strip first, plan step 3);
+        the hint takes the spare width. `corner_widget` (the run drop-down)
+        sits at the right of the tab bar's row, outside the tab's content.
         """
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 11)            # Step1's page insets
@@ -132,6 +135,9 @@ class Step3Page(QWidget):
         free_tab_bar(right_tabs)
         right_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right_tabs.addTab(right, "Viewer")
+        if corner_widget is not None:
+            right_tabs.setCornerWidget(corner_widget, Qt.TopRightCorner)
+        self._right_tabs = right_tabs
         split.addWidget(right_tabs)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 2)

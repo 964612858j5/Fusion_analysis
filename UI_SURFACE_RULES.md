@@ -229,10 +229,16 @@ row, and the duplicate Tissue Preview button in the step bar.
   `Tissue Navigator`; LEFT, the `Fusion` tab with Step1's `Channels` frame --
   `Show all` (Step1's sweep) and `Intensity…`, the rule, `Reset weights` and
   `Load weights`, then the one dock with Step1's rows, in a host of Step3's
-  own; RIGHT, the `Viewer` tab with ONE row over Step3's viewer -- the mask
-  controls (block 4c, user rulings 2026-09-26/27), then the `Overlay` /
-  `Fusion` pair (the SAME mode as Step1's pair) at its right end. The mask
-  controls, left to right: the run drop-down (the current ROI workspace's
+  own; RIGHT, the `Viewer` tab with ONE row over Step3's viewer (plan step
+  3, user ruling 2026-09-27: one row, never two) -- Step1's patch strip (the
+  SAME component, `ui/patch_strip.py`: `Patch ▾` listing every patch, at
+  most seven inline buttons in the patches' own colours, no load glyphs; a
+  click lands Step3's viewer on the patch and is THE patch selection, the one
+  Step1's strip marks and its session keeps), then the mask controls (block
+  4c, user rulings 2026-09-26/27), then the `Overlay` / `Fusion` pair (the
+  SAME mode as Step1's pair) at its right end. The run drop-down sits at the
+  right of the TAB BAR's row, beside the `Viewer` tab and outside its
+  content. The mask controls: the run drop-down (the current ROI workspace's
   finished Step2 runs, `method · date time`, `(active)` marked, newest
   first; one disabled `No segmentation results for this ROI` when there are
   none; the run named by Step2's finished dialog, else the current choice,
@@ -248,7 +254,7 @@ row, and the duplicate Tissue Preview button in the step bar.
   Step1's paused while Step3 is), sharing Step1's camera; a navigator click
   moves the viewer of the step on screen. When it cannot open, the slot's
   notice says why. `← Back to Step 2` below. No Save, no pre-segmentation, no
-  patch strip (a later block). The column joins the one
+  second patch strip of its own (it shows Step1's). The column joins the one
   channel-column share. A refusal to open Step3 is said in a (non-modal)
   dialog on the page the user is on. The Tissue Navigator in Step3 (block
   S5, user ruling 2026-09-26): the ROIs are Step0/Step1's and FROZEN -- no

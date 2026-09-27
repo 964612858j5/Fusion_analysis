@@ -112,28 +112,12 @@ from .step4_page import Step4Page
 STEP1_PATCH_PREVIEW_MAX_PX = 1024
 
 
-# How many patch buttons the Step1 selector keeps INLINE. The row used to
-# hold one button per patch, so its width grew without bound: measured at
-# twenty patches it was 916 px wide and the last button's right edge sat at
-# 1309 px, i.e. outside a 1000 px window entirely. Seven is what the row
-# showed before, so nothing that fits today moves; patch eight onwards lives
-# in the "Patch" menu, which is always there and always lists ALL of them.
-STEP1_INLINE_PATCH_BUTTONS = 7
-
-# The inline patch button's fixed size and the strip's spacing. They were
-# literals inside the rebuild; the dropdown's width is derived from them, so
-# they have to be one definition -- a menu 250 px wide (Qt's default for
-# twenty "P12" items, measured) next to a 318 px strip reads as a different
-# control, not as the rest of the same row.
-STEP1_PATCH_BTN_W = 42
-STEP1_PATCH_BTN_H = 22
-STEP1_PATCH_BTN_SPACING = 4
-
-
-def step1_patch_menu_width():
-    """As wide as a full inline strip: seven buttons and their gaps."""
-    n = STEP1_INLINE_PATCH_BUTTONS
-    return n * STEP1_PATCH_BTN_W + (n - 1) * STEP1_PATCH_BTN_SPACING
+# The patch strip's sizes and its menu width rule live with the strip
+# (`ui/patch_strip.py`, plan step 3); the names stay importable from here.
+from .patch_strip import (  # noqa: E402
+    STEP1_INLINE_PATCH_BUTTONS, STEP1_PATCH_BTN_H, STEP1_PATCH_BTN_SPACING,
+    STEP1_PATCH_BTN_W, PatchStrip, step1_patch_menu_width,
+)
 
 # The overlay's channels are remapped BEFORE they are composited (so the
 # expensive part can be cached), and the compositor it hands them to is
@@ -1111,33 +1095,20 @@ class MainWindow(QMainWindow):
         # cannot show -- is reachable from the "Patch" menu, which is the
         # row's title and its dropdown at the same time.
         sel_row = QHBoxLayout()
-        self._patch_menu_btn = QToolButton()
-        self._patch_menu_btn.setText("Patch")
-        self._patch_menu_btn.setPopupMode(QToolButton.InstantPopup)
-        self._patch_menu_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        self._patch_menu_btn.setFixedHeight(STEP1_PATCH_BTN_H)
-        self._patch_menu_btn.setStyleSheet(
-            "QToolButton{color:#9bd0ff;background:#182230;"
-            "border:1px solid #354a63;border-radius:3px;"
-            "font-size:10px;font-weight:bold;padding:2px 8px;}"
-            "QToolButton::menu-indicator{subcontrol-position:right center;"
-            "subcontrol-origin:padding;left:-4px;}")
-        self._patch_menu = QMenu(self._patch_menu_btn)
-        # The dropdown is as wide as a full inline strip, so the list reads
-        # as the continuation of the row it drops out of. A MINIMUM, not a
-        # fixed width: a list taller than the screen is laid out by Qt in
-        # columns, and a hard 318 px then clips every column but the first
-        # -- measured, with P19 and P20 sitting at x=318 in a 318 px wide
-        # menu, i.e. unreachable. Each column is a full strip wide instead.
-        self._patch_menu.setMinimumWidth(step1_patch_menu_width())
-        self._patch_menu_btn.setMenu(self._patch_menu)
+        # THE SHARED STRIP (plan step 3): the same component Step3 shows. The
+        # old names stay, as aliases of its widgets and of its lists (which
+        # are refilled, never replaced), so nothing that reads them moves.
+        self._patch_strip = PatchStrip(self)
+        # looked up at click time, as the old per-button lambdas did
+        self._patch_strip.chosen.connect(lambda idx: self._select_preview_patch(idx))
+        self._patch_menu_btn = self._patch_strip.menu_button
+        self._patch_menu = self._patch_strip.menu
         #: One action per patch, in patch order. Derived from
         #: `_all_patches` on every rebuild -- never a second patch model.
-        self._patch_menu_actions = []
+        self._patch_menu_actions = self._patch_strip.menu_actions
         sel_row.addWidget(self._patch_menu_btn)
-        self._patch_sel_btns = []
-        self._patch_sel_container = QHBoxLayout()
-        self._patch_sel_container.setSpacing(STEP1_PATCH_BTN_SPACING)
+        self._patch_sel_btns = self._patch_strip.buttons
+        self._patch_sel_container = self._patch_strip.container
         sel_row.addLayout(self._patch_sel_container)
         sel_row.addStretch()
         sel_row.addWidget(self._btn_mode_overlay)
@@ -1629,11 +1600,17 @@ class MainWindow(QMainWindow):
         self._btn_step3_mode_fusion.setChecked(mode == STEP1_PREVIEW_FUSION)
         self._step3_cb_all = show_all
 
-        # Block 4c: the mask row before the pair -- run, cell, nucleus, hint.
+        # ONE ROW (plan step 3, user ruling): the shared patch strip, the two
+        # mask buttons, the hint, then the pair. The run drop-down (block 4c)
+        # sits at the right of the tab bar's row -- beside the `Viewer` tab,
+        # not inside it.
         bar = Step3MaskBar(self)
         bar.run_chosen.connect(self._step3_on_run_chosen)
         bar.style_changed.connect(self._step3_on_mask_style)
         self._step3_mask_bar = bar
+        strip = PatchStrip(self)
+        strip.chosen.connect(lambda idx: self._select_step3_patch(idx))
+        self._step3_patch_strip = strip
 
         page.assemble(
             title_bar=title_bar, tab_qss=_STEP1_TAB_QSS, free_tab_bar=_free_the_tab_bar,
@@ -1641,7 +1618,9 @@ class MainWindow(QMainWindow):
             header_widgets=(show_all, intensity), header_margins=header_margins,
             header_spacing=header_spacing, weight_widgets=(reset, load),
             mode_widgets=(self._btn_step3_mode_overlay, self._btn_step3_mode_fusion),
-            mask_widgets=bar.row_widgets(), mask_hint=bar.hint)
+            mask_widgets=(strip.holder(), bar.buttons["cell"], bar.buttons["nucleus"]),
+            mask_hint=bar.hint, corner_widget=bar.run_combo)
+        self._rebuild_step3_patch_strip()
 
     def _load_weights_dialog(self, parent):
         """Load weights from a Step1 session, asked from `parent` (block F's
@@ -6105,87 +6084,71 @@ class MainWindow(QMainWindow):
                 'error': f'{name} ✗'}.get(state, name)
 
     def _rebuild_patch_buttons(self, patches):
-        """Rebuild the P1/P2/… selector; preserve load-state styling.
+        """Rebuild the P1/P2/… selectors -- Step1's and Step3's, the one
+        shared strip component twice -- and keep the load-state styling.
 
-        The inline strip shows at most `STEP1_INLINE_PATCH_BUTTONS`; the
-        menu shows every patch. Both are built from `patches` on each call,
-        so there is exactly one patch model and the menu cannot drift away
-        from it.
+        The inline strips show at most `STEP1_INLINE_PATCH_BUTTONS`; the
+        menus show every patch. Both are built from `patches` on each call,
+        so there is exactly one patch model and no menu can drift from it.
         """
-        for btn in self._patch_sel_btns:
-            self._patch_sel_container.removeWidget(btn)
-            btn.deleteLater()
-        self._patch_sel_btns.clear()
-
-        inline = min(len(patches), STEP1_INLINE_PATCH_BUTTONS)
-        for i in range(inline):
-            btn = QPushButton(self._patch_label(i))
-            btn.setCheckable(True)
-            btn.setFixedSize(STEP1_PATCH_BTN_W, STEP1_PATCH_BTN_H)
-            btn.clicked.connect(lambda _, idx=i: self._select_preview_patch(idx))
-            self._patch_sel_container.addWidget(btn)
-            self._patch_sel_btns.append(btn)
-
-        self._rebuild_patch_menu(len(patches))
+        self._patch_strip.rebuild(len(patches), self._patch_label)
         for i in range(len(patches)):
             # Apply correct state style immediately -- inline and menu both.
             self._set_patch_btn_state(i, self._patch_btn_state(i))
-
+        self._rebuild_step3_patch_strip()
         self._sync_patch_selection_marks(self._preview_patch_idx)
 
     def _rebuild_patch_menu(self, count):
         """One checkable menu action per patch, in patch order."""
-        menu = getattr(self, "_patch_menu", None)
-        if menu is None:
-            return
-        menu.clear()
-        # `clear()` drops the actions, not the width -- restate it so the
-        # dropdown cannot shrink back to whatever its longest label asks for.
-        menu.setMinimumWidth(step1_patch_menu_width())
-        self._patch_menu_actions = []
-        btn = self._patch_menu_btn
-        if count <= 0:
-            btn.setEnabled(False)
-            btn.setToolTip("No patches yet")
-            return
-        btn.setEnabled(True)
-        btn.setToolTip(f"{count} patch{'es' if count != 1 else ''} — "
-                       "click to choose")
-        for i in range(count):
-            act = menu.addAction(self._patch_label(i))
-            act.setCheckable(True)
-            # THE SAME ENTRY POINT the inline buttons use. The menu selects
-            # patches; it does not know how to.
-            act.triggered.connect(lambda _=False, idx=i:
-                                  self._select_preview_patch(idx))
-            self._patch_menu_actions.append(act)
+        if getattr(self, "_patch_strip", None) is not None:
+            self._patch_strip.rebuild_menu(count, self._patch_label)
 
     def _sync_patch_selection_marks(self, idx):
-        """Show `idx` as the selection in the strip and in the menu."""
-        for i, btn in enumerate(self._patch_sel_btns):
-            btn.setChecked(i == idx)
-        for i, act in enumerate(getattr(self, "_patch_menu_actions", [])):
-            act.setChecked(i == idx)
+        """Show `idx` as the selection in every strip and menu: the patch
+        selection is global (plan step 3, user ruling)."""
+        for strip in (self.__dict__.get("_patch_strip"),
+                      self.__dict__.get("_step3_patch_strip")):
+            if strip is not None:
+                strip.set_selected(idx)
 
     def _set_patch_btn_state(self, idx, state: str):
         """Update button label+style for states: idle / loading / ready / error."""
         label = self._patch_btn_label(idx, state)
-        actions = getattr(self, "_patch_menu_actions", [])
-        if idx < len(actions):
-            # The menu carries the SAME label, from the same states -- the
-            # entry for a patch the strip cannot show must still say whether
-            # it is loading, ready or in error.
-            actions[idx].setText(label)
-        if idx >= len(self._patch_sel_btns):
-            return
-        btn = self._patch_sel_btns[idx]
-        btn.setText(label)
         # Always the patch's own colour, exactly Step0's button (user ruling,
         # 2026-09-24): the grey "not preloaded" look left every button grey
         # under the whole-slide viewer, which preloads nothing. The state is
-        # the glyph in the label (⟳ ✓ ✗).
+        # the glyph in the label (⟳ ✓ ✗); the menu carries the SAME label.
         patch = self._all_patches[idx] if idx < len(self._all_patches) else None
-        btn.setStyleSheet(patch_button_qss(_patch_color_of(patch, idx)))
+        self._patch_strip.set_entry(idx, label, patch_button_qss(_patch_color_of(patch, idx)))
+
+    # ── Step3's strip: the same component, the same patches ───────────
+    def _rebuild_step3_patch_strip(self):
+        """Step3's copy of the strip: the same names and colours, no load
+        glyphs (Step3 has no patch renderer to load)."""
+        strip = self.__dict__.get("_step3_patch_strip")
+        if strip is None:
+            return
+        patches = self._all_patches
+        strip.rebuild(len(patches), self._patch_label)
+        for i, patch in enumerate(patches):
+            strip.set_entry(i, self._patch_label(i), patch_button_qss(_patch_color_of(patch, i)))
+        strip.set_selected(self._preview_patch_idx)
+
+    def _select_step3_patch(self, idx):
+        """A patch chosen in Step3: Step3's viewer lands on it, and it is THE
+        selection -- the same one Step1 shows and its session keeps."""
+        if idx < 0 or idx >= len(self._all_patches):
+            return
+        self._sync_patch_selection_marks(idx)
+        self._preview_patch_idx = idx
+        self._selected_step1_patch_idx = idx
+        mount = self.__dict__.get("_step3_mount")
+        if mount is not None and mount.host.stack is not None:
+            try:
+                mount.show_patch(self._all_patches[idx])
+            except (IndexError, TypeError):
+                pass
+        self._schedule_step1_session_save()
 
     # ── ROI changes ─────────────────────────────────────────────────
 

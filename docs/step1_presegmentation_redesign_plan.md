@@ -9,6 +9,8 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.68：第 ③ 步真机验收通过；Step3 重设计的各步全部完成。
+- v3.67：第 ③ 步已实施（自动验收通过，待真机验收），写入执行记录。
 - v3.66：第 ③ 步申请 v2 获批（一行；运行下拉框移到标签栏右侧角落；patch 选中与 Step1 共用）。
 - v3.65：第 ③ 步申请 v1（patch 按钮条组件化 + Step3 patch 空降）；交接文件更新。
 - v3.64：块 N2 真机验收通过。
@@ -1476,7 +1478,7 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 回归：32 个模块（Step2 全部相关模块、HQ / HQ2 / CDS 的 worker 测试、标签归属、标签金字塔、预分割、remap 提升、Step3 数据层 / 接线 / 标签绑定 / viewer），每模块单独进程、顺序运行，与 `git archive HEAD`（`02ba00d`）逐条对比，**无新增失败**。两边相同：`test_hq_marker_segmentation.py` 2 条（HQ 不维护）、`test_seg_runner_engines.py` 3 条（2 条 Mesmer 无模型、1 条 StarDist 偶发）。本侧一次：`test_step2_runner_path.py::test_a_hand_over_equals_the_runner_with_shared_ownership[stardist_nuclei_dapi-full]` 0.46 % 像素差 1（StarDist 偶发，已知；本块未改纯核方法的路径），单独重跑 3 次都通过。
   - **真机验收通过（用户 2026-09-27）**。nuclear-guided 的真机验收（含保留率）随 Mesmer 暂缓项。
 
-### 第 ③ 步 — patch 按钮条组件化 + Step3 的 patch 空降（申请 v2，按用户裁定修订，**用户 2026-09-27 批准**，实施中）
+### 第 ③ 步 — patch 按钮条组件化 + Step3 的 patch 空降（申请 v2，按用户裁定修订，**用户 2026-09-27 批准**；已实施，**真机验收通过**）
 - **必要性**：Step3 重设计裁定 2（「patch 空降」）与 11（「patch 按钮条抽成 Step1 / Step3 共用组件，允许修改 Step1 并回归」）。现在 Step3 只能靠 Tissue Navigator 或拖动去某个 patch；Step1 的按钮条是主窗口里的一段代码，不能直接放进 Step3。
 - **只读调查结论**：
   - Step1 的按钮条在 `main_window.py:1105-1149`（构建）与 `:6107-6197`（`_rebuild_patch_buttons` / `_rebuild_patch_menu` / `_sync_patch_selection_marks` / `_set_patch_btn_state`）：行首一个 `Patch` 下拉按钮（列出**全部** patch，最小宽度 = 一整条内联按钮的宽度，`step1_patch_menu_width()`），后面最多 `STEP1_INLINE_PATCH_BUTTONS = 7` 个内联按钮（42 × 22，间距 4，颜色取 patch 自己的颜色 `patch_button_qss`，与 Step0 的按钮同一外观），名字取 `_patch_label`（稳定编号 / 改名后的名字），按钮与菜单都可勾选、只标出当前选中的一个；同一行右端是 `Overlay` / `Fusion` 与 Step1 的会话按钮。
@@ -1504,6 +1506,15 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
 - **用户裁定（2026-09-27）**：
   1. **必须一行**。Step3 `Viewer` 标签页内容顶部一行：`[Patch ▾][P1]…[P7][Cell mask ▾][Nucleus mask ▾] 提示…… [Overlay][Fusion]`。**运行下拉框移到标签栏那一行的右侧**（`Viewer` 标签所在的一行，作为标签栏的角落控件，`QTabWidget.setCornerWidget(TopRightCorner)`），**不并入 `Viewer` 标签页的内容**。
   2. **patch 是全局组件，选中必须共用**：在 Step3 选 P3，Step1 也标 P3，并像 Step1 一样记进会话；两个按钮条（Step1 / Step3）始终标出同一个选中。
+- **执行记录**（2026-09-27，未提交）：
+  - `ui/patch_strip.py`（新）：`PatchStrip`——`Patch` 下拉按钮、至多 7 个内联按钮、菜单；常量与 `step1_patch_menu_width()` 从 `main_window.py` 原样移入（`main_window` 仍可导入这些名字）；`rebuild` / `rebuild_menu` / `set_selected` / `set_entry`、信号 `chosen`、Step3 用的 `holder()`；`buttons` 与 `menu_actions` 在整个生命期是同一个列表（只重填、不替换）。
+  - `ui/main_window.py`：Step1 的按钮条改用组件，`_patch_menu_btn`、`_patch_menu`、`_patch_menu_actions`、`_patch_sel_btns`、`_patch_sel_container` 是组件内部对象的别名，`_rebuild_patch_buttons` / `_rebuild_patch_menu` / `_sync_patch_selection_marks` / `_set_patch_btn_state` 转交给组件；点击时才查 `_select_preview_patch`（与原来按钮上的 lambda 一样，实施中由现有测试发现后改回）；Step3 的第二个实例 `_step3_patch_strip`，`_rebuild_step3_patch_strip`（同名同色、无加载符号，随 `_all_patches` 重建）与 `_select_step3_patch`（Step3 viewer 的 `show_patch`、同一个选中、会话保存）；选中标记同时更新两个条；Step3 的一行按裁定 1 组装，运行下拉框作标签栏角落控件。
+  - `ui/step3_page.py`：`assemble` 接收 `corner_widget`（`QTabWidget.setCornerWidget(TopRightCorner)`）。
+  - 文档：`UI_SURFACE_RULES.md` Step3 一节（一行；patch 条是 Step1 的同一个组件、选中共用；运行下拉框在标签栏右侧；删除「no patch strip (a later block)」）；两份用户指南 Step3 一节（去掉「正在重建」，新增 patch 空降一条，运行下拉框的位置）。
+  - 测试：`tests/test_patch_strip.py`（6 条：外观与改动前逐字相同的样式表 / 尺寸 / 间距 / 菜单宽度、7 个上限与菜单全列、点击与菜单都发 `chosen`、选中 / 名字 / 样式、无 patch 时禁用与提示、列表对象不被替换）；`tests/test_step3_patch_strip.py`（4 条：一行的组成与顺序、运行下拉框是标签栏角落控件且不在标签页内容里、与 Step1 同名同色并跟随列表变化、Step3 点击后 Step3 viewer 空降且与 Step1 viewer 对同一 patch 的空降位置相同、选中共用与会话保存、viewer 未打开时的选中）。**直接用到按钮条内部名字的 16 个现有测试文件一条未改、全部通过。**
+  - 反向注入 8 处，各使至少 1 条变红：Step3 点击不更新 Step1 的标记、不保存会话、Step3 条不随列表重建、运行下拉框不在角落、Step3 点击移动了 Step1 的 viewer、内联上限改为 6、列表对象被替换、菜单按钮样式漂移。
+  - 回归：40 个模块（上述 16 个 patch 相关文件、界面规则契约、Step3 各模块、Step1 viewer / 相机 / 暂停 / Navigator 权限 / 通道面板 / montage / GPU 接管相关模块），每模块单独进程，与 `git archive HEAD`（`1177185`）逐条对比：**38 个既有模块两边结果完全相同，无新增失败**（两边相同：`test_global_channel_dock.py`、`test_step1_channel_panel.py` 各 1 条字体，`test_tissue_navigator_viewport_sync.py::test_mapping_slide_local_to_full`，`test_step1_montage_view.py` 第 27 条后崩溃）；新增 2 个模块 10 条全部通过。
+  - **真机验收通过（用户 2026-09-27）**。
 
 ## 六、未决与 advisory
 

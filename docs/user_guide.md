@@ -43,7 +43,7 @@ Step 0          Step 1          Step 2          Step 3        Step 4
 | **Step 0** | Setup | Pick the region to analyze, organize channels, remove background noise | Corrected image, ROI config |
 | **Step 1** | Fusion + Tuning | Merge channels into one "cell-outline image"; tune the best segmentation parameters on small patches | Segmentation parameter file |
 | **Step 2** | Segmentation + Merge | Use the chosen parameters to circle **every cell in the whole region** | Whole-image cell mask |
-| **Step 3** | QC Viewer | Check the cells against the tissue (being rebuilt; see Step 3) | Confirm / not confirm |
+| **Step 3** | QC Viewer | Check the cells against the tissue | Confirm / not confirm |
 | **Step 4** | Feature Extraction | Measure each cell's value in each channel, export the table | `cell_features.csv` / `.h5ad` |
 
 > **Core idea**: the earlier steps are all "preparation and trial". The truly heavy lifting is Step 2 (processing the entire big image), and the final Step 4 produces the table.
@@ -191,22 +191,21 @@ Take the parameters tuned in Step 1 and **actually circle every single cell in t
 
 ### Step 3 · QC Viewer
 
-> 🚧 **Being rebuilt.** Step 3 is being rebuilt to look and work like Step 1. What is available **now** is listed below; the patch buttons come in a later update.
+**What it does:**
+Check the Step 2 result against the tissue: the whole slide with the cell mask on top, pan and zoom, jump by Tissue Navigator or patch. It looks and works like Step 1.
 
-**What it will do:**
-Check the Step 2 result against the tissue: the whole slide with the cell mask on top, pan and zoom, jump by Tissue Navigator or patch.
-
-**What works now:**
+**How to use it:**
 
 1. The left column is Step 1's `Channels` frame: `Show all`, `Intensity…`, `Reset weights`, `Load weights` and the channel list with weights.
 2. **Step 3 and Step 1 share the same channels, weights and fusion**: a tick or a weight changed here is the same in Step 1 (and is saved in the session like any Step 1 change). Your saved Fusion Settings only change when you save them in Step 1.
 3. `Overlay` / `Fusion` switch the mode for Step 1 and Step 3 together; the Tissue Navigator follows what you set here.
 4. The right side shows the **whole slide**, like Step 1: drag to pan, scroll to zoom, click in the Tissue Navigator to jump there. Step 1 and Step 3 keep the same position when you switch between them.
 5. In the Tissue Navigator opened from Step 3, **ROIs are locked** (they come from Step 0 / Step 1 and cannot be drawn, deleted or changed here), while **patches can be added, moved, renamed and deleted** — patch changes are saved and show up in Step 0 and Step 1 too.
-6. **The cell mask on the whole slide.** The row above the picture:
-   - the **run** drop-down: the Step 2 results of the current ROI (method, date and time; the active one is marked). Step 3 shows the run you opened from Step 2's finished dialog; otherwise the one you chose last, the active one, or the newest;
+6. **Patches**: the row above the picture starts with Step 1's patch buttons (`Patch ▾` lists them all). Click one and the picture jumps there. The chosen patch is the same in Step 1 and Step 3.
+7. **The cell mask on the whole slide.**
+   - the **run** drop-down, at the right of the `Viewer` tab's row: the Step 2 results of the current ROI (method, date and time; the active one is marked). Step 3 shows the run you opened from Step 2's finished dialog; otherwise the one you chose last, the active one, or the newest;
    - **`Cell mask ▾`** and **`Nucleus mask ▾`**: click to set `Show`, the colour (a preset or `Custom…`), `Opacity`, `Width` (1–4) and `Outline` / `Fill`. The colour is the outline's; `Fill` gives every cell its own colour. A button is greyed out when the run has no such mask (e.g. a nuclei-only method has no cell mask, a whole-cell method no nucleus mask, and an expansion result from before nuclei were kept says to re-run Step 2);
-   - a **hint** on the right of it says why a mask is not shown, e.g. no Step 2 result yet, a result that does not belong to this ROI (re-run Step 2), `Masks need the GPU display`, `Preparing zoomed-out masks…` (an older result is being prepared, once), or that masks cannot be shown zoomed out. Hover over it for the whole text.
+   - after them, on the same row, a **hint** says why a mask is not shown, e.g. no Step 2 result yet, a result that does not belong to this ROI (re-run Step 2), `Masks need the GPU display`, `Preparing zoomed-out masks…` (an older result is being prepared, once), or that masks cannot be shown zoomed out. Hover over it for the whole text.
    Masks follow pan, zoom and every jump. Your mask settings are kept while the program runs; nothing is written to your project, except that an older result without zoomed-out levels gets them the first time (in its own run folder).
 
 **Output:** no new files (except the zoomed-out mask levels of an older Step 2 result, once, in its run folder).

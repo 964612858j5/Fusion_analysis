@@ -10,7 +10,10 @@ labels whose centroid lies in the half-open own region, one LUT for the
 primary mask, the HQ nuclei, every HQ2 layer and the QC rows (ids above the
 primary's max dropped), and Step2's paste of the whole read window. Each
 loop's real outputs must equal it -- primary, nuclei, HQ2 layers, QC table
-ids and the total -- over boundary-crossing cells and empty tiles.
+ids and the total -- over boundary-crossing cells and empty tiles. Since
+block N3b this holds for HQ / HQ2 (not maintained, old path kept); an engine
+method (`cellpose_wholecell_fusion` here) is merged by `core.seam_merge` and
+equals the pure functions' reference instead.
 
 The model is replaced by a fixed labelling, as in `test_label_ownership.py`.
 The shadow compare is switched off: never called, and neither the log nor
@@ -127,6 +130,21 @@ def _legacy_merge(method, data, rows, cols, overlap):
     return prim, nuclei, layers, qc_ids, hq2_tiles, offset
 
 
+def _seam_reference(data, rows, cols, overlap):
+    import sys
+    from block01.core import seam_merge as sm
+    from block01.utils.tile_scheduler import TileScheduler
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_seam_merge import reference_merge
+    h, w = data.shape[:2]
+    tiles, locals_ = [], []
+    for k, tile in enumerate(TileScheduler(h, w, rows, cols, overlap).tiles):
+        ry0, ry1, rx0, rx1 = tile.read_bbox
+        tiles.append(sm.Tile(k, tuple(tile.read_bbox), tuple(tile.own_bbox)))
+        locals_.append(_fake_result("cellpose_wholecell_fusion", data[ry0:ry1, rx0:rx1]))
+    return reference_merge(tiles, locals_, (h, w))
+
+
 def _worker(tmp_path, monkeypatch, method, lab, rows, cols, overlap):
     import zarr
     from block01.workers.segment_merge_worker import SegmentMergeWorker as W
@@ -182,12 +200,18 @@ def test_both_loops_equal_the_legacy_inline_ownership(tmp_path, monkeypatch, cap
         return np.asarray(zarr.open(os.path.join(worker.output_dir, f"{name}{sfx}.zarr"),
                                     mode="r"))
 
+    if method == "cellpose_wholecell_fusion":
+        # Block N3b: an engine method is merged by `core.seam_merge`, not by
+        # the paste -- equal to the pure functions' reference, ids included
+        ref = _seam_reference(np.stack([lab, lab], -1), rows, cols, overlap)
+        got = read("global_mask")
+        assert total == int(ref.max()) == int(got.max())
+        np.testing.assert_array_equal(got, ref)
+        return
     prim, nuclei, layers, qc_ids, hq2_tiles, offset = _legacy_merge(
         method, np.stack([lab, lab], -1), rows, cols, overlap)
     assert total == offset
     np.testing.assert_array_equal(read("global_mask"), prim)
-    if method == "cellpose_wholecell_fusion":
-        return
     np.testing.assert_array_equal(read("global_nuclei_mask"), nuclei)
     qc_name = "hq2_qc_table" if method == "cellpose_nuclei_hq2" else "hq_qc_table"
     with open(os.path.join(worker.output_dir, f"{qc_name}{sfx}.csv")) as f:

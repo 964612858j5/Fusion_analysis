@@ -1,11 +1,11 @@
 """The shared ownership / renumbering (plan block C, step 1: a pure move).
 
 The gate (plan 7.11.3): on the same label image and the same own region,
-`core.label_ownership` keeps the same labels and gives the same new ids as
-Step2's authoritative inline code. Proved against Step2 ITSELF: its real
-`_segment_one_zarr` merge runs on a synthetic fused zarr with the model
-replaced by a fixed labelling, and its global mask must equal the one built
-from this module tile by tile.
+`core.label_ownership` keeps the same labels as Step2. Proved against Step2
+ITSELF: its real `_segment_one_zarr` runs on a synthetic fused zarr with the
+model replaced by a fixed labelling. Since block N3b Step2 merges the tiles
+by `core.seam_merge` (candidates, seam reconciliation), not by pasting each
+tile's owned labels over the last; its ownership flag is this module's.
 """
 
 import logging
@@ -44,11 +44,18 @@ def _fixed_labelling(self, tile_data, backend, *a, **kw):
 
 @pytest.mark.parametrize("seed,rows,cols,overlap", [(0, 2, 3, 7), (1, 3, 2, 12), (2, 1, 1, 0),
                                                     (3, 4, 4, 5)])
-def test_step2s_real_merge_equals_this_module_tile_by_tile(tmp_path, monkeypatch, seed, rows,
-                                                           cols, overlap):
+def test_step2s_real_merge_owns_by_this_module_and_merges_by_seam_merge(
+        tmp_path, monkeypatch, seed, rows, cols, overlap):
+    """Block N3b: Step2's candidates are owned by THIS module's centroid rule;
+    the merge is `core.seam_merge`'s (the reference built from the same
+    windows by the pure functions, in Step2's id order), not the old paste."""
+    import sys
     import zarr
+    from block01.core import seam_merge as sm
     from block01.utils.tile_scheduler import TileScheduler
     from block01.workers.segment_merge_worker import SegmentMergeWorker
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_seam_merge import reference_merge, same_partition
 
     lab = _random_labels(seed)
     h, w = lab.shape
@@ -65,20 +72,23 @@ def test_step2s_real_merge_equals_this_module_tile_by_tile(tmp_path, monkeypatch
     step2 = np.asarray(zarr.open(os.path.join(worker.output_dir, "global_mask_t.zarr"),
                                  mode="r"))
 
-    ours = np.zeros((h, w), np.uint32)
-    offset = 0
     data = np.stack([lab, lab], -1)
-    for tile in TileScheduler(h, w, rows, cols, overlap).tiles:
+    tiles, locals_ = [], []
+    for k, tile in enumerate(TileScheduler(h, w, rows, cols, overlap).tiles):
         ry0, ry1, rx0, rx1 = tile.read_bbox
         oy0, oy1, ox0, ox1 = tile.own_bbox
         local = _fixed_labelling(None, data[ry0:ry1, rx0:rx1], None)
-        out, _, n = lo.apply_ownership(local, (oy0 - ry0, oy1 - ry0, ox0 - rx0, ox1 - rx0),
-                                       offset)
-        dst = ours[ry0:ry1, rx0:rx1]
-        np.copyto(dst, out, where=(out > 0))          # Step2's paste, unchanged
-        offset += n
-    assert offset == total
-    np.testing.assert_array_equal(step2, ours)
+        t = sm.Tile(k, tuple(tile.read_bbox), tuple(tile.own_bbox))
+        owned = set(lo.kept_labels(local, (oy0 - ry0, oy1 - ry0, ox0 - rx0, ox1 - rx0)))
+        for c in sm.extract(t, local, (h, w))[0]:
+            assert c.owned == (c.label in owned)
+        tiles.append(t)
+        locals_.append(local)
+    ref = reference_merge(tiles, locals_, (h, w))
+    assert total == int(ref.max()) == int(step2.max())
+    np.testing.assert_array_equal(step2, ref)                   # pixels and ids
+    assert same_partition(step2, ref) is not None
+    assert set(np.unique(step2)) == set(range(total + 1))      # every id has pixels
 
 
 def test_centroids_are_step2s_centroids():

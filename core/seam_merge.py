@@ -250,3 +250,197 @@ def paint(cands, kept, region_shape, offset=0, min_free_fraction=0.0):
         nid += 1
         view[free] = nid
     return out, clipped
+
+
+# ── block N3b: the region-level merger Step2 drives ──────────────────────
+
+SEAM_MERGE = {"version": 1, "duplicate_overlap_threshold": 0.5, "minimum_writable_fraction": 0.5}
+
+
+class SeamContractError(RuntimeError):
+    """The merged labels break the LabelStore contract (a program defect)."""
+
+
+class SeamMerger:
+    """One region's merge. `add_tile` writes the tile's interior cells (they
+    cannot meet another tile) at once and spills its seam candidates -- a
+    bool crop and, with nuclei, the crop of their local nucleus ids -- to
+    `spill_dir`; `finish` decides every seam candidate together (user ruling
+    2026-09-27: at the end of the region, so the result does not depend on
+    the tile order) and writes the kept ones deepest-margin first.
+
+    Ids: cells 1..N and nuclei 1..M in write order, every id with pixels. A
+    nucleus is written only when all its pixels lie in its cell's written
+    pixels; otherwise it is dropped (`nuclei_dropped_seam_conflict`)."""
+
+    def __init__(self, region_shape, tiles, spill_dir, with_nuclei=False,
+                 tau=SEAM_MERGE["duplicate_overlap_threshold"],
+                 min_free=SEAM_MERGE["minimum_writable_fraction"],
+                 table_sink=None, table_chunk=1 << 20):
+        import os
+        self.shape = tuple(region_shape)
+        self.tiles = list(tiles)
+        self.spill_dir = spill_dir
+        os.makedirs(spill_dir, exist_ok=True)
+        self.with_nuclei = with_nuclei
+        self.tau, self.min_free = float(tau), float(min_free)
+        self.n_cells = 0
+        self.n_nuclei = 0
+        # nucleus -> cell, in id order: a numpy buffer handed to `table_sink`
+        # (the zarr table's append) every `table_chunk` entries (block N2's
+        # contract: appended block by block, no Python list of ids)
+        self.table_sink = table_sink
+        self._buf = np.zeros(int(table_chunk), np.uint32)
+        self._nbuf = 0
+        self.stats = {"candidates": 0, "interior_cells": 0, "touching_internal_edge": 0,
+                      "duplicate_groups": 0, "duplicate_versions_removed": 0,
+                      "split_merge_groups": 0, "recovered_missing_cells": 0,
+                      "cells_with_clipped_pixels": 0, "clipped_pixels": 0,
+                      "dropped_insufficient_free_pixels": 0,
+                      "nuclei_dropped_seam_conflict": 0}
+
+    # -- writing one kept candidate
+    def _write(self, cand, nuc_crop, cells, nuclei):
+        y0, y1, x0, x1 = cand.bbox
+        view = cells[y0:y1, x0:x1]
+        free = cand.mask & (view == 0)
+        n_free = int(np.count_nonzero(free))
+        if n_free == 0 or n_free < self.min_free * cand.area:
+            self.stats["dropped_insufficient_free_pixels"] += 1
+            return 0
+        if n_free < cand.area:
+            self.stats["cells_with_clipped_pixels"] += 1
+            self.stats["clipped_pixels"] += int(cand.area - n_free)
+        self.n_cells += 1
+        cid = self.n_cells
+        view[free] = cid
+        if nuc_crop is not None and nuclei is not None:
+            nview = nuclei[y0:y1, x0:x1]
+            for n in np.unique(nuc_crop[nuc_crop > 0]):
+                nm = nuc_crop == n
+                if not free[nm].all():
+                    self.stats["nuclei_dropped_seam_conflict"] += 1
+                    continue
+                self.n_nuclei += 1
+                nview[nm] = self.n_nuclei
+                self._buf[self._nbuf] = cid
+                self._nbuf += 1
+                if self._nbuf == self._buf.size:
+                    self.flush_table()
+        return cid
+
+    def add_tile(self, tile, local, cells, nuclei=None, local_nuclei=None, local_nuclei_cell=None):
+        """Returns the number of interior cells written now."""
+        import os
+        cands, touching = extract(tile, local, self.shape)
+        self.stats["touching_internal_edge"] += touching
+        ry0, _ry1, rx0, _rx1 = tile.read
+        seam, crops, written = [], [], 0
+        cell_of = None
+        if self.with_nuclei and local_nuclei is not None and local_nuclei_cell is not None:
+            cell_of = np.asarray(local_nuclei_cell, np.int64)
+        for c in cands:
+            nuc_crop = None
+            if cell_of is not None:
+                y0, y1, x0, x1 = c.bbox
+                ln = np.asarray(local_nuclei[y0 - ry0:y1 - ry0, x0 - rx0:x1 - rx0], np.int64)
+                ok = (ln > 0) & (ln < cell_of.size)
+                mine = np.zeros(ln.shape, bool)
+                mine[ok] = cell_of[ln[ok]] == c.label
+                nuc_crop = np.where(mine & c.mask, ln, 0).astype(np.uint32)
+            if is_seam(c, self.tiles):
+                seam.append(c)
+                crops.append(nuc_crop)
+            elif c.owned:
+                if self._write(c, nuc_crop, cells, nuclei):
+                    written += 1
+        self.stats["interior_cells"] += written
+        self.stats["candidates"] += len(seam)
+        if seam:
+            meta = np.array([(c.tile, c.label, *c.bbox, c.area, c.cy, c.cx, c.margin, c.owned)
+                             for c in seam], dtype=np.float64)
+            masks = np.concatenate([c.mask.ravel() for c in seam])
+            nucs = (np.concatenate([n.ravel() for n in crops]) if cell_of is not None
+                    else np.zeros(0, np.uint32))
+            np.savez(os.path.join(self.spill_dir, f"tile_{tile.index:05d}.npz"),
+                     meta=meta, masks=masks, nucs=nucs)
+        return written
+
+    def _load(self):
+        import glob
+        import os
+        cands, crops = [], []
+        for path in sorted(glob.glob(os.path.join(self.spill_dir, "tile_*.npz"))):
+            z = np.load(path)
+            meta, masks, nucs = z["meta"], z["masks"], z["nucs"]
+            pos = 0
+            for row in meta:
+                t, lab, y0, y1, x0, x1, area, cy, cx, mg, owned = row
+                y0, y1, x0, x1 = int(y0), int(y1), int(x0), int(x1)
+                n = (y1 - y0) * (x1 - x0)
+                cands.append(Candidate(tile=int(t), label=int(lab), bbox=(y0, y1, x0, x1),
+                                       mask=masks[pos:pos + n].reshape(y1 - y0, x1 - x0),
+                                       area=int(area), cy=float(cy), cx=float(cx),
+                                       margin=float(mg), owned=bool(owned)))
+                crops.append(nucs[pos:pos + n].reshape(y1 - y0, x1 - x0) if nucs.size else None)
+                pos += n
+        return cands, crops
+
+    def finish(self, cells, nuclei=None):
+        """Decide and write the seam candidates; the region's counts."""
+        import shutil
+        cands, crops = self._load()
+        d = resolve(cands, self.tiles, self.tau)
+        for key in ("duplicate_groups", "duplicate_versions_removed", "split_merge_groups",
+                    "recovered_missing_cells"):
+            self.stats[key] = int(d.stats[key])
+        for k in d.kept:
+            self._write(cands[k], crops[k], cells, nuclei)
+        self.flush_table()
+        shutil.rmtree(self.spill_dir, ignore_errors=True)
+        return self.record()
+
+    def flush_table(self):
+        if self._nbuf and self.table_sink is not None:
+            self.table_sink(self._buf[:self._nbuf].copy())
+        self._nbuf = 0
+
+    def record(self):
+        return {"seam_merge": dict(SEAM_MERGE,
+                                   duplicate_overlap_threshold=self.tau,
+                                   minimum_writable_fraction=self.min_free),
+                "seam_reconciliation": dict(self.stats)}
+
+
+def validate(cells, nuclei=None, parents=None, n_cells=None, block=1024):
+    """Stream the merged region by row blocks: cell ids 1..N each with pixels;
+    with nuclei, ids 1..M each with pixels and every nucleus pixel in the
+    cell `parents[id - 1]`. Raises SeamContractError."""
+    H = cells.shape[0]
+    N = int(n_cells) if n_cells is not None else 0
+    ccount = np.zeros(N + 1, np.int64)
+    M = 0 if parents is None else int(parents.size)
+    ncount = np.zeros(M + 1, np.int64)
+    table = None if parents is None else np.concatenate([[0], parents]).astype(np.uint32)
+    for y in range(0, H, block):
+        c = np.asarray(cells[y:y + block])
+        top = int(c.max()) if c.size else 0
+        if top > N:
+            raise SeamContractError(f"cell id {top} above the {N} written")
+        ccount += np.bincount(c.ravel(), minlength=N + 1)
+        if nuclei is not None and table is not None:
+            n = np.asarray(nuclei[y:y + block])
+            ntop = int(n.max()) if n.size else 0
+            if ntop > M:
+                raise SeamContractError(f"nucleus id {ntop} above the {M} written")
+            ncount += np.bincount(n.ravel(), minlength=M + 1)
+            m = n > 0
+            if (table[n[m]] != c[m]).any():
+                raise SeamContractError("a nucleus pixel lies outside its cell")
+    empty = np.nonzero(ccount[1:] == 0)[0]
+    if empty.size:
+        raise SeamContractError(f"{empty.size} cell ids without pixels (first {int(empty[0]) + 1})")
+    if M:
+        nempty = np.nonzero(ncount[1:] == 0)[0]
+        if nempty.size:
+            raise SeamContractError(f"{nempty.size} nucleus ids without pixels")

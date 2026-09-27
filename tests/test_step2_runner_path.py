@@ -35,7 +35,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt5")
 from PyQt5 import QtCore, QtWidgets  # noqa: E402
 
-from block01.core import label_ownership, nuclei_pairing, preseg_contract, preseg_input  # noqa: E402
+from block01.core import nuclei_pairing, preseg_contract, preseg_input  # noqa: E402
 from block01.seg_runner import engines as seg_engines  # noqa: E402
 from block01.seg_runner.client import EngineProcess  # noqa: E402
 
@@ -181,23 +181,20 @@ SECONDARY_NUCLEI = ("cellpose_nuclei_expansion", "stardist_nuclei_expansion",
 
 
 def _oracle(method, img):
-    """The same runner, tile by tile, pasted with the shared ownership code
-    the way Step2 pastes (whole read window). Block N2: for the methods that
-    keep nuclei, each tile's nuclei are paired to their cells
-    (`nuclei_pairing`), kept when their cell is kept, numbered on their own
-    across tiles, and the nucleus -> cell table built alongside.
-    Returns (primary, nuclei, n_cells, nucleus_to_cell)."""
+    """The same runner, tile by tile, merged by the seam merge's reference
+    (block N3b: `test_seam_merge.reference_merge`, the pure functions -- not
+    Step2's loops), in Step2's id order. Block N2: for the methods that keep
+    nuclei, each tile's nuclei are paired to their cells (`nuclei_pairing`);
+    a nucleus follows its cell and is kept only whole inside it; the nucleus
+    -> cell table alongside. Returns (primary, nuclei, n_cells, nucleus_to_cell)."""
+    from block01.core import seam_merge as sm
     from block01.utils.tile_scheduler import TileScheduler
+    from test_seam_merge import reference_merge
     import tempfile
 
     engine = seg_engines.METHOD_ENGINE[method]
     outputs = seg_engines.METHOD_OUTPUTS[method]
     primary = "cell" if "cell" in outputs else "nucleus"
-    prim = np.zeros((H, W), np.uint32)
-    nuclei = np.zeros((H, W), np.uint32)
-    offset = 0
-    n_offset = 0
-    table = [np.zeros(1, np.uint32)]
     tmp = tempfile.mkdtemp()
     tiles = TileScheduler(H, W, ROWS, COLS, HALO).tiles
     tasks = []
@@ -216,36 +213,25 @@ def _oracle(method, img):
     finally:
         ep.close()
     assert set(states.values()) == {"ok"}
+    stiles, locals_, nucs, cells_of = [], [], [], []
     for i, tile in enumerate(tiles):
         with open(ep.states[f"t{i}"]["detail"], encoding="utf-8") as f:
             rec = json.load(f)
         local = np.load(rec[primary]["path"]).astype(np.uint32)
-        nuc = (np.load(rec["nucleus"]["path"]).astype(np.uint32)
-               if method in SECONDARY_NUCLEI else None)
-        n_raw = int(local.max())
-        if n_raw == 0:
-            continue
-        ry0, ry1, rx0, rx1 = tile.read_bbox
-        oy0, oy1, ox0, ox1 = tile.own_bbox
-        keep = label_ownership.kept_labels(local, (oy0 - ry0, oy1 - ry0, ox0 - rx0, ox1 - rx0))
-        if len(keep) == 0:
-            continue
-        lut = label_ownership.ownership_lut(local, keep, offset)
-        out = lut[local]
-        np.copyto(prim[ry0:ry1, rx0:rx1], out, where=out > 0)
-        if nuc is not None:
+        stiles.append(sm.Tile(i, tuple(tile.read_bbox), tuple(tile.own_bbox)))
+        locals_.append(local)
+        if method in SECONDARY_NUCLEI:
+            nuc = np.load(rec["nucleus"]["path"]).astype(np.uint32)
             kept_n, cell_of, _counts, _dropped = nuclei_pairing.pair_nuclei(local, nuc)
-            parents = lut[cell_of.astype(np.int64)]
-            parents[0] = 0
-            stay = np.nonzero(parents[1:] > 0)[0] + 1
-            new_ids = np.zeros(cell_of.size, np.uint32)
-            new_ids[stay] = n_offset + np.arange(1, stay.size + 1)
-            nout = new_ids[kept_n.astype(np.int64)]
-            np.copyto(nuclei[ry0:ry1, rx0:rx1], nout, where=nout > 0)
-            table.append(parents[stay].astype(np.uint32))
-            n_offset += stay.size
-        offset += len(keep)
-    return prim, nuclei, offset, np.concatenate(table)
+            nucs.append(kept_n)
+            cells_of.append(cell_of)
+    if method in SECONDARY_NUCLEI:
+        prim, nuclei, parents = reference_merge(stiles, locals_, (H, W), nucs, cells_of)
+    else:
+        prim = reference_merge(stiles, locals_, (H, W))
+        nuclei, parents = np.zeros((H, W), np.uint32), np.zeros(0, np.uint32)
+    table = np.concatenate([np.zeros(1, np.uint32), parents]).astype(np.uint32)
+    return prim, nuclei, int(prim.max()), table
 
 
 # ── equality, 8 methods × 2 loops ─────────────────────────────────────

@@ -15,7 +15,8 @@ the 2 x 2 tile seams (kept once, by the tile that owns them).
     right counts and retained fraction; zarr attributes; no nucleus OME-TIFF,
     no nucleus `.dat`, no `*.partial`; the nucleus pyramid passes 4a's check
     and 4a resolves both masks from the store;
-  * the cells are exactly what the ownership code makes of the cell truth;
+  * the cells are exactly what the seam merge makes of the cell truth
+    (block N3b), its parameters and counts recorded;
   * ROI and whole-image modes;
   * an ordinary I/O failure while the table is written: the run fails, is
     not registered, and leaves no partial; a Stop likewise;
@@ -154,20 +155,16 @@ def _guided_worker(tmp_path, monkeypatch, rois, **fake):
 
 
 def _cells_oracle(cells):
-    """What the ownership code makes of the cell truth, tile by tile."""
-    prim = np.zeros((H, W), np.uint32)
-    offset = 0
-    for tile in TileScheduler(H, W, ROWS, COLS, HALO).tiles:
+    """Block N3b: what the seam merge (the pure functions' reference) makes
+    of the cell truth, window by window, in Step2's id order."""
+    from block01.core import seam_merge as sm
+    from test_seam_merge import reference_merge
+    tiles, locals_ = [], []
+    for k, tile in enumerate(TileScheduler(H, W, ROWS, COLS, HALO).tiles):
         ry0, ry1, rx0, rx1 = tile.read_bbox
-        oy0, oy1, ox0, ox1 = tile.own_bbox
-        local = cells[ry0:ry1, rx0:rx1]
-        keep = label_ownership.kept_labels(local, (oy0 - ry0, oy1 - ry0, ox0 - rx0, ox1 - rx0))
-        if not keep:
-            continue
-        out = label_ownership.ownership_lut(local, keep, offset)[local]
-        np.copyto(prim[ry0:ry1, rx0:rx1], out, where=out > 0)
-        offset += len(keep)
-    return prim
+        tiles.append(sm.Tile(k, tuple(tile.read_bbox), tuple(tile.own_bbox)))
+        locals_.append(cells[ry0:ry1, rx0:rx1])
+    return reference_merge(tiles, locals_, (H, W))
 
 
 def _meta(worker, name="segmentation_meta.json"):
@@ -182,7 +179,7 @@ def _assert_label_store(worker, sfx, truth, store):
     nz = zarr.open(os.path.join(worker.output_dir, f"global_nuclei_mask{sfx}.zarr"), "r")
     tz = zarr.open(os.path.join(worker.output_dir, f"global_nuclei_cell{sfx}.zarr"), "r")
     nuc, table = np.asarray(nz), np.asarray(tz)
-    # the cells are the ownership code's, unchanged
+    # the cells are the seam merge's (block N3b), ids included
     np.testing.assert_array_equal(cell, _cells_oracle(cells_truth))
     # nuclei 1..M unique, the table M + 1, every pixel in the named cell
     ids = np.unique(nuc[nuc > 0])
@@ -206,12 +203,17 @@ def _assert_label_store(worker, sfx, truth, store):
     assert store["relation"] == {"nucleus_to_cell": "many_to_one"}
     info = store["nuclei"]
     assert info["kept"] == m
-    assert info["dropped"] == {k: len(expect[k]) for k in
-                               ("multiple_cells", "partial_background", "outside_cells")}
+    assert info["dropped"] == dict({k: len(expect[k]) for k in
+                                    ("multiple_cells", "partial_background", "outside_cells")},
+                                   seam_conflict=0)          # block N3b
     assert info["predicted"] == m + sum(info["dropped"].values())
     assert info["retained_fraction"] == pytest.approx(m / info["predicted"])
     assert store["nucleus"]["n_objects"] == m and store["nucleus_to_cell"]["length"] == m + 1
     assert store["cell"]["n_objects"] == int(cell.max())
+    # block N3b: the seam merge's parameters and counts are recorded
+    assert store["seam_merge"] == {"version": 1, "duplicate_overlap_threshold": 0.5,
+                                   "minimum_writable_fraction": 0.5}
+    assert store["seam_reconciliation"]["nuclei_dropped_seam_conflict"] == 0
     assert nz.attrs["kind"] == "nucleus" and tz.attrs["kind"] == "nucleus_to_cell"
     # no OME-TIFF of the nuclei, no temporary memmap, no partial
     names = os.listdir(worker.output_dir)
@@ -273,7 +275,9 @@ def test_an_io_failure_while_writing_the_table_fails_the_run(app, tmp_path, monk
 
     def failing(self, data, axis=0):
         calls.append(1)
-        if len(calls) == 2:
+        # block N3b: the table is appended once per 2^20 nuclei -- here the
+        # first append is the whole table
+        if len(calls) == 1:
             raise OSError(28, "No space left on device")
         return real(self, data, axis)
     monkeypatch.setattr(zarr.core.Array, "append", failing)

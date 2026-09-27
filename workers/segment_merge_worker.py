@@ -23,7 +23,8 @@ import zarr
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from ..core import label_ownership, label_pyramid, nuclei_pairing, preseg_contract, preseg_input
+from ..core import (label_ownership, label_pyramid, nuclei_pairing, preseg_contract,
+                    preseg_input, seam_merge)
 from ..core.io_loader import OMETIFFLoader
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
@@ -642,6 +643,55 @@ class SegmentMergeWorker(QThread):
     def _keeps_secondary_nuclei(self):
         return self.method in self.SECONDARY_NUCLEI_METHODS and self._runs_on_engine()
 
+    def _seam_begin(self, tiles, full_h, full_w, out_prefix, keeps_nuclei, nuclei_state=None):
+        """Block N3: the region's seam merger for the engine methods (HQ /
+        HQ2 / CDS keep the old paste). Its spill folder is cleaned up with
+        the run's partials whatever happens."""
+        if self.method not in METHOD_ENGINE:
+            return None
+        spill = os.path.join(self.output_dir, f".seam_candidates_{out_prefix or 'whole_image'}")
+        shutil.rmtree(spill, ignore_errors=True)
+        self._nuclei_partials.append(spill)
+        stiles = [seam_merge.Tile(k, tuple(int(v) for v in t.read_bbox),
+                                  tuple(int(v) for v in t.own_bbox))
+                  for k, t in enumerate(tiles)]
+        sink = (lambda block: nuclei_state["table"].append(block)) if nuclei_state else None
+        return seam_merge.SeamMerger((full_h, full_w), stiles, spill, with_nuclei=keeps_nuclei,
+                                     table_sink=sink, table_chunk=self.TABLE_CHUNK)
+
+    def _seam_add_tile(self, merger, i, local_mask, mmap, nuclei_mmap, local_nuclei,
+                       local_nuclei_cell):
+        return merger.add_tile(merger.tiles[i], local_mask, mmap,
+                               nuclei_mmap if merger.with_nuclei else None,
+                               local_nuclei, local_nuclei_cell)
+
+    def _seam_finish(self, merger, mmap, nuclei_mmap, nuclei_state, log, out_prefix):
+        """Decide the seam candidates, write the nucleus -> cell table, check
+        the region's LabelStore contract by row blocks (a failure raises: the
+        run fails and is not registered). Returns (cells, the record)."""
+        record = merger.finish(mmap, nuclei_mmap if nuclei_state is not None else None)
+        parents = None
+        if nuclei_state is not None:
+            if merger.n_nuclei > self.UINT32_LIMIT:
+                raise RuntimeError("more than 2^32 - 1 nuclei in one region: uint32 ids would wrap")
+            nuclei_state["offset"] = merger.n_nuclei
+            parents = np.asarray(nuclei_state["table"][1:], np.uint32)   # M entries
+        seam_merge.validate(mmap, nuclei_mmap if parents is not None else None, parents,
+                            n_cells=merger.n_cells, block=256)
+        rec = record["seam_reconciliation"]
+        msg = (f"[Step2] seams {out_prefix or 'whole image'}: {rec['candidates']:,} seam candidates, "
+               f"{rec['duplicate_groups']:,} duplicate groups ({rec['duplicate_versions_removed']:,} "
+               f"versions removed, {rec['split_merge_groups']:,} split/merge), "
+               f"{rec['recovered_missing_cells']:,} recovered, "
+               f"{rec['dropped_insufficient_free_pixels']:,} dropped (< "
+               f"{merger.min_free:.0%} writable), {rec['cells_with_clipped_pixels']:,} cells clipped "
+               f"({rec['clipped_pixels']:,} px), nuclei dropped on seams "
+               f"{rec['nuclei_dropped_seam_conflict']:,}; cells {merger.n_cells:,}")
+        print(msg)
+        if self._logger:
+            self._logger.info(msg)
+        return merger.n_cells, record
+
     def _nuclei_begin(self, out_prefix):
         """One region's nucleus bookkeeping: the global nucleus counter, the
         nucleus -> cell table (written block by block to `*.partial`) and the
@@ -723,7 +773,7 @@ class SegmentMergeWorker(QThread):
         return nuclei_path, state["table_path"]
 
     def _label_store(self, cell_path, nucleus_path, table_path, n_cells, nuclei_state,
-                     shape):
+                     shape, seam=None):
         """The region's semantic entry (block N2): which array holds the
         cells, which the nuclei, and how nuclei map to cells. File names stay
         historical; this is the authority. None for HQ / HQ2 / CDS."""
@@ -746,6 +796,11 @@ class SegmentMergeWorker(QThread):
         if nuclei_state is not None and nucleus_path:
             m = int(nuclei_state["offset"])
             dropped = dict(nuclei_state["dropped"])
+            if seam is not None:
+                # block N3: whole nuclei that could not be written inside
+                # their cell once the seams were decided
+                dropped["seam_conflict"] = int(
+                    seam["seam_reconciliation"]["nuclei_dropped_seam_conflict"])
             predicted = m + sum(dropped.values())
             store["nucleus"] = array(nucleus_path, m)
             store["nucleus_to_cell"] = {"path": self._abs(table_path), "dtype": "uint32",
@@ -757,6 +812,8 @@ class SegmentMergeWorker(QThread):
         elif self.method in self.SECONDARY_NUCLEI_METHODS:
             store["nuclei"] = {"unavailable": "this run recovered tiles from .npy; "
                                               "the nuclei cannot be recovered"}
+        if seam is not None:
+            store.update(seam)                   # block N3: seam_merge + seam_reconciliation
         return store
 
     def _log_nuclei(self, out_prefix, store):
@@ -769,7 +826,9 @@ class SegmentMergeWorker(QThread):
                + (f" ({frac:.1%})" if frac is not None else "")
                + f"; dropped: {info['dropped']['multiple_cells']:,} over several cells, "
                f"{info['dropped']['partial_background']:,} partly on background, "
-               f"{info['dropped']['outside_cells']:,} outside any cell")
+               f"{info['dropped']['outside_cells']:,} outside any cell"
+               + (f", {info['dropped']['seam_conflict']:,} on tile seams"
+                  if "seam_conflict" in info["dropped"] else ""))
         print(msg)
         if self._logger:
             self._logger.info(msg)
@@ -2507,6 +2566,8 @@ class SegmentMergeWorker(QThread):
         keeps_nuclei = self._keeps_secondary_nuclei()
         hq_nuclei = is_hq and not is_mesmer_guided
         nuclei_state = self._nuclei_begin(out_prefix) if keeps_nuclei else None
+        merger = self._seam_begin(tiles, full_h, full_w, out_prefix, keeps_nuclei, nuclei_state)
+        seam_record = None
         hq_channels, hq_group = ([], None)
         mesmer_group = None
         nuclei_mmap = None
@@ -2780,6 +2841,34 @@ class SegmentMergeWorker(QThread):
                 self._drop_caches()
                 continue
 
+            if merger is not None:
+                # Block N3: interior cells now, seam candidates decided at the end.
+                _t = time.perf_counter()
+                with self.step2_profiler.time_stage("merge_or_write", labels_count=n_raw, **tile_profile_base):
+                    n_kept = self._seam_add_tile(merger, i, local_mask, mmap, nuclei_mmap,
+                                                 local_nuclei, local_nuclei_cell)
+                stage_seconds["merge_or_write"] = stage_seconds.get("merge_or_write", 0.0) + (time.perf_counter() - _t)
+                del local_mask
+                local_nuclei = local_nuclei_cell = None
+                tile_stats.append({
+                    'row': row,
+                    'col': col,
+                    'n_cells': n_kept,
+                    'bbox_local': [oy0, oy1, ox0, ox1],
+                    'dapi_path': self._abs(dapi_tile_path),
+                    'mask_path': self._abs(raw_mask_tile_path),
+                })
+                self.step2_profiler.record_tile_metadata(
+                    profile_tile_id, labels_count=n_kept,
+                    output_path=self._abs(raw_mask_tile_path or mmap_path))
+                self.tile_done.emit(i, n_tiles, n_kept)
+                log.info(f"  ✓ Tile [{i+1}/{n_tiles}] interior cells={n_kept} (seam cells decided at the end)")
+                stage_seconds["_profile_tile_id"] = profile_tile_id
+                self._profile_tile_line(i, n_tiles, stage_seconds, n_kept, tile_shape)
+                gc.collect()
+                self._drop_caches()
+                continue
+
             _t = time.perf_counter()
             with self.step2_profiler.time_stage("postprocess", labels_count=n_raw, **tile_profile_base):
                 keep_labels = label_ownership.kept_labels(
@@ -2885,6 +2974,11 @@ class SegmentMergeWorker(QThread):
             metrics = scheduler.prefetch_metrics()
             self.step2_profiler.log_tile_stage(None, "tile_prefetch_wait", metrics.get("prefetch_wait_seconds", 0.0), **metrics)
         self._close_tile_scheduler(scheduler)
+
+        if merger is not None and not self._stop:
+            with self.step2_profiler.time_stage("seam_merge", method=self.method):
+                global_id_offset, seam_record = self._seam_finish(
+                    merger, mmap, nuclei_mmap, nuclei_state, log, out_prefix)
 
         # ── Flush memmaps ─────────────────────────────────────────────
         with self.step2_profiler.time_stage("merge_all_tiles", method=self.method, output_path=self._abs(mmap_path)):
@@ -3017,7 +3111,8 @@ class SegmentMergeWorker(QThread):
         self._record_step2_geometry(full_h, full_w, nuclei_zarr_path, out_zarr_path)
         pyramids = self._write_label_pyramids(out_zarr_path, nuclei_zarr_path, bbox, full_h, full_w)
         label_store = self._label_store(out_zarr_path, nuclei_zarr_path, nuclei_table_path,
-                                        total_cells, nuclei_state, (full_h, full_w))
+                                        total_cells, nuclei_state, (full_h, full_w),
+                                        seam=seam_record)
         self._log_nuclei(out_prefix, label_store)
         if keeps_nuclei and nuclei_mmap_path and os.path.exists(nuclei_mmap_path):
             os.remove(nuclei_mmap_path)          # nobody reads it; the zarr is the store
@@ -3417,6 +3512,8 @@ class SegmentMergeWorker(QThread):
             keeps_nuclei = self._keeps_secondary_nuclei()
             hq_nuclei = is_hq and not is_mesmer_guided
             nuclei_state = self._nuclei_begin("") if keeps_nuclei else None
+            merger = self._seam_begin(tiles, full_h, full_w, "", keeps_nuclei, nuclei_state)
+            seam_record = None
             hq_channels, hq_group = ([], None)
             mesmer_group = None
             nuclei_mmap = None
@@ -3671,6 +3768,35 @@ class SegmentMergeWorker(QThread):
                     self._drop_caches()
                     continue
 
+                if merger is not None:
+                    # Block N3: interior cells now, seam candidates decided at the end.
+                    _t = time.perf_counter()
+                    with self.step2_profiler.time_stage("merge_or_write", labels_count=n_raw, **tile_profile_base):
+                        n_kept = self._seam_add_tile(merger, i, local_mask, mmap, nuclei_mmap,
+                                                     local_nuclei, local_nuclei_cell)
+                    stage_seconds["merge_or_write"] = stage_seconds.get("merge_or_write", 0.0) + (time.perf_counter() - _t)
+                    del local_mask
+                    local_nuclei = local_nuclei_cell = None
+                    tile_stats.append({
+                        'row': row,
+                        'col': col,
+                        'n_cells': n_kept,
+                        'bbox_local': [oy0, oy1, ox0, ox1],
+                        'dapi_path': self._abs(dapi_tile_path),
+                        'mask_path': self._abs(raw_mask_tile_path),
+                    })
+                    self.step2_profiler.record_tile_metadata(
+                        profile_tile_id, labels_count=n_kept,
+                        output_path=self._abs(raw_mask_tile_path or mmap_path))
+                    self.tile_done.emit(i, n_tiles, n_kept)
+                    self.progress.emit(i + 1, n_tiles, f"✓ Tile [{i+1}/{n_tiles}]  interior cells={n_kept} (seam cells decided at the end)")
+                    log.info(f"  ✓ Tile [{i+1}/{n_tiles}] interior cells={n_kept} (seam cells decided at the end)")
+                    stage_seconds["_profile_tile_id"] = profile_tile_id
+                    self._profile_tile_line(i, n_tiles, stage_seconds, n_kept, tile_shape)
+                    gc.collect()
+                    self._drop_caches()
+                    continue
+
                 _t = time.perf_counter()
                 with self.step2_profiler.time_stage("postprocess", labels_count=n_raw, **tile_profile_base):
                     keep_labels = label_ownership.kept_labels(
@@ -3796,6 +3922,11 @@ class SegmentMergeWorker(QThread):
                 self._empty_torch_cache_if_available()
                 self._drop_caches()
                 log.info(f"All inference done. {self._mem_snapshot()}")
+
+            if merger is not None and not self._stop:
+                with self.step2_profiler.time_stage("seam_merge", method=self.method):
+                    global_id_offset, seam_record = self._seam_finish(
+                        merger, mmap, nuclei_mmap, nuclei_state, log, "")
 
             with self.step2_profiler.time_stage("merge_all_tiles", method=self.method, output_path=self._abs(mmap_path)):
                 mmap.flush()
@@ -3923,7 +4054,8 @@ class SegmentMergeWorker(QThread):
             pyramids = self._write_label_pyramids(out_zarr_path, nuclei_zarr_path, None,
                                                   full_h, full_w)
             label_store = self._label_store(out_zarr_path, nuclei_zarr_path, nuclei_table_path,
-                                            total_cells, nuclei_state, (full_h, full_w))
+                                            total_cells, nuclei_state, (full_h, full_w),
+                                            seam=seam_record)
             self._log_nuclei("", label_store)
             if keeps_nuclei and nuclei_mmap_path and os.path.exists(nuclei_mmap_path):
                 os.remove(nuclei_mmap_path)

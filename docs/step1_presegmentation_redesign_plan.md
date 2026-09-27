@@ -9,6 +9,8 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.95：块 N3b 真机验收通过（20 块网格）。
+- v3.94：块 N3b 已实施（自动验收通过，待真机验收），写入执行记录与实施中的用户裁定（区域结束时一次裁决）。
 - v3.93：用户锁定两个 0.5、批准 N3b 的测试改动清单；N3a 提交推送，开始 N3b。
 - v3.92：N3a 之后的审核意见（锁定两个 0.5、元数据记录 `seam_merge` 版本与参数）与 N3b 须报批的测试改动清单，待用户确认。
 - v3.91：块 N3a 完成（纯函数、13 条测试、真实数据探测；分布分成两堆；须加辅助条件「空像素 < 50 % 整个放弃」），等用户锁定规则。
@@ -1888,6 +1890,20 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - `tests/test_step2_keeps_nuclei.py`：第 160–170 行的细胞参考改为新规则，核的参考加上「跟随细胞、写不全就丢弃（`seam_conflict`）」；
   - `tests/test_step2_ownership_move.py::test_both_loops_equal_the_legacy_inline_ownership`：两处循环与「旧的内联归属 + 覆盖写」相等 → 改为两处循环都与新规则的参考相等（HQ / HQ2 的参数化用例同样）；
   - `tests/test_label_ownership.py::test_step2s_real_merge_equals_this_module_tile_by_tile`：「Step2 的合并 = 本模块逐块 + 覆盖写」→ 改为「Step2 的候选归属与本模块一致、合并按 `seam_merge`」；`core/label_ownership.py` 本身不改（Step1 共用），其余 4 条不变。
+
+- **N3b 实施中的用户裁定（2026-09-27）**：接缝候选在**整个区域的切块跑完后一次裁决**（v3 写的「等齐邻块、最多等一行」不成立：边界分歧的像素要按余量分配才与遍历顺序无关，部分重叠的候选会沿接缝连成一串、横竖接缝在交汇处相连，可能一直连到最后一块）。内部细胞仍逐块立即写出。
+- **N3b 执行记录**（2026-09-27，未提交）：
+  - `core/seam_merge.py`：`SeamMerger`（`add_tile`：候选提取，内部且按今天规则归属的细胞立即写出，接缝候选的 bool 裁剪与核的局部编号裁剪写到运行目录的 `.seam_candidates_<区域>/`；`finish`：读回全部接缝候选、`resolve`、按余量写入、删除临时目录）；`_write`：只写空像素、可写 < 50 % 整个放弃、编号在决定之后分配；核只在全部像素都落在细胞写入的像素里时写入，否则计 `nuclei_dropped_seam_conflict`；「核 → 细胞」用 numpy 缓冲，每 2^20 项交给 zarr 表追加一次（N2 契约）；`validate`：按行块流式核对细胞编号 1 … N 都有像素、核编号 1 … M 都有像素、每个核像素在它的细胞里，失败抛 `SeamContractError`；`SEAM_MERGE = {version 1, 0.5, 0.5}`。
+  - `workers/segment_merge_worker.py`：`_seam_begin` / `_seam_add_tile` / `_seam_finish`，两处循环（ROI、整图）只对引擎方法走新合并，HQ / HQ2 / CDS 照旧；每块的 `tile_stats.n_cells` 现在是该块立即写出的内部细胞数（接缝细胞在收尾时计入总数）；收尾核对失败 → 运行失败、不登记；`label_store` 写入 `seam_merge` 与 `seam_reconciliation`，`nuclei.dropped` 增加 `seam_conflict`（终端打印「on tile seams」）；临时目录登记进 `_nuclei_partials`，成功、失败、Stop 都会清理。
+  - 测试：`tests/test_seam_merge.py` 共 20 条（N3a 的 13 条，加 `SeamMerger` 的内部 / 接缝写入、核因接缝冲突丢弃、对应表分块、收尾核对对每种破坏报错，Step2 端到端：两块各给一个版本、按今天的规则两边都丢的细胞被补回且完整，替身的核对失败 → 运行不登记，**真实核对**抓到被破坏的合并结果 → 运行失败）；按批准的清单改参考：`test_step2_runner_path.py::_oracle`（改用 `reference_merge`，并按 Step2 的编号顺序——内部细胞按切块与标签、接缝细胞按余量——因此仍是**逐像素、逐编号**相等，`test_step2_engine_unified.py` 不改代码）、`test_step2_keeps_nuclei.py`（细胞参考、`seam_merge` 记录、`seam_conflict: 0`；对应表 I/O 失败的注入点由「第 2 次追加」改为「第 1 次」，因为对应表现在每 2^20 项才追加一次）、`test_step2_ownership_move.py`（只有引擎方法 `cellpose_wholecell_fusion` 改为新参考；HQ / HQ2 保持旧参考——比清单改得少）、`test_label_ownership.py`（Step2 的归属标志等于本模块的质心规则，合并等于 `reference_merge`，逐编号相等）。
+  - 反向注入 9 处：覆盖写、重复不丢弃、胜者按切块序号、逐对不连通分量、编号在去留之前分配、核不完整仍保留、不调用收尾核对、`seam_conflict` 不计入——各使至少 1 条变红；「不按归属也写内部细胞」没有测试变红，它是**等价变异**（候选的质心必在外接框内；质心不在本块就在邻块的归属区内，外接框就与邻块窗口相交，它就是接缝候选，所以内部候选必然按今天的规则归属）。
+  - 真实数据（`docs/benchmarks/step2/seam_probe_2026-09-27.md` 的 N3b 一节）：细胞 56 948、空标签 0、**核像素不在自己的细胞里 0**（原 457）、接缝附近碎块 / 小碎片 23 / 79（原 31 / 88）——与 N3a 的离线预测逐项相同；因接缝冲突丢掉的核 110；Step2 耗时与峰值内存不变。
+  - 实引擎回归：`test_step2_runner_path` 30 通过 6 跳过、`test_step2_engine_unified` 32 通过 6 跳过（跳过的都是 Mesmer，本机无模型）。
+  - 回归：34 个模块（Step2 全部相关、HQ / HQ2 / CDS 的 worker、标签归属 / 金字塔、预分割、Step3 数据层与标签绑定、Step1→Step2 交接）每模块单独进程，与 `git archive HEAD`（`5d8cb59`）逐条对比，**无新增失败**。两边相同：`test_seg_runner.py` 2 条（StarDist 偶发 1 像素差、Mesmer）、`test_seg_runner_engines.py` 3 条（2 条 Mesmer 无模型、1 条 StarDist）、`test_hq_marker_segmentation.py` 2 条（HQ 不维护）；HEAD 侧另有 `test_preseg_run.py::test_the_job_equals_the_steps_done_by_hand` 1 条偶发失败，本侧通过。
+  - 文档：两份用户指南的 Step2 产出加「切块接缝」一段（规则、以前的结果须重跑、元数据里的计数、重叠带须比最大的细胞宽）。
+  - **前提**（写进用户指南）：重叠带必须比最大的细胞宽；否则一个细胞可能在所有覆盖它的窗口里都碰到内部窗口边，从而不成为候选（旧规则会保留一个被截断的版本）。产品的重叠带 = Step1 的 halo（默认 200 px），远大于细胞。
+  - **真机验收通过（用户 2026-09-27）**：工作区 `full_wsi_20260927_194511_cc8e`，StarDist + expansion，**4 × 5 = 20 块**（与本机测试的 3 × 4 不同）：接缝候选 24 076、重复组 10 298（丢弃版本 11 504，split / merge 366）、补回 173、可写不足一半而放弃 87、被裁边界像素的细胞 427（12 864 px）、因接缝冲突丢掉的核 97；细胞 56 892；核保留率 99.8 %（含「97 on tile seams」）；3 min 28.6 s、峰值 9.23 GB。Step3 里接缝处没有明显不合理的 mask。
+  - advisory（与本块无关）：Step2 完成后自动进入 Step3 时，GUI 线程在 Step3 GPU 图层的 `resizeGL`（`step1_viewer_mount._start_gpu_backend` → `layer.show()`）停了 6.5 s（gui-watchdog）。
 
 ### 块 S4-2 — 核 / 胞质、输出范围问卷、h5ad 新结构、CSV 可选（申请 v1；**用户 2026-09-27 裁定：改为只有一个 h5ad、一行一个主对象，不做单独的核表；排在 N3 之后，另行修订为 v2**）
 - **必要性**：Step4 调查一节的用户裁定 2、3、5 与 S4-0 裁定 3、4：有核时输出核与胞质的特征（由用户选择）；默认输出 h5ad（按约定的结构），CSV 可选；特征按「范围」组织成可折叠的问卷，只计算勾选的组合；每个核一行的核表在本块交付。

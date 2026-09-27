@@ -9,6 +9,8 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v3.78：块 S4-1P 获批（Rust 工具链授权、GPU 纳入；决定规则待结果出来后讨论）。
+- v3.77：块 S4-1P 申请 v1（CPU / GPU 内核探测，采纳用户与 ChatGPT 的讨论；本机核实 CuPy 的 nvrtc 加载问题、没有 Rust 工具链）。
 - v3.76：块 S4-0 B 部分完成；S4-0 完成。
 - v3.75：块 S4-0 A 部分实测完成（报告 `docs/benchmarks/step4/baseline_2026-09-27.md`）。
 - v3.74：块 S4-0 v2 获批（用户做校正数据；主区域至少一个统计量；核表在 S4-2；周长只保留新定义）。
@@ -1613,6 +1615,55 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   5. **周长只保留新定义**（按标签判断、分块带 1 像素重叠）；旧的并集腐蚀周长不再输出——验收里的逐细胞对照因此不含周长，新周长另用独立的参考实现核对。
 - **执行记录 A 部分**（2026-09-27）：脚本 `scripts/benchmark_step4_baseline.py`；报告 `docs/benchmarks/step4/baseline_2026-09-27.md`。test1（2.5 亿像素、29 通道、40 843 细胞，通道全部不校正）：① 只 mean **215.5 s、峰值 8.63 GB**；② 快速统计全选 **1034 s（17.2 min）、峰值 8.66 GB**，其中通道统计 917 s（min / max 每通道约 10 s、std 约 6.6 s、mean / sum 约 2.5 s）、形态约 1 min、读通道约 1 s / 通道；③ median 约 15 s / 通道、p90 约 3 s / 通道（2 个通道实测，29 通道约 7 min + 1.4 min 为推算）。参考输出保存在 `~/fusionflux/bench_step4/test1/2026-09-27_bdbd29e/`。
 - **执行记录 B 部分**（2026-09-27）：用户新做的带校正工作区 `full_wsi_20260927_121444_6bad`（2 个 tophat 通道 CD3D、HsBAg；本机 cuCIM 不能用 GPU，没有 cuCIM 通道），StarDist + expansion 运行，56 874 细胞。只 mean：旧 Step4 **654 s**，其中**现场 tophat 481 s（每通道约 4 min）**；快速统计全选：旧 1503 s vs **对照 B（读 Step0 校正结果）1014 s**，读校正结果 2 个通道共 7.5 s（约为现场校正的 1/60）；峰值 8.4–8.6 GB。来源核对通过（原始读 27 次、校正结果 2 次）。**两份全选输出全部 153 列在 1e-5 内相同**——改读 Step0 结果不改变数值。参考输出 `~/fusionflux/bench_step4/test1_tophat/2026-09-27_bdbd29e/`。**S4-0 完成（自动验收：分项时间、两种峰值内存、三种配置、参考输出、来源记录齐全）。**
+
+### 块 S4-1P — CPU / GPU 内核探测（申请 v1，**用户 2026-09-27 批准**；插在 S4-1 之前，不改产品代码）
+- **来由**：用户与 ChatGPT 的讨论（`~/nextstep.txt`，用户转述）有三点建议：Step4 一开始就做成 CPU / GPU 双后端，二者执行同一份累加器契约；CPU 后端必须认真优化，不能「没有 GPU 就回到 17 分钟」；正式实现之前先用一个小探测在真实数据块上比较 SciPy、Numba 融合内核与 Rust / Rayon 融合内核，由实测决定 CPU 后端用哪个。**采纳**，另按本机核实的事实补充与修正如下。
+- **本机核实（2026-09-27，只读）**：
+  1. GPU：RTX 3060 Laptop，6 GB，驱动 581.95。环境里有 CuPy 13.3（`cupy-cuda12x`）、torch 2.5.1+cu121（CUDA 可用），numba 0.67 的 `numba.cuda` 也报告可用。
+  2. **CuPy 的自定义内核（RawKernel）默认编译不了**：报 `libnvrtc.so.12: cannot open shared object file`。这个库在 pip 包 `nvidia-cuda-nvrtc-cu12` 里，不在动态加载器的搜索路径上。把它所在的目录加进 `LD_LIBRARY_PATH` 之后，RawKernel 可以编译运行（用 atomicAdd 做的计数和求和结果正确）。产品若用 CuPy 内核，必须明确解决 nvrtc 的加载问题，不能依赖用户的环境变量。**推测**：本机「cuCIM 不能用 GPU」可能也是这个原因（cuCIM 建在 CuPy 上）。这只是推测，本块不查，列入 advisory。
+  3. Rust：本机**没有**工具链（没有 `cargo`、`rustc`、`maturin`）。
+  4. CPU：WSL 里有 16 个逻辑核（i7-12700H 有 6 个 P 核、8 个 E 核；WSL 分给 16 个）。
+- **对讨论的几处修正与补充**：
+  1. **I/O 下限要在「按块读」下重新测**。S4-0 的 42 s 是整区域一次读的时间；流式按块读的模式不同，还要加上 mask zarr 的解压。如果融合内核的计算时间已经小于按块读的时间，那么 Rust 或 GPU 的收益主要看 I/O 与计算能否重叠，而不在内核本身。所以探测**同时测按块读的速度**（原始 OME-TIFF、Step0 校正结果 zarr、细胞 mask zarr），作为判断的基准线。
+  2. **累加精度**：CPU 上 sum / sumsq 与坐标矩用 float64（在 CPU 上代价很小）。std 用 `sumsq/n − mean²` 计算有抵消误差，探测里与逐细胞的 float64 双遍参考对照。GPU 版先用「块内 shared memory 局部归约 + float64 atomicAdd」（sm_86 支持 double 的 atomicAdd），与纯 float32 atomic 各测一次，看误差和速度的代价。不要求逐位相同：count / min / max 必须完全相同，sum / mean / std 的阈值按实测定。
+  3. **Rust 的探测接法**：不用 PyO3 / maturin，也不往产品环境里装包。Rust 写成导出 C ABI 的 `cdylib`，Python 用 `ctypes` 传 numpy 指针调用；Rayon 每个线程一份私有累加器，最后归约。产品是否改用 PyO3 / maturin，以及 Windows 上怎么构建，都等决定用 Rust 之后，在 S4-1 里另定。
+  4. **Numba 并行**也按「每线程一份私有累加器 + 归约」来写（`prange` 按行带并行），与 Rust 结构相同，这样比较才公平。
+  5. **GPU 一起测**：做一个 CuPy RawKernel 的融合版，测「H2D 传输 + 内核」的时间和每块峰值显存。它回答 S4-1 是否现在就做 CUDA 后端；无论结果如何，后端接口（`accumulate(tile) / merge / finalize`）都按双后端设计。
+- **做法**：新增 `scripts/probe_step4_kernels.py`（不被产品导入）和 `scripts/probe_step4_rust/`（Cargo 工程，`src/lib.rs`；构建产物放在 `target/`，不进 git）。数据用 B 部分的工作区 `full_wsi_20260927_121444_6bad`：StarDist + expansion 运行的细胞 mask zarr（56 874 个细胞），4 个 marker（2 个不校正，加上 2 个 tophat 通道 CD3D、HsBAg，读 Step0 的校正结果），只读。
+  - 块边长 2048² / 4096² / 8192²，各取有细胞的真实位置；通道 1 个或一批 4 个；线程数 1 / 8 / 16。
+  - 同一份计算：count、sum、sumsq、min、max（每细胞 × 每通道），加上几何的 count、Σx、Σy、Σx²、Σy²、Σxy 与外接框；收尾算 mean / std。
+  - 参赛者：
+    - A. 今天的 SciPy 调用，与旧 Step4 相同的 5 项统计与形态；
+    - B. Numba 融合内核；
+    - C. Rust / Rayon 融合内核；
+    - D. CuPy 融合内核（分两次记：只算内核的时间，以及含传输的时间）。
+  - 正确性：每个块上 B / C / D 都与 float64 双遍参考逐细胞对照。
+  - 另测按块读的时间：同样的块，读 4 个通道与 mask，分成原始 OME-TIFF、校正结果 zarr、mask zarr 三项分别计时。
+  - 最后用胜出的 CPU 内核在整个区域上按块循环跑一次（29 通道，只做统计、不写产品输出），与 S4-0 的对照 B 参考（`fast_corrected/cell_features.csv`）比较 mean / sum / std / min / max 与面积、质心。
+  - 记录指标：时间、每秒像素数、有效 GB/s、峰值 RSS / 显存。
+  - 结果写进 `docs/benchmarks/step4/kernel_probe_2026-09-27.md` 与本文档；原始数据写到 `~/fusionflux/bench_step4/test1_tophat/<日期>_<哈希>_probe/`。
+- **决定规则**（建议，请用户裁定）：
+  - CPU 后端：
+    - Rust 比 Numba 快 **2 倍以上**：S4-1 的 CPU 内核用 Rust；
+    - 快 **不到 1.3 倍**：用 Numba；
+    - 在两者之间：看整区域的计算时间是否已经小于按块读的时间。已经小于（接近 I/O 受限）就用 Numba，否则用 Rust。
+  - GPU 后端：
+    - 最快的 CPU 内核在整区域上的计算时间**超过按块读时间的 1.5 倍**：S4-1 同时交付 CUDA 后端，Auto 模式是「有 CUDA 且显存够用 GPU，否则用 CPU」；
+    - 否则 S4-1 只交付 CPU 后端，CUDA 后端的接口位置留好，等出现计算重的特征（S4-3 的分布统计等）或 WSI 实测需要时再做。
+- **白名单**：`scripts/probe_step4_kernels.py`（新）；`scripts/probe_step4_rust/`（新）；`.gitignore` 加上 `scripts/probe_step4_rust/target/`；`docs/benchmarks/step4/kernel_probe_2026-09-27.md`（新）；本文档。**不改产品代码，不往 `fusion_mesmer` 环境装包，不写 `~/fusion_data`。**
+- **须授权的环境改动**：用 rustup 把 Rust 工具链装到用户目录（`~/.rustup`、`~/.cargo`，约 1 GB 以内）；从 crates.io 取 `rayon`。只对当前用户生效，删掉这两个目录即可完全撤销。
+- **风险**：8192² × 4 通道的块约 1.3 GB，加上参考计算，峰值约 3–4 GB。探测期间不跑其他重任务。整区域那一遍约几分钟。
+- **验收门**：
+  - 三种块边长 × 四个参赛者的时间与内存都有数字；
+  - B / C / D 的正确性对照通过（count / min / max 完全相同，sum / mean / std 的误差如实报告）；
+  - 按块读的三项时间齐全；
+  - 整区域那一遍与 S4-0 参考一致；
+  - 按决定规则写出结论。
+- **用户裁定（2026-09-27）**：
+  1. 授权用 rustup 把工具链装到用户目录，从 crates.io 取 `rayon`。
+  2. GPU（CuPy 内核）纳入探测。
+  3. 决定规则**暂不定**：先拿到结果，再讨论。
+  4. 申请提交推送后开始执行。
 
 ## 六、未决与 advisory
 

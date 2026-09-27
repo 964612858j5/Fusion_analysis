@@ -13,3 +13,6 @@ build/
 .vscode/
 sync_v5.sh
 .memory/
+
+# block S4-1P probe build output
+scripts/probe_step4_rust/target/

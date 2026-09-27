@@ -1,0 +1,3 @@
+# Same footing as Numba, which compiles for the host CPU.
+[build]
+rustflags = ["-C", "target-cpu=native"]

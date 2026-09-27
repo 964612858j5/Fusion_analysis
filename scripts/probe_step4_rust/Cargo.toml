@@ -1,0 +1,18 @@
+[package]
+name = "probe_step4_rust"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Block S4-1P: a probe, not part of the product. Built as a C-ABI shared
+# library that `scripts/probe_step4_kernels.py` calls through ctypes.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rayon = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

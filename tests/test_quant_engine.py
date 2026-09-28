@@ -87,13 +87,15 @@ def make_case(seed=0, shape=(173, 211), n=60):
 
 
 def run(lab, chans, n_objects, stats=qe.FAST_STATS, nuclei=None, table=None, regions=(),
-        features=("morphology",), compartment="cell", tmp=None, **kw):
+        features=("morphology",), compartment="cell", tmp=None, distribution=None,
+        markers=None, **kw):
     """The engine in float64 (sink_dtype f8): exact comparisons."""
     import tempfile
     job = Job(lab, chans, n_objects, has_nuclei=nuclei is not None, compartment=compartment)
     kw.setdefault("sink_dtype", "f8")
     res, timing = qe.quantify(job, ArrayReader(lab, chans, nuclei, table), stats,
                               regions=list(regions), features=features,
+                              distribution=distribution, markers=markers,
                               sink_path=str(tmp) if tmp else tempfile.mkdtemp(),
                               settings=qe.QuantSettings(**kw))
     return res, timing
@@ -455,3 +457,121 @@ def test_x_is_the_first_chosen_statistic(tmp_path):
     lab, chans, n = make_case(seed=18)
     res, _t = run(lab, chans, n, stats=["max", "std"], tmp=tmp_path / "s")
     assert res.x_layer == "cell_std" and res.layers == ["cell_std", "cell_max"]
+
+
+# ── block S4-3: Crofton perimeter, circularity, distribution statistics ──
+
+def test_crofton_equals_skimage_across_tiles_edges_and_touching_cells(tmp_path):
+    lab, chans, n = make_case(seed=21)
+    lab[(lab == n - 1) | (lab == n)] = 0
+    lab[100:120, 20:30] = n - 1                          # two touching cells
+    lab[100:120, 30:40] = n
+    props = {p.label: p for p in regionprops(lab.astype(np.int64))}
+    for tile in (7, 33, 64, 4096):
+        res, _t = run(lab, chans, n, tile=tile, tmp=tmp_path / f"s{tile}")
+        ids = res.ids.astype(int)
+        want = np.array([props[i].perimeter_crofton for i in ids])
+        np.testing.assert_allclose(res.obs["perimeter_crofton"], want, rtol=0, atol=1e-9,
+                                   err_msg=f"tile {tile}")
+        area = np.array([props[i].area for i in ids], float)
+        np.testing.assert_allclose(res.obs["circularity"], 4 * np.pi * area / want ** 2,
+                                   rtol=1e-12)
+
+
+def test_circularity_is_not_clipped():
+    lab = np.zeros((10, 10), np.uint32)
+    lab[4, 4] = 1                                        # one pixel: circularity > 1
+    res, _t = run(lab, [np.ones((10, 10), np.uint8)], 1, tile=4)
+    assert res.obs["circularity"][0] > 1.0
+    want = regionprops(lab.astype(np.int64))[0].perimeter_crofton
+    assert res.obs["perimeter_crofton"][0] == pytest.approx(want, abs=1e-12)
+
+
+def dist_reference(lab, nuc, table, img, ids, region):
+    inside = (lab > 0) & (nuc > 0) & (table[nuc] == lab) if nuc is not None else \
+        np.zeros(lab.shape, bool)
+    mask = {"cell": lab > 0, "nucleus": inside, "cytoplasm": (lab > 0) & ~inside}[region]
+    out = {s: [] for s in qe.DIST_STATS}
+    for i in ids:
+        x = np.sort(img[(lab == i) & mask].astype(np.float64))
+        m = x.size
+        if m == 0:
+            for s in out:
+                out[s].append(np.nan)
+            continue
+        out["median"].append(np.median(x))
+        out["p90"].append(np.percentile(x, 90))
+        out["p95"].append(np.percentile(x, 95))
+        tot = x.sum()
+        out["gini"].append(np.nan if tot == 0 else
+                           2 * np.sum(np.arange(1, m + 1) * x) / (m * tot) - (m + 1) / m)
+    return {s: np.array(v) for s, v in out.items()}
+
+
+def test_distribution_equals_numpy_in_every_region(tmp_path):
+    lab, chans, n = make_case(seed=22)
+    nuc, table = make_nuclei(lab, corrupt=False)
+    res, _t = run(lab, chans, n, nuclei=nuc, table=table, regions=("nucleus", "cytoplasm"),
+                  distribution=qe.DIST_STATS, markers=["ch0", "ch1"], tile=37,
+                  tmp=tmp_path / "s")
+    assert res.dist_markers == ["ch0", "ch1"]
+    ids = res.ids.astype(int)
+    for mi, ci in enumerate([0, 1]):                     # uint8 and float32 markers
+        for region in ("cell", "nucleus", "cytoplasm"):
+            ref = dist_reference(lab, nuc, table, chans[ci], ids, region)
+            for stat in qe.DIST_STATS:
+                got = res.sink.read(f"dist_{region}_{stat}")[:, mi]
+                want = ref[stat]
+                assert np.array_equal(np.isnan(got), np.isnan(want)), (region, stat)
+                ok = ~np.isnan(want)
+                tol = 1e-12 if stat == "gini" else 0
+                np.testing.assert_allclose(got[ok], want[ok], rtol=tol, atol=0,
+                                           err_msg=f"ch{ci} {region} {stat}")
+
+
+def test_only_the_chosen_markers_and_statistics(tmp_path):
+    lab, chans, n = make_case(seed=23)
+    res, _t = run(lab, chans, n, distribution=["p90", "median"], markers=["ch2"],
+                  tmp=tmp_path / "s")
+    assert res.dist_stats == ["median", "p90"] and res.dist_markers == ["ch2"]
+    assert res.dist_layers == ["dist_cell_median", "dist_cell_p90"]
+    assert res.sink.read("dist_cell_median").shape == (res.ids.size, 1)
+    assert "ch2_median" in res.columns and "ch0_median" not in res.columns
+    with pytest.raises(ValueError, match="at least one marker"):
+        run(lab, chans, n, distribution=["median"], markers=[], tmp=tmp_path / "t")
+    with pytest.raises(ValueError, match="not a channel"):
+        run(lab, chans, n, distribution=["median"], markers=["nope"], tmp=tmp_path / "u")
+    with pytest.raises(ValueError, match="not a distribution statistic"):
+        run(lab, chans, n, distribution=["p99"], markers=["ch0"], tmp=tmp_path / "v")
+
+
+def test_gini_edge_cases(tmp_path):
+    lab = np.zeros((12, 12), np.uint32)
+    lab[1, 1] = 1                                        # one non-zero pixel -> 0
+    lab[5:7, 5:7] = 2                                    # all zero -> NaN
+    img = np.zeros((12, 12), np.float32)
+    img[1, 1] = 7.0
+    res, _t = run(lab, [img], 2, distribution=["gini", "median"], markers=["ch0"],
+                  tmp=tmp_path / "s")
+    g = res.sink.read("dist_cell_gini")[:, 0]
+    assert g[0] == 0.0 and np.isnan(g[1])
+    assert res.sink.read("dist_cell_median")[1, 0] == 0.0
+
+
+def test_forced_object_blocks_give_the_same_result_within_the_budget(tmp_path):
+    lab, chans, n = make_case(seed=24)
+    nuc, table = make_nuclei(lab, corrupt=False)
+    kw = dict(nuclei=nuc, table=table, regions=("nucleus", "cytoplasm"),
+              distribution=qe.DIST_STATS, markers=["ch0", "ch1", "ch2"], tile=40)
+    base, _t = run(lab, chans, n, tmp=tmp_path / "a", **kw)
+    # a budget smaller than ONE marker's pixel buffer forces object blocks
+    one_marker = int((lab > 0).sum()) * 4
+    budget = int(lab.max() + 1) * 8 + one_marker // 3
+    res, _t = run(lab, chans, n, tmp=tmp_path / "b", accumulator_budget=budget, **kw)
+    rec = res.distribution
+    assert rec["passes"] > 3                              # more than one block per marker
+    assert rec["peak_working_set_bytes"] <= budget
+    assert rec["total_tile_reads"] >= rec["unique_tiles_read"] and rec["reread_factor"] >= 1
+    for name in base.dist_layers:
+        np.testing.assert_array_equal(res.sink.read(name), base.sink.read(name), err_msg=name)
+    assert base.distribution["passes"] == 2               # one per dtype group, one block

@@ -107,7 +107,8 @@ class Step4Page(QWidget):
         self._apply_job_to_scope(job)
 
     def _update_run_button(self):
-        self._btn_run.setEnabled(self._job is not None and not self._running)
+        self._btn_run.setEnabled(self._job is not None and not self._running
+                                 and not self.__dict__.get("_scope_blocked", False))
 
     # ── output scope (block S4-2) ─────────────────────────────────────
 
@@ -124,6 +125,14 @@ class Step4Page(QWidget):
             self._update_scope()             # the same result again: keep the user's choice
             return
         self._scope_key = key
+        self._marker_list.blockSignals(True)
+        self._marker_list.clear()
+        for c in (job.channels if job is not None else ()):
+            item = QtWidgets.QListWidgetItem(c.name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            self._marker_list.addItem(item)
+        self._marker_list.blockSignals(False)
         self._region_checks['cell'].setText('Nucleus' if nuclei_only else 'Whole cell')
         for cb in (self._region_checks['nucleus'], self._region_checks['cytoplasm'],
                    self._feature_checks['nuclear_summary']):
@@ -145,13 +154,27 @@ class Step4Page(QWidget):
                     if self._feature_checks[k].isEnabled() and self._feature_checks[k].isChecked()]
         return stats, regions, features, self._output_checks['csv'].isChecked()
 
+    def distribution_scope(self):
+        """(distribution statistics, markers in slide order) as checked."""
+        dist = [k for k, cb in self._dist_checks.items() if cb.isChecked()]
+        markers = [self._marker_list.item(i).text() for i in range(self._marker_list.count())
+                   if self._marker_list.item(i).checkState() == Qt.Checked]
+        return dist, markers
+
     def _update_scope(self):
         stats, regions, features, csv = self.scope()
+        dist, markers = self.distribution_scope()
+        self._marker_list.setVisible(bool(dist))
+        self._scope_blocked = bool(dist and not markers)
         base = output_base(self._prefix_edit.text().strip())
         files = [f'{base}.h5ad', f'{base}_provenance.json'] + ([f'{base}.csv'] if csv else [])
         job = self._job
         primary = 'nucleus' if (job is not None and job.compartment == qs.NUCLEUS) else 'cell'
         x = f'X = {primary} {stats[0]}' if stats else '⚠  choose at least one statistic'
+        if dist and not markers:
+            x += '     ·     ⚠  choose the markers for the distribution statistics'
+        elif dist:
+            x += f'     ·     distribution: {len(markers)} marker' + ('s' if len(markers) > 1 else '')
         self._prefix_info.setText('Outputs:  ' + '   '.join(files) + '     ·     ' + x)
         risky = bool(job is not None and job.has_nuclei and job.seam_merge is None
                      and (regions or 'nuclear_summary' in features))
@@ -282,6 +305,28 @@ class Step4Page(QWidget):
         self._stat_checks = _checks(row, [
             ('mean', 'Mean', True), ('sum', 'Sum (total int.)', True),
             ('std', 'Std dev', True), ('min', 'Min', True), ('max', 'Max', True)])
+        # block S4-3: distribution statistics, slow, for the chosen markers
+        dist_w = QWidget()
+        dl = QVBoxLayout(dist_w)
+        dl.setContentsMargins(24, 0, 0, 4)
+        drow = QHBoxLayout()
+        dlab = QLabel('Distribution (slow):')
+        dlab.setStyleSheet('font-size:11px;color:#ccc;')
+        drow.addWidget(dlab)
+        self._dist_checks = _checks(drow, [
+            ('median', 'Median', False), ('p90', 'P90', False), ('p95', 'P95', False),
+            ('gini', 'Gini', False)])
+        dl.addLayout(drow)
+        self._marker_list = QtWidgets.QListWidget()
+        self._marker_list.setMaximumHeight(110)
+        self._marker_list.setStyleSheet('font-size:11px;')
+        self._marker_list.setToolTip('Markers for the distribution statistics')
+        self._marker_list.itemChanged.connect(lambda _item: self._update_scope())
+        self._marker_list.setVisible(False)
+        dl.addWidget(self._marker_list)
+        sl.addWidget(dist_w)
+        arrow.toggled.connect(dist_w.setVisible)
+        self._dist_widget = dist_w
         row, arrow, body = _group('Expression regions  (for the expression values only)')
         self._groups['regions'] = (arrow, body)
         self._region_checks = _checks(row, [
@@ -419,6 +464,7 @@ class Step4Page(QWidget):
         out_dir = self._out_edit.text().strip() or default_output_dir(self._job)
 
         stats, regions, features, write_csv = self.scope()
+        distribution, markers = self.distribution_scope()
         if not stats:
             QMessageBox.warning(self, 'No statistics selected',
                                 'Please select at least one intensity statistic.')
@@ -435,6 +481,8 @@ class Step4Page(QWidget):
             regions     = regions,
             features    = features,
             write_csv   = write_csv,
+            distribution = distribution,
+            markers     = markers,
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.extraction_done.connect(self._on_finished)

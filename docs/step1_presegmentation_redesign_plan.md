@@ -9,6 +9,8 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v4.07：块 S4-3 真机验收通过；Step4 的功能扩展到此为止。
+- v4.06：块 S4-3 已实施（自动验收通过，待真机验收），写入执行记录。
 - v4.05：用户压缩 WSL 虚拟磁盘后授权提交并实施 S4-3。
 - v4.04：块 S4-3 按独立审核修订为 v2 并获批（工作集预算、强制单通道超预算路径与重读记录、Crofton 来源记录与圆度不截断；S4-3 之后停止扩 Step4）；执行前先清理磁盘，等用户授权。
 - v4.03：块 S4-3 申请 v1（分布统计按 marker 选择、obsm 存法、内存上界；Crofton 周长与圆度；Parquet 不做）。
@@ -2044,6 +2046,19 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 回归：S4-2 的 20 个模块（不含实引擎的 Step2 模块：本块不改 Step2），与 HEAD 逐条对比。
   - 真机（用户）：选 2–3 个 marker 的分布统计，读回 h5ad 的 `obsm`。
 - **用户裁定（2026-09-28，同意独立审核）**：1–5 全部按建议（`obsm` 存法、numpy 线性分位数与所定的 Gini、全零为 NaN（单像素非零对象为 0）、不做 Parquet（留到以后 NGFF / Zarr + Parquet + AnnData 的整体数据架构评估）、新增 Crofton 周长与圆度并保留 `boundary_pixel_count`、批处理不提供分布统计）；加上面三条硬约束。**S4-3 之后停止继续扩 Step4 的功能**，转入数据架构 / 边缘计算的评估。
+- **执行记录**（2026-09-28，未提交）：
+  - `core/quant_engine.py`：
+    - **Crofton**：`Geometry.cr`（每个对象 16 种 2 × 2 构型的计数，int32）；内核的几何任务按标签累加窗口构型，窗口归右下角像素所在的切块，区域最后一行 / 列窗口由边界切块负责（`ext_r` / `ext_c`）；收尾 `perimeter_crofton = cr @ CROFTON_COEFS`（skimage 4 方向权重），`circularity = 4πA / P²`（不截断，P = 0 为 NaN），接在形态列末尾；`PERIMETER_RECORD`。**实施中发现并修正**：核心区没有标签的切块原来整块跳过，但它第一行 / 列的窗口可能含相邻切块的细胞像素——改为外圈有标签时只跑几何任务（不读通道）。
+    - **分布统计**：`DIST_STATS`、`normalize_distribution`；`distribution_pass`：按 dtype 与工作集预算分组 marker，单个 marker 超预算时按对象编号分块、每块只读与其外接框相交的切块；`scatter`（Numba）把像素写进「对象 → 偏移」的缓冲，核像素在前、胞质在后，一套游标供同批所有通道共用；`reduce`（Numba，按对象并行）对核段与胞质段**原地排序**，全细胞由两段有序合并进一个对象大小的临时数组；`quantile` 照抄 numpy 的「linear」（虚拟索引 `(n-1)*q`）与 `_lerp`；Gini 按公式、全零为 NaN。工作集（缓冲 + 标签映射 + 偏移 / 游标 + 输出块）计入预算并记录峰值；记录读过的不同切块数、读取总次数、重读倍数。结果写进 sink 的 `dist_<区域>_<统计>`（列 = 选中的 marker）。**实施中发现并修正**：(1) p90 与 numpy 差 1 个最低位——numpy 的 linear 方法用 `(n-1)*q` 而不是通用公式；(2) 同一 dtype 的 marker 在列表里不一定相邻，按「首列 + 连续宽度」写回会错列——改为逐列写。
+    - `quantify(distribution, markers)`；`QuantResult.dist_*` 与 CSV 列。
+  - `workers/feature_extract_worker.py`：h5ad 的 `obsm["<区域>_<统计>"]` 用 `anndata.io.write_elem` 逐个写入（DataFrame，列 = marker，float32）；`uns["distribution_markers"]`、`uns["distribution_statistics"]`、`uns["perimeter"]`；来源记录的 `perimeter` 与 `distribution`；参数校验（有分布统计必须有 marker、marker 必须是切片的通道）在任何输出之前。
+  - `ui/step4_page.py`：Statistics 组下 `Distribution (slow)` 一行与 marker 列表（勾了分布统计项才显示；没有 marker 时不能运行并提示；折叠 Statistics 时一起隐藏）；`distribution_scope()`。
+  - 测试：`tests/test_quant_engine.py` 35 条（新增 Crofton 对 skimage（分块 7 / 33 / 64 / 4096、区域边界、紧贴细胞）、单像素圆度 > 1 不截断、分布统计对 numpy 三区域 × uint8 / float32、只算选中的 marker 与参数校验、Gini 的单像素与全零、强制按对象分块逐位相同且工作集 ≤ 预算）；`tests/test_step4_worker.py` 22 条（新增 `obsm` / `uns` / 来源记录 / CSV 列、没有分布统计时没有 `obsm`、缺 marker 在输出前拒绝；S4-1 的「不输出圆度」断言按 S4-3 改为输出）；`tests/test_step4_page.py` 20 条（新增默认关闭与列表隐藏、没有 marker 不能运行、折叠、页面运行得到 `obsm`）。
+  - 反向注入 10 处（中位数取下中位数、分位数取最近下标、Gini 名次反向、算了全部 marker、分块只读第一块、Crofton 在切块边界重复计窗口、恢复跳过只有外圈的切块、圆度用边界像素数、圆度截到 1、按首列连续写回）——各使至少 1 条测试变红。
+  - 真实数据与内存门：报告 `docs/benchmarks/step4/s43_2026-09-28.md`——全范围 + 3 marker × 3 区域 × 4 项分布统计 25.5 s、峰值 1.81 GB；对 numpy 最大相对差 6e-8（float32 存储），Crofton 对 skimage 1.1e-13，圆度最大 1.006；快速统计与 S4-1 的 CSV 161 列逐字符相同；强制按对象分块（预算 20 MB）：10 遍、16 个切块、读取 88 次、重读倍数 5.5、工作集 ≤ 预算、结果逐位相同；50 万对象峰值 2.88 GB。
+  - 文档：`UI_SURFACE_RULES.md` 的 Step4 条目；两份用户指南（分布统计的选择与 `obsm`、Crofton 周长与圆度的定义）。
+  - 回归：S4-2 的 20 个模块（Step4 五个、`test_main_window_step1_5`、`test_step0_step1_handoff_contract`、`test_step3_masks`、Step0→Step1→Step2 交接与会话各模块、`test_ui_surface_contract`），每模块单独进程，与 `git archive HEAD`（`3e4cb39`）逐条对比：本侧 20 个模块**全部通过**，无新增失败（本块不改 Step2，未跑实引擎模块）。
+  - **真机验收通过（用户 2026-09-28）**：`seg_20260927_194616_stardist_nuclei_expansion`，Median + P90 × TIM3、CD22：`obsm` 6 张表（2 统计 × 3 区域），列为所选 marker；`perimeter_crofton` / `circularity` 在 `obs`（圆度中位数 0.83、最大 1.005，未截断）。`perimeter_crofton` 的最大值 12 792 px 是该运行（N4 之前）里 414 万像素的伪影细胞，重跑 Step2 即由 N4 过滤。
 - **请用户裁定**（v1 原文）：
   1. **存法**：`obsm` 里按「区域 × 统计」各一张只含选中 marker 的 DataFrame（建议，符合契约 8，按 marker 名取列）；或者整张 layer、未选的 marker 为 NaN（与快速统计的访问方式一致，但占满 n × 29）。
   2. **分位数定义**：`numpy` 线性插值（建议，与旧 Step4 的 p90 相同）；Gini 用上面的公式，全零对象为 NaN。

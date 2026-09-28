@@ -57,9 +57,11 @@ def test_outputs_and_provenance(tmp_path):
                              write_csv=True)
     header, rows = _rows(res["csv"])
     assert os.path.basename(res["csv"]) == "s1_cell_features.csv"
-    assert header[:16] == ["cell_id"] + list(qe.MORPHOLOGY_COLUMNS)
-    assert "perimeter" not in header and "circularity" not in header
-    assert header[16:] == ["DAPI_mean", "DAPI_max", "CD3_mean", "CD3_max", "CD8_mean",
+    k = 1 + len(qe.MORPHOLOGY_COLUMNS)
+    assert header[:k] == ["cell_id"] + list(qe.MORPHOLOGY_COLUMNS)
+    assert "perimeter" not in header                  # the old union-erosion column
+    assert "perimeter_crofton" in header and "circularity" in header   # block S4-3
+    assert header[k:] == ["DAPI_mean", "DAPI_max", "CD3_mean", "CD3_max", "CD8_mean",
                            "CD8_max", "PanCK_mean", "PanCK_max"]
     present = sorted(int(v) for v in np.unique(lab) if v)
     assert [int(r[0]) for r in rows] == present
@@ -302,3 +304,49 @@ def test_the_csv_keeps_full_precision_while_the_h5ad_is_float32(tmp_path):
     assert [r[ci] for r in rows] == want
     assert json.load(open(res["provenance"]))["settings"]["sink_dtype"] == "f8"
     assert _read(res["h5ad"]).layers["cell_std"].dtype == np.float32
+
+
+
+# ── block S4-3: distribution statistics and the Crofton perimeter ────────
+
+def test_distribution_statistics_go_to_obsm_for_the_chosen_markers(tmp_path):
+    p = build_project(tmp_path, nuclei=True)
+    res = few.run_extraction(p["run_dir"], str(tmp_path / "out"), regions=["nucleus"],
+                             distribution=["median", "gini"], markers=["CD8", "CD3"],
+                             write_csv=True)
+    ad = _read(res["h5ad"])
+    assert sorted(ad.obsm.keys()) == ["cell_gini", "cell_median", "nucleus_gini",
+                                      "nucleus_median"]
+    frame = ad.obsm["nucleus_median"]
+    assert list(frame.columns) == ["CD3", "CD8"]          # slide order
+    assert list(frame.index) == list(ad.obs_names)
+    assert list(ad.uns["distribution_markers"]) == ["CD3", "CD8"]
+    assert list(ad.uns["distribution_statistics"]) == ["median", "gini"]
+    assert ad.uns["perimeter"]["perimeter_method"] == "crofton"
+    prov = json.load(open(res["provenance"]))
+    d = prov["distribution"]
+    assert d["markers"] == ["CD3", "CD8"] and d["statistics"] == ["median", "gini"]
+    assert d["total_tile_reads"] >= d["unique_tiles_read"] >= 1
+    assert prov["perimeter"]["crofton_directions"] == 4
+    header, rows = _rows(res["csv"])
+    assert "CD8_nucleus_median" in header and "CD3_gini" in header
+    assert "DAPI_median" not in header
+    assert "perimeter_crofton" in ad.obs.columns and "circularity" in ad.obs.columns
+
+
+def test_without_distribution_there_is_no_obsm(tmp_path):
+    p = build_project(tmp_path)
+    res = few.run_extraction(p["run_dir"], str(tmp_path / "out"))
+    ad = _read(res["h5ad"])
+    assert len(ad.obsm.keys()) == 0 and "distribution_markers" not in ad.uns
+    assert json.load(open(res["provenance"]))["distribution"] is None
+
+
+def test_distribution_needs_markers_before_any_output(tmp_path):
+    p = build_project(tmp_path)
+    out = str(tmp_path / "out")
+    with pytest.raises(ValueError, match="at least one marker"):
+        few.run_extraction(p["run_dir"], out, distribution=["median"])
+    with pytest.raises(ValueError, match="not a channel"):
+        few.run_extraction(p["run_dir"], out, distribution=["median"], markers=["XYZ"])
+    assert not os.path.exists(out)

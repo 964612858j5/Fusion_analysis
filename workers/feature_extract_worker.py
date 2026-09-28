@@ -117,6 +117,10 @@ def _write_h5ad(path, job, result, prov):
     adata.uns["perimeter_definition"] = qe.PERIMETER_DEFINITION
     adata.uns["seam_merge"] = dict(job.seam_merge) if job.seam_merge else "absent"
     adata.uns["provenance_json"] = json.dumps(prov)
+    adata.uns["perimeter"] = dict(qe.PERIMETER_RECORD)
+    if result.dist_markers:
+        adata.uns["distribution_markers"] = list(result.dist_markers)
+        adata.uns["distribution_statistics"] = list(result.dist_stats)
     adata.write_h5ad(path)
     del adata
     n, c = int(result.ids.size), len(job.channels)
@@ -130,6 +134,18 @@ def _write_h5ad(path, job, result, prov):
             for r0 in range(0, n, H5AD_BLOCK_ROWS):
                 r1 = min(n, r0 + H5AD_BLOCK_ROWS)
                 ds[r0:r1] = result.sink.read(name, r0, r1).astype(np.float32)
+        # block S4-3: distribution statistics of the chosen markers, one
+        # DataFrame per region x statistic (columns = the markers), written
+        # one at a time
+        if result.dist_markers:
+            from anndata.io import write_elem
+            index = pd.Index(result.ids.astype(str))
+            for region in result.regions:
+                for stat in result.dist_stats:
+                    values = result.sink.read(f"dist_{region}_{stat}").astype(np.float32)
+                    frame = pd.DataFrame(values, index=index, columns=list(result.dist_markers))
+                    write_elem(f.require_group("obsm"), f"{region}_{stat}", frame)
+                    del frame, values
 
 
 def _provenance(job, result, stats, reader, settings, timing, outputs, seconds, features):
@@ -152,6 +168,8 @@ def _provenance(job, result, stats, reader, settings, timing, outputs, seconds, 
                     "nucleus_pixels_outside_their_cell": result.nucleus_outside}
                    if job.has_nuclei else None),
         "seam_merge": job.seam_merge or "absent",
+        "perimeter": dict(qe.PERIMETER_RECORD),
+        "distribution": result.distribution,
         "segmentation_run": {"run_id": job.run_id, "run_dir": job.run_dir,
                              "method": job.method, "workspace": job.workspace},
         "region": {"roi_name": job.roi_name, "bbox_fullres": list(job.bbox),
@@ -189,7 +207,8 @@ def _provenance(job, result, stats, reader, settings, timing, outputs, seconds, 
 
 def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions=None,
                    features=("morphology",), write_csv=False, file_prefix=None,
-                   open_slide=None, settings=None, progress=None, should_stop=None):
+                   open_slide=None, settings=None, progress=None, should_stop=None,
+                   distribution=None, markers=None):
     """Quantify one region and write its outputs: {"h5ad", "csv" (or None),
     "provenance"}. Raises QuantSourceError (nothing quantified),
     QuantStopped, or any I/O error -- never leaving a `*.partial`, the sink or
@@ -204,6 +223,11 @@ def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions
     features = set(features or ())
     job = qs.resolve_quant_job(run_path, roi_name, open_slide)
     qe.normalize_regions(regions or [], job)                     # refuse before any output
+    if qe.normalize_distribution(distribution) and not markers:
+        raise ValueError("distribution statistics need at least one marker")
+    unknown = [m for m in (markers or []) if m not in [c.name for c in job.channels]]
+    if unknown:
+        raise ValueError(f"not a channel of this slide: {unknown}")
     if "nuclear_summary" in features and not job.has_nuclei:
         raise ValueError("this run has no nuclei beside its cells: no nuclear summary")
     base = output_base(file_prefix)
@@ -223,7 +247,8 @@ def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions
         try:
             result, timing = qe.quantify(job, reader, stats, regions=regions, features=features,
                                          sink_path=sink_dir, settings=settings,
-                                         progress=progress, should_stop=should_stop)
+                                         progress=progress, should_stop=should_stop,
+                                         distribution=distribution, markers=markers)
         finally:
             reader.close()
         if should_stop is not None and should_stop():
@@ -281,7 +306,7 @@ class FeatureExtractWorker(QThread):
 
     def __init__(self, run_path, output_dir, roi_name=None, statistics=None,
                  file_prefix=None, open_slide=None, settings=None, regions=None,
-                 features=("morphology",), write_csv=False):
+                 features=("morphology",), write_csv=False, distribution=None, markers=None):
         super().__init__()
         self.run_path = run_path
         self.output_dir = output_dir
@@ -290,6 +315,8 @@ class FeatureExtractWorker(QThread):
         self.regions = list(regions or [])
         self.features = tuple(features or ())
         self.write_csv = bool(write_csv)
+        self.distribution = list(distribution or [])
+        self.markers = list(markers or [])
         self.file_prefix = file_prefix
         self.open_slide = open_slide
         self.settings = settings
@@ -312,6 +339,7 @@ class FeatureExtractWorker(QThread):
                 self.run_path, self.output_dir, roi_name=self.roi_name,
                 statistics=self.statistics, regions=self.regions, features=self.features,
                 write_csv=self.write_csv, file_prefix=self.file_prefix,
+                distribution=self.distribution, markers=self.markers,
                 open_slide=self.open_slide, settings=self.settings,
                 progress=lambda d, t, m: self.progress.emit(d, max(1, t), m),
                 should_stop=lambda: self._stop)

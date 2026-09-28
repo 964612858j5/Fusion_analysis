@@ -224,3 +224,72 @@ def test_the_page_runs_the_chosen_scope(tmp_path):
     ad = anndata.read_h5ad(os.path.join(mine, "cell_features.h5ad"))
     assert "nucleus_mean" in ad.layers and "cytoplasm_mean" not in ad.layers
     assert os.path.isfile(os.path.join(mine, "cell_features.csv"))
+
+
+# ── block S4-3: distribution statistics on the page ──────────────────────
+
+def _check_markers(page, names):
+    from PyQt5.QtCore import Qt
+    for i in range(page._marker_list.count()):
+        item = page._marker_list.item(i)
+        if item.text() in names:
+            item.setCheckState(Qt.Checked)
+
+
+def test_distribution_is_off_and_its_marker_list_hidden_by_default(tmp_path):
+    p = build_project(tmp_path)
+    page = _page()
+    page.set_run(p["run_dir"], open_slide=p["slide"])
+    assert all(not cb.isChecked() for cb in page._dist_checks.values())
+    assert list(page._dist_checks) == ["median", "p90", "p95", "gini"]
+    assert not page._marker_list.isVisibleTo(page)
+    assert [page._marker_list.item(i).text() for i in range(page._marker_list.count())] == \
+        ["DAPI", "CD3", "CD8", "PanCK"]
+    assert page.distribution_scope() == ([], [])
+
+
+def test_distribution_without_markers_cannot_run(tmp_path):
+    p = build_project(tmp_path)
+    page = _page()
+    page.set_run(p["run_dir"], open_slide=p["slide"])
+    page._dist_checks["median"].setChecked(True)
+    assert page._marker_list.isVisibleTo(page)
+    assert not page._btn_run.isEnabled()
+    assert "choose the markers" in page._prefix_info.text()
+    _check_markers(page, ["CD8"])
+    assert page._btn_run.isEnabled()
+    assert "distribution: 1 marker" in page._prefix_info.text()
+    assert page.distribution_scope() == (["median"], ["CD8"])
+
+
+def test_folding_statistics_hides_the_distribution_row():
+    page = _page()
+    page.show()
+    try:
+        arrow, _body = page._groups["statistics"]
+        assert page._dist_widget.isVisible()
+        arrow.setChecked(False)
+        assert not page._dist_widget.isVisible()
+        arrow.setChecked(True)
+        assert page._dist_widget.isVisible()
+    finally:
+        page.close()
+
+
+def test_the_page_runs_the_distribution_statistics(tmp_path):
+    p = build_project(tmp_path, nuclei=True)
+    page = _page()
+    page.set_run(p["run_dir"], open_slide=p["slide"])
+    mine = str(tmp_path / "dist_out")
+    page._out_edit.setText(mine)
+    page._dist_checks["p90"].setChecked(True)
+    _check_markers(page, ["CD3", "PanCK"])
+    page._run()
+    page._worker.wait(60000)
+    for _ in range(50):
+        _app.processEvents()
+    assert page._errors == []
+    import anndata
+    ad = anndata.read_h5ad(os.path.join(mine, "cell_features.h5ad"))
+    assert set(ad.obsm.keys()) == {"cell_p90", "nucleus_p90", "cytoplasm_p90"}
+    assert list(ad.obsm["cell_p90"].columns) == ["CD3", "PanCK"]

@@ -56,7 +56,19 @@ MORPHOLOGY_COLUMNS = (
     "bbox_min_y", "bbox_min_x", "bbox_max_y", "bbox_max_x",
     "major_axis", "minor_axis", "eccentricity", "orientation",
     "equivalent_diameter", "aspect_ratio", "extent", "boundary_pixel_count",
+    "perimeter_crofton", "circularity",
 )
+# block S4-3: skimage's perimeter_crofton(directions=4) weights of the 16
+# configurations of a 2 x 2 window (bits: top-left 8, top-right 2,
+# bottom-left 4, bottom-right 1; skimage/measure/_regionprops_utils.py)
+CROFTON_COEFS = np.array([
+    0, np.pi / 4 * (1 + 1 / np.sqrt(2)), np.pi / (4 * np.sqrt(2)), np.pi / (2 * np.sqrt(2)),
+    0, np.pi / 4 * (1 + 1 / np.sqrt(2)), 0, np.pi / (4 * np.sqrt(2)),
+    np.pi / 4, np.pi / 2, np.pi / (4 * np.sqrt(2)), np.pi / (4 * np.sqrt(2)),
+    np.pi / 4, np.pi / 2, 0, 0])
+PERIMETER_RECORD = {"perimeter_method": "crofton", "crofton_directions": 4,
+                    "perimeter_unit": "pixel",
+                    "circularity": "4*pi*area/perimeter_crofton^2 (not clipped; NaN when P = 0)"}
 NUCLEAR_SUMMARY_COLUMNS = ("n_nuclei", "nuclear_area", "nuclear_area_mean", "nuclear_area_max",
                            "nuclear_fraction", "cytoplasm_area")
 INTEGER_COLUMNS = frozenset({"cell_id", "nucleus_id", "area", "bbox_min_y", "bbox_min_x",
@@ -127,6 +139,7 @@ class Geometry:
     sxy: np.ndarray
     bb: np.ndarray               # int64 (n, 4): min y, max y, min x, max x
     bnd: np.ndarray              # int64 (n,)
+    cr: np.ndarray               # int32 (n, 16): 2 x 2 window configurations (Crofton)
 
     @classmethod
     def empty(cls, n):
@@ -136,7 +149,7 @@ class Geometry:
         bb[:, 1::2] = -1
         z = [np.zeros(n, np.int64) for _ in range(6)]
         return cls(cnt=z[0], sx=z[1], sy=z[2], sxx=z[3], syy=z[4], sxy=z[5], bb=bb,
-                   bnd=np.zeros(n, np.int64))
+                   bnd=np.zeros(n, np.int64), cr=np.zeros((n, 16), np.int32))
 
 
 @dataclasses.dataclass
@@ -202,8 +215,8 @@ def _numba_kernel():
     from numba import njit, prange
 
     @njit(parallel=True, nogil=True, cache=True)
-    def kernel(halo, nucflag, has_nuc, img, cidx, geom, y0, x0,
-               cnt, sx, sy, sxx, syy, sxy, bb, bnd,
+    def kernel(halo, nucflag, has_nuc, img, cidx, geom, y0, x0, ext_r, ext_c,
+               cnt, sx, sy, sxx, syy, sxy, bb, bnd, cr,
                s, ss, mn, mx, ns, nss, nmn, nmx, ymn, ymx,
                w_ss, w_mn, w_mx, w_ns, w_nss, w_nmn, w_nmx, w_ymn, w_ymx):
         h = halo.shape[0] - 2
@@ -242,6 +255,38 @@ def _numba_kernel():
                                     edge = True
                         if edge:
                             bnd[lab] += 1
+                # Crofton: every 2 x 2 window, owned by the tile of its
+                # bottom-right pixel; the region's last row / column of
+                # windows (bottom-right just outside) by the edge tiles
+                for rr in range(1, h + 1 + ext_r):
+                    for qq in range(1, w + 1 + ext_c):
+                        tl = halo[rr - 1, qq - 1]
+                        tr = halo[rr - 1, qq]
+                        bl = halo[rr, qq - 1]
+                        br = halo[rr, qq]
+                        if tl == 0 and tr == 0 and bl == 0 and br == 0:
+                            continue
+                        for pick in range(4):
+                            lab = tl if pick == 0 else (tr if pick == 1 else
+                                                        (bl if pick == 2 else br))
+                            if lab == 0 or lab >= n:
+                                continue
+                            if pick >= 1 and lab == tl:
+                                continue
+                            if pick >= 2 and lab == tr:
+                                continue
+                            if pick == 3 and lab == bl:
+                                continue
+                            code = 0
+                            if tl == lab:
+                                code += 8
+                            if tr == lab:
+                                code += 2
+                            if bl == lab:
+                                code += 4
+                            if br == lab:
+                                code += 1
+                            cr[lab, code] += 1
             else:
                 c = cidx[j]
                 for r in range(h):
@@ -288,8 +333,9 @@ class NumbaBackend(QuantBackend):
     channel of the batch plus one for the geometry), ONE accumulator set."""
     name = "numba"
 
-    def __init__(self, geometry, acc, threads=None):
+    def __init__(self, geometry, acc, threads=None, region_shape=None):
         self.geo = geometry
+        self.region_shape = region_shape
         self.acc = acc
         self.threads = int(threads or os.cpu_count() or 1)
         self._d2 = np.zeros((1, 1))
@@ -308,7 +354,11 @@ class NumbaBackend(QuantBackend):
                np.ascontiguousarray(nucflag) if nucflag is not None else self._flag,
                nucflag is not None, np.ascontiguousarray(block),
                np.asarray(channel_idx, np.int64), bool(geometry), np.int64(y0), np.int64(x0),
-               g.cnt, g.sx, g.sy, g.sxx, g.syy, g.sxy, g.bb, g.bnd,
+               np.int64(1 if (self.region_shape and y0 + halo.shape[0] - 2 == self.region_shape[0])
+                        else 0),
+               np.int64(1 if (self.region_shape and x0 + halo.shape[1] - 2 == self.region_shape[1])
+                        else 0),
+               g.cnt, g.sx, g.sy, g.sxx, g.syy, g.sxy, g.bb, g.bnd, g.cr,
                a.s, arr(a.ss), arr(a.mn), arr(a.mx), arr(a.ns), arr(a.nss), arr(a.nmn),
                arr(a.nmx), arr(a.ymn), arr(a.ymx),
                a.ss is not None, a.mn is not None, a.mx is not None, a.ns is not None,
@@ -351,6 +401,16 @@ class FeatureMatrixSink:
     def write(self, layer, c0, values):
         """values: float64 (objects, group channels) for channels c0 ..."""
         self.root[layer][:, c0:c0 + values.shape[1]] = values
+
+    def add(self, layer, width, dtype="f8", chunk_rows=65536):
+        """A further (objects, width) layer (block S4-3: distribution
+        statistics of the chosen markers)."""
+        self.root.create_dataset(layer, shape=(self.n_rows, width), dtype=dtype,
+                                 chunks=(max(1, min(chunk_rows, self.n_rows)), max(1, width)),
+                                 fill_value=np.nan)
+
+    def write_rows(self, layer, r0, c0, values):
+        self.root[layer][r0:r0 + values.shape[0], c0:c0 + values.shape[1]] = values
 
     def read(self, layer, r0=0, r1=None):
         return np.asarray(self.root[layer][r0:r1])
@@ -397,6 +457,10 @@ class QuantFinalizer:
                           0.5 * np.arctan2(2.0 * cov, ((B - A) / n2).astype(np.float64)))
         bb = geo.bb[ids]
         bbox_area = (bb[:, 1] - bb[:, 0] + 1).astype(np.float64) * (bb[:, 3] - bb[:, 2] + 1)
+        perim = geo.cr[ids].astype(np.float64) @ CROFTON_COEFS
+        with np.errstate(invalid="ignore", divide="ignore"):
+            circ = np.where(perim > 0, 4.0 * np.pi * n / np.where(perim > 0, perim, 1.0) ** 2,
+                            np.nan)
         return {
             "area": n,
             "centroid_y": cy + oy,
@@ -413,6 +477,8 @@ class QuantFinalizer:
             "aspect_ratio": aspect,
             "extent": n / bbox_area,
             "boundary_pixel_count": geo.bnd[ids].astype(np.float64),
+            "perimeter_crofton": perim,
+            "circularity": circ,
         }
 
     @staticmethod
@@ -494,6 +560,14 @@ class QuantResult:
     empty_label_ids: np.ndarray
     nucleus_outside: Dict[str, int]  # nucleus pixels not in their cell
     channel_groups: int
+    dist_stats: List[str] = dataclasses.field(default_factory=list)
+    dist_markers: List[str] = dataclasses.field(default_factory=list)
+    distribution: Optional[Dict] = None   # the pass's record (tile reads, blocks, ...)
+
+    @property
+    def dist_layers(self):
+        """sink layers "dist_<region>_<stat>" (columns = dist_markers)."""
+        return [f"dist_{r}_{st}" for r in self.regions for st in self.dist_stats]
 
     @property
     def cell_ids(self):
@@ -518,6 +592,12 @@ class QuantResult:
                     names.append(channel_column(ch, stat, None if region == self.regions[0]
                                                 else region))
                     src.append((f"{region}_{stat}", ci))
+        for mi, mk in enumerate(self.dist_markers):
+            for region in self.regions:
+                for stat in self.dist_stats:
+                    names.append(channel_column(mk, stat, None if region == self.regions[0]
+                                                else region))
+                    src.append((f"dist_{region}_{stat}", mi))
         return names, src
 
     def block(self, r0, r1):
@@ -544,6 +624,276 @@ class QuantResult:
     def values(self):
         """The whole table (small data / tests only)."""
         return self.block(0, self.ids.size)
+
+
+# ── distribution statistics (block S4-3) ─────────────────────────────────
+
+DIST_STATS = ("median", "p90", "p95", "gini")
+DIST_DEFINITIONS = {"median": "numpy.median (mean of the two middle values when even)",
+                    "p90": "numpy.percentile(q=90, method='linear')",
+                    "p95": "numpy.percentile(q=95, method='linear')",
+                    "gini": "2*sum(i*x_i)/(n*sum(x)) - (n+1)/n over the sorted values; "
+                            "NaN when sum(x) = 0"}
+
+
+def normalize_distribution(stats):
+    wanted = {str(s).strip().lower() for s in (stats or [])}
+    unknown = sorted(wanted - set(DIST_STATS))
+    if unknown:
+        raise ValueError(f"not a distribution statistic: {unknown}")
+    return [s for s in DIST_STATS if s in wanted]
+
+
+_NBD = {}
+
+
+def _dist_kernels():
+    if _NBD:
+        return _NBD
+    from numba import njit, prange
+
+    @njit(nogil=True, cache=True)
+    def scatter(core, flag, has_flag, img, obj_of, start, nnuc, cur_n, cur_c, bufs):
+        """Each pixel of a chosen object to its slot: the object's nuclear
+        pixels first, then its cytoplasm (no flag: all in one run). One
+        cursor set serves every channel of the batch (same pixel order)."""
+        h, w = core.shape
+        k = img.shape[0]
+        n_lab = obj_of.shape[0]
+        for r in range(h):
+            for q in range(w):
+                lab = core[r, q]
+                if lab == 0 or lab >= n_lab:
+                    continue
+                o = obj_of[lab]
+                if o < 0:
+                    continue
+                if has_flag and flag[r, q]:
+                    pos = start[o] + cur_n[o]
+                    cur_n[o] += 1
+                else:
+                    pos = start[o] + nnuc[o] + cur_c[o]
+                    cur_c[o] += 1
+                for j in range(k):
+                    bufs[j, pos] = img[j, r, q]
+
+    @njit(nogil=True, cache=True)
+    def lerp(a, b, t):
+        # numpy's _lerp (numpy/lib/function_base.py), bit for bit
+        d = b - a
+        v = a + d * t
+        if t >= 0.5:
+            v = b - d * (1.0 - t)
+        return v
+
+    @njit(nogil=True, cache=True)
+    def quantile(x, m, q):
+        # numpy.quantile(method="linear"): virtual index (n - 1) * q
+        # (numpy/lib/function_base.py, _QuantileMethods["linear"])
+        vi = (m - 1) * q
+        if vi >= m - 1:
+            return x[m - 1]
+        if vi < 0:
+            return x[0]
+        p = np.floor(vi)
+        i = np.int64(p)
+        return lerp(x[i], x[i + 1], vi - p)
+
+    @njit(nogil=True, cache=True)
+    def stats_of(x, m, want, out, row, j, o):
+        """x: sorted float64 of length m; want[k]: median, p90, p95, gini."""
+        base = row * 4
+        if m == 0:
+            for k in range(4):
+                if want[k]:
+                    out[base + k, j, o] = np.nan
+            return
+        if want[0]:
+            if m % 2 == 1:
+                out[base, j, o] = x[m // 2]
+            else:
+                out[base, j, o] = (x[m // 2 - 1] + x[m // 2]) / 2.0
+        if want[1]:
+            out[base + 1, j, o] = quantile(x, m, 0.9)
+        if want[2]:
+            out[base + 2, j, o] = quantile(x, m, 0.95)
+        if want[3]:
+            tot = 0.0
+            acc = 0.0
+            for i in range(m):
+                tot += x[i]
+                acc += (i + 1) * x[i]
+            out[base + 3, j, o] = np.nan if tot == 0.0 else \
+                (2.0 * acc) / (m * tot) - (m + 1.0) / m
+
+    @njit(parallel=True, nogil=True, cache=True)
+    def reduce(bufs, start, cnt, nnuc, rows, want, out):
+        """Per object and channel: sort its nuclear run and its cytoplasm run
+        IN PLACE (no copy of the buffer); the whole cell is the merge of the
+        two sorted runs into an object-sized scratch. rows[r] = output row of
+        region r (cell, nucleus, cytoplasm) or -1."""
+        k = bufs.shape[0]
+        n_obj = start.shape[0]
+        for o in prange(n_obj):
+            s0 = start[o]
+            nn = nnuc[o]
+            m = cnt[o]
+            for j in range(k):
+                run1 = bufs[j, s0:s0 + nn]
+                run2 = bufs[j, s0 + nn:s0 + m]
+                run1.sort()
+                run2.sort()
+                if rows[1] >= 0:
+                    x1 = np.empty(nn)
+                    for i in range(nn):
+                        x1[i] = run1[i]
+                    stats_of(x1, nn, want, out, rows[1], j, o)
+                if rows[2] >= 0:
+                    x2 = np.empty(m - nn)
+                    for i in range(m - nn):
+                        x2[i] = run2[i]
+                    stats_of(x2, m - nn, want, out, rows[2], j, o)
+                if rows[0] >= 0:
+                    xm = np.empty(m)
+                    a = 0
+                    b = 0
+                    for i in range(m):
+                        if b >= m - nn or (a < nn and run1[a] <= run2[b]):
+                            xm[i] = run1[a]
+                            a += 1
+                        else:
+                            xm[i] = run2[b]
+                            b += 1
+                    stats_of(xm, m, want, out, rows[0], j, o)
+
+    _NBD.update(scatter=scatter, reduce=reduce)
+    return _NBD
+
+
+def _tiles_meeting(tiles, bbox):
+    y0, y1, x0, x1 = bbox
+    return [i for i, (a, b, c, d) in enumerate(tiles) if a <= y1 and y0 < b and c <= x1 and x0 < d]
+
+
+def distribution_pass(job, reader, tiles, geo, ids, nic_obj, table, regions, dstats, markers,
+                      sink, settings, timing, should_stop=None, progress=None):
+    """Distribution statistics of the chosen markers, into sink layers
+    "dist_<region>_<stat>". The WORKING SET -- pixel buffers, the label ->
+    object map, offsets, cursors and the output block -- stays within
+    settings.accumulator_budget: markers are grouped by dtype and count;
+    when one marker's buffer alone does not fit, the objects are split into
+    blocks (consecutive ids) and each block re-reads only the tiles meeting
+    its objects' bounding boxes. Returns the pass's record."""
+    kern = _dist_kernels()
+    channels = list(job.channels)
+    split = bool(table is not None and len(regions) > 1)
+    n_obj = int(ids.size)
+    n_lab = int(geo.cnt.size)
+    cnt_obj = geo.cnt[ids].astype(np.int64)
+    nn_obj = nic_obj.astype(np.int64) if split else np.zeros(n_obj, np.int64)
+    rows = np.full(3, -1, np.int64)
+    for r, name in enumerate(["cell", "nucleus", "cytoplasm"] if regions[0] == "cell"
+                             else ["nucleus"]):
+        if name in regions:
+            rows[r] = regions.index(name)
+    want = np.array([s in dstats for s in DIST_STATS], np.bool_)
+    n_rows_out = 4 * len(regions)
+    for name in [f"dist_{r}_{s}" for r in regions for s in dstats]:
+        sink.add(name, len(markers))
+    budget = int(settings.accumulator_budget)
+    fixed = n_lab * 8                                    # label -> object map
+
+    def per_obj_bytes(k):                                # offsets, cursors, output
+        return 4 * 8 + n_rows_out * k * 8
+
+    by_dtype = {}
+    for mi, pos in enumerate(markers):
+        by_dtype.setdefault(np.dtype(reader.channel_dtype(channels[pos])).str, []).append(mi)
+    unique_tiles, total_reads, blocks_run, peak_ws = set(), 0, 0, 0
+    t_read = t_compute = 0.0
+    csum = np.concatenate([[0], np.cumsum(cnt_obj)])
+    for key, mis in by_dtype.items():
+        item = np.dtype(key).itemsize
+        total_px = int(csum[-1])
+        k_fit = (budget - fixed - n_obj * per_obj_bytes(1)) // max(1, total_px * item)
+        if k_fit >= 1:
+            groups = [mis[i:i + int(k_fit)] for i in range(0, len(mis), int(k_fit))]
+            blocks = [(0, n_obj)]
+        else:
+            groups = [[mi] for mi in mis]
+            blocks, b0 = [], 0
+            room = budget - fixed
+            while b0 < n_obj:
+                b1 = b0
+                while b1 < n_obj and ((csum[b1 + 1] - csum[b0]) * item
+                                      + (b1 + 1 - b0) * per_obj_bytes(1)) <= room:
+                    b1 += 1
+                if b1 == b0:
+                    raise MemoryError("one object alone exceeds the distribution budget")
+                blocks.append((b0, b1))
+                b0 = b1
+        for grp in groups:
+            sources = [channels[markers[mi]] for mi in grp]
+            for b0, b1 in blocks:
+                if should_stop is not None and should_stop():
+                    raise QuantStopped()
+                nb = b1 - b0
+                bpx = int(csum[b1] - csum[b0])
+                obj_of = np.full(n_lab, -1, np.int64)
+                obj_of[ids[b0:b1].astype(np.int64)] = np.arange(nb)
+                start = (csum[b0:b1] - csum[b0]).astype(np.int64)
+                cur_n = np.zeros(nb, np.int64)
+                cur_c = np.zeros(nb, np.int64)
+                bufs = np.empty((len(grp), bpx), np.dtype(key))
+                out = np.full((n_rows_out, len(grp), nb), np.nan)
+                ws = (obj_of.nbytes + start.nbytes + cur_n.nbytes + cur_c.nbytes + bufs.nbytes
+                      + out.nbytes + nn_obj[b0:b1].nbytes)
+                peak_ws = max(peak_ws, ws)
+                bb = geo.bb[ids[b0:b1].astype(np.int64)]
+                box = (int(bb[:, 0].min()), int(bb[:, 1].max()), int(bb[:, 2].min()),
+                       int(bb[:, 3].max()))
+                t0 = time.perf_counter()
+                for ti in _tiles_meeting(tiles, box):
+                    y0, y1, x0, x1 = tiles[ti]
+                    core = np.ascontiguousarray(reader.labels(y0, y1, x0, x1)[1:-1, 1:-1])
+                    flag = np.zeros((1, 1), np.uint8)
+                    if split:
+                        nuc = reader.nuclei(y0, y1, x0, x1)
+                        flag = ((nuc > 0) & (table[nuc] == core)).view(np.uint8)
+                    blk = reader.channels(sources, y0, y1, x0, x1)
+                    unique_tiles.add(ti)
+                    total_reads += 1
+                    kern["scatter"](core, flag, split, np.ascontiguousarray(blk), obj_of, start,
+                                    nn_obj[b0:b1], cur_n, cur_c, bufs)
+                t_read += time.perf_counter() - t0
+                if not (np.array_equal(cur_n, nn_obj[b0:b1])
+                        and np.array_equal(cur_c, cnt_obj[b0:b1] - nn_obj[b0:b1])):
+                    raise QuantLabelError("the distribution pass did not see every pixel "
+                                          "of its objects")
+                t0 = time.perf_counter()
+                kern["reduce"](bufs, start, cnt_obj[b0:b1], nn_obj[b0:b1], rows, want, out)
+                for r, region in enumerate(regions):
+                    for si, stat in enumerate(DIST_STATS):
+                        if stat in dstats:
+                            # markers of one dtype need not be adjacent in
+                            # the marker list: one column each
+                            for jj, mi in enumerate(grp):
+                                sink.write_rows(f"dist_{region}_{stat}", b0, mi,
+                                                out[r * 4 + si, jj][:, None])
+                t_compute += time.perf_counter() - t0
+                blocks_run += 1
+                del bufs, out, obj_of
+                if progress is not None:
+                    progress(blocks_run, blocks_run, f"distribution {blocks_run}")
+    timing["distribution_read"] = t_read
+    timing["distribution_compute"] = t_compute
+    return {"markers": [channels[m].name for m in markers], "statistics": list(dstats),
+            "regions": list(regions), "definitions": {s: DIST_DEFINITIONS[s] for s in dstats},
+            "budget_bytes": budget, "peak_working_set_bytes": int(peak_ws),
+            "passes": blocks_run, "unique_tiles_read": len(unique_tiles),
+            "total_tile_reads": total_reads,
+            "reread_factor": round(total_reads / max(1, len(unique_tiles)), 3),
+            "marker_groups": sum(1 for _ in by_dtype)}
 
 
 # ── the driver ───────────────────────────────────────────────────────────
@@ -611,7 +961,16 @@ def _pass(job, reader, tiles, batches, backend, first, table, counts, timing, se
                     raise QuantLabelError(f"label {top} exceeds the label store's "
                                           f"{job.n_objects} objects")
                 if top == 0:
-                    if not put(("skip", ti, len(batches))):
+                    # an empty core can still own 2 x 2 windows (Crofton)
+                    # whose top-left pixels are a neighbour's cell: the
+                    # geometry job runs on its ring, no channel is read
+                    if first and halo.any():
+                        if not put(("block", ti, halo, None,
+                                    np.zeros((0,) + core.shape, np.uint8), [], True, None)):
+                            return
+                        if not put(("skip", ti, len(batches) - 1)):
+                            return
+                    elif not put(("skip", ti, len(batches))):
                         return
                     continue
                 flag = None
@@ -682,7 +1041,8 @@ def _pass(job, reader, tiles, batches, backend, first, table, counts, timing, se
 
 def quantify(job, reader, statistics, regions=None, features=("morphology",), sink_path=None,
              settings=None, progress: Optional[Callable[[int, int, str], None]] = None,
-             should_stop: Optional[Callable[[], bool]] = None):
+             should_stop: Optional[Callable[[], bool]] = None, distribution=None,
+             markers=None):
     """The whole job: (QuantResult, timings). `regions`: chosen expression
     regions (the primary one is always there); `features`: "morphology",
     "nuclear_summary"; the expression layers go to a FeatureMatrixSink at
@@ -690,6 +1050,14 @@ def quantify(job, reader, statistics, regions=None, features=("morphology",), si
     import tempfile
     settings = settings or QuantSettings()
     stats = normalize_statistics(statistics)
+    dstats = normalize_distribution(distribution)
+    names = [c.name for c in job.channels]
+    unknown = [m for m in (markers or []) if m not in names]
+    if unknown:
+        raise ValueError(f"not a channel of this slide: {unknown}")
+    marker_pos = [names.index(m) for m in names if m in set(markers or [])]
+    if dstats and not marker_pos:
+        raise ValueError("distribution statistics need at least one marker")
     regs = normalize_regions(regions or [], job)
     features = set(features or ())
     has_nuc = bool(getattr(job, "has_nuclei", False))
@@ -722,7 +1090,7 @@ def quantify(job, reader, statistics, regions=None, features=("morphology",), si
     layer_names = [f"{r}_{s}" for r in regs for s in stats]
     for gi, (group, batches) in enumerate(zip(groups, group_batches)):
         acc = ChannelAcc.empty(n, len(group), stats, regs)
-        backend = NumbaBackend(geo, acc, settings.compute_threads)
+        backend = NumbaBackend(geo, acc, settings.compute_threads, region_shape=(H, W))
         # the kernel indexes the group's accumulators by position in the group
         local = [[(group.index(p), ch) for p, ch in b] for b in batches]
         done = _pass(job, reader, tiles, local, backend, gi == 0, table, counts, timing,
@@ -754,6 +1122,11 @@ def quantify(job, reader, statistics, regions=None, features=("morphology",), si
     if counts is not None:
         outside = {"pixels": int(counts["out_px"].sum()),
                    "nuclei": int(np.count_nonzero(counts["out_px"][1:]))}
+    dist_record = None
+    if dstats and marker_pos:
+        nic_obj = counts["nic"][ids] if counts is not None else None
+        dist_record = distribution_pass(job, reader, tiles, geo, ids, nic_obj, table, regs, dstats,
+                                        marker_pos, sink, settings, timing, should_stop)
     timing["tiles"] = len(tiles)
     timing["channel_groups"] = len(groups)
     timing["accumulator_bytes_per_group"] = bytes_per_channel(n, stats, regs) * \
@@ -763,5 +1136,8 @@ def quantify(job, reader, statistics, regions=None, features=("morphology",), si
                       obs=obs, sink=sink, layers=layer_names,
                       channel_names=[c.name for c in channels], regions=regs, stats=stats,
                       max_label_id=int(job.n_objects), empty_label_ids=empty.astype(np.uint32),
-                      nucleus_outside=outside, channel_groups=len(groups))
+                      nucleus_outside=outside, channel_groups=len(groups),
+                      dist_stats=dstats if marker_pos else [],
+                      dist_markers=[names[p] for p in marker_pos] if dstats else [],
+                      distribution=dist_record)
     return res, timing

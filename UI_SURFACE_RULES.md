@@ -313,7 +313,11 @@ row, and the duplicate Tissue Preview button in the step bar.
   disabled. `What to quantify` (block S4-2, user ruling 2026-09-27; it
   replaced `Intensity Statistics`): four groups, open by default, each folded
   by the arrow on its title line -- `Statistics` (Mean, Sum, Std dev, Min,
-  Max; all checked by default), `Expression regions  (for the expression
+  Max; all checked by default; under them `Distribution (slow):` Median, P90,
+  P95, Gini, unchecked, and -- only while one of them is checked -- a
+  checkable list of the slide's markers, none checked; with a distribution
+  statistic but no marker `Extract Features` is disabled and the outputs line
+  says to choose markers; block S4-3), `Expression regions  (for the expression
   values only)` (Whole cell -- `Nucleus` for a nuclei-only result -- always
   on and greyed; Nucleus, Cytoplasm), `Features` (Expression always on and
   greyed; Morphology, checked; Nuclear summary), `Outputs` (h5ad always on

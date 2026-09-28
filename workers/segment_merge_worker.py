@@ -643,7 +643,27 @@ class SegmentMergeWorker(QThread):
     def _keeps_secondary_nuclei(self):
         return self.method in self.SECONDARY_NUCLEI_METHODS and self._runs_on_engine()
 
-    def _seam_begin(self, tiles, full_h, full_w, out_prefix, keeps_nuclei, nuclei_state=None):
+    def _size_filter(self, zarr_path):
+        """Block N4: the largest object area Step2 keeps -- from the Step1
+        pre-segmentation run this hand-over came from (its fused zarr's
+        folder is Step1's), else the default."""
+        primary = "cell" if "cell" in METHOD_OUTPUTS.get(self.method, ()) else "nucleus"
+        contract = getattr(self, "_contract", None)
+        if not contract:
+            return seam_merge.size_limit([], "default (no Step1 result for this run)")
+        step1_dir = os.path.dirname(os.path.abspath(zarr_path))
+        try:
+            areas = seam_merge.step1_object_areas(step1_dir, contract["preseg_run_id"],
+                                                  contract["combo_id"], primary)
+        except Exception as exc:                                # noqa: BLE001
+            areas = []
+            print(f"[Step2] Step1 object sizes could not be read: {exc}")
+        return seam_merge.size_limit(
+            areas, f"Step1 pre-segmentation run {contract['preseg_run_id']} "
+                   f"combo {contract['combo_id']} ({primary})")
+
+    def _seam_begin(self, tiles, full_h, full_w, out_prefix, keeps_nuclei, nuclei_state=None,
+                    zarr_path=None):
         """Block N3: the region's seam merger for the engine methods (HQ /
         HQ2 / CDS keep the old paste). Its spill folder is cleaned up with
         the run's partials whatever happens."""
@@ -656,8 +676,14 @@ class SegmentMergeWorker(QThread):
                                   tuple(int(v) for v in t.own_bbox))
                   for k, t in enumerate(tiles)]
         sink = (lambda block: nuclei_state["table"].append(block)) if nuclei_state else None
-        return seam_merge.SeamMerger((full_h, full_w), stiles, spill, with_nuclei=keeps_nuclei,
-                                     table_sink=sink, table_chunk=self.TABLE_CHUNK)
+        size = self._size_filter(zarr_path or self.zarr_path)
+        merger = seam_merge.SeamMerger((full_h, full_w), stiles, spill, with_nuclei=keeps_nuclei,
+                                       table_sink=sink, table_chunk=self.TABLE_CHUNK,
+                                       max_area=size["max_area_px"])
+        merger.size_filter = size
+        print(f"[Step2] size filter {out_prefix or 'whole image'}: objects above "
+              f"{size['max_area_px']:,} px are dropped ({size['rule']}; {size['source']})")
+        return merger
 
     def _seam_add_tile(self, merger, i, local_mask, mmap, nuclei_mmap, local_nuclei,
                        local_nuclei_cell):
@@ -679,6 +705,9 @@ class SegmentMergeWorker(QThread):
         seam_merge.validate(mmap, nuclei_mmap if parents is not None else None, parents,
                             n_cells=merger.n_cells, block=256)
         rec = record["seam_reconciliation"]
+        record["size_filter"] = dict(merger.size_filter,
+                                     objects_dropped=rec["oversized_objects_dropped"],
+                                     nuclei_dropped=rec["nuclei_dropped_oversized"])
         msg = (f"[Step2] seams {out_prefix or 'whole image'}: {rec['candidates']:,} seam candidates, "
                f"{rec['duplicate_groups']:,} duplicate groups ({rec['duplicate_versions_removed']:,} "
                f"versions removed, {rec['split_merge_groups']:,} split/merge), "
@@ -686,7 +715,9 @@ class SegmentMergeWorker(QThread):
                f"{rec['dropped_insufficient_free_pixels']:,} dropped (< "
                f"{merger.min_free:.0%} writable), {rec['cells_with_clipped_pixels']:,} cells clipped "
                f"({rec['clipped_pixels']:,} px), nuclei dropped on seams "
-               f"{rec['nuclei_dropped_seam_conflict']:,}; cells {merger.n_cells:,}")
+               f"{rec['nuclei_dropped_seam_conflict']:,}; oversized objects dropped "
+               f"{rec['oversized_objects_dropped']:,} (> {merger.max_area:,} px); "
+               f"cells {merger.n_cells:,}")
         print(msg)
         if self._logger:
             self._logger.info(msg)
@@ -801,6 +832,8 @@ class SegmentMergeWorker(QThread):
                 # their cell once the seams were decided
                 dropped["seam_conflict"] = int(
                     seam["seam_reconciliation"]["nuclei_dropped_seam_conflict"])
+                dropped["oversized_cell"] = int(
+                    seam["seam_reconciliation"].get("nuclei_dropped_oversized", 0))
             predicted = m + sum(dropped.values())
             store["nucleus"] = array(nucleus_path, m)
             store["nucleus_to_cell"] = {"path": self._abs(table_path), "dtype": "uint32",
@@ -828,7 +861,9 @@ class SegmentMergeWorker(QThread):
                f"{info['dropped']['partial_background']:,} partly on background, "
                f"{info['dropped']['outside_cells']:,} outside any cell"
                + (f", {info['dropped']['seam_conflict']:,} on tile seams"
-                  if "seam_conflict" in info["dropped"] else ""))
+                  if "seam_conflict" in info["dropped"] else "")
+               + (f", {info['dropped']['oversized_cell']:,} in oversized objects"
+                  if "oversized_cell" in info["dropped"] else ""))
         print(msg)
         if self._logger:
             self._logger.info(msg)
@@ -2566,7 +2601,8 @@ class SegmentMergeWorker(QThread):
         keeps_nuclei = self._keeps_secondary_nuclei()
         hq_nuclei = is_hq and not is_mesmer_guided
         nuclei_state = self._nuclei_begin(out_prefix) if keeps_nuclei else None
-        merger = self._seam_begin(tiles, full_h, full_w, out_prefix, keeps_nuclei, nuclei_state)
+        merger = self._seam_begin(tiles, full_h, full_w, out_prefix, keeps_nuclei, nuclei_state,
+                                  zarr_path=zarr_path)
         seam_record = None
         hq_channels, hq_group = ([], None)
         mesmer_group = None

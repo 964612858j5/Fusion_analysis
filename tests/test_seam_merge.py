@@ -476,3 +476,89 @@ def test_a_corrupted_merge_is_caught_by_the_real_final_check(tmp_path, monkeypat
     worker.run()
     assert got["finished"] == [] and "outside its cell" in got["error"][0]
     assert not rp._registered(worker)
+
+
+# ── block N4: the size filter ────────────────────────────────────────────
+
+def test_the_limit_is_fifty_times_the_step1_median_with_a_floor():
+    rec = sm.size_limit(np.full(30, 400), "s")
+    assert rec["max_area_px"] == 20_000 and rec["step1_objects"] == 30
+    assert sm.size_limit(np.full(30, 50), "s")["max_area_px"] == 10_000      # the floor
+    few = sm.size_limit(np.full(5, 400), "s")
+    assert few["max_area_px"] == 100_000 and "fewer than 20" in few["rule"]
+    assert sm.size_limit([], "none")["max_area_px"] == 100_000
+
+
+def test_step1_areas_come_from_the_combos_ok_patches_without_edge_objects(tmp_path):
+    import json
+    from block01.core import preseg_run
+    rdir = preseg_run.run_dir(str(tmp_path), "run1")
+    import os
+    os.makedirs(os.path.join(rdir, "records"))
+    os.makedirs(os.path.join(rdir, "masks"))
+
+    def patch(task, combo, status, cells):
+        lab = np.zeros((40, 40), np.uint32)
+        for k, (y0, y1, x0, x1) in enumerate(cells, start=1):
+            lab[y0:y1, x0:x1] = k
+        cpath = os.path.join(rdir, "masks", f"{task}.cell.npy")
+        np.save(cpath, lab)
+        rec = {"task_id": task, "combo_id": combo, "status": status,
+               "cell": {"status": "ok", "path": cpath}, "nucleus": {"status": "not_produced"}}
+        json.dump(rec, open(os.path.join(rdir, "records", f"{task}.json"), "w"))
+    patch("a__1", "a", "ok", [(5, 10, 5, 10), (20, 30, 20, 26), (0, 4, 0, 4)])  # last on the edge
+    patch("a__2", "a", "failed", [(5, 25, 5, 25)])
+    patch("b__1", "b", "ok", [(5, 25, 5, 25)])
+    areas = sm.step1_object_areas(str(tmp_path), "run1", "a", "cell")
+    assert sorted(areas.tolist()) == [25, 60]
+    assert sm.step1_object_areas(str(tmp_path), "run1", "a", "nucleus").size == 0
+    assert sm.step1_object_areas(str(tmp_path), "missing", "a", "cell").size == 0
+
+
+def test_the_merger_drops_an_oversized_object_and_its_nuclei(tmp_path):
+    big, small = rect(55, 95, 5, 45), rect(10, 16, 10, 16)          # both interior of tile 0? big in 2
+    m = sm.SeamMerger((H, W), TILES, str(tmp_path / "s"), with_nuclei=True, max_area=500)
+    cells = np.zeros((H, W), np.uint32)
+    nuc = np.zeros((H, W), np.uint32)
+    for t in TILES:
+        per = {0: [small], 2: [big]}.get(t.index, [])
+        nper = {0: [rect(12, 14, 12, 14)], 2: [rect(70, 72, 20, 22)]}.get(t.index, [])
+        m.add_tile(t, local_of(t, per), cells, nuc, local_of(t, nper),
+                   np.array([0, 1], np.uint32))
+    rec = m.finish(cells, nuc)
+    r = rec["seam_reconciliation"]
+    assert r["oversized_objects_dropped"] == 1 and r["nuclei_dropped_oversized"] == 1
+    assert not cells[big].any() and cells[small].all() and m.n_cells == 1
+    assert m.n_nuclei == 1
+
+
+def test_step2_drops_an_oversized_object_and_records_the_filter(tmp_path, monkeypatch):
+    import json as _json
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.dirname(__file__))
+    import test_step2_keeps_nuclei as kn
+    import test_step2_runner_path as rp
+    import zarr
+    cells, nuclei, _e = kn._truth()
+    cells = cells.copy()
+    nuclei = nuclei.copy()
+    cells[100:150, 20:70] = 8888                          # 2500 px: an artefact here
+    nuclei[100:150, 20:70] = 0
+    nuclei[110:114, 30:34] = 9000
+    monkeypatch.setitem(sm.SIZE_FILTER, "default_px", 1000)
+    from block01.workers import segment_merge_worker as smw
+    worker = rp._worker(tmp_path, rp._fused_zarr(tmp_path, rp._image()),
+                        dict(rp.PARAMS[kn.GUIDED], method=kn.GUIDED), rois=None)
+    monkeypatch.setattr(smw, "EngineProcess", kn._FakeEngine((cells, nuclei), worker=worker))
+    monkeypatch.setattr(smw.SegmentMergeWorker, "_validate_mesmer_config", lambda s, *a, **k: None)
+    got = rp._collect(worker)
+    worker.run()
+    assert got["error"] == [] and len(got["finished"]) == 1
+    cell = np.asarray(zarr.open(_os.path.join(worker.output_dir, "global_mask.zarr"), "r"))
+    assert not cell[100:150, 20:70].any()
+    store = _json.load(open(_os.path.join(worker.output_dir, "segmentation_meta.json")))["label_store"]
+    sf = store["size_filter"]
+    assert sf["max_area_px"] == 1000 and sf["objects_dropped"] >= 1 and sf["nuclei_dropped"] >= 1
+    assert "default" in sf["source"]
+    assert store["nuclei"]["dropped"]["oversized_cell"] == sf["nuclei_dropped"]

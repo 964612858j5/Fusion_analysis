@@ -9,6 +9,9 @@
 - v3：块 A0 的 8 项产出，见**第七节**。第一至六节的正文不改，凡被第七节更正或细化的地方，以第七节为准（4.5 的 Mesmer 两行、4.4 的来源字段、4.7 的资格规则）。第七节里标「待确认」的条目，确认前不算定稿。
 - v3.1：按独立审核意见修订第七节：F1、P1–P3、O1、O2、L1、S1、T1、T2、E1、E2 已裁定，另外明确块 D 缓存和线程的授权边界。新增 7.10 块 V（分割方法运行沙箱，用户提出，**未批准**）。
 - v3.2：块 V 的方向通过独立审核。7.10 按审核意见重写，分为 V0 / V1/C / V2 三个阶段，只有 V0 可以申请启动。
+- v4.02：块 N4 完成（用户裁定证据足够，提交推送）。
+- v4.01：块 N4 已实施（自动验收通过，待真机验收），写入执行记录。
+- v4.00：块 N4 记录（Step2 巨大对象过滤 + 运行资源监控器 NameError，用户授权执行）。
 - v3.99：块 S4-2 真机验收通过；记录真机中发现的 StarDist 巨大误检（另立块）。
 - v3.98：块 S4-2 已实施（自动验收通过，待真机验收），写入执行记录。
 - v3.97：块 S4-2 v2 获批（N3 之前的运行允许定量并提示风险；CSV 只在勾选时输出，批处理加勾选框）。
@@ -1982,6 +1985,28 @@ Step1 左侧的 `Method & Parameters` 标签页改为上下两部分：
   - 真机中发现（与 S4-2 无关，另立块）：该运行右上角有一个 414 万像素的巨大「细胞」（标签 7592）。4 × 5 网格重跑并保存每块的原始预测证实：它是 StarDist 在几乎全是背景的切块（tile_004）上直接输出的星凸多边形（像素数与最终标签完全相同）；tile_004 / tile_006 另有 3 个同类巨大标签因碰到内部窗口边被 N3 排除。重跑时还撞上了运行资源监控器的 `NameError`（已知 advisory）。
 
 - **v1（已被 v2 取代）** 的全文见修订记录 v3.86 对应的提交 `c7f43c7`（与 v2 的主要差别：两个 h5ad（细胞表 + 核表）、没有输出内存上界、问卷第二组叫 `Compartments`）。
+
+### 块 N4 — Step2 的巨大对象过滤 + 运行资源监控器的 `NameError`（用户 2026-09-27 授权按方案执行）
+- **来由**：S4-2 真机验收时发现，4 × 5 网格下 StarDist 在几乎全是背景的切块上直接输出了 414 万像素的星凸多边形（见 S4-2 执行记录）。用户：下游 QC 按面积也会滤掉它，但 Step2 内部应先有一道反巨大细胞的过滤；同意方案，授权执行。
+- **只读调查**：Step1 预分割运行 `<step1>/presegmentation_runs/<run_id>/`：`records/<combo>__<bbox>.json`（`status`，`cell` / `nucleus` 各自的 `status` 与 `path`）与 `masks/<combo>__<bbox>.{cell,nucleus}.npy`（patch 本身的标签）；Step2 的参数文件里 `preseg_contract` 有 `preseg_run_id` 与 `combo_id`（`segment_merge_worker.py:3248` 读入 `self._contract`）；Step1 目录 = fused zarr 所在目录。运行资源监控器：`_cpu_fallback_reasons()`（`utils/runtime_resource_monitor.py:336`）残留一行从 `diagnose()` 复制来的代码，用到 `diagnose()` 的局部变量 `likely_gpu_inference`、`gpu_peak_util`，而这一行的结果在函数里没有用到。
+- **做法**：
+  1. 上限 = max(50 × Step1 面积中位数, 10 000 px)：Step1 面积取 contract 所指的运行、同一 combo、状态 ok 的各 patch 的主对象 mask（有细胞的方法取 cell，纯核方法取 nucleus），**不碰 patch 边的对象**；可用对象少于 20 个或没有 contract（手动参数运行）时，用默认上限 100 000 px。
+  2. `core/seam_merge.SeamMerger`：候选面积超过上限 → 丢弃（在接缝裁决与写入之前，不占别的细胞的像素），计入 `oversized_objects_dropped`，其核计入 `nuclei_dropped_oversized`；只对引擎方法（与 N3 相同）。
+  3. 元数据 `label_store.size_filter = {version 1, max_area_px, rule, source, step1_median_area, step1_objects, objects_dropped, nuclei_dropped}`；`nuclei.dropped` 增加 `oversized_cell`；终端打印。
+  4. 删去 `_cpu_fallback_reasons()` 里那一行。
+- **白名单**：`core/seam_merge.py`、`workers/segment_merge_worker.py`、`utils/runtime_resource_monitor.py`（只删那一行）；测试 `tests/test_seam_merge.py`、新 `tests/test_runtime_resource_monitor.py`，以及现有 Step2 测试中因 `nuclei.dropped` 多一个键而须改的断言；两份用户指南；本文档。
+- **验收门**：上限的推导（有 / 没有 Step1、对象太少、碰边对象不计、纯核方法取核）；超限对象不进入最终 mask、它的核也不在、计数正确、上限以下的对象不受影响；真实数据（4 × 5 网格重跑）：414 万像素的对象消失、其余与改动前逐像素相同、接缝核对通过；`diagnose()` 在「退回 CPU」条件下不再抛错；反向注入；Step2 回归无新增失败。
+- **执行记录**（2026-09-27，未提交）：
+  - `core/seam_merge.py`：`SIZE_FILTER`（version 1：50 倍、下限 10 000 px、默认 100 000 px、至少 20 个 Step1 对象）；`step1_object_areas`（contract 所指运行、同一 combo、ok 的 patch、主对象 mask、去掉碰 patch 边的对象）；`size_limit`；`SeamMerger(max_area)`：超限候选在接缝裁决与写入之前丢弃，计 `oversized_objects_dropped` 与 `nuclei_dropped_oversized`。**实施中发现并修正**：`preseg_run.load_records()` 返回按 `task_id` 索引的字典，首版当成列表遍历（在真实数据上会让每次都退回默认上限），由测试抓到。
+  - `workers/segment_merge_worker.py`：`_size_filter(zarr_path)`（Step1 目录 = fused zarr 所在目录；没有 contract → 默认），`_seam_begin` 把上限交给合并器并打印；`label_store.size_filter`（上限、规则、来源、Step1 中位数与对象数、丢弃的对象数与核数）；`nuclei.dropped.oversized_cell`；终端打印。
+  - `utils/runtime_resource_monitor.py`：删去 `_cpu_fallback_reasons()` 里那一行。
+  - 测试：`tests/test_seam_merge.py` 加 4 条（上限推导与下限 / 默认、Step1 面积只取本 combo 的 ok patch 且不含碰边对象、合并器丢弃超限对象与它的核、Step2 端到端丢弃超限对象并记录 `size_filter`）；新 `tests/test_runtime_resource_monitor.py` 2 条（「退回 CPU」条件下 `diagnose()` 不再抛错）；`tests/test_step2_keeps_nuclei.py` 的 `nuclei.dropped` 断言加 `oversized_cell: 0`。
+  - 反向注入 6 处（过滤不生效、超限对象的核不计数、Step1 面积含碰边对象、没有下限、监控器那一行恢复、`oversized_cell` 不计入）——各使至少 1 条测试变红。
+  - 真实数据：真实 Step1 结果（`20260927_194534_52af`）619 个对象、中位数 547 px → 上限 **27 350 px**；4 × 5 网格在复制件上重跑（复制件不在 Step1 目录下，用的是默认上限 100 000 px）：414 万像素的对象被丢弃（它的 1 个核计入 `oversized_cell`），最大标签 11 176 px；**其余区域与改动前的真机运行逐像素相同**（分区等价）；运行正常结束，未再出现 `NameError`。
+  - 回归：本侧 35 个模块（Step2 全部相关、HQ / HQ2 / CDS 的 worker、标签归属 / 金字塔、预分割、Step3 数据层与标签绑定、Step1→Step2 交接、新的监控器测试）全部跑完；失败 9 条都在已知清单：Mesmer 无模型 3、HQ 不维护 2、StarDist 同机偶发 4（其中 `runner_path` 纯核整图、`preseg_run` 单独重跑通过；`test_seg_runner.py::test_stardist_in_subprocess_equals_direct_call` 与 `test_seg_runner_engines.py::test_stardist_expansion_returns_the_nuclei_from_before_expanding` 重跑仍失败——它们只测引擎子进程，不经过本块改动的合并器与监控器，且此前两次回归在 HEAD 上同样失败过）。HEAD 侧只跑到一半即停止：实引擎测试运行时 Windows 为换页临时占用约 15 GB 的 C 盘（C 盘一度只剩 2.2 GB），为避免写满磁盘停止了完整对比。
+  - 文档：两份用户指南的 Step2 产出加「过大的对象」一段。
+  - **用户 2026-09-28 裁定：证据足够（4 × 5 网格重跑中巨大对象被过滤、其余逐像素不变），不再做真机重跑，提交推送。**
+  - advisory：本机 C 盘余量小（约 11–17 GB），实引擎测试与 Step2 运行会让 Windows 临时占用十几 GB 换页；建议压缩 WSL 的 `ext4.vhdx`（60.6 GB，其中约 38 GB 为已删除的空间）或把 `.wslconfig` 的 `memory=11GB` 调小。
 
 ## 六、未决与 advisory
 

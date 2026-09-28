@@ -256,6 +256,56 @@ def paint(cands, kept, region_shape, offset=0, min_free_fraction=0.0):
 
 SEAM_MERGE = {"version": 1, "duplicate_overlap_threshold": 0.5, "minimum_writable_fraction": 0.5}
 
+# block N4: objects far larger than the method makes on real patches are
+# prediction artefacts (e.g. StarDist polygons over a background tile)
+SIZE_FILTER = {"version": 1, "factor": 50, "floor_px": 10_000, "default_px": 100_000,
+               "min_step1_objects": 20}
+
+
+def step1_object_areas(step1_dir, run_id, combo_id, primary):
+    """Areas of the objects the Step1 pre-segmentation run made with this
+    combination: its OK patches' `primary` masks ("cell" | "nucleus"),
+    objects touching the patch edge left out (cut by the patch)."""
+    import os
+    from . import preseg_run
+    rdir = preseg_run.run_dir(step1_dir, run_id)
+    areas = []
+    for rec in (preseg_run.load_records(rdir).values() if os.path.isdir(rdir) else []):
+        if rec.get("combo_id") != combo_id or rec.get("status") != preseg_run.OK:
+            continue
+        out = rec.get(primary) or {}
+        path = out.get("path")
+        if out.get("status") != preseg_run.OK or not path or not os.path.exists(path):
+            continue
+        lab = np.load(path)
+        if lab.ndim != 2 or not lab.size:
+            continue
+        cnt = np.bincount(lab.ravel().astype(np.int64))
+        edge = np.unique(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]))
+        keep = np.ones(cnt.size, bool)
+        keep[0] = False
+        keep[edge] = False
+        areas.append(cnt[keep & (cnt > 0)])
+    return np.concatenate(areas) if areas else np.zeros(0, np.int64)
+
+
+def size_limit(areas, source):
+    """The size filter's record: max(factor x median, floor), or the default
+    when Step1 gives too few objects."""
+    f = SIZE_FILTER
+    areas = np.asarray(areas)
+    if areas.size >= f["min_step1_objects"]:
+        med = float(np.median(areas))
+        limit = int(max(f["factor"] * med, f["floor_px"]))
+        return {"version": f["version"], "max_area_px": limit,
+                "rule": f"max({f['factor']} x Step1 median area, {f['floor_px']} px)",
+                "source": source, "step1_median_area": med, "step1_objects": int(areas.size)}
+    return {"version": f["version"], "max_area_px": int(f["default_px"]),
+            "rule": f"default {f['default_px']} px (fewer than {f['min_step1_objects']} "
+                    f"Step1 objects)", "source": source,
+            "step1_median_area": float(np.median(areas)) if areas.size else None,
+            "step1_objects": int(areas.size)}
+
 
 class SeamContractError(RuntimeError):
     """The merged labels break the LabelStore contract (a program defect)."""
@@ -276,7 +326,7 @@ class SeamMerger:
     def __init__(self, region_shape, tiles, spill_dir, with_nuclei=False,
                  tau=SEAM_MERGE["duplicate_overlap_threshold"],
                  min_free=SEAM_MERGE["minimum_writable_fraction"],
-                 table_sink=None, table_chunk=1 << 20):
+                 table_sink=None, table_chunk=1 << 20, max_area=None):
         import os
         self.shape = tuple(region_shape)
         self.tiles = list(tiles)
@@ -290,6 +340,7 @@ class SeamMerger:
         # (the zarr table's append) every `table_chunk` entries (block N2's
         # contract: appended block by block, no Python list of ids)
         self.table_sink = table_sink
+        self.max_area = int(max_area) if max_area else None
         self._buf = np.zeros(int(table_chunk), np.uint32)
         self._nbuf = 0
         self.stats = {"candidates": 0, "interior_cells": 0, "touching_internal_edge": 0,
@@ -297,7 +348,8 @@ class SeamMerger:
                       "split_merge_groups": 0, "recovered_missing_cells": 0,
                       "cells_with_clipped_pixels": 0, "clipped_pixels": 0,
                       "dropped_insufficient_free_pixels": 0,
-                      "nuclei_dropped_seam_conflict": 0}
+                      "nuclei_dropped_seam_conflict": 0,
+                      "oversized_objects_dropped": 0, "nuclei_dropped_oversized": 0}
 
     # -- writing one kept candidate
     def _write(self, cand, nuc_crop, cells, nuclei):
@@ -348,6 +400,13 @@ class SeamMerger:
                 mine = np.zeros(ln.shape, bool)
                 mine[ok] = cell_of[ln[ok]] == c.label
                 nuc_crop = np.where(mine & c.mask, ln, 0).astype(np.uint32)
+            if self.max_area is not None and c.area > self.max_area:
+                # block N4: an artefact, dropped before it can take pixels
+                self.stats["oversized_objects_dropped"] += 1
+                if nuc_crop is not None:
+                    self.stats["nuclei_dropped_oversized"] += int(np.unique(
+                        nuc_crop[nuc_crop > 0]).size)
+                continue
             if is_seam(c, self.tiles):
                 seam.append(c)
                 crops.append(nuc_crop)

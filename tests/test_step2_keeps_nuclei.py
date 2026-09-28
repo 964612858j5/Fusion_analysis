@@ -205,7 +205,7 @@ def _assert_label_store(worker, sfx, truth, store):
     assert info["kept"] == m
     assert info["dropped"] == dict({k: len(expect[k]) for k in
                                     ("multiple_cells", "partial_background", "outside_cells")},
-                                   seam_conflict=0)          # block N3b
+                                   seam_conflict=0, oversized_cell=0)   # blocks N3b, N4
     assert info["predicted"] == m + sum(info["dropped"].values())
     assert info["retained_fraction"] == pytest.approx(m / info["predicted"])
     assert store["nucleus"]["n_objects"] == m and store["nucleus_to_cell"]["length"] == m + 1

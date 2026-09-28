@@ -333,7 +333,6 @@ class RuntimeResourceMonitor:
     def _cpu_fallback_reasons(self):
         cellpose_requested_gpu = str(self.seg_config.get("use_gpu", True)).strip().lower() not in {"0", "false", "no", "off", "cpu"}
         cellpose_actual_device = self._cellpose_model_device() if "cellpose" in self.backend.lower() else "unknown"
-        actual_cuda_execution = bool(likely_gpu_inference or ("cuda" in str(cellpose_actual_device).lower() and gpu_peak_util > 0.0))
         gpu_morph_available = None
         cupy_smoke_test = "unknown"
         cucim_smoke_test = "unknown"

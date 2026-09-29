@@ -1,6 +1,6 @@
 # FusionFlux v16 — Pre-TMA Architecture Gate v2.1
 
-**Status:** **v2.1 APPROVED** by the user on 2026-09-29 — the authoritative v16 architecture / pre-TMA plan. Every stage below still needs its own application + whitelist (P0 rules: `AGENTS.md`, `docs/P0_SCOPE_RULES.md`). Also authorised on 2026-09-29: generating the 2×2 synthetic mosaic (§8).
+**Status:** **v2.1 APPROVED** by the user on 2026-09-29 — the authoritative v16 architecture / pre-TMA plan. Every stage below still needs its own application + whitelist (P0 rules: `AGENTS.md`, `docs/P0_SCOPE_RULES.md`). Also authorised on 2026-09-29: generating the 2×2 synthetic mosaic (§8). **Done 2026-09-29** (execution record in §8).
 **Line:** v16 = this architecture gate + TMA Foundation + QualityMask (blur / fold / low tissue). v15 is frozen at `f93f195` (tag `v15-final`; §14).
 **Time budget:** 10–15 effective working days.
 **Hard stop:** TMA Foundation starts as soon as the six start gates (§9) pass.
@@ -495,6 +495,27 @@ C: has ~40 GB free. WSL frees space on C: only after the user compacts `ext4.vhd
 It is used together with the original `cropped_region` (real tissue content).
 
 **Limits:** repeated content means compression ratio and cell statistics are not representative. The mosaic tests IO, boundedness, identity and invariance, not biology.
+
+#### Execution record: mosaic generated (2026-09-29)
+
+- **Script:** `scripts/make_synthetic_mosaic.py` (`make` / `verify [--full]`; `--crop H W C --crop-origin Y X` for smoke runs). Not imported by the product; the source is only read.
+- **Output:** `~/fusionflux/synthetic/synthetic_2x2_mirror.ome.tif`, 3.72 GB (source 0.93 GB), with `.done.json`, `.verify.json` and the logs next to it.
+  - 29 × 30874 × 32430 uint8, CYX, BigTIFF, pyramid as SubIFDs: 30874 × 32430 → 7718 × 8107 → 1929 × 2026.
+  - Same as the source: 512² tiles, LZW, no predictor, 3 levels, channel names and colours, `PhysicalSizeX/Y = 0.5068606698203042 µm`. Written little-endian; the source is big-endian, which makes no difference for uint8.
+  - Quadrants: source, flipped in x, flipped in y, flipped in both. Each seam repeats the edge row / column once, so the image is continuous.
+  - OME `Name` and `Description` say synthetic.
+- **Pyramid rule:** level k is floor(mean) of the level-0 `4^k × 4^k` blocks, with trailing partial blocks dropped.
+  - The source's level 1 follows the same rule: 0.99998 of its pixels are equal.
+  - The source's level 2 does not: only 0.79 equal. No block mean, nearest-neighbour or cv2 resampling of its level 0 or level 1 reproduces it. The mosaic keeps the explicit rule.
+- **Cost:** 243 s with 14 compression threads, peak RSS 2.75 GB. One source channel plane is held at a time; levels 1–2 are accumulated in RAM, about 1.9 GB.
+- **Verification, `verify --full`: 21 / 21 pass.**
+  - Level 0: every pixel of 29 channels × 4 quadrants is bitwise equal to the mirrored source (1.69 × 10⁹ non-zero source pixels).
+  - Levels 1–2: every pixel equals floor(mean) of level 0.
+  - Metadata: shapes, tiling, compression, OME names, colours and physical size all match.
+  - Product readers: `OMETIFFLoader`, `RawTileProvider` and Step4's `TiffTileReader` (fast `tiff_tiles` path) read a window that straddles both seams bitwise correctly.
+  - Reverse injection: a one-row mirror shift, round-instead-of-floor pyramid levels and one wrong seam column all turn the check red.
+- **Pitfall found:** the source's borders are background, so a top-left crop, and the full mosaic's seams, lie in zeros. Sampled windows alone are weak evidence there. Smoke runs must pick an origin inside tissue, and acceptance uses `--full`.
+- **Disk:** C: had 42 GB free before and 63 GB after. Both readings include Windows page-file fluctuation.
 
 **Routes run one after another:**
 1. TIFF route end to end.

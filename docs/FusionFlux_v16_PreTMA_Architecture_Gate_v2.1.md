@@ -196,6 +196,25 @@ The mapping from today's layout (`rois/<workspace>/step2/segmentation_runs/<run>
 - [ ] PixelSource, coordinate and object-schema drafts exist.
 - [ ] No production code changed.
 
+#### Execution record: A0 (2026-09-29; application `docs/v16_A0_application.md` v2, approved)
+
+**Automatic part done. The real-machine camera log (ruling 1) is still pending.**
+
+- **Viewer shift (A0-1)** — `docs/v16_A0_viewer_shift_report.md`, `scripts/diagnose_v16_a0_camera.py`. Runs used a path-rewritten copy of the test1 workspace; the original project's tree fingerprint was unchanged before and after every run.
+  - **C1 confirmed.** The Step1/3 GPU layer fills the whole graphics viewport but draws the ViewBox range, and the ViewBox is inset 9 px per side. Compared with Step0 at the same camera, the picture is magnified 1.4 % in x and 2.3 % in y. Phase correlation in real GL measured the corner shifts within 0.5 px of the prediction.
+  - **C2 confirmed.** `Step1WholeSlideMount.apply_camera` rounds the rectangle to integers, then refits it through `setRange(rect)`. The error is ±0.5 L0 px per entry, and it drifts systematically: cy moved −52 px after 50 × 0→1→3→1→0.
+  - **C3 confirmed.** Layout changes after the apply (dock, bottom bar, channel floor) shrink the ViewBox, pyqtgraph refits, and the live sink writes the new scale back. The scale changes by −2.49 % offscreen and −1.72 % in real GL, on the first Step1 entry only.
+  - **C4 excluded** for a same-source reload. **C6** (HiDPI) is left for the real machine.
+  - Entering Step0 is exact. Each cause is local, so no CameraState framework is needed (stop rule 1).
+- **Storage (A0-2)** — `docs/v16_A0_storage_benchmark.md`, `scripts/bench_v16_a0_storage.py`. Workloads were pre-registered.
+  - **The adoption rule fails.** Gains: cold ROI 2048² 1.30×, level-0 viewport 1.46×, both under the 1.5× threshold. Regression: the Step4 scan is 1.95× slower (cold), against a 10 % limit. NGFF size is 2.01× the source with lz4.
+  - **A2b and the NGFF half of Gate 2 move to the backlog.**
+  - The alternative of storing derived products is worth weighing in A2: a stored corrected level 1 is 22× faster than today's runtime reduction and bitwise equal to it.
+  - A supplementary, non-gating run with a direct-byte NGFF reader shows the Step4 gap follows compressed size and decode cost, not zarr-python overhead.
+  - The NGFF copies were deleted. "Cold" means cold only for the WSL guest.
+- **Contracts (A0-3)** — `docs/v16_contracts_draft.md`: PixelSource, coordinates (`world = global_pixel + 0.5` adapter rule, `bbox_fullres` `[y0, y1, x0, x1]` ↔ `bbox_x0..y1`, real per-axis level ratios, µm only from OME) and object tables. `region_id` ← `roi_id`, never `roi_name`. `slide_id` does not exist yet. Two findings are listed, not fixed: `image_mpp = 0.5` is hard-coded while the slide is 0.50686 µm, and `model_checksum` is not a weight-file hash (input to A0.5).
+- **Product code unchanged**: `git status` / `git diff` list only whitelist paths.
+
 ---
 
 ## 3. Stage A0.5 — Engine identity scope fix

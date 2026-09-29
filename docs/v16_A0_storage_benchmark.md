@@ -3,6 +3,8 @@
 日期：2026-09-29。分支 `v16`，产品代码 = `9999601`（未改动）。依据：`docs/v16_A0_application.md` v2 §3 A0-2（工作负载在开跑前已预注册，运行中没有改动）与 v2.1 §2.3 的采纳规则。
 脚本：`scripts/bench_v16_a0_storage.py`。驱动：`~/fusionflux/bench_a0/run_all.sh`。原始 JSON：`~/fusionflux/bench_a0/results/`（主结果）、`results_supplementary/`（补充）。
 
+> **v2.2 说明（2026-09-29，用户批准）**：下面第 1 节的结论针对的是 A0 测的 **NGFF v0 实现**：(1, 512, 512) 分块、通用 zarr 读取器、只测原始读取的 Step4 扫描。**它不是对 NGFF 架构的否决。**规范存储由最多 2 天的 A2b-probe 决定，采用新的、开跑前写死的采纳规则（`docs/FusionFlux_v16_PreTMA_Architecture_Gate_v2.2.md` §5.6–§5.7）。本报告的数字不改，作为 A0 的原始记录。
+
 ## 1. 结论
 
 **采纳规则不通过。NGFF 不作为新项目的原始像素平面。** 按 v2.1 §2.3，**A2b（NgffSource + 入库）和 Gate 2 的 NGFF 部分移入 backlog**；A2a（PixelSource + OmeTiffSource）照常进行。

@@ -1,11 +1,28 @@
-# FusionFlux v16 — Pre-TMA Architecture Gate v2.1
+# FusionFlux v16 — Pre-TMA Architecture Gate v2.2
 
-**Status:** **SUPERSEDED by v2.2** (`FusionFlux_v16_PreTMA_Architecture_Gate_v2.2.md`, approved 2026-09-29); kept unchanged below as the historical record. Was: **v2.1 APPROVED** by the user on 2026-09-29. Every stage below still needs its own application + whitelist (P0 rules: `AGENTS.md`, `docs/P0_SCOPE_RULES.md`). Also authorised on 2026-09-29: generating the 2×2 synthetic mosaic (§8). **Done 2026-09-29** (execution record in §8).
+**Status:** **v2.2 APPROVED** by the user on 2026-09-29 — the authoritative v16 architecture / pre-TMA plan, including the §5.6.4 thresholds and the §12 schedule. It supersedes v2.1 (`FusionFlux_v16_PreTMA_Architecture_Gate_v2.1.md`, kept as the historical record); the changes are listed in the table below. Every stage below still needs its own application + whitelist (P0 rules: `AGENTS.md`, `docs/P0_SCOPE_RULES.md`). Also authorised on 2026-09-29: generating the 2×2 synthetic mosaic (§8). **Done 2026-09-29** (execution record in §8).
 **Line:** v16 = this architecture gate + TMA Foundation + QualityMask (blur / fold / low tissue). v15 is frozen at `f93f195` (tag `v15-final`; §14).
 **Time budget:** 10–15 effective working days.
 **Hard stop:** TMA Foundation starts as soon as the six start gates (§9) pass.
 
-### Changes from v2 Lean
+### Changes from v2.1 (after A0)
+
+| # | Change | Why |
+|---|---|---|
+| 1 | A0's storage result is restated: **the NGFF v0 implementation failed the canonical-store gate** — chunk (1, 512, 512), the generic zarr reader, the raw Step4 scan. **NGFF itself is not rejected.** | The user's ruling: A0 tested one layout with one reader, not the architecture. The viewer side was 1.3–1.5× faster; Step4 was 2× slower. |
+| 2 | New stage **A2b-probe** (§5.6): a strictly time-boxed (≤ 2 days) NGFF layout + scan probe, with its **own adoption rule, written into this plan before the probe runs** | One targeted chance for a unified NGFF data plane, bounded so that it cannot delay TMA. |
+| 3 | A2 is split into **A2a → A2b-probe → A2b (only if the probe passes) → A2c** | NgffSource / ingest is only built if the probe passes. |
+| 4 | PixelSource unifies the **scientific source / storage contract**, not one read algorithm: region access, multiscale access and a **sequential-scan capability** (§5.1). Step4 may use a dedicated scan reader on the same canonical store. | Viewer tiles and the Step4 scan have opposite access patterns. |
+| 5 | **Exactly one active canonical raster store** in the long term (§5.7): either NGFF (source TIFF ingested with a checksum, then archived) or TIFF (Zarr / NGFF only for derived rasters). Long-term TIFF + NGFF duplication is not the goal. | Two raw copies double the disk and create two sources of truth. |
+| 6 | **Persisting corrected-channel coarse levels** becomes its own item (§5.8), independent of the raw-NGFF decision | A0 measured 22× on the Step1 corrected level 1, bitwise equal. |
+| 7 | **Odon reference**, non-gating (§5.6.6) | Answers how far FusionFlux is from Odon, and where the gap is (storage / scheduler / decode / renderer). |
+| 8 | Schedule (§12): A0 real machine → push → A0.5 → A1 → A2a → A2b-probe → decision → A2b / A2c → A3 / A4 / A5 → TMA. The probe comes **after** A0.5 and A1. | A0.5 and A1 are deterministic, already diagnosed work; finish them first. |
+| 9 | Stop rule 7 (§13) for the probe | The probe stops at its time box, or when Step4 end-to-end stays about 1.5× or more slower. |
+| 10 | *(independent review of the v2.2 draft, 2026-09-29)* A0.5 hashes the real model artifact where one exists (§3); A2a's `OmeTiffSource` delegates to the existing readers (§5.2); the probe compares the scientific payload, not whole files (§5.6.3); §5.8 is off the critical path (§12) | `model_checksum` is only a metadata-entry hash; A2a promises zero behaviour change; provenance fields differ by design; a 22× win must not eat Pre-TMA days |
+
+**Method note.** The A0 rule was pre-registered and failed. The A2b-probe rule (§5.6.4) is less strict and is written **after** A0's data was seen. That is a known weakness. It is acceptable only because the new rule binds only the new probe, is fixed in this plan before the probe runs, and the probe measures new configurations (layouts, a scan reader, end-to-end Step4) rather than re-scoring A0's numbers.
+
+### Changes from v2 Lean (v2.1)
 
 | # | Change | Why |
 |---|---|---|
@@ -61,7 +78,7 @@ Everything else is deferred (§11).
                 ┌─────────────────┐
                 │   PixelSource   │
                 │ OME-TIFF        │
-                │ OME-NGFF (if A0)│
+                │ OME-NGFF (if §5.6)│
                 └────────┬────────┘
           ┌──────────────┼──────────────┐
        Viewer        Step1 fusion     Step4
@@ -77,7 +94,7 @@ Everything else is deferred (§11).
 
 ### Frozen principles
 
-- **Pixels:** one `PixelSource` contract. OME-NGFF / OME-Zarr is the storage direction only if A0 supports it (§2.3). OME-TIFF stays supported either way.
+- **Pixels:** one `PixelSource` contract (§5.1). **Exactly one active canonical raster store** per project (§5.7): OME-NGFF if the A2b-probe passes (§5.6), otherwise OME-TIFF with Zarr / NGFF for derived rasters only. OME-TIFF stays readable either way (old projects, and the ingest source).
 - **LabelStore:** the scientific authority for segmentation identity and the cell↔nucleus relation.
 - **Parquet:** the canonical object table (§6.3).
 - **AnnData:** the canonical analysis state (§6.3).
@@ -162,13 +179,13 @@ External SSD numbers are taken only once an external SSD is available.
 - no regression greater than 10 % on the Step4 scan or on Step1 fusion reads, **and**
 - a disk cost the user accepts: NGFF copy size ÷ source size is reported.
 
-"Raw stays OME-TIFF; only derived products use NGFF" is evaluated as an explicit alternative. If the rule fails, A2b and the NGFF half of Gate 2 move to the backlog.
+"Raw stays OME-TIFF; only derived products use NGFF" is evaluated as an explicit alternative. If the rule fails, A2b and the NGFF half of Gate 2 move to the backlog. *(v2.2: superseded. The rule failed for the NGFF v0 implementation; the decision moves to the A2b-probe, §5.6.)*
 
 ### 2.4 Minimum layout v1 (drafted in A0, frozen in A3)
 
 ```text
 <project>/
-├── image.ome.zarr/                  # only if A0 adopts NGFF (new projects)
+├── image.ome.zarr/                  # only if the A2b-probe adopts NGFF (§5.6, §5.7 (a); new projects)
 ├── segmentations/
 │   └── <segmentation_run_id>/
 │       ├── metadata.json            # engine identity, operates_on: [region_id, ...]
@@ -207,10 +224,11 @@ The mapping from today's layout (`rois/<workspace>/step2/segmentation_runs/<run>
   - **C4 excluded** for a same-source reload. **C6** (HiDPI) is left for the real machine.
   - Entering Step0 is exact. Each cause is local, so no CameraState framework is needed (stop rule 1).
 - **Storage (A0-2)** — `docs/v16_A0_storage_benchmark.md`, `scripts/bench_v16_a0_storage.py`. Workloads were pre-registered.
-  - **The adoption rule fails.** Gains: cold ROI 2048² 1.30×, level-0 viewport 1.46×, both under the 1.5× threshold. Regression: the Step4 scan is 1.95× slower (cold), against a 10 % limit. NGFF size is 2.01× the source with lz4.
-  - **A2b and the NGFF half of Gate 2 move to the backlog.**
-  - The alternative of storing derived products is worth weighing in A2: a stored corrected level 1 is 22× faster than today's runtime reduction and bitwise equal to it.
-  - A supplementary, non-gating run with a direct-byte NGFF reader shows the Step4 gap follows compressed size and decode cost, not zarr-python overhead.
+  - **The NGFF v0 implementation failed the §2.3 rule** — chunk (1, 512, 512), Blosc-lz4 / zstd clevel 5, the generic zarr reader, the raw Step4 read scan. Gains: cold ROI 2048² 1.30×, level-0 viewport 1.46×, both under 1.5×. Regression: the raw Step4 scan was 1.95× slower (cold), against a 10 % limit. NGFF size was 2.01× the source with lz4 and 1.01× with zstd.
+  - **v2.2 reading (user's ruling): NGFF itself is not rejected.** A time-boxed layout + scan probe decides (§5.6).
+  - A supplementary, non-gating run with a direct-byte NGFF reader (the NGFF analogue of `TiffTileReader`) left the Step4 scan unchanged (45.9 s vs 45.6 s), while random ROI reads got faster (1.87× vs TIFF). **The Step4 gap therefore followed compressed size and decode cost, not zarr-python overhead.** The probe must vary layout and codec, not only the reader.
+  - A0 measured **raw reads only**. Real Step4 overlaps reads with compute (a producer thread, queue depth 2). On `cropped_region` the TIFF read alone was 5.8 s, of a whole Step4 of about 12–13 s (S4-1), so an end-to-end measurement is required (§5.6.3).
+  - Persisting corrected coarse levels is worth doing whatever the raw decision (§5.8): a stored corrected level 1 was 22× faster than today's runtime reduction and bitwise equal to it.
   - The NGFF copies were deleted. "Cold" means cold only for the WSL guest.
 - **Contracts (A0-3)** — `docs/v16_contracts_draft.md`: PixelSource, coordinates (`world = global_pixel + 0.5` adapter rule, `bbox_fullres` `[y0, y1, x0, x1]` ↔ `bbox_x0..y1`, real per-axis level ratios, µm only from OME) and object tables. `region_id` ← `roi_id`, never `roi_name`. `slide_id` does not exist yet. Two findings are listed, not fixed: `image_mpp = 0.5` is hard-coded while the slide is 0.50686 µm, and `model_checksum` is not a weight-file hash (input to A0.5).
 - **Product code unchanged**: `git status` / `git diff` list only whitelist paths.
@@ -228,7 +246,10 @@ Today `seg_runner/runner.py:engine_identity` includes `lock_hash`, which hashes 
 - the runner code hash (already present);
 - the engine package versions (`lib_versions`, already present);
 - the versions of the preprocessing libraries the engine actually uses (numpy, scipy, scikit-image, TensorFlow / torch, as applicable);
-- the model checksum (already present);
+- **the model artifact identity** — *not* already present. Today's `model_checksum` is a hash of the model's `models.json` entry, not of any weight file (A0; `seg_runner/runner.py:43-47`). A0.5:
+  - records the metadata-entry hash separately, under a name that does not claim to be a weight checksum;
+  - hashes the actual artifact wherever a concrete local weight / model file exists;
+  - decides per engine, after its own read-only investigation, which models have such a file. Nothing is prescribed here;
 - the relevant device / CUDA mode, reported as today.
 
 Old pre-segmentation runs whose identity still carries `lock_hash` must keep a defined behaviour. The application states which: accepted with a note, or reported once.
@@ -298,9 +319,9 @@ These may change content but never camera geometry:
 
 ---
 
-## 5. Stage A2 — PixelSource (+ NGFF if adopted)
+## 5. Stage A2 — PixelSource (+ NGFF if the probe passes)
 
-**Budget:** 4–5 days in total. **TMA blocker:** A2a yes; A2b only if A0 adopts NGFF.
+**Budget:** 4–5 days in total for A2a + A2c, plus **at most 2 days** for the A2b-probe. A2b (1–2 days) only if the probe passes. **TMA blocker:** A2a yes; A2b only if the probe passes.
 
 ### 5.1 Contract (smallest interface existing consumers need)
 
@@ -317,13 +338,29 @@ read_tile(...)
 
 Optional performance hints are allowed; scientific behaviour never depends on backend-specific fields.
 
+**What is unified is the scientific source / storage contract, not one read algorithm.** A source offers three capabilities over the same pixels:
+
+```text
+PixelSource
+├─ region access        read_region / read_tile           (viewer, fusion)
+├─ multiscale access    level_count / level_shape / level_downsample
+└─ sequential scan      scan(channels, level, tile) → iterator of blocks, with read-ahead   (Step4)
+```
+
+The scan capability may be implemented by a dedicated reader (e.g. `NgffScanReader`, the analogue of today's `TiffTileReader`) over the same canonical store. Every capability must return bitwise the same pixels for the same (channel, level, region).
+
 ### 5.2 Split
 
 - **A2a — contract + adapters for existing sources; zero behaviour change.**
-  - `OmeTiffSource` absorbs today's readers, including Step4's `TiffTileReader`.
+  - `OmeTiffSource` is an **adapter that delegates to the existing optimised readers**; it does not merge or rewrite them:
+    - `read_region` / `read_tile` → `RawTileProvider` (viewer), or the reader each consumer uses today;
+    - `scan` → Step4's `TiffTileReader`, including its aszarr fallback.
+
+    Zero behaviour change is the A2a promise, so reader consolidation is out of scope.
   - Step0's committed corrected zarr is exposed through the same interface.
   - Step4's fail-closed source contract (`core/quant_sources.py`) is kept unchanged.
-- **A2b — `NgffSource` + ingest; conditional on A0.**
+- **A2b-probe — NGFF layout + scan probe; ≤ 2 days (§5.6).** Decides between §5.7 (a) and (b).
+- **A2b — `NgffSource` + ingest; only if the probe passes.**
   - One ingest operation turns an OME-TIFF into NGFF 0.4.
   - The source image is left untouched.
   - A physical merge of raw + corrected into one hierarchy is not required: raw is uint8, corrected is float32, covers only some channels and is stored per ROI.
@@ -333,6 +370,10 @@ Optional performance hints are allowed; scientific behaviour never depends on ba
   - **Step1 fusion:** reads raw slide pixels and writes `fused.zarr`.
   - **Step2:** reads Step1's `fused.zarr`, which is a derived product, not a slide. It is left as is unless the fused product itself moves.
   - **Viewers (Step0 / 1 / 3):** separate P0 approval; Step0 may keep internal compatibility code.
+
+### 5.2b Corrected coarse levels (see §5.8)
+
+Independent of the probe; its own application.
 
 ### 5.3 LabelStore compatibility (unchanged semantics)
 
@@ -361,6 +402,97 @@ On the representative dataset, via each available route:
 - [ ] the LabelStore contract passes;
 - [ ] Step4 S4-3 outputs meet §5.4;
 - [ ] an old OME-TIFF project still opens.
+
+### 5.6 A2b-probe — NGFF layout + scan optimisation (≤ 2 days)
+
+Runs after A2a. It is a probe: scripts and scratch copies only, no product code. Its own application gives the whitelist and freezes §5.6.2–§5.6.4 again before running.
+
+#### 5.6.1 Hard boundaries
+
+- **At most 2 working days**, then stop and decide on whatever has been measured.
+- No Rust. No new packages without the user's approval; zarr 2.18, numcodecs and imagecodecs as installed.
+- **QuantBackend / QuantFinalizer and the S4-3 scientific logic are not touched.** Only the reader, the chunk scheduling (read-ahead, concurrency) and the on-disk layout may vary.
+- **No scientific algorithm may be changed to make a benchmark pass.**
+- The 2×2 synthetic mosaic is not enlarged; no 3×3 / 4×4 mosaics.
+- The probe must not push TMA past the v2.1 time budget (§12): it uses the day-15 buffer.
+
+#### 5.6.2 Matrix (small on purpose)
+
+| Variable | Values |
+|---|---|
+| Level-0 chunk | (1, 512, 512), (1, 1024, 1024), (1, 2048, 2048); levels ≥ 1 stay (1, 512, 512) |
+| Codec | Blosc-lz4 and Blosc-zstd, clevel 5 (as in A0) |
+| Reader | the generic zarr reader (A0) vs a **parallel chunk scan + read-ahead** reader (direct chunk bytes, decode on the pool, the next scan tile read while the current one is consumed) |
+
+The six layouts × two readers run on **`cropped_region`**, one copy at a time (1–2 GB each), each deleted after its runs. Only the best one or two layouts get a confirmation run on the synthetic mosaic (about 4–8 GB each), also one at a time.
+
+#### 5.6.3 Measurements
+
+- **Viewer:** random ROI 512² / 2048² / 4096², viewport pan L0 / L1 / L2 and channel switch, as pre-registered in A0 (same seeds and paths).
+- **Step4 end to end:** the product's quantification (`QuantEngine`, S4-3 settings, the test1 copy's segmentation run on `cropped_region`) with **only the raw-pixel reader swapped** in the probe script. The TIFF baseline is the unmodified product path on the same data.
+  - **The scientific payload must be bitwise identical**:
+    - every numeric array and table (h5ad `X`, `layers`, `obs` numeric columns, `obsm`; the CSV's numeric values);
+    - the cell ordering;
+    - categorical and string biological fields (channel names, decisions, compartments).
+
+    uint8 pixels are identical by construction, so any difference is a bug. **Provenance fields that intentionally record the reader, backend, paths, timings or commit may differ** and are excluded from the comparison; the comparison lists which fields it excluded.
+- **Raw Step4 read scan:** as in A0, on `cropped_region` and in the mosaic confirmation. The mosaic has no segmentation, so no end-to-end run there.
+- **Also:** Step1 fusion reads, disk size ÷ source, ingest time, peak RSS.
+- **Cold / warm:** as in A0 (sync + fadvise + fincore; cold only for the WSL guest).
+
+#### 5.6.4 Adoption rule for NGFF as the canonical store (proposed; fixed before the run)
+
+All of the following, on the best layout, measured on `cropped_region` and confirmed on the mosaic where the workload exists there:
+
+| # | Condition | Proposed threshold |
+|---|---|---|
+| 1 | Viewer, primary: cold ROI 2048² and level-0 viewport pan | NGFF **≥ 1.2× faster** on at least one, and **not slower** (≤ 1.05× TIFF time) on the other |
+| 2 | Viewer, every other pre-registered workload | NGFF ≤ 1.05× TIFF time |
+| 3 | **Step4 end to end** (cold and warm medians) | NGFF ≤ **1.2×** TIFF time |
+| 4 | Step1 fusion reads | NGFF ≤ 1.1× TIFF time |
+| 5 | Disk | NGFF ≤ **1.25×** the source TIFF, i.e. no near-doubling |
+| 6 | Scientific output | bitwise identical (§5.6.3) |
+
+- If it passes: §5.7 (a), and A2b builds `NgffSource`, ingest and `NgffScanReader`.
+- If it fails, or if **Step4 end to end stays about 1.5× or more slower after optimisation**: stop the raw-NGFF direction; §5.7 (b).
+- Thresholds 1, 3 and 5 are the user's to confirm in the probe's application.
+
+#### 5.6.5 Deliverable
+
+A report with the matrix, the rule applied row by row and the decision (a) or (b). Raw JSON is kept; NGFF copies are deleted.
+
+#### 5.6.6 Odon reference (non-gating)
+
+- Done only if Odon is available and opens the same NGFF data; nothing is installed for it without the user's approval.
+- Record: warm open → usable, uncached pan, zoom → sharp, channel switch, peak RAM.
+- It answers where FusionFlux is slower (storage / scheduler / decode / renderer). It never gates TMA or the adoption rule.
+
+### 5.7 One active canonical raster store (end state)
+
+**(a) NGFF wins:**
+
+```text
+source OME-TIFF ──ingest + checksum──▶ canonical NGFF (in the project)
+                                        source TIFF archived / moved out of the project
+```
+
+The ingest records the source's sha256 and verifies the NGFF against it (every level, bitwise) before the TIFF may be archived. Old projects are not migrated (§2.4).
+
+**(b) NGFF does not win:**
+
+```text
+OME-TIFF = canonical raw
+Zarr / NGFF = derived rasters only (corrected channels and their levels, labels, fused)
+```
+
+Long-term TIFF + NGFF duplication of the raw pixels is not an end state in either case.
+
+### 5.8 Corrected-channel coarse levels (independent of §5.6)
+
+- **Today:** Step1 reduces the corrected level 1 from level 0 at runtime (`viewer/step1_source.py`, `reduce_corrected`); only a coarse sidecar exists.
+- **A0:** a stored level 1 built with the same `reduce_corrected` was bitwise equal and 22× faster on the viewport_l1 path, and cost 12 MB per channel (levels 1 + 2).
+- **Proposal:** Step0 writes the corrected levels once, with NGFF 0.4 multiscales metadata and the same per-axis-ratio scales. Step1 reads a stored level when it is valid and keeps the runtime reduction as the fallback.
+- It touches the Step0 writer and the Step1 viewer read path, so it needs its own application with a P0 whitelist (viewer read changes need separate approval, `AGENTS.md` rule 5). It comes after A1, and it is **off the critical path** (§12): not a TMA blocker, and it never delays A3, the gates or TMA.
 
 ---
 
@@ -561,7 +693,7 @@ When the server is back, one real WSI is run as a **supplementary validation**. 
 ## 9. Six TMA start gates
 
 1. **Viewer stability:** Step0 ↔ Step1 ↔ Step3 is visually stationary, with no cumulative drift (automatic + real machine).
-2. **PixelSource:** consumers read through one contract with `OmeTiffSource`. If A0 adopted NGFF, `NgffSource` implements the same contract and the representative dataset runs through it.
+2. **PixelSource:** consumers read through one contract with `OmeTiffSource`. The A2b-probe has decided the canonical store (§5.7). If NGFF won, `NgffSource` (with its scan capability) implements the same contract and the representative dataset runs through it.
 3. **Scientific invariance:** the representative dataset completes PixelSource → Step2 → N3 → LabelStore → Step4 S4-3, meeting §5.4 against the accepted v15 implementation.
 4. **Coordinate / identity freeze:** hierarchy, SegmentationRun key, coordinate names and conventions frozen. A TMA core is an ordinary region.
 5. **Object layer:** cells.parquet + regions.parquet from a real result, with keys and coordinates agreeing with LabelStore and the viewer.
@@ -592,14 +724,18 @@ No further architecture polishing between Gate 6 and TMA Foundation unless a new
 
 | Days | Stage |
 |---|---|
-| 1–2 | A0 diagnosis + benchmark + drafts (the synthetic mosaic is generated first) |
-| 2 | A0.5 engine identity scope |
-| 3–4 | A1 zero-drift |
-| 5–9 | A2a (+ A2b if adopted) + A2c consumer migrations |
-| 10 | A3 |
-| 11–12 | A4 |
-| 13–14 | A5 |
-| 15 | buffer / regression / real-machine acceptance |
+| 1–2 | A0 diagnosis + benchmark + drafts — **automatic part done 2026-09-29**; the real-machine camera probe (incl. DPR 125 % / 150 %) remains; then push the A0 commits |
+| 2 | A0.5 engine identity scope (including the model-artifact identity question, §3) |
+| 3–4 | A1 zero-drift (C1–C3, local fixes) |
+| 5–7 | A2a PixelSource contract + `OmeTiffSource`, zero behaviour change |
+| 8–9 | **A2b-probe (≤ 2 days)** → decision §5.7 (a) or (b) |
+| 10–11 | A2b if (a); the A2c migrations the gates require |
+| 12 | A3 |
+| 13–14 | A4 |
+| 15 | A5 |
+| (16) | buffer / regression / real-machine acceptance — the probe has consumed the old day-15 buffer; anything beyond this is a scope decision for the user |
+
+**Off the critical path:** §5.8 corrected coarse levels. It is opportunistic: run in parallel or after the gate work, with its own application, and it **never delays A3, the gates or TMA**.
 
 If A0 shows weak benefit for a planned change, the change is removed rather than consuming the buffer.
 
@@ -613,6 +749,7 @@ If A0 shows weak benefit for a planned change, the change is removed rather than
 4. An optimisation that affects none of scientific correctness, TMA compatibility, OOM safety or the six gates cannot extend the schedule.
 5. Day 15 is a decision point. If the six gates pass, TMA starts.
 6. After two review rounds with no new public-path defect, hardening stops (P0 rule).
+7. **A2b-probe:** it stops at 2 working days whatever it has measured. It also stops early, deciding §5.7 (b), when the best optimised layout still has Step4 end to end at about 1.5× TIFF or worse. Nothing in the scientific backend is changed to pass it.
 
 ---
 

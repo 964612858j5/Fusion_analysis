@@ -9843,6 +9843,11 @@ class MainWindow(QMainWindow):
             n_rows     = n_rows,
             n_cols     = n_cols,
             rois       = self._rois if self._rois else None,
+            # Block A2c 3/3: the pixels through PixelSource, from sources the
+            # worker builds itself (raw slide + Step0's saved correction).
+            corrected_zarr_path = self._corrected_zarr_path,
+            corrected_decisions = dict(self._corrected_decisions),
+            use_pixel_sources   = True,
         )
         self._start_fusion_worker(
             worker,

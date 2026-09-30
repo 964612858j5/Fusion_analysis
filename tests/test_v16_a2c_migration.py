@@ -59,3 +59,85 @@ def test_a_project_without_corrected_channels_opens_no_corrected_source(tmp_path
         assert r._corrected is None
     finally:
         r.close()
+
+
+# ── 3/3 FullFusionWorker ─────────────────────────────────────────────────
+
+REMAP = {"DAPI": {"min": 0.0, "max": 255.0, "gamma": 1.0},
+         "CD3": {"min": 0.0, "max": 50.0, "gamma": 1.0},
+         "CD8": {"min": 0.0, "max": 255.0, "gamma": 1.0}}
+
+
+def _fuse(p, out, *, sources, loader=None, rois=None, decisions=None, zpath=None, hook=None):
+    from PyQt5 import QtCore
+    QtCore.QCoreApplication.instance() or QtCore.QCoreApplication([])
+    from block01.core.io_loader import OMETIFFLoader
+    from block01.ui.step0.overview_panel import FullFusionWorker
+    decisions = {"CD3": "tophat"} if decisions is None else decisions
+    zpath = p["zarr"] if zpath is None else zpath
+    if loader is None:
+        loader = OMETIFFLoader(p["slide"])
+        loader.set_corrected_zarr_store(zpath, decisions)
+    rois = rois if rois is not None else [{"name": "Full WSI", "bbox_fullres": list(ROI_BBOX),
+                                           "polygon_fullres": None}]
+    cfg = {"ome_tiff": p["slide"], "output_dir": str(out), "nucleus": {"channel": "DAPI", "weight": 1.0},
+           "groups": {"markers": {"group_weight": 1.0, "channels": {"CD3": 1.0, "CD8": 1.0}}},
+           "channel_remap_params": REMAP, "artifact_kind": "test", "config_hash": "test"}
+    kw = ({"corrected_zarr_path": zpath, "corrected_decisions": decisions, "use_pixel_sources": True}
+          if sources else {})
+    w = FullFusionWorker(loader=loader, fusion_cfg=cfg, n_rows=2, n_cols=2, rois=rois, **kw)
+    if hook is not None:
+        hook(w, loader)
+    errs, done = [], []
+    w.error.connect(errs.append)
+    w.finished.connect(done.append)
+    w.run()
+    return errs, (zarr.open(done[0], mode="r")[...] if done else None)
+
+
+def test_fusion_through_sources_equals_the_loader_path(tmp_path):
+    p = build_project(tmp_path)
+    errs_a, a = _fuse(p, tmp_path / "a", sources=False)
+    errs_b, b = _fuse(p, tmp_path / "b", sources=True)
+    assert errs_a == [] and errs_b == []
+    assert a is not None and a.any() and np.array_equal(a, b)
+
+
+def test_fusion_reads_corrected_channels_from_the_product(tmp_path):
+    p = build_project(tmp_path)
+    _, with_product = _fuse(p, tmp_path / "a", sources=True)
+    _, raw_only = _fuse(p, tmp_path / "b", sources=True, decisions={})
+    assert not np.array_equal(with_product, raw_only)       # CD3 came from the product
+
+
+def test_a_region_the_corrected_group_does_not_cover_is_refused_not_read_raw(tmp_path):
+    """Blocker (1): the loader served raw pixels here; the migrated path refuses."""
+    p = build_project(tmp_path)
+    wider = [{"name": "Full WSI", "bbox_fullres": [0, 150, 0, 170], "polygon_fullres": None}]
+    errs_old, old = _fuse(p, tmp_path / "old", sources=False, rois=wider)
+    assert errs_old == [] and old is not None          # the old path silently went on
+    errs, out = _fuse(p, tmp_path / "a", sources=True, rois=wider)
+    assert out is None and errs and "no fallback" in errs[0]
+
+
+def test_a_change_to_the_loaders_store_during_the_run_does_not_reach_the_fusion(tmp_path):
+    """Blocker (2): the migrated worker never reads pixels through the loader."""
+    p = build_project(tmp_path)
+    _, clean = _fuse(p, tmp_path / "a", sources=True)
+    from block01.ui.step0.overview_panel import FullFusionWorker
+    real = FullFusionWorker._read_one_source
+
+    def meddle(w, loader):
+        def read(*a, **k):
+            loader.set_corrected_zarr_store("", {})        # the GUI thread changing it
+            loader.set_correction_config({})
+            return real(*a, **k)
+        w._read_one_source = read
+    _, meddled = _fuse(p, tmp_path / "b", sources=True, hook=meddle)
+    assert np.array_equal(clean, meddled)
+
+
+def test_a_decided_channel_without_a_product_is_refused(tmp_path):
+    p = build_project(tmp_path)
+    errs, out = _fuse(p, tmp_path / "a", sources=True, zpath="")
+    assert out is None and errs and "no fallback" in errs[0]

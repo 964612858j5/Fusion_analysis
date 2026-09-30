@@ -96,6 +96,9 @@ def test_the_contract_imports_no_viewer_ui_or_qt():
 MIGRATED = {os.path.join("core", "pixel_source.py"),
             os.path.join("core", "quant_sources.py"),
             os.path.join("ui", "step0", "overview_panel.py"),
+            # wiring only: it hands FullFusionWorker `use_pixel_sources=True`
+            # and the corrected product's path / decisions (A2c 3/3)
+            os.path.join("ui", "main_window.py"),
             os.path.join("scripts", "diagnose_v16_a2c_oracle.py")}
 
 

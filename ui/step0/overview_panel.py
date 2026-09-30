@@ -266,9 +266,21 @@ class FullFusionWorker(QThread):
     MAX_IO_WORKERS = 8
 
     def __init__(self, loader, fusion_cfg, n_rows, n_cols,
-                 zarr_chunk=1024, preview_ds=16, rois=None):
+                 zarr_chunk=1024, preview_ds=16, rois=None,
+                 corrected_zarr_path="", corrected_decisions=None,
+                 use_pixel_sources=False):
         super().__init__()
         self.loader      = loader
+        # Block A2c 3/3: with `use_pixel_sources` the pixels come through the
+        # PixelSource contract, from sources this worker builds for itself at
+        # the start of the run -- the raw slide (`OmeTiffSource`) and Step0's
+        # saved correction (`CorrectedZarrSource`, the region's own group,
+        # fail-closed). The page loader is then only asked for its channel
+        # index and shape, never for pixels, so a GUI-thread change to its
+        # corrected store during the run cannot reach this fusion.
+        self._use_sources = bool(use_pixel_sources)
+        self._corrected_path = corrected_zarr_path or ""
+        self._corrected_decisions = dict(corrected_decisions or {})
         self.fusion_cfg  = fusion_cfg
         self.n_rows      = n_rows
         self.n_cols      = n_cols
@@ -305,6 +317,36 @@ class FullFusionWorker(QThread):
             normalize=False,
         )
         return ch_name, region.copy()
+
+    @staticmethod
+    def _read_one_source(source, key, ch_name, y0, y1, x0, x1):
+        """One channel tile through its PixelSource, as float32 (what the
+        loader's normalize=False read returns). A source that does not own
+        the whole tile refuses it -- never partly filled from elsewhere."""
+        arr, _ = source.read_region(key, 0, y0, y1, x0, x1)
+        if arr.shape != (y1 - y0, x1 - x0):
+            raise ValueError(f"{ch_name}: the source covers {arr.shape} of the tile "
+                             f"{[y0, y1, x0, x1]} -- no fallback to other pixels")
+        return ch_name, np.asarray(arr, dtype=np.float32)
+
+    def _region_sources(self, raw, region_name, channels):
+        """{channel: (source, key)} for one region."""
+        decided = [ch for ch in channels if ch in self._corrected_decisions]
+        corrected = None
+        if decided:
+            if not self._corrected_path:
+                raise ValueError(f"channels {decided} are corrected in Step0 but no corrected "
+                                 f"product was handed over -- no fallback to raw pixels")
+            from ...sources import CorrectedZarrSource
+            corrected = CorrectedZarrSource(self._corrected_path, region_name,
+                                            slide_shape=self.loader.shape)
+            self._open_sources.append(corrected)
+            missing = [ch for ch in decided if ch not in corrected.channel_names()]
+            if missing:
+                raise ValueError(f"the corrected product has no {missing} for region "
+                                 f"'{region_name}' -- no fallback to raw pixels")
+        return {ch: ((corrected, ch) if ch in decided else (raw, int(self.loader.ch_map[ch])))
+                for ch in channels}
 
     def _channel_norm(self, ch, arr):
         """One channel as a [0,1] signal, through its COMMITTED window.
@@ -451,6 +493,12 @@ class FullFusionWorker(QThread):
             all_channels = [ch for ch in all_channels if ch in ch_map]
 
             os.makedirs(output_dir, exist_ok=True)
+            self._open_sources = []
+            raw_source = None
+            if self._use_sources:
+                from ...sources import OmeTiffSource
+                raw_source = OmeTiffSource(ome_path)
+                self._open_sources.append(raw_source)
 
             # ── Determine regions to fuse ─────────────────────────────
             # If ROIs defined: generate one zarr per ROI (bounding box)
@@ -496,6 +544,8 @@ class FullFusionWorker(QThread):
                 rname  = region["name"]
                 ry0, ry1 = region["y0"], region["y1"]
                 rx0, rx1 = region["x0"], region["x1"]
+                region_sources = (self._region_sources(raw_source, rname, all_channels)
+                                  if raw_source is not None else None)
                 rh     = ry1 - ry0
                 rw     = rx1 - rx0
                 zarr_path = os.path.join(output_dir, region["zarr_name"])
@@ -566,13 +616,22 @@ class FullFusionWorker(QThread):
                     # Parallel channel IO
                     raw_cache = {}
                     with ThreadPoolExecutor(max_workers=self.MAX_IO_WORKERS) as pool:
-                        futures = {
-                            pool.submit(
-                                self._read_one_channel,
-                                self.loader, ch, ty0, ty1, tx0, tx1
-                            ): ch
-                            for ch in all_channels
-                        }
+                        if region_sources is not None:
+                            futures = {
+                                pool.submit(
+                                    self._read_one_source, *region_sources[ch],
+                                    ch, ty0, ty1, tx0, tx1
+                                ): ch
+                                for ch in all_channels
+                            }
+                        else:
+                            futures = {
+                                pool.submit(
+                                    self._read_one_channel,
+                                    self.loader, ch, ty0, ty1, tx0, tx1
+                                ): ch
+                                for ch in all_channels
+                            }
                         for fut in as_completed(futures):
                             if self._stop:
                                 break
@@ -693,6 +752,9 @@ class FullFusionWorker(QThread):
             for leftover in list(self._tmp_stores):
                 shutil.rmtree(leftover, ignore_errors=True)
             self._tmp_stores = []
+            for source in getattr(self, "_open_sources", []):
+                source.close()
+            self._open_sources = []
 
 
 # ── Direct patch editing on the tissue thumbnail ──────────────────────

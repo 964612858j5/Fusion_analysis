@@ -161,6 +161,11 @@ v2.2 §11 stands. Added as **v17 candidates**, to be designed with real TMA work
 - the E4 debt, if the user grants the E4 waiver after an A7 rollback (§16.4 A), with the recorded reason;
 - A8 fields left in place under §17.2.
 
+**A2c migration blockers** (recorded by A2a, `docs/v16_A2a_application.md` §2.2 items 4–5, user ruling 2026-09-30). They are not deferred to v17: the A2c application that migrates a consumer using one of these paths must rule explicitly, *fix it* or *prove it irrelevant to that consumer*:
+
+- `OMETIFFLoader._read_corrected_roi_only` returns None for a request not fully inside one saved ROI and the loader then **silently serves raw pixels** for a corrected channel (`core/io_loader.py:92-99`, `:216-234`); Step1 refuses and Step4 fails closed, the loader path does not;
+- the loader's lazily created `_corrected_store` has no lock while `set_corrected_zarr_store` / `set_correction_config` run on the GUI thread and preload / fusion / random-patch threads read.
+
 Still in the backlog, not in v16 unless A0-style evidence shows a shared cause with a v16 stage: the occasionally black Step1 viewer (fine / working-set budget refusal), the ~6.5 s first Step3 `resizeGL` stall, C8 zoom stall, the "→ Feature Extraction (Step 4)" button that emits `open_qc_requested`.
 
 ---
@@ -186,6 +191,8 @@ Estimates are working days. The weeks are an **order and a budget**; if the exit
 
 - **(b) NGFF not adopted:** the table above as written.
 - **(a) NGFF adopted:** week 3 builds `NgffSource`, ingest and `NgffScanReader` (A2b) before A2c; **A3 / A4 move to week 4, A6 to week 5, A7 to week 6, A8 + A5 to week 7, regression + gates to week 8**; the buffer shrinks to what is left of week 8. If that leaves no buffer, the user decides at the end of week 6 whether to extend within the 8-week cap by dropping the real-WSI run, or to trim A8 to its minimum (§17.2).
+
+**Progress** (a record, appended): A1b done 2026-09-30 (§4.x). A2a done 2026-09-30 — `core/pixel_source.py` + `sources/` (`docs/v16_A2a_application.md` §10).
 
 **Off the critical path** (unchanged): v2.2 §5.8 corrected coarse levels — opportunistic, own application, never delays a gate.
 

@@ -178,3 +178,43 @@ A2a 只做第一步：**定义契约，并给现有数据源写适配器；不�
 ## 9. 用户裁定（2026-09-30）
 
 批准 v2，§8 的 1–6 全部按建议：通道名规则 (c)；校正源用全局坐标、按交集返回、没有交集时报错；`scan` 只支持第 0 层；契约放在 `core/pixel_source.py`，适配器放在 `sources/`；不需要真机验收；§2.2 第 4、5 条列为 A2c 迁移阻断项。
+
+## 10. 执行记录（2026-09-30）
+
+**已实施，自动验收与实测全部通过。按裁定 5，不需要真机验收。**
+
+- **新增文件**（没有改动任何现有产品文件）：
+  - `core/pixel_source.py`：`PixelSource` 抽象基类、`PixelSourceIdentity`、`OutOfBounds`、`SourceClosed`、`intersect()`。只依赖 numpy。
+    - `level_downsample`、`read_tile`、`read_regions`、`scan` 由基类按 `read_region` 给出默认实现；
+    - `with` 退出时调用 `close()`。
+  - `sources/ome_tiff.py`：`OmeTiffSource`。
+    - 区域 / 分块 / 多级读委托给 `RawTileProvider`；
+    - `scan` 委托给 `TiffTileReader.read`，在一个私有线程上预读一块，只支持第 0 层；
+    - 通道名和物理尺寸由适配器自己解析 OME 元数据（规则 (c)；支持 µm / nm / mm 等单位，OME 未写单位时按标准默认 µm）；
+    - 提供 `legacy_level_downsample_rounded`。
+  - `sources/corrected_zarr.py`：`CorrectedZarrSource`。
+    - 查找沿用 `quant_sources._corrected_group`：先按同样的规则找到恰好一个组，再用它自己的 bbox 调用 `_corrected_group` 做同样的校验；
+    - 也支持非 `roi_only` 的整张切片产品（边界为数组形状）；
+    - `level_shape(0)` 取自产品记录的 `source_ome` 切片；读不到就报错，或由调用方传入 `slide_shape`，不猜测。
+  - `tests/test_v16_pixel_source.py`（43 条）、`scripts/diagnose_v16_a2a_pixel_source.py`。
+- **测试**：43 条全部通过。
+  - 三种合成切片（uint8 分块 3 层、uint16 分块 3 层、uint8 条带 1 层，最后一种走 `TiffTileReader` 的 aszarr 退路）；
+  - 能力矩阵逐位相同；部分越界 / 完全越界；分块 / 扫描 / 批量读；8 线程并发读和 2 个并发扫描与串行结果逐位相同；生命周期；身份；通道名规则 (c) 的三种情况；物理尺寸（含 nm 换算、未记录、未知单位）；
+  - 奇数尺寸金字塔上的真实比例；校正源的交集、越界、非校正通道、多组查找；
+  - 契约不 import viewer / ui / Qt；没有产品模块使用契约。
+- **反向注入**（都变红）：
+  1. 适配器转 float32：3 条；
+  2. `level_downsample` 取整：1 条。第一次没有变红，因为合成金字塔的比例恰好是整数；补了奇数尺寸金字塔的测试后变红；
+  3. 校正源不按交集截取：3 条；
+  4. 越界不报错：6 条；
+  5. 契约 import viewer：1 条。
+  - 并发读：`TiffTileReader` 被多个调用方同时使用的测试通过（每个池线程有自己的文件句柄），所以适配器没有加锁。
+- **实测**（test1 副本指向的真实切片 `cropped_region.ome.tif`，15437 × 16215，29 通道，3 层；只读）：
+  - 每层每通道 20 个窗口，共 1740 次比较：所有层对 `RawTileProvider`；第 0 层另外对 `TiffTileReader` 和 `OMETIFFLoader(normalize=False)`。**0 处差异**；
+  - 校正产品 `Full WSI`（CD3D、HsBAg）40 个窗口对 Step4 的校正读，**0 处差异**；
+  - 这张切片上 `OmeTiffSource.channel_names()` 与 viewer 的通道名完全相同；
+  - 切片和原始项目的指纹前后一致。
+- **回归**（只新增文件，只跑相关模块）：`io_loader_lowres`、`quant_engine`、`quant_sources`、`step1_source_table`、`step4_page`、`step4_worker`、`tile_scheduler`、`viewer_prototype`、`batch_step4_dialog` 全部通过。
+- **文档**：
+  - `docs/v16_contracts_draft.md` §1：冻结说明，「吸收」改为「委托」；
+  - v2.3：§11 记入两个 A2c 迁移阻断项，§12 记入进度一行。

@@ -7,6 +7,16 @@
 
 ## 1. PixelSource
 
+> **A2a 冻结（2026-09-30）**：契约的权威文本已经是代码 `core/pixel_source.py`（它的模块说明列出所有语义），适配器在 `sources/`；本节只作说明。与下表相比，冻结版有这些变化（A2a 申请 v2、独立审核）：
+> - 身份是 core 自己的 `PixelSourceIdentity`（不再用 viewer 的 `SourceIdentity`）；它是运行时 / 存储身份，`slide_id` 另留字段；
+> - 新增 `valid_bounds(level)`：`read_region` 返回请求与它的交集及实际起点，交集为空时抛出 `OutOfBounds`，任何源都不拿别的源的像素去填；
+> - `read_tile(channel, level, ty, tx, tile_size)` 用普通整数，不用 `TileAddress`；
+> - `scan(channels, level, tile_size)` 属于契约，预读深度不属于契约；
+> - `close()` / `with` 与并发读语义属于契约；
+> - `level_downsample_rounded` **不在契约里**，只作为 OME-TIFF 适配器的遗留兼容属性 `legacy_level_downsample_rounded`，只能作缓存键；
+> - `channel_names()` 用规则 (c)：有名的保留，缺名的那一个记为 `ch_NN`，`Channel` 元素数与页数不符时全部 `ch_NN`；不套用 `name_map`；
+> - `physical_size()` 返回 `(dy_um, dx_um)` 或 None。
+
 ### 1.1 最小接口（v2.1 §5.1）
 
 | 方法 | 语义 | 今天对应的调用 |
@@ -29,7 +39,7 @@
 
 ### 1.2 实现与消费者（A2a / A2c）
 
-- `OmeTiffSource`：吸收 `RawTileProvider`、`OMETIFFLoader._read_roi_zarr`、`TiffTileReader`（快速分块路径与 aszarr 退路）。
+- `OmeTiffSource`：**委托**给 `RawTileProvider`（区域 / 分块 / 多级读）和 `TiffTileReader`（第 0 层扫描，含快速分块路径与 aszarr 退路），不吸收、不合并它们（v2.2 §5.2；本行原来写的「吸收」已按 A2a 改正）。
 - 校正 zarr（Step0 已提交的产品，float32、`roi_only`、按 ROI 分组）通过同一接口暴露，**只在它自己的 ROI 组里读**，沿用 `quant_sources` 的严格查找，不退到别的 ROI 组。Step4 的 fail-closed 来源契约不变。
 - `NgffSource`：只有 A0 采纳 NGFF 时才实现（A2b）。
 

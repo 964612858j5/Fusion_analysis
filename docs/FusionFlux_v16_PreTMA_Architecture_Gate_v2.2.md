@@ -241,20 +241,45 @@ The mapping from today's layout (`rois/<workspace>/step2/segmentation_runs/<run>
 
 Today `seg_runner/runner.py:engine_identity` includes `lock_hash`, which hashes all of `conda-linux-64.lock` + `requirements-pip.txt`. Any package added to the environment, even one unrelated to segmentation, changes every engine's identity. Step2 then reports "engine identity changed" against the Step1 contract.
 
-**Target:** identity covers only what changes segmentation output:
+**Target** *(amended by the approved A0.5 application v3, `docs/v16_A05_application.md`, 2026-09-29; the earlier list — runner code hash, library versions, preprocessing libraries, a run-time hash of the model artifact — was an over-built fingerprint and is replaced)*. Three separate concerns:
 
-- the runner code hash (already present);
-- the engine package versions (`lib_versions`, already present);
-- the versions of the preprocessing libraries the engine actually uses (numpy, scipy, scikit-image, TensorFlow / torch, as applicable);
-- **the model artifact identity** — *not* already present. Today's `model_checksum` is a hash of the model's `models.json` entry, not of any weight file (A0; `seg_runner/runner.py:43-47`). A0.5:
-  - records the metadata-entry hash separately, under a name that does not claim to be a weight checksum;
-  - hashes the actual artifact wherever a concrete local weight / model file exists;
-  - decides per engine, after its own read-only investigation, which models have such a file. Nothing is prescribed here;
-- the relevant device / CUDA mode, reported as today.
+- **Compatibility identity**, compared Step1 → Step2:
+  - `engine`, an explicit per-engine **`behavior_version`** and **`model_id`** (the `models.json` key);
+  - `behavior_version` is bumped **only** for a change that can alter the segmentation output: normalisation, threshold semantics, the expansion algorithm, the input-channel arrangement, post-processing, another default model. A package, a log line, the protocol or the UI never bumps it.
+- **Provenance**, recorded, never compared: git commit, the runner code hash, library versions (engine + pre-/post-processing), `env_lock_hash` (the old `lock_hash`), device / CUDA mode, `model_manifest_entry_hash` (the old `model_checksum` — a hash of the manifest entry, **not** a weight checksum) and the resolved model path.
+- **Model file integrity**: the deployment check `scripts/model_manifest.py --verify` against the manifest's per-file sha256. No weight file is hashed at run time.
 
-Old pre-segmentation runs whose identity still carries `lock_hash` must keep a defined behaviour. The application states which: accepted with a note, or reported once.
+Step2: another engine kind is refused (as today). A behaviour or model difference is asked in a dialog before the run and is recorded once the user confirms it; an unconfirmed difference is refused by the worker.
+
+Old pre-segmentation runs whose identity still carries `lock_hash` are **accepted and only recorded** (user ruling, A0.5 v3): compared on the engine kind, never on `lock_hash`.
 
 Tests: `tests/test_preseg_contract.py` and the Step2 contract check.
+
+#### Execution record: A0.5 (2026-09-29; application `docs/v16_A05_application.md` v3, approved)
+
+**Implemented and accepted.** Automatic acceptance passed. The user accepted the dialog on the real machine on 2026-09-30, using a synthetic params file with `behavior_version = 0` against the test1 copy.
+
+- **`seg_runner/engines.py`:**
+  - `IDENTITY_VERSION = 2`, `BEHAVIOR_VERSION` (all engines at 1, with the bump rule next to it) and `MODEL_ID` (the `models.json` keys);
+  - `behavior_identity(engine)`, which is pure and importable without any engine library, and `compare_identity(step1, current)`, which marks a pre-v2 identity as legacy;
+  - `lib_versions` now also records numpy, scipy and scikit-image, plus csbdeep for StarDist;
+  - each engine reports `model_resolved_path`. `predict` is untouched.
+- **`seg_runner/runner.py`:** `engine_identity` is the small v2 identity. The new `engine_provenance` holds git commit, `runner_version`, `lib_versions`, `env_lock_hash`, device, `model_manifest_entry_hash` and `model_resolved_path`. `hello` carries `provenance`.
+- **`ui/step1_presegmentation/run_job.py`:** `run.json["engine_provenance"][engine]` (one line).
+- **`workers/segment_merge_worker.py` `_start_contract_engine`:**
+  - another engine kind is refused (unchanged);
+  - a legacy Step1 identity is accepted and only recorded;
+  - a behaviour or model difference runs only when the user confirmed exactly those differences, and is refused otherwise;
+  - `seg_engine` gains `provenance` and `identity_comparison`.
+- **`ui/step2_page.py` `_confirm_engine_identity`:** before a Step1 hand-over runs, a `Segmentation engine` warning (`Run anyway` / `Cancel`) lists each behaviour or model difference. The confirmation goes to the worker. There is no dialog when nothing differs, and none for a legacy identity.
+- **`envs/fusion_mesmer/models.json`:** the three StarDist `2D_versatile_fluo_extracted/…` entries were removed. `scripts/model_manifest.py --verify` now reports only the known missing Mesmer model (4 files).
+- **Docs:** `UI_SURFACE_RULES.md`, `docs/user_guide.md` and `docs/用户指南.md` describe the dialog; §3 above was amended.
+- **Tests:**
+  - new `tests/test_engine_identity.py` (13 cases);
+  - 4 dialog cases in `tests/test_step2_engine_unified.py`;
+  - in `tests/test_step2_runner_path.py`, the old "another engine version runs" case is replaced by three real-StarDist cases: legacy recorded only, confirmed difference recorded, unconfirmed difference refused.
+- **Regression:** 17 modules, one process each, run sequentially on the current tree and on a `git archive HEAD` copy. **No new failure.** The five failures on both sides are known: Mesmer model missing ×3, and the StarDist 1-px flake ×2; `test_stardist_expansion_returns_the_nuclei_from_before_expanding` alternated pass / fail on re-runs.
+- **Reverse injection** (scratch copy): each of these turns the tests red — `lock_hash` back in the identity, `lib_versions` in the identity, `model_id` not compared, legacy compared field by field, the dialog skipped, and an unconfirmed difference not refused.
 
 ---
 

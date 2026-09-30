@@ -43,6 +43,48 @@ MESMER_THRESHOLD_TARGET = {"mesmer_whole_cell": "whole_cell",
 
 MODELS_MANIFEST = pathlib.Path(__file__).resolve().parent.parent / "envs" / "fusion_mesmer" / "models.json"
 
+# ── compatibility identity (block A0.5) ──────────────────────────────────
+# What decides whether a Step2 run is "the same segmentation" as the Step1
+# result it was handed. Deliberately small: environment hashes, library
+# versions and code hashes are PROVENANCE (recorded, never compared) -- see
+# `seg_runner.runner.engine_provenance`. Model file integrity is checked at
+# deployment by `scripts/model_manifest.py --verify`, not at every start.
+IDENTITY_VERSION = 2
+#: Bump an engine's number ONLY for a change that can alter its segmentation
+#: output: normalisation, threshold semantics, the expansion algorithm, the
+#: input-channel arrangement, post-processing, another default model. Adding
+#: a package, logging, the protocol or the UI never bumps it.
+BEHAVIOR_VERSION = {"cellpose": 1, "stardist": 1, "mesmer": 1}
+#: The `models.json` key of the model each engine loads.
+MODEL_ID = {"cellpose": "cellpose_cpsam", "stardist": "stardist_2D_versatile_fluo",
+            "mesmer": "mesmer_multiplex_segmentation"}
+#: Compared between a Step1 result and the engine Step2 runs.
+COMPARED_FIELDS = ("behavior_version", "model_id")
+
+
+def behavior_identity(engine):
+    """The compatibility identity of `engine` as this code would run it. Pure:
+    no engine library is imported, so the GUI can ask before a run."""
+    return {"version": IDENTITY_VERSION, "engine": engine,
+            "behavior_version": BEHAVIOR_VERSION[engine], "model_id": MODEL_ID[engine]}
+
+
+def compare_identity(step1, current):
+    """How the engine about to run differs from the one a Step1 result ran on.
+
+    Returns {"engine_differs", "legacy_identity", "differences"}:
+    `differences` is a list of [field, step1_value, current_value]. A Step1
+    identity from before version 2 (it carried `lock_hash` and no
+    `behavior_version`) is LEGACY: only the engine kind is checked, because
+    its other fields mean something else.
+    """
+    step1, current = dict(step1 or {}), dict(current or {})
+    legacy = int(step1.get("version") or 0) < IDENTITY_VERSION
+    differences = [] if legacy else [
+        [k, step1.get(k), current.get(k)] for k in COMPARED_FIELDS if step1.get(k) != current.get(k)]
+    return {"engine_differs": step1.get("engine") != current.get("engine"),
+            "legacy_identity": legacy, "differences": differences}
+
 
 class ModelMissingError(RuntimeError):
     """The model the manifest names is not where it says (plan 7.10.3: no
@@ -118,7 +160,13 @@ class CellposeEngine:
         import cellpose
         import torch
         return {"cellpose": getattr(cellpose, "__version__", "") or _dist_version("cellpose"),
-                "torch": torch.__version__}
+                "torch": torch.__version__, **_common_lib_versions()}
+
+    def model_resolved_path(self):
+        path = getattr(self._model, "pretrained_model", None)
+        if isinstance(path, (list, tuple)):
+            path = path[0] if path else None
+        return str(path) if path else None
 
     def predict(self, image, params):
         kwargs = {
@@ -149,7 +197,12 @@ class StardistEngine:
     def lib_versions(self):
         import stardist
         import tensorflow as tf
-        return {"stardist": stardist.__version__, "tensorflow": tf.__version__}
+        return {"stardist": stardist.__version__, "tensorflow": tf.__version__,
+                "csbdeep": _dist_version("csbdeep"), **_common_lib_versions()}
+
+    def model_resolved_path(self):
+        path = getattr(self._model, "logdir", None)
+        return str(path) if path else None
 
     def predict(self, image, params):
         from csbdeep.utils import normalize
@@ -172,7 +225,11 @@ class MesmerEngine:
 
     def lib_versions(self):
         import tensorflow as tf
-        return {"deepcell": _dist_version("deepcell"), "tensorflow": tf.__version__}
+        return {"deepcell": _dist_version("deepcell"), "tensorflow": tf.__version__,
+                **_common_lib_versions()}
+
+    def model_resolved_path(self):
+        return str(self.model_path) if self.model_path else None
 
     def predict(self, image, params, compartment, thresholds=None):
         """`thresholds` go to the post-processing of `compartment` (DeepCell
@@ -185,6 +242,11 @@ class MesmerEngine:
         pred = self._app.predict(batch, image_mpp=float(params.get("image_mpp", 0.5)),
                                  compartment=compartment, batch_size=1, **post)
         return np.squeeze(pred)
+
+
+def _common_lib_versions():
+    """Libraries every engine's pre- / post-processing touches (provenance)."""
+    return {name: _dist_version(name) for name in ("numpy", "scipy", "scikit-image")}
 
 
 def _dist_version(name):

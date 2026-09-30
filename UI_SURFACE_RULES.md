@@ -300,7 +300,13 @@ row, and the duplicate Tissue Preview button in the step bar.
   percentiles are gone, and so are the `tile size` / `batch size` rows. The
   StarDist model is shown, read-only (`2D_versatile_fluo`). Run on a params
   file with settings the engine does not use lists them with the reason;
-  the buttons are `Run per contract` and `Cancel` only.
+  the buttons are `Run per contract` and `Cancel` only. Block A0.5 (user
+  ruling 2026-09-29): when the engine a Step1 hand-over would run on has
+  another behaviour version or another model than the one the Step1 result
+  ran on, a `Segmentation engine` warning lists each difference before the
+  run; the buttons are `Run anyway` and `Cancel` only, and the confirmed
+  differences are recorded with the result. No dialog when nothing differs,
+  and none for a Step1 result from before block A0.5 (recorded only).
 * **Step4's page** (block S4-1, user ruling 2026-09-27) -- one column.
   `Input Files`: `Run:` (a Step2 run folder + Browse) and `Region:` (the
   run's regions; disabled when it has one), both handed over from Step3's

@@ -178,6 +178,7 @@ class PresegRunJob:
             return
         self.run.setdefault("engines", {})[engine] = hello.get("identity")
         self.run.setdefault("devices", {})[engine] = hello.get("device")
+        self.run.setdefault("engine_provenance", {})[engine] = hello.get("provenance")
         preseg_run.write_run(self.step1_dir, self.run)          # run.json gains the engine
 
         by_id = {rt["task_id"]: rt for rt in runner_tasks}

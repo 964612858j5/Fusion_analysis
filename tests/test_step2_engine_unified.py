@@ -354,6 +354,56 @@ def test_a_hand_over_with_another_stardist_model_is_not_a_mismatch(app, tmp_path
     assert "model_name" in shown[0] and "2D_versatile_fluo" in shown[0]
 
 
+# ── block A0.5: another behaviour version or model is asked before the run ──
+
+def _hand_over(tmp_path, app, identity):
+    _, out, _path = tpc._use_and_save(tmp_path, "stardist_nuclei_dapi",
+                                      tpc.COMBOS["stardist_nuclei_dapi"], identity=identity)
+    return tpc._page_config(app, out)
+
+
+def _v2(**kw):
+    return dict(seg_engines.behavior_identity("stardist"), **kw)
+
+
+@pytest.mark.parametrize("identity", ["legacy", "same"])
+def test_no_question_when_nothing_changed_or_the_identity_is_legacy(app, tmp_path, monkeypatch,
+                                                                   identity):
+    ident = tpc.IDENT["stardist"] if identity == "legacy" else _v2()
+    page = _hand_over(tmp_path, app, ident)
+    shown = _answer(monkeypatch, "Run anyway")
+    assert page._confirm_engine_identity(page.get_seg_config()) == (True, None)
+    assert shown == []
+
+
+def test_another_behaviour_version_is_asked_and_cancel_stops(app, tmp_path, monkeypatch):
+    page = _hand_over(tmp_path, app, _v2(behavior_version=0))
+    shown = _answer(monkeypatch, "Cancel")
+    assert page._confirm_engine_identity(page.get_seg_config()) == (False, None)
+    assert len(shown) == 1 and "behaviour has changed" in shown[0] and "0 -> 1" in shown[0]
+
+
+def test_run_anyway_hands_the_confirmed_differences_to_the_run(app, tmp_path, monkeypatch):
+    page = _hand_over(tmp_path, app, _v2(model_id="stardist_other"))
+    shown = _answer(monkeypatch, "Run anyway")
+    run, confirmation = page._confirm_engine_identity(page.get_seg_config())
+    assert run is True and "model has changed" in shown[0]
+    assert confirmation["differences"] == [["model_id", "stardist_other",
+                                           "stardist_2D_versatile_fluo"]]
+    assert confirmation["confirmed_at"]
+
+
+def test_cancel_on_the_engine_question_does_not_run(app, tmp_path, monkeypatch):
+    page = _hand_over(tmp_path, app, _v2(behavior_version=0))
+    page.set_zarr_path(rp._fused_zarr(tmp_path, rp._image()))
+    page._overlap_spin.setValue(int(page.get_seg_config()[preseg_contract.CONTRACT_KEY]["halo_px"]))
+    monkeypatch.setattr(page, "_confirm_ignored_settings", lambda path: True)
+    said = tpc._told(monkeypatch)             # any other message would be a failure, not a hang
+    shown = _answer(monkeypatch, "Cancel")
+    page._run()
+    assert said == [] and len(shown) == 1 and page._worker is None
+
+
 # ── Step1: the StarDist model is fixed there too ──────────────────────
 
 def test_step1_refuses_another_stardist_model_and_shows_it_read_only(app):

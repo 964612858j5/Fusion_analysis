@@ -4,6 +4,7 @@ block01/ui/step2_page.py — Step2Page (Segmentation & Merge).
 
 import os
 import json
+import time
 
 import numpy as np
 import zarr
@@ -49,6 +50,7 @@ from ..workers.hq_marker_segmentation import (
 )
 from ..workers.segment_merge_worker import SegmentMergeWorker
 from ..core import preseg_contract
+from ..seg_runner import engines as seg_engines
 from ..utils import segmentation_param_schema as param_schema
 
 
@@ -2348,6 +2350,44 @@ class Step2Page(QWidget):
         box.exec_()
         return box.clickedButton() is run_btn
 
+    def _confirm_engine_identity(self, seg_config):
+        """Block A0.5: when the engine this run would use differs from the one
+        the Step1 result ran on -- its behaviour version or its model -- the
+        user is asked before the run. Returns `(run, confirmation)`;
+        `confirmation` goes to the worker, which refuses any difference that
+        was not confirmed. A legacy (pre-v2) Step1 identity is only recorded
+        by the worker; another engine kind is refused by the worker."""
+        block = preseg_contract.validate(seg_config)
+        if block is None:
+            return True, None
+        engine = seg_engines.METHOD_ENGINE.get(block["method"])
+        if engine not in seg_engines.BEHAVIOR_VERSION:
+            return True, None
+        cmp = seg_engines.compare_identity(block["engine_identity"],
+                                           seg_engines.behavior_identity(engine))
+        if cmp["engine_differs"] or cmp["legacy_identity"] or not cmp["differences"]:
+            return True, None
+        said = {"behavior_version": "the {e} segmentation behaviour has changed since the "
+                                    "Step1 run (version {a} -> {b})",
+                "model_id": "the {e} model has changed since the Step1 run ({a} -> {b})"}
+        lines = "\n".join("  - " + said.get(k, "{k}: {a} -> {b}").format(e=engine, k=k, a=a, b=b)
+                          for k, a, b in cmp["differences"])
+        print(f"[Step2] engine differs from the Step1 run:\n{lines}")
+        box = QMessageBox(self)
+        box.setWindowTitle('Segmentation engine')
+        box.setIcon(QMessageBox.Warning)
+        box.setText(
+            "The engine this run would use is not the one the Step1 result ran on:\n"
+            f"{lines}\n\nThe Step1 preview was made with the old one, so the whole-slide "
+            "result may differ from it. Run anyway? The difference is recorded with the result.")
+        run_btn = box.addButton('Run anyway', QMessageBox.AcceptRole)
+        box.addButton('Cancel', QMessageBox.RejectRole)
+        box.exec_()
+        if box.clickedButton() is not run_btn:
+            return False, None
+        return True, {"differences": cmp["differences"],
+                      "confirmed_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+
     def _run(self):
         if not self._zarr_path or not os.path.exists(self._zarr_path):
             QMessageBox.warning(self, 'No data',
@@ -2373,10 +2413,14 @@ class Step2Page(QWidget):
                 if not self._apply_selected_index_params():
                     return
         seg_config = self.get_seg_config()
+        identity_confirmation = None
         if source == "index":
             if not self._check_preseg_contract(seg_config):
                 return
             if not self._confirm_ignored_settings(resolved):
+                return
+            run_it, identity_confirmation = self._confirm_engine_identity(seg_config)
+            if not run_it:
                 return
         else:
             # Manual parameters are the user's own, not a Step1 hand-over.
@@ -2435,6 +2479,7 @@ class Step2Page(QWidget):
             rois             = self._rois if self._rois else None,
             param_file        = param_file,
             parameter_source  = "index" if param_file else "manual",
+            identity_confirmation = identity_confirmation,
         )
         seg_cfg = seg_config
         print(f"[Step2] segmentation method={seg_cfg.get('method')}")

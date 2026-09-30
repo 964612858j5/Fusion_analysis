@@ -29,23 +29,49 @@ def _sha256_files(paths):
     return h.hexdigest()[:16]
 
 
-def engine_identity(engine, engine_obj):
-    """What decides whether a result came from 'the same engine' (plan 7.10.5).
+def engine_identity(engine, engine_obj=None):
+    """What decides whether a result came from 'the same segmentation'
+    (plan 7.10.5; block A0.5): the engine kind, its explicit behaviour
+    version and the model it loads -- `engines.behavior_identity`. Nothing
+    about the environment: that is `engine_provenance`."""
+    from . import engines
+    return engines.behavior_identity(engine)
 
-    The device is deliberately not part of it: it is reported separately.
-    """
+
+def _git_commit():
+    try:
+        import subprocess
+        out = subprocess.run(["git", "-C", str(_REPO), "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=5)
+        return out.stdout.strip() or None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def engine_provenance(engine, engine_obj):
+    """What this engine process actually ran with. RECORDED, never compared
+    (block A0.5): an unrelated package, a log line or a protocol change must
+    not read as "another engine". Model file integrity is the deployment
+    check `scripts/model_manifest.py --verify`, not a hash at every start."""
     env = _REPO / "envs" / "fusion_mesmer"
     manifest = env / "models.json"
     models = {}
     if manifest.is_file():
         models = {k: v for k, v in json.loads(manifest.read_text()).get("models", {}).items()
                   if v.get("engine") == engine}
+    resolved = getattr(engine_obj, "model_resolved_path", None)
+    try:
+        resolved = resolved() if callable(resolved) else None
+    except Exception:  # noqa: BLE001 -- provenance must never stop an engine
+        resolved = None
     return {
-        "engine": engine,
-        "lock_hash": _sha256_files([env / "conda-linux-64.lock", env / "requirements-pip.txt"]),
-        "lib_versions": engine_obj.lib_versions(),
-        "model_checksum": hashlib.sha256(json.dumps(models, sort_keys=True).encode()).hexdigest()[:16],
+        "git_commit": _git_commit(),
         "runner_version": _sha256_files(sorted(_PKG.glob("*.py"))),
+        "lib_versions": engine_obj.lib_versions(),
+        "env_lock_hash": _sha256_files([env / "conda-linux-64.lock", env / "requirements-pip.txt"]),
+        "device": engine_obj.device,
+        "model_manifest_entry_hash": hashlib.sha256(json.dumps(models, sort_keys=True).encode()).hexdigest()[:16],
+        "model_resolved_path": resolved,
     }
 
 
@@ -95,7 +121,7 @@ def main(argv=None):
     from . import engines
     engine_obj = engines.load(args.engine)
     send("hello", engine=args.engine, identity=engine_identity(args.engine, engine_obj),
-         device=engine_obj.device)
+         provenance=engine_provenance(args.engine, engine_obj), device=engine_obj.device)
 
     for line in sys.stdin:
         if not line.strip():

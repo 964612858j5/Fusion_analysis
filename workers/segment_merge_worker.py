@@ -66,6 +66,7 @@ from ..utils.tile_strategy import suggest_tile_strategy
 from ..seg_runner import protocol as runner_protocol
 from ..seg_runner.client import EngineProcess, EngineStartError
 from ..seg_runner.engines import EXPANSION_METHODS, METHOD_ENGINE, METHOD_OUTPUTS
+from ..seg_runner import engines as seg_engines
 from ..utils.mesmer_utils import mesmer_metadata
 from ..utils import segmentation_param_schema as param_schema
 from .hq_marker_segmentation import (
@@ -123,7 +124,7 @@ class SegmentMergeWorker(QThread):
     def __init__(self, zarr_path, seg_config=None, n_rows=1, n_cols=1,
                  overlap_px=200, output_dir=None, recovery_npy_dir=None,
                  rois=None, cp_params=None, param_file=None,
-                 parameter_source="manual"):
+                 parameter_source="manual", identity_confirmation=None):
         super().__init__()
         self.zarr_path        = zarr_path
         self.seg_config       = normalize_segmentation_config(seg_config if seg_config is not None else cp_params)
@@ -158,6 +159,9 @@ class SegmentMergeWorker(QThread):
         # Step2 hook-up, step 3: the Step1 hand-over this run executes (set in
         # run()), and its engine process. None on every other path.
         self._contract        = None
+        # Block A0.5: the differences between the Step1 result's engine and
+        # this one that the user accepted before the run (Step2 page), or None.
+        self._identity_confirmation = identity_confirmation
         self._engine          = None
         self._runner_io       = ""
         self._logger          = None
@@ -2309,21 +2313,41 @@ class SegmentMergeWorker(QThread):
             raise _ContractStopped()
         got = hello.get("identity") or {}
         want = self._contract["engine_identity"] if self._contract is not None else None
+        comparison = None
         if want is not None:
-            if want.get("engine") != got.get("engine"):
+            comparison = seg_engines.compare_identity(want, got)
+            if comparison["engine_differs"]:
                 raise RuntimeError(
                     f"the Step1 result ran on the {want.get('engine')} engine, "
                     f"not {got.get('engine')}; choose again in Step1")
-            keys = sorted(k for k in set(want) | set(got) if want.get(k) != got.get(k))
-            if keys:
-                msg = (f"[Step2] the engine differs from the Step1 run in: {', '.join(keys)}; "
-                       "running with the Step1 parameters")
+            if comparison["legacy_identity"]:
+                # Block A0.5: recorded only. A pre-v2 identity's other fields
+                # (lock_hash, ...) mean something else and are not compared.
+                msg = ("[Step2] the Step1 result has a legacy engine identity; "
+                       "compared on the engine kind only")
+                print(msg)
+                if self._logger:
+                    self._logger.info(msg)
+            elif comparison["differences"]:
+                # A behaviour or model difference runs only when the user
+                # accepted exactly these differences before the run.
+                confirmed = (self._identity_confirmation or {}).get("differences")
+                if confirmed != comparison["differences"]:
+                    raise RuntimeError(
+                        "the engine differs from the Step1 run in "
+                        + ", ".join(d[0] for d in comparison["differences"])
+                        + " and this was not confirmed before the run; start it again in Step2")
+                comparison["user_confirmed"] = dict(self._identity_confirmation)
+                msg = ("[Step2] the engine differs from the Step1 run in "
+                       + ", ".join(f"{k} ({a!r} -> {b!r})" for k, a, b in comparison["differences"])
+                       + "; confirmed by the user")
                 print(msg)
                 if self._logger:
                     self._logger.warning(msg)
         self._engine_meta = {"engine": engine, "device": hello.get("device"),
                              "use_gpu": self._wants_gpu(), "identity": got,
-                             "step1_identity": want}
+                             "step1_identity": want, "provenance": hello.get("provenance"),
+                             "identity_comparison": comparison}
         if self._logger:
             self._logger.info(f"[Step2] {engine} engine process started, device={hello.get('device')}")
         return {"runner": ep}

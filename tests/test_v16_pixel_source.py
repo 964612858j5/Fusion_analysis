@@ -90,10 +90,20 @@ def test_the_contract_imports_no_viewer_ui_or_qt():
     assert bad == [], bad
 
 
-def test_no_product_module_uses_the_contract_yet():
-    """A2a changes no behaviour: nothing outside the contract, its adapters,
-    its tests and its probe imports them."""
-    allowed = {os.path.join("core", "pixel_source.py")}
+# The consumers migrated onto the contract so far (block A2c): Step4's
+# JobReader (2/3) and FullFusionWorker (3/3). Any other user is a migration
+# nobody approved.
+MIGRATED = {os.path.join("core", "pixel_source.py"),
+            os.path.join("core", "quant_sources.py"),
+            os.path.join("ui", "step0", "overview_panel.py"),
+            os.path.join("scripts", "diagnose_v16_a2c_oracle.py")}
+
+
+def test_only_the_migrated_consumers_use_the_contract():
+    """A2a changed no behaviour; A2c migrates Step4 and Step1 fusion only.
+    Nothing else outside the contract, its adapters, tests and probes
+    imports them."""
+    allowed = MIGRATED
     users = []
     for base, dirs, files in os.walk(ROOT):
         rel = os.path.relpath(base, ROOT)

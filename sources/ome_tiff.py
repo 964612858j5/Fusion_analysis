@@ -163,6 +163,24 @@ class OmeTiffSource(PixelSource):
         arr, origin = self._provider.read_region(index, level, cy0, cy1, cx0, cx1)
         return arr, (int(origin[0]), int(origin[1]))
 
+    def read_regions(self, channels, level, y0, y1, x0, x1):
+        """Level 0: Step4's `TiffTileReader` (tile-parallel decode, the fast
+        batch path; block A2c 2/3) -- bitwise the per-channel reads. Other
+        levels: the contract's per-channel default."""
+        if int(level) != 0:
+            return super().read_regions(channels, level, y0, y1, x0, x1)
+        self._check_open()
+        indices = [self._index(ch) for ch in channels]
+        if not indices:
+            raise ValueError("no channels")
+        cy0, cy1, cx0, cx1 = intersect((y0, y1, x0, x1), self.valid_bounds(0))
+        return self._reader().read(indices, cy0, cy1, cx0, cx1), (cy0, cx0)
+
+    def scan_reader_mode(self) -> str:
+        """Which path the level-0 batch reader takes ("tiff_tiles" or
+        "tifffile_zarr"), for the provenance."""
+        return self._reader().mode
+
     def _reader(self):
         with self._scan_lock:
             if self._scan_reader is None:

@@ -498,24 +498,37 @@ class JobReader:
 
     def __init__(self, job, read_threads=8):
         import zarr
+
+        from ..sources import CorrectedZarrSource, OmeTiffSource
         self.job = job
         self.shape = job.shape
         self._labels = zarr.open(job.label_path, mode="r")
         self._nuclei = zarr.open(job.nucleus_path, mode="r") if job.nucleus_path else None
-        self._raw = TiffTileReader(job.slide, threads=read_threads)
-        self._corrected = {}
-        for ch in job.channels:
-            if ch.kind == "corrected":
-                self._corrected[ch.index] = (zarr.open(ch.path, mode="r")[ch.array], ch.offset)
+        # Block A2c 2/3: the image data through the PixelSource contract --
+        # the raw slide as `OmeTiffSource` (its level-0 batch read is this
+        # module's TiffTileReader), Step0's saved correction as
+        # `CorrectedZarrSource` (the same strict group lookup as
+        # `_corrected_group`), both in slide coordinates.
+        self._raw = OmeTiffSource(job.slide, scan_threads=read_threads)
+        self._corrected = None
+        if any(ch.kind == "corrected" for ch in job.channels):
+            zpaths = {ch.path for ch in job.channels if ch.kind == "corrected"}
+            if len(zpaths) != 1:
+                raise QuantSourceError(f"the corrected channels come from {sorted(zpaths)}, "
+                                       "not one product")
+            self._corrected = CorrectedZarrSource(zpaths.pop(), job.roi_name,
+                                                  slide_shape=self._raw.level_shape(0))
+        self._pool = ThreadPoolExecutor(max(1, int(read_threads)),
+                                        thread_name_prefix="step4-corrected")
         self.reads = {"raw": 0, "corrected": 0}
         self._lock = threading.Lock()
 
     @property
     def raw_mode(self):
-        return self._raw.mode
+        return self._raw.scan_reader_mode()
 
     def channel_dtype(self, ch):
-        return np.dtype(np.float32) if ch.kind == "corrected" else self._raw.dtype
+        return np.dtype(np.float32) if ch.kind == "corrected" else self._raw.dtype(ch.index)
 
     def nuclei(self, y0, y1, x0, x1):
         """uint32 nucleus ids of the tile (no ring), or None."""
@@ -547,20 +560,31 @@ class JobReader:
         if len(kinds) != 1:
             raise ValueError("one batch, one source kind")
         by, bx = self.job.bbox[0], self.job.bbox[2]
+        want = (y1 - y0, x1 - x0)
         if kinds == {"raw"}:
-            out = self._raw.read([s.index for s in sources], by + y0, by + y1, bx + x0, bx + x1)
+            out, _ = self._raw.read_regions([s.index for s in sources], 0,
+                                            by + y0, by + y1, bx + x0, bx + x1)
+            if out.shape[1:] != want:
+                raise QuantSourceError(f"the slide does not cover the tile {[y0, y1, x0, x1]}")
             with self._lock:
                 self.reads["raw"] += len(sources)
             return out
         out = np.empty((len(sources), y1 - y0, x1 - x0), np.float32)
 
         def one(k):
-            arr, (oy, ox) = self._corrected[sources[k].index]
-            out[k] = arr[oy + y0:oy + y1, ox + x0:ox + x1]
-        list(self._raw._pool.map(one, range(len(sources))))
+            arr, _ = self._corrected.read_region(sources[k].name, 0, by + y0, by + y1,
+                                                 bx + x0, bx + x1)
+            if arr.shape != want:                  # fail closed, never partly raw
+                raise QuantSourceError(f"the corrected product does not cover the tile "
+                                       f"{[y0, y1, x0, x1]} of channel {sources[k].name}")
+            out[k] = arr
+        list(self._pool.map(one, range(len(sources))))
         with self._lock:
             self.reads["corrected"] += len(sources)
         return out
 
     def close(self):
+        self._pool.shutdown(wait=True)
+        if self._corrected is not None:
+            self._corrected.close()
         self._raw.close()

@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..config import OUTPUT_DIR
+from .step_frame import FRAME_TAB_QSS, StepFrame, StepFrameMetrics, free_tab_bar
 from ..core import quant_engine as qe
 from ..core import quant_sources as qs
 from ..workers.feature_extract_worker import (
@@ -26,8 +27,13 @@ class Step4Page(QWidget):
 
     go_back = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, metrics=None, title_bar=None):
         super().__init__(parent)
+        # The page frame (block A1b S4): the window hands over the one
+        # `StepFrameMetrics` and a title bar built like Step3's; a page
+        # standing on its own (the page-level tests) measures its own.
+        self._frame_metrics_in = metrics
+        self._title_bar_in = title_bar
         self._worker = None
         self._running = False
         self._open_slide = ""
@@ -189,17 +195,15 @@ class Step4Page(QWidget):
     # ── UI ────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
+        # ONE `StepFrame` in its wide mode (block A1b S4, S0 ruling 4): the
+        # page's single column is the frame's one merged slot. `root` is that
+        # column's layout, put into the slot at assembly.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        root = QVBoxLayout()
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(8)
-
-        title = QLabel('Step 4 — Cell Feature Extraction')
-        title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet(
-            'font-size:16px;font-weight:bold;color:#eee;'
-            'background:#1a1a1a;padding:6px;border-radius:4px;'
-        )
-        root.addWidget(title)
 
         def _box(label, color):
             b = QGroupBox(label)
@@ -435,8 +439,35 @@ class Step4Page(QWidget):
         self._btn_run.setEnabled(False)
         nav.addWidget(self._btn_run)
 
-        root.addLayout(nav)
+        self._assemble_frame(outer, root, nav)
         self._apply_job_to_scope(None)
+
+    def _assemble_frame(self, outer, column, nav):
+        """Put the page into its wide `StepFrame` (block A1b S4).
+
+            title slot   `Step 4 — Cell Feature Extraction`
+            tab row      blank
+            merged slot  the page's one column, as before
+            bottom slot  ← Back to Step 3 | stretch | Batch... | Stop | Extract
+        """
+        title_bar = self._title_bar_in
+        if title_bar is None:
+            title_bar = QLabel('Step 4 — Cell Feature Extraction')
+            title_bar.setStyleSheet('font-size:12px;font-weight:bold;color:#eee;'
+                                    'padding:4px 8px;')
+        metrics = self._frame_metrics_in
+        if metrics is None:
+            title_bar.ensurePolished()
+            metrics = StepFrameMetrics(
+                title_height=title_bar.sizeHint().height(),
+                bottom_height=max(nav.sizeHint().height(), 38),
+                tab_qss=FRAME_TAB_QSS)
+        frame = StepFrame(metrics, free_tab_bar, wide=True)
+        self._frame = frame
+        frame.set_title(title_bar)
+        frame.wide_layout.addLayout(column)
+        frame.bottom_layout.addLayout(nav)
+        outer.addWidget(frame)
 
     # ── helpers ───────────────────────────────────────────────────────
 

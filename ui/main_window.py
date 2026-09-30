@@ -1419,7 +1419,8 @@ class MainWindow(QMainWindow):
         # is what a real session saw as a 1:1 split.
         self._stack.currentChanged.connect(
             lambda _i: self._fix_step1_split_ratio())
-        self._step2 = Step2Page()
+        self._step2 = Step2Page(metrics=self._frame_metrics,
+                                title_bar=self._frame_title_bar("Step 2 — Segmentation & Merge"))
         self._step2.go_back.connect(self._go_to_step1)
         self._step2.segmentation_done.connect(self._on_step2_complete)
         self._step2.segmentation_done.connect(self._step3_on_segmentation_done)
@@ -1440,7 +1441,8 @@ class MainWindow(QMainWindow):
         # after the last of them exists.
         self._wire_channel_column_sync()
 
-        self._step4 = Step4Page()
+        self._step4 = Step4Page(metrics=self._frame_metrics,
+                                title_bar=self._frame_title_bar("Step 4 — Cell Feature Extraction"))
         self._step4.go_back.connect(self._go_to_step3)
         self._stack.addWidget(self._step4)
 
@@ -1512,6 +1514,16 @@ class MainWindow(QMainWindow):
     _CHANNEL_COLUMN_FRACTION_FALLBACK = 0.278
 
     # ── Step3 (block 2c-1) ────────────────────────────────────────────
+    def _frame_title_bar(self, text):
+        """A framed page's title bar, as Step3's (block A1b S3 / S4, ruling
+        1): Step0's load bar's height, the step's name on the left."""
+        title_bar = _HeightTwinBar(self._step0._file_bar)
+        title_row = QHBoxLayout(title_bar)
+        title_row.setContentsMargins(8, 4, 8, 4)
+        title_row.addWidget(self._make_label(text, bold=True))
+        title_row.addStretch()
+        return title_bar
+
     def _build_step3_page(self, page):
         """Step1's controls, built from Step1's style sources, handed to the
         Step3 page to lay out. Each one is the Step1 action: Step3 shares
@@ -1702,14 +1714,14 @@ class MainWindow(QMainWindow):
         self._apply_channel_column_fraction()
 
     def _apply_channel_column_fraction(self):
-        """Put the shared width on every page (block A1b S2: the framed
-        pages as one pixel width, Step2 as a share until S3)."""
+        """Put the shared width on every page: all four column pages are
+        framed (block A1b S3) and show one pixel width."""
         if getattr(self, "_syncing_channel_column", False):
             return
         fraction = self.channel_column_fraction()
         self._syncing_channel_column = True
         try:
-            # THE PAGE FRAMES (block A1b: Step0, Step1, Step3) get ONE PIXEL
+            # THE PAGE FRAMES (block A1b: Step0, Step1, Step2, Step3) get ONE PIXEL
             # WIDTH. All hold the same floor, so all clamp alike; the widest
             # clamp is what every frame shows. A clamp that widened the
             # column is written back into the share, so a floor that later
@@ -1746,25 +1758,16 @@ class MainWindow(QMainWindow):
                 if split in shown and split.sizes()[0] > wanted:
                     fraction = split.sizes()[0] / float(usable)
                     self._channel_column_fraction = fraction
-
-            for split in self._channel_column_splitters()[1:]:
-                if split is None or split in frames:
-                    continue
-                if split.count() != 2 or split.width() <= 10:
-                    continue
-                usable = max(1, split.width() - split.handleWidth())
-                left = max(1, int(round(usable * fraction)))
-                right = max(1, usable - left)
-                if split.sizes() != [left, right]:
-                    split.setSizes([left, right])
         finally:
             self._syncing_channel_column = False
 
     def _channel_column_frame_splitters(self):
         """The splitters of the pages built on `StepFrame` (block A1b)."""
+        step2 = getattr(self, "_step2", None)
         step3 = getattr(self, "_step3", None)
         return [getattr(getattr(self, "_step0", None), "_bg_c_split", None),
                 getattr(self, "_step1_main_split", None),
+                getattr(step2, "channel_column_splitter", lambda: None)(),
                 getattr(step3, "channel_column_splitter", lambda: None)()]
 
     def _fix_step1_split_ratio(self):
@@ -5126,9 +5129,13 @@ class MainWindow(QMainWindow):
         whether or not the page has ever been shown.
         """
         step0 = getattr(self, "_step0", None)
+        step2 = getattr(self, "_step2", None)
         step3 = getattr(self, "_step3", None)
+        # Step2's parameter panel too (block A1b S3, ruling 3): its content's
+        # minimum takes part, so at the floor the panel still fits.
         panels = [p for p in (getattr(step0, "left_panel", lambda: None)(),
                               getattr(self, "_step1_left_panel", None),
+                              getattr(step2, "left_panel", lambda: None)(),
                               getattr(step3, "left_panel", lambda: None)())
                   if p is not None]
         if not panels:

@@ -157,3 +157,44 @@ StepFrame(metrics, wide=True)
 - 同意方案，§8 的 1–5 都按建议执行。
 - 授权提交本申请并推送（推到 `origin/v16`，不碰 `origin/main`，不强推）。
 - 远程指令：回复我发的邮件（同一线程）即为指令；收到并开始执行时，回复「开始执行了」。
+
+## 11. 执行记录（2026-09-30）
+
+**已实施，自动验收通过；待用户真机验收（与 S2 以后的内容一起）。**
+
+- **`ui/step_frame.py`**：新增宽模式 `StepFrame(..., wide=True)`。
+  - `wide_slot` 是一个**真的** QTabWidget，放在 splitter 的位置。它只有一个 tab，文字为空、画成透明、不可用、不可聚焦。
+  - 因此空白 tab 行的高度、pane 的上下边缘都与真 tab 控件由同一个布局算出来，不用探针，也不写死。实测离屏 33、真实 GL 27，都与其他页相同。
+  - 内容放在 `wide_layout` 里，边距 6（裁定 4）。
+  - 与申请 §3.1 的差异：申请写的是「探针 tab 栏量高度 + 仿制的内容框」；实际采用上面这个更简单、按构造就一致的做法。
+- **Step2**（`ui/step2_page.py`）：
+  - `Step2Page(parent=None, metrics=None, title_bar=None)`；`_assemble_frame` 把各部分放进框架：标题栏、左 tab「Parameters」= 参数滚动区、右 tab「Tile Status」（工具行 =「Tile Status Overview」）、底部槽 = Back ｜ Run ｜ Stop。
+  - `_main_split` = 框架的 splitter；新增 `left_panel()`。
+  - 单独构造时用自己的标题标签和 nav 量出 metrics。
+- **Step4**（`ui/step4_page.py`）：同样的构造参数；宽模式；原来的单栏整体放进 `wide_layout`；底部槽 = Back ｜ Batch... ｜ Stop ｜ Extract Features。
+- **`ui/main_window.py`**：
+  - 新增 `_frame_title_bar(text)`，做法与 Step3 的标题栏相同，Step2、Step4 用它；
+  - Step2 加入 `_channel_column_frame_splitters` 和共同下限；
+  - 删除只剩 Step2 在用的比例循环。
+- **实测**（`scripts/diagnose_v16_a1b_frame.py`，test1 副本，离屏与真实 GL，1600 × 1000 与 2050 × 1330）：
+  - 五页的标题槽、tab 行（y、高度）、底部槽相同；
+  - Step0 / 1 / 2 / 3 的左右栏、工具行相同；
+  - Step4 的 `wide slot` = [6, 71, 1588, 861]（离屏 1600），正好是左栏起点到右栏终点；
+  - Step0 / 1 / 3 的 viewer、GPU 层照旧相同。
+- **测试**：
+  - `test_v16_frame_lock.py` 共 25 条：新增 Step2 框架矩形（4 种尺寸）、Step4 宽模式（4 种尺寸，含 pane 上下边缘和空白 tab）、在 Step2 拖动后四页同宽、Step2 持有同一下限；
+  - `test_step2_layout.py`：splitter 的子部件现在是 tab 控件，断言改为「左 tab = [Parameters]，里面是参数滚动区；右 tab = [Tile Status]」；共享宽度的容差从 ±2 改为 0。
+- **反向注入**（都变红）：
+  - Step2 不进框架宽度：frame_lock + step2_layout 共 5 条；
+  - Step2 不持有下限：2 条；
+  - 空白行自带高度（去掉边框和内边距）：4 条；
+  - 宽模式少了分隔条那 4 px：4 条。
+  - 第一次注入「Step2 不进框架宽度」时改错了地方：同样两行也出现在 `_channel_column_splitters` 里，结果测试没变红。改到 `_channel_column_frame_splitters` 之后才生效。
+- **回归**（离屏 110 个模块 + 真实 GL 11 个，逐个进程运行；失败的模块放到 HEAD `0b5f8bf` 上重跑，逐条对比失败的测试名）：
+  - GL 部分与 HEAD 完全一致（`fusion_visibility` / `gpu_roi_clip` 三件两边都 abort，`gpu_takeover` 两边都失败 1 条）；
+  - 离屏有 2 条只在当前代码上失败：`test_step0_compare_tiles::test_the_dapi_mapping_is_its_own_channels`、`test_step2_runner_path::test_a_hand_over_equals_the_runner_with_shared_ownership[stardist_nuclei_expansion-full]`。当前代码上单独重跑 3 次：失败 1 次、通过 2 次，属于不稳定测试，而且与布局无关（瓦片调度 / 显示映射、分割引擎交接）。HEAD 上各跑 4 次都通过。结论：
+    - dapi 这条在当前代码上单独跑 5 次全部通过，是负载下的时序问题（回归时异步列表还是空的）；
+    - runner 这条比较的是分割掩膜（1.1% 的像素标签差 1，属于并发完成顺序导致的编号差异）。这个测试不构造任何窗口或页面，而 S3+S4 只改了 UI 布局，不可能影响它。
+    - 两条都判为不稳定测试，不是新增失败；
+  - 其余失败两边相同：global_channel_dock、preview_source_provider、step0_channel_conditioning（超时）、step0_no_process_button、step0_process_incremental、step1_channel_panel、tissue_navigator_viewport_sync、step1_montage_view（崩溃）。
+- **文档**：`UI_SURFACE_RULES.md`（列宽、页面框架、Step2 页、Step4 页）；两份用户指南（Step2 的两个 tab 和底栏；Step4 的标题栏和底栏）。v2.2 / v2.3 计划文档未改动：v2.3 是用户在另一个窗口提交的，A1b 完成的记录留给用户确认。

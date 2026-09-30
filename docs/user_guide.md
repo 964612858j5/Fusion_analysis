@@ -170,7 +170,7 @@ Two things:
 **What it does:**
 Take the parameters tuned in Step 1 and **actually circle every single cell in the entire ROI**. Because the whole image is too big to fit in GPU memory, the software **cuts it into a grid of small tiles, processes each one, then stitches (merges) them into one whole-image mask**.
 
-**How to operate:**
+**How to operate:** the parameters are in the left tab **Parameters**, the tile overview and progress in the right tab **Tile Status**; **← Back to Step 1**, **▶ Run Segmentation & Merge** and **⏹ Stop** are the row at the bottom. The left column is as wide as the channel column of Step 0 / 1 / 3 — dragging it on any page moves all of them.
 
 1. Confirm the inputs in **Input Data** (fusion image / parameter file, usually carried over automatically). You can click **Load zarr info & overview** to take a look.
 2. **Tile Grid**: set the tile size (how big each cell of the grid is). Smaller tiles use less GPU memory, but the seams need more care.
@@ -225,7 +225,7 @@ Time to **produce the table.** Step 4 goes through every cell of one Step 2 resu
 
 **Where the numbers come from:** each channel is read from where Step 0 decided — a channel kept `original` from the raw slide; a channel corrected with TopHat / cuCIM **only** from the correction Step 0 saved. If that saved correction is missing or does not match (another region, other parameters, another slide), Step 4 **stops before measuring anything** and says why — it never falls back to raw pixels and never recomputes the correction. Re-save Step 0's correction in that case.
 
-**How to operate:**
+**How to operate:** the page has the other steps' title bar and bottom row (**← Back to Step 3**, **Batch...**, **⏹ Stop**, **▶ Extract Features**); its settings are one column in between.
 
 1. **Run** and **Region**: Step 4 opens on the result you chose in Step 3 (or the latest Step 2 result). `Browse` picks another run folder; a run with several regions lets you choose one. The **Slide** is the run's own and cannot be changed. The line under it says how many cells and how many channels are read raw or from Step 0's correction. A red line says why a result cannot be measured — e.g. a result from before Step 2 kept a label store (re-run Step 2), a result made on another slide, or a missing Step 0 correction.
    - A nuclei-only result (e.g. StarDist nuclei) has no cell mask: its nuclei are measured as the objects.

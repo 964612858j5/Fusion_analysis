@@ -227,15 +227,15 @@ row, and the duplicate Tissue Preview button in the step bar.
   dragging Step0's or Step1's moves both, and a window resize keeps them
   together because the share is normalised. Step0 is written through its own
   left-column mechanism so its hidden peer splitter stays at the same width.
-  Block A1b S1 + S2 (user rulings 2026-09-30): the pages built on the page
-  frame (Step0, Step1, Step3) show ONE PIXEL WIDTH -- the widest clamp of the
+  Block A1b S1-S3 (user rulings 2026-09-30): the pages built on the page
+  frame with columns (Step0, Step1, Step2, Step3) show ONE PIXEL WIDTH -- the widest clamp of the
   page on screen, written back into the share, so a floor that drops never
-  narrows the column -- and hold ONE floor: the widest of the three Channels
-  columns' own minimum (today Step0's header row). It does not depend on the
+  narrows the column -- and hold ONE floor: the widest of the left columns'
+  own minimum (the three Channels columns and Step2's parameter panel;
+  today Step2's panel or Step0's header row, a pixel apart). It does not depend on the
   rows, on which page shows the dock or on a page having been visited, so
   entering a page never widens the column. Every framed page opens at
-  Step0's rule, 4/3 of that minimum. Step2 still takes the share as a
-  fraction until S3.
+  Step0's rule, 4/3 of the Channels column's minimum.
 * **The page frame** (block A1b, user ruling 2026-09-30;
   `docs/v16_A1b_application.md`, `ui/step_frame.py`) -- every step page is
   one `StepFrame`: a title slot, one tab row (left tabs over the left
@@ -252,9 +252,14 @@ row, and the duplicate Tissue Preview button in the step bar.
   `Background Correction` (the Channels column) and `Viewer` (its toolbar is
   the tool row, the full image / compare area below); Per-Channel Decision
   and `Save` are the bottom slot, Decision under the Channels frame's left
-  edge; its Channels frame has Step1's 4 px margins. Step2 and Step4 follow
-  in S3-S4 (Step2: tabs `Parameters` / `Tile Status`; Step4: a blank tab row
-  and one merged slot).
+  edge; its Channels frame has Step1's 4 px margins. S3 + S4: Step2 is on
+  it -- tabs `Parameters` (the parameter panel) and `Tile Status` (tool row
+  = `Tile Status Overview`, then the overview and progress), `← Back to
+  Step 1` | Run | Stop in the bottom slot; Step4 is the frame's WIDE mode --
+  the same title slot and bottom slot, a blank tab row, and ONE slot where
+  the other pages have their two columns and the handle, holding Step4's
+  single column as before. Every page's title is a left-aligned title bar
+  as Step3's (Step2, Step4: no button on its right).
 * **Step2 rows** -- tick, swatch, name. Nothing else. **Step3 rows** are
   Step1's rows (block 2b): tick (the fusion command), swatch, name, weight.
 * **Step3's page** (block 2c-1, user ruling 2026-09-26) -- Step1's layout
@@ -311,7 +316,7 @@ row, and the duplicate Tissue Preview button in the step bar.
   Step1's patch edits (written through Step0's one writer).
 * **Step2's page** (block L2, user ruling 2026-09-25) -- TWO columns: the
   parameter panel on the LEFT, as wide as Step0's and Step1's channel column
-  (the same one share: dragging any of the three handles moves all three),
+  (the same one width, block A1b S3: dragging any page's handle moves all),
   and the Tile Status Overview with the progress on the right. Each
   parameter row's label is exactly as wide as its text and is never cut;
   the control after it gives way (a drop-down shows its choice elided and
@@ -344,7 +349,8 @@ row, and the duplicate Tissue Preview button in the step bar.
   run; the buttons are `Run anyway` and `Cancel` only, and the confirmed
   differences are recorded with the result. No dialog when nothing differs,
   and none for a Step1 result from before block A0.5 (recorded only).
-* **Step4's page** (block S4-1, user ruling 2026-09-27) -- one column.
+* **Step4's page** (block S4-1, user ruling 2026-09-27) -- one column (the
+  page frame's wide slot, block A1b S4).
   `Input Files`: `Run:` (a Step2 run folder + Browse) and `Region:` (the
   run's regions; disabled when it has one), both handed over from Step3's
   choice when Step4 opens; `Slide:` read-only (the run's own slide -- there

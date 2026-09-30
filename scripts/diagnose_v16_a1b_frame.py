@@ -3,10 +3,12 @@ coordinates -- the frame slots, the Channels frame and dock, the graphics
 viewport, the ViewBox and (under real GL) the GPU layer. Read-only; runs on
 the path-rewritten test1 copy made by `diagnose_v16_a0_camera.py copy-project`.
 
-    python scripts/diagnose_v16_a1b_frame.py [--size W H ...] [--steps 0 1 3] [--json OUT]
+    python scripts/diagnose_v16_a1b_frame.py [--size W H ...] [--steps 0 1 2 3 4] [--json OUT]
 
 Prints one table per window size and, for every part, whether the steps
-agree. S2 guarantees Step0 == Step1 == Step3; Step2 / Step4 join in S3-S4.
+agree. Step0 / 1 / 3 agree on every part; Step2 on the frame's parts (no
+channel panel, no viewer); Step4 is the wide mode -- its `wide slot` is the
+others' left column + handle + right column.
 """
 
 import argparse
@@ -32,9 +34,18 @@ def measure(w, step):
     out = {}
     frame = {0: getattr(getattr(w, "_step0", None), "_frame", None),
              1: getattr(w, "_step1_page_widget", None),
+             2: getattr(getattr(w, "_step2", None), "_frame", None),
+             4: getattr(getattr(w, "_step4", None), "_frame", None),
              3: getattr(getattr(w, "_step3", None), "_frame", None)}.get(step)
+    if frame is not None and getattr(frame, "wide", False):
+        out["title"] = rect(frame.title_slot)
+        out["tab row"] = rect(frame.wide_slot.tabBar())[1::2]
+        out["wide slot"] = rect(frame.wide_slot)
+        out["bottom"] = rect(frame.bottom_slot)
+        return out
     if frame is not None and hasattr(frame, "title_slot"):
         out["title"] = rect(frame.title_slot)
+        out["tab row"] = rect(frame.left_tabs.tabBar())[1::2]
         out["left tab bar"] = rect(frame.left_tabs.tabBar())
         out["right tab bar"] = rect(frame.right_tabs.tabBar())
         out["left column"] = rect(frame.left_tabs)
@@ -48,6 +59,8 @@ def measure(w, step):
     out["Channels frame"] = rect(boxes[0]) if boxes else None
     dock = getattr(w, "_channel_dock", None)
     out["dock"] = rect(dock)
+    if step == 2:
+        return out
     if step == 0:
         stack = getattr(getattr(w._step0, "_explore_tab", None), "stack", None)
         view, layer = getattr(stack, "view", None), None
@@ -68,7 +81,7 @@ def measure(w, step):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--size", type=int, nargs=2, action="append", metavar=("W", "H"))
-    ap.add_argument("--steps", type=int, nargs="+", default=[0, 1, 3])
+    ap.add_argument("--steps", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     ap.add_argument("--dest", default=a0.DEFAULT_DEST)
     ap.add_argument("--json")
     args = ap.parse_args()

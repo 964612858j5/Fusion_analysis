@@ -13,6 +13,9 @@ A `StepFrame` owns that geometry once:
     ├ bottom slot (fixed height) ───────────────────────────────┤
     └───────────────────────────────────────────────────────────┘
 
+A page with no columns (Step4, S0 ruling 4) takes the WIDE mode: the two
+columns and the handle between them are one slot, under a blank tab row.
+
 This module ONLY LAYS OUT. It knows nothing about fusion, segmentation, ROIs,
 masks or any particular step -- a page fills the slots. Every number comes
 from one `StepFrameMetrics`, never from asking another page's widgets at run
@@ -75,7 +78,12 @@ class StepFrameMetrics:
 class StepFrame(QWidget):
     """A step page's frame: title slot, two tabbed columns, bottom slot."""
 
-    def __init__(self, metrics, free_tab_bar=None, parent=None):
+    # The blank tab row's one tab: laid out as every other tab (same padding,
+    # same 1 px border, so the same height), drawn as nothing and unreachable.
+    _BLANK_TAB_QSS = ("QTabBar::tab{background:transparent;color:transparent;"
+                      "border:1px solid transparent;}")
+
+    def __init__(self, metrics, free_tab_bar=None, parent=None, wide=False):
         super().__init__(parent)
         self.metrics = metrics
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -92,16 +100,35 @@ class StepFrame(QWidget):
         title_lay.setSpacing(0)
         root.addWidget(self.title_slot)
 
-        self.splitter = QSplitter(Qt.Horizontal)
-        self.splitter.setChildrenCollapsible(False)
-        self.left_tabs = self._tabs(metrics, free_tab_bar)
-        self.left_tabs.setMinimumWidth(0)
-        self.right_tabs = self._tabs(metrics, free_tab_bar)
-        self.splitter.addWidget(self.left_tabs)
-        self.splitter.addWidget(self.right_tabs)
-        self.splitter.setStretchFactor(0, 1)
-        self.splitter.setStretchFactor(1, 2)
-        root.addWidget(self.splitter, 1)
+        self.wide = bool(wide)
+        if self.wide:
+            # ONE tab widget where the splitter would be: its rect is the two
+            # columns and the handle, its tab row and its pane are laid out
+            # exactly as a real one's -- because it is a real one, whose only
+            # tab is invisible.
+            self.splitter = self.left_tabs = self.right_tabs = None
+            self.wide_slot = self._tabs(metrics, free_tab_bar)
+            page = QWidget()
+            self.wide_layout = QVBoxLayout(page)
+            self.wide_layout.setContentsMargins(6, 6, 6, 6)
+            self.wide_slot.addTab(page, "")
+            bar = self.wide_slot.tabBar()
+            bar.setStyleSheet(self._BLANK_TAB_QSS)
+            bar.setTabEnabled(0, False)
+            bar.setFocusPolicy(Qt.NoFocus)
+            root.addWidget(self.wide_slot, 1)
+        else:
+            self.wide_slot = self.wide_layout = None
+            self.splitter = QSplitter(Qt.Horizontal)
+            self.splitter.setChildrenCollapsible(False)
+            self.left_tabs = self._tabs(metrics, free_tab_bar)
+            self.left_tabs.setMinimumWidth(0)
+            self.right_tabs = self._tabs(metrics, free_tab_bar)
+            self.splitter.addWidget(self.left_tabs)
+            self.splitter.addWidget(self.right_tabs)
+            self.splitter.setStretchFactor(0, 1)
+            self.splitter.setStretchFactor(1, 2)
+            root.addWidget(self.splitter, 1)
 
         self.bottom_slot = QWidget()
         self.bottom_slot.setFixedHeight(metrics.bottom_height)

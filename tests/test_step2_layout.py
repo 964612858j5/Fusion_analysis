@@ -49,8 +49,13 @@ def test_step2_parameters_are_the_left_column_and_the_overview_the_right(win):
     split = s2.channel_column_splitter()
     _go(win, 2, s2)
     assert split.count() == 2
-    left, right = split.widget(0), split.widget(1)
-    assert isinstance(left, QtWidgets.QScrollArea)
+    # The page frame's two tabs (block A1b S3): `Parameters` holds the
+    # parameter panel, `Tile Status` the overview.
+    tabs_l, tabs_r = split.widget(0), split.widget(1)
+    assert [tabs_l.tabText(i) for i in range(tabs_l.count())] == ["Parameters"]
+    assert [tabs_r.tabText(i) for i in range(tabs_r.count())] == ["Tile Status"]
+    left, right = tabs_l.widget(0), tabs_r.widget(0)
+    assert left is s2.left_panel() and isinstance(left, QtWidgets.QScrollArea)
     titles = [b.title() for b in left.widget().findChildren(QtWidgets.QGroupBox)]
     assert "Segmentation Parameters" in titles and "Input Data" in titles
     assert s2._ov_gv.parentWidget() is right and s2._prog_bar.parentWidget() is right
@@ -62,7 +67,7 @@ def test_the_three_pages_share_one_channel_column(win):
     _go(win, 0, win._step0)
     _go(win, 1, win._stack.widget(1))
     _go(win, 2, s2)
-    assert abs(_left(split2) - _left(win._step1_main_split)) <= 2
+    assert _left(split2) == _left(win._step1_main_split)   # one pixel width (A1b S3)
     # a drag on Step2's handle moves Step0 and Step1
     split2.setSizes([300, split2.width() - 300 - split2.handleWidth()])
     win._on_channel_column_dragged(split2)
@@ -71,7 +76,7 @@ def test_the_three_pages_share_one_channel_column(win):
     _go(win, 1, win._stack.widget(1))
     s1 = _left(win._step1_main_split)
     _go(win, 2, s2)
-    assert abs(s0 - 300) <= 2 and abs(s1 - 300) <= 2 and abs(_left(split2) - 300) <= 2
+    assert s0 == s1 == _left(split2) == 300
 
 
 def _cut_labels(scroll):
@@ -90,7 +95,7 @@ def _cut_labels(scroll):
 
 def test_no_label_is_cut_and_the_default_column_needs_no_scroll_bar(win):
     s2 = win._step2
-    scroll = s2.channel_column_splitter().widget(0)
+    scroll = s2.left_panel()
     _go(win, 0, win._step0)       # the app opens on Step0: its rule sets the share
     _go(win, 2, s2)
     for i in range(s2._method_combo.count()):
@@ -114,7 +119,7 @@ def test_a_fresh_start_shows_no_scroll_bar(app, size):
         w.show()
         _go(w, 0, w._step0)
         _go(w, 2, w._step2)
-        scroll = w._step2.channel_column_splitter().widget(0)
+        scroll = w._step2.left_panel()
         assert not scroll.horizontalScrollBar().isVisible()
     finally:
         w.hide()

@@ -59,6 +59,7 @@ def _gpu_on(value):
     return str(value if value is not None else True).strip().lower() not in {
         "0", "false", "no", "off", "cpu"}
 from ..core.io_loader import OMETIFFLoader
+from .step_frame import FRAME_TAB_QSS, StepFrame, StepFrameMetrics, free_tab_bar
 
 # ══════════════════════════════════════════════════════════════════════
 #  Step 2 Page  (Segmentation & Merge)
@@ -155,8 +156,13 @@ class Step2Page(QWidget):
     _COL_DONE    = ( 60, 200,  80)
     _COL_ERROR   = (220,  60,  60)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, metrics=None, title_bar=None):
         super().__init__(parent)
+        # The page frame (block A1b S3): the window hands over the one
+        # `StepFrameMetrics` and a title bar built like Step3's; a page
+        # standing on its own (the page-level tests) measures its own.
+        self._frame_metrics_in = metrics
+        self._title_bar_in = title_bar
         self._zarr_path      = None
         self._seg_config     = {}
         self._worker         = None
@@ -225,29 +231,19 @@ class Step2Page(QWidget):
     # ── UI construction ───────────────────────────────────────────────
 
     def _build_ui(self):
+        # ONE `StepFrame` (block A1b S3), assembled at the end of this method.
         root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(6)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # Title
-        title = QLabel('Step 2 — Segmentation & Merge')
-        title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet(
-            'font-size:16px;font-weight:bold;color:#eee;'
-            'background:#1a1a1a;padding:6px;border-radius:4px;'
-        )
-        root.addWidget(title)
-
-        # Main split: left overview | right controls
-        split = QSplitter(Qt.Horizontal)
-
-        # ── LEFT: overview + progress ─────────────────────────────────
+        # ── The frame's right tab, `Tile Status`: overview + progress ──
         left = QWidget()
         ll   = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(4)
 
-        ll.addWidget(self._lbl('Tile Status Overview', bold=True))
+        # The tab's tool row (placed at assembly).
+        self._tile_status_label = self._lbl('Tile Status Overview', bold=True)
 
         self._ov_gv  = pg.GraphicsLayoutWidget()
         self._ov_gv.setBackground('#111')
@@ -1002,15 +998,9 @@ class Step2Page(QWidget):
         # kept by the main window), and the tile overview the rest. A
         # horizontal scroll bar appears only when the column is dragged
         # narrower than the controls.
-        split.addWidget(right_scroll)
-        split.addWidget(self._overview_panel)
-        split.setChildrenCollapsible(False)
-        split.setStretchFactor(0, 0)
-        split.setStretchFactor(1, 1)
-        self._main_split = split
-        root.addWidget(split, stretch=1)
+        self._params_scroll = right_scroll
 
-        # ── Bottom navigation ─────────────────────────────────────────
+        # ── Bottom navigation: the frame's bottom slot ───────────────
         nav = QHBoxLayout()
 
         self._btn_back = QPushButton('← Back to Step 1')
@@ -1044,7 +1034,46 @@ class Step2Page(QWidget):
         self._btn_stop.clicked.connect(self._stop)
         nav.addWidget(self._btn_stop)
 
-        root.addLayout(nav)
+        self._assemble_frame(root, nav)
+
+    def _assemble_frame(self, root, nav):
+        """Put the page into its `StepFrame` (block A1b S3).
+
+            title slot   `Step 2 — Segmentation & Merge`
+            left tab     `Parameters`: the parameter panel
+            right tab    `Tile Status`: tool row = `Tile Status Overview`;
+                         the overview and the progress below it
+            bottom slot  ← Back to Step 1 | stretch | Run | Stop
+
+        Every widget is the one built above, moved into its slot.
+        """
+        title_bar = self._title_bar_in
+        if title_bar is None:
+            title_bar = QLabel('Step 2 — Segmentation & Merge')
+            title_bar.setStyleSheet('font-size:12px;font-weight:bold;color:#eee;'
+                                    'padding:4px 8px;')
+        metrics = self._frame_metrics_in
+        if metrics is None:
+            title_bar.ensurePolished()
+            metrics = StepFrameMetrics(
+                title_height=title_bar.sizeHint().height(),
+                bottom_height=max(nav.sizeHint().height(), 38),
+                tab_qss=FRAME_TAB_QSS)
+        frame = StepFrame(metrics, free_tab_bar)
+        self._frame = frame
+        frame.set_title(title_bar)
+        frame.left_tabs.addTab(self._params_scroll, 'Parameters')
+        frame.right_tabs.addTab(self._overview_panel, 'Tile Status')
+        row = QHBoxLayout()
+        row.addWidget(self._tile_status_label)
+        frame.tool_row(self._overview_panel.layout(), row)
+        frame.bottom_layout.addLayout(nav)
+        self._main_split = frame.splitter
+        root.addWidget(frame)
+
+    def left_panel(self):
+        """The parameter column -- held at the shared channel-column floor."""
+        return getattr(self, "_params_scroll", None)
 
     # ── utilities ─────────────────────────────────────────────────────
 

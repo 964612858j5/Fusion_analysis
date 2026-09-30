@@ -192,7 +192,7 @@ Estimates are working days. The weeks are an **order and a budget**; if the exit
 - **(b) NGFF not adopted:** the table above as written.
 - **(a) NGFF adopted:** week 3 builds `NgffSource`, ingest and `NgffScanReader` (A2b) before A2c; **A3 / A4 move to week 4, A6 to week 5, A7 to week 6, A8 + A5 to week 7, regression + gates to week 8**; the buffer shrinks to what is left of week 8. If that leaves no buffer, the user decides at the end of week 6 whether to extend within the 8-week cap by dropping the real-WSI run, or to trim A8 to its minimum (§17.2).
 
-**Progress** (a record, appended): A1b done 2026-09-30 (§4.x). A2a done 2026-09-30 — `core/pixel_source.py` + `sources/` (`docs/v16_A2a_application.md` §10).
+**Progress** (a record, appended): A1b done 2026-09-30 (§4.x). A2a done 2026-09-30 — `core/pixel_source.py` + `sources/` (`docs/v16_A2a_application.md` §10). **A2b-probe PASS (probe completed) 2026-09-30, outcome (b)** — ruled by the user on 2026-09-30: OME-TIFF stays the canonical raw store, zarr / NGFF for derived rasters only, A2b not built. About 2 hours of the ≤ 4-day box (v2.3.1); every NGFF copy deleted; raw data unchanged (size / mtime equal to the recorded fingerprint). Report `docs/v16_A2b_probe_report.md`, record `docs/v16_A2b_probe_application.md` §11. The (b) branch of this section applies: A2c next.
 
 **Off the critical path** (unchanged): v2.2 §5.8 corrected coarse levels — opportunistic, own application, never delays a gate.
 

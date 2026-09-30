@@ -30,6 +30,13 @@ Semantics every source keeps:
   * Only ``level_downsample`` -- exact, per axis -- is a scale. A rounded
     factor is not part of this contract (see the OME-TIFF adapter's
     ``legacy_level_downsample_rounded``, a cache-key compatibility hint).
+  * Native tiles (block A2c, plan v2.4 P1): ``native_tile_shape(level)`` is
+    the source's own storage block -- a TIFF tile (or strip), a zarr chunk --
+    and ``read_native_tile(channel, level, tile_y, tile_x)`` returns exactly
+    one such block, clipped to what the source owns: bitwise
+    ``read_region`` of that rectangle. The grid is anchored at the origin of
+    the source's storage (level pixel 0 for a slide; the product's bbox
+    origin for a saved corrected product, see ``native_tile_origin``).
 """
 
 from abc import ABC, abstractmethod
@@ -148,9 +155,25 @@ class PixelSource(ABC):
                                              x0, min(x0 + ts, bx1))
                 yield y0, x0, block
 
+    # ── native tiles (block A2c) ─────────────────────────────────────
+    @abstractmethod
+    def native_tile_shape(self, level: int) -> Tuple[int, int]:
+        """``(h, w)`` of the storage block at `level`."""
+
+    def native_tile_origin(self, level: int) -> Tuple[int, int]:
+        """Where the storage grid of `level` starts, in level pixels."""
+        return 0, 0
+
+    def read_native_tile(self, channel, level: int, tile_y: int,
+                         tile_x: int) -> Tuple[np.ndarray, Tuple[int, int]]:
+        """One storage block, clipped to `valid_bounds`: exactly
+        `read_region` of that block's rectangle."""
+        th, tw = self.native_tile_shape(level)
+        oy, ox = self.native_tile_origin(level)
+        y0, x0 = oy + int(tile_y) * th, ox + int(tile_x) * tw
+        return self.read_region(channel, level, y0, y0 + th, x0, x0 + tw)
+
     # ── optional hints ───────────────────────────────────────────────
-    def native_chunk_shape(self) -> Optional[Tuple[int, int]]:
-        return None
 
     def preferred_threads(self) -> Optional[int]:
         return None

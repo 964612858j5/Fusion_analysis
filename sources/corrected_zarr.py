@@ -119,6 +119,18 @@ class CorrectedZarrSource(PixelSource):
         self.level_shape(level)
         return self._bounds
 
+    def native_tile_shape(self, level: int) -> Tuple[int, int]:
+        """The zarr chunk of the product's arrays (one shape for all)."""
+        self.level_shape(level)
+        shapes = {tuple(int(v) for v in self._container[n].chunks[-2:]) for n in self._names}
+        if len(shapes) != 1:
+            raise ValueError(f"the corrected arrays are chunked differently: {sorted(shapes)}")
+        return shapes.pop()
+
+    def native_tile_origin(self, level: int) -> Tuple[int, int]:
+        """The chunk grid starts at the product's own bbox origin."""
+        return self.valid_bounds(level)[0], self.valid_bounds(level)[2]
+
     # ── reads ────────────────────────────────────────────────────────
     def read_region(self, channel, level, y0, y1, x0, x1):
         if self._closed:

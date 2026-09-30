@@ -85,6 +85,16 @@ class OmeTiffSource(PixelSource):
         with tifffile.TiffFile(self.path) as tf:
             xml = tf.ome_metadata
             self._dtype = np.dtype(tf.series[0].dtype)
+            self._native = []
+            for lv in tf.series[0].levels:
+                page = lv.pages[0]
+                page = page.aspage() if hasattr(page, "aspage") else page
+                if getattr(page, "is_tiled", False):
+                    self._native.append((int(page.tilelength), int(page.tilewidth)))
+                else:                                   # a strip is the block
+                    rows = int(getattr(page, "rowsperstrip", 0) or page.imagelength)
+                    self._native.append((min(rows, int(page.imagelength)),
+                                         int(page.imagewidth)))
         n = self._provider.num_channels
         self._names = channel_names_from_ome(xml, n)
         self._physical = physical_size_from_ome(xml)
@@ -127,6 +137,10 @@ class OmeTiffSource(PixelSource):
     def valid_bounds(self, level: int):
         h, w = self.level_shape(level)
         return 0, h, 0, w
+
+    def native_tile_shape(self, level: int) -> Tuple[int, int]:
+        """The TIFF tile of `level` (or its strip, for a stripped level)."""
+        return self._native[int(level)]
 
     def legacy_level_downsample_rounded(self, level: int) -> float:
         """Today's `RawTileProvider.level_downsample`: a CACHE-KEY

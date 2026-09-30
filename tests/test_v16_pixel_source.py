@@ -383,3 +383,47 @@ def test_level_downsample_is_the_exact_per_axis_ratio(tmp_path):
         assert src.level_downsample(2) == (521 / 130, 777 / 194)
         assert src.level_downsample(2) != (4.0, 4.0)
         assert src.legacy_level_downsample_rounded(2) == 4
+
+
+# ── native tiles (block A2c, plan v2.4 P1) ───────────────────────────────
+
+def test_native_tiles_are_the_tiff_blocks_on_every_level(slide):
+    import tifffile
+    path, data = slide
+    with tifffile.TiffFile(path) as tf:
+        pages = [lv.pages[0] for lv in tf.series[0].levels]
+        want = []
+        for p in pages:
+            p = p.aspage() if hasattr(p, "aspage") else p
+            want.append((int(p.tilelength), int(p.tilewidth)) if p.is_tiled
+                        else (min(int(p.rowsperstrip), int(p.imagelength)), int(p.imagewidth)))
+    with OmeTiffSource(path) as src:
+        for level in range(src.level_count()):
+            th, tw = src.native_tile_shape(level)
+            assert (th, tw) == want[level]
+            h, w = src.level_shape(level)
+            for ty in range(-(-h // th)):
+                for tx in range(-(-w // tw)):
+                    tile, origin = src.read_native_tile("CD3", level, ty, tx)
+                    assert origin == (ty * th, tx * tw)
+                    assert tile.shape == (min(th, h - ty * th), min(tw, w - tx * tw))   # edge clipped
+                    rect, _ = src.read_region("CD3", level, ty * th, ty * th + th, tx * tw, tx * tw + tw)
+                    assert tile.dtype == data.dtype and np.array_equal(tile, rect)
+                    if level == 0:
+                        assert np.array_equal(tile, data[1, ty * th:ty * th + th, tx * tw:tx * tw + tw])
+            with pytest.raises(OutOfBounds):
+                src.read_native_tile("CD3", level, -(-h // th), 0)
+
+
+def test_corrected_native_tiles_start_at_the_products_bbox(corrected):
+    zpath, arrays = corrected
+    y0, y1, x0, x1 = ROI_BBOX
+    with CorrectedZarrSource(zpath, "ROI 1") as src:
+        assert src.native_tile_shape(0) == (64, 64)
+        assert src.native_tile_origin(0) == (y0, x0)
+        a = arrays[("ROI_1", "CD3")]
+        for ty in range(-(-(y1 - y0) // 64)):
+            for tx in range(-(-(x1 - x0) // 64)):
+                tile, origin = src.read_native_tile("CD3", 0, ty, tx)
+                assert origin == (y0 + ty * 64, x0 + tx * 64)
+                assert np.array_equal(tile, a[ty * 64:ty * 64 + 64, tx * 64:tx * 64 + 64])

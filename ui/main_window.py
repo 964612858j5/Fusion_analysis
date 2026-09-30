@@ -81,6 +81,7 @@ from .block01_display import (
     STEP2 as _CTX_STEP2, STEP3 as _CTX_STEP3,
 )
 from .step0.config_panel import ConfigPanel
+from .step_frame import StepFrame, StepFrameMetrics
 from .widgets.channel_dock import template as channel_template
 from .step0.search_ctrl import SearchCtrlPanel
 from .step0.result_grid import ResultGridPanel
@@ -807,16 +808,20 @@ class MainWindow(QMainWindow):
         self._out_path_edit = self._step0._out_path_edit
         self._panel_csv_edit = self._step0._panel_csv_edit
 
-        page1_w = QWidget()
-        page1_w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        root = QVBoxLayout(page1_w)
-        # Step0's own outer margins and spacing, so the title bar and the tabs
-        # under it start where Step0's bar and tabs do. The bottom margin is
-        # Step0's 6 plus the 5 px (tab pane border + Section C's margin) that
-        # sit under Step0's bottom row but not under this page's, so the two
-        # Channels frames end on the same line (user ruling, 2026-09-23).
-        root.setContentsMargins(6, 6, 6, 11)
-        root.setSpacing(4)
+        # THE PAGE FRAME (block A1b S1): one geometry for every step page --
+        # margins, title slot, tab row, columns, tool row, bottom slot. The
+        # numbers are Step0's, taken once here while Step0 still lays itself
+        # out (S2 moves Step0 onto the same metrics). The page margins are
+        # Step0's 6 plus, at the bottom, the 5 px (tab pane border + Section
+        # C's margin) under Step0's bottom row, so the Channels frames of the
+        # two steps end on the same line (user ruling, 2026-09-23).
+        self._frame_metrics = StepFrameMetrics(
+            title_height=self._step0._file_bar.sizeHint().height(),
+            bottom_height=self._step0._decision_box.sizeHint().height(),
+            tab_qss=_STEP1_TAB_QSS)
+        page1_w = StepFrame(self._frame_metrics, _free_the_tab_bar)
+        self._step1_frame = page1_w
+        root = page1_w.root_layout
 
         # The title line IS the step's bar: the name on the left, the entry to
         # the one shared Tissue Preview on its right. The button is the same
@@ -844,10 +849,9 @@ class MainWindow(QMainWindow):
             self._step0._btn_tissue_nav.styleSheet())
         self._btn_step1_tissue_nav.clicked.connect(self._show_tissue_navigator)
         title_row.addWidget(self._btn_step1_tissue_nav)
-        root.addWidget(title_bar)
+        page1_w.set_title(title_bar)
 
-        main_split = QSplitter(Qt.Horizontal)
-        main_split.setChildrenCollapsible(False)
+        main_split = page1_w.splitter
         self._step1_main_split = main_split
 
         # Left: the channel panel, plus the entry to the shared Tissue Preview.
@@ -953,6 +957,10 @@ class MainWindow(QMainWindow):
         self._step1_channels_host = channels_box_lay
         self.config = ConfigPanel([], fusion=self._display.fusion,
                                   channel_dock=self._channel_dock)
+        # Block A1b S1: no inset of its own inside the Channels frame, so its
+        # Reset / Load row stands where Step3's does. Set on THIS instance
+        # (the only one); the ConfigPanel class keeps its default.
+        self.config.layout().setContentsMargins(0, 0, 0, 0)
         # This panel speaks for STEP1, so its restores write Step1's display
         # answers wherever the user is standing.
         self.config.display_scope = self._DISPLAY_SCOPES.get(1, "")
@@ -1040,20 +1048,11 @@ class MainWindow(QMainWindow):
         # Parameters` is the segmentation settings panel, which used to own a
         # third column of its own. One column, switched, so the picture on the
         # right gets the width the third column was taking.
-        left_tabs = QtWidgets.QTabWidget()
-        left_tabs.setStyleSheet(_STEP1_TAB_QSS)
-        left_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        # THE TAB BAR MAY NOT SET THE COLUMN'S FLOOR. Two full labels measure
-        # ~300px, which is wider than Step0's channel column ever is, so the
-        # splitter clamped there and Step1 could not show Step0's proportion
-        # (measured: Step0 0.205 of the width, Step1 stuck at 0.241). The
-        # labels elide and the bar scrolls instead.
-        _free_the_tab_bar(left_tabs)
-        # ...but never narrower than the Channels page's own content: the
-        # labels may elide, the panel may not be covered. Step0's column
-        # stops at its content's minimum the same way.
-        left_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        left_tabs.setMinimumWidth(0)
+        # The frame's left tabs (block A1b S1). THE TAB BAR MAY NOT SET THE
+        # COLUMN'S FLOOR -- two full labels measure ~300px -- so the labels
+        # elide and the bar scrolls (`_free_the_tab_bar`, applied by the
+        # frame); the floor is the channel rows' own (`_hold_step1_channel_floor`).
+        left_tabs = page1_w.left_tabs
         self._step1_left_tabs = left_tabs
         # "Fusion" (user ruling, 2026-09-24): the frame inside is titled
         # `Channels` as in Step0, and the tab had the same word over it. What
@@ -1061,7 +1060,6 @@ class MainWindow(QMainWindow):
         # Settings -- and with `Pre-segmentation` beside it the two tabs are
         # the two halves of the step's title.
         left_tabs.addTab(left, "Fusion")
-        main_split.addWidget(left_tabs)
 
         pw = QWidget()
         pw.setMinimumSize(300, 300)
@@ -1114,7 +1112,9 @@ class MainWindow(QMainWindow):
         sel_row.addWidget(self._btn_mode_overlay)
         sel_row.addWidget(self._btn_mode_fusion)
         sel_row.addSpacing(8)
-        pl.addLayout(sel_row)
+        # The frame's tool row (block A1b S1): a fixed height, the same in
+        # every step, so the viewer under it starts on the same line.
+        self._step1_tool_row = page1_w.tool_row(pl, sel_row)
         # The session/handoff buttons join THIS row, at its right end (user
         # ruling, 2026-09-23); they are added below, where they are built.
         self._step1_patch_row = sel_row
@@ -1193,10 +1193,7 @@ class MainWindow(QMainWindow):
         pl.addWidget(self.prev_gv, stretch=1)
         self.viewer_tab = pw
 
-        right_tabs = QtWidgets.QTabWidget()
-        right_tabs.setStyleSheet(_STEP1_TAB_QSS)
-        right_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        _free_the_tab_bar(right_tabs)
+        right_tabs = page1_w.right_tabs
         self.right_tabs = right_tabs
         self._step1_right_tabs = right_tabs
         self._step1_right_split = None
@@ -1346,7 +1343,6 @@ class MainWindow(QMainWindow):
         print("[Step1-Tabs] left tabs created")
         print("[Step1-Tabs] right tabs created")
         print("[Step1-Tabs] default tabs=Fusion | Viewer")
-        main_split.addWidget(right_tabs)
 
         # STEP0'S PROPORTION, taken from Step0 itself at runtime rather than
         # copied as a number -- see `_step0_left_fraction`. The stretch
@@ -1360,9 +1356,8 @@ class MainWindow(QMainWindow):
         # asks for more keeps it until something drags the handle. Step0 pins
         # its own ratio the same way (`Step0Page._fix_split_ratio`).
         self._fix_step1_split_ratio()
-        root.addWidget(main_split, stretch=1)
 
-        bot = QHBoxLayout()
+        bot = page1_w.bottom_layout
         self._step1_bottom_bar = bot
         # NO `← Back to Step 0` ON SCREEN (user ruling, 2026-09-23): the step
         # bar already goes back. The button is kept, parented and hidden, for
@@ -1408,7 +1403,6 @@ class MainWindow(QMainWindow):
         self._force_dapi_zarr.setToolTip("Regenerate Step1 fused/DAPI input zarr even when existing metadata matches.")
         bot.addWidget(self.btn_save)
         bot.addWidget(self._force_dapi_zarr)
-        root.addLayout(bot)
 
         self._fusion_bar_widget = QWidget()
         fbl = QVBoxLayout(self._fusion_bar_widget)
@@ -1621,7 +1615,7 @@ class MainWindow(QMainWindow):
         self._step3_patch_strip = strip
 
         page.assemble(
-            title_bar=title_bar, tab_qss=_STEP1_TAB_QSS, free_tab_bar=_free_the_tab_bar,
+            title_bar=title_bar, metrics=self._frame_metrics, free_tab_bar=_free_the_tab_bar,
             frame_qss=channel_template.frame_qss(),
             header_widgets=(show_all, intensity), header_margins=header_margins,
             header_spacing=header_spacing, weight_widgets=(reset, load),
@@ -1754,8 +1748,33 @@ class MainWindow(QMainWindow):
                         fraction = settled
                         self._channel_column_fraction = settled
 
+            # THE PAGE FRAMES (block A1b S1: Step1, Step3) get ONE PIXEL
+            # WIDTH. Both hold the same row floor, so both clamp alike; the
+            # widest clamp is what every frame shows. A clamp that widened
+            # the column is written back into the share, so a floor that
+            # later drops does not narrow it again (W = max(W_user, floor)
+            # and the widened W becomes W_user).
+            self._hold_step1_channel_floor()
+            frames = self._channel_column_frame_splitters()
+            framed = [s for s in frames
+                      if s is not None and s.count() == 2 and s.width() > 10]
+            # Only a frame ON SCREEN has been laid out: a hidden page's
+            # splitter still has Qt's default size, and a clamp measured there
+            # is not the column's. It gets the same width and is measured for
+            # real when it is shown (every page change re-applies this).
+            shown = [s for s in framed if s.isVisible()]
+            for split in shown + [s for s in framed if s not in shown]:
+                usable = max(1, split.width() - split.handleWidth())
+                wanted = max(1, int(round(usable * fraction)))
+                split.setSizes([wanted, max(1, usable - wanted)])
+                if split in shown and split.sizes()[0] > wanted:
+                    fraction = split.sizes()[0] / float(usable)
+                    self._channel_column_fraction = fraction
+
             for split in self._channel_column_splitters()[1:]:
-                if split is None or split.count() != 2 or split.width() <= 10:
+                if split is None or split in frames:
+                    continue
+                if split.count() != 2 or split.width() <= 10:
                     continue
                 usable = max(1, split.width() - split.handleWidth())
                 left = max(1, int(round(usable * fraction)))
@@ -1764,6 +1783,12 @@ class MainWindow(QMainWindow):
                     split.setSizes([left, right])
         finally:
             self._syncing_channel_column = False
+
+    def _channel_column_frame_splitters(self):
+        """The splitters of the pages built on `StepFrame` (block A1b S1)."""
+        step3 = getattr(self, "_step3", None)
+        return [getattr(self, "_step1_main_split", None),
+                getattr(step3, "channel_column_splitter", lambda: None)()]
 
     def _fix_step1_split_ratio(self):
         """Both pages show the one channel-column share.
@@ -5116,9 +5141,21 @@ class MainWindow(QMainWindow):
         laid out now, plus a scroll bar whether or not one is showing, so
         adding channels can never push the weight box out of sight.
         """
-        panel = getattr(self, "_step1_left_panel", None)
+        # Block A1b S1: ONE floor for every page frame's channel column --
+        # measured on whichever of them shows the dock, held on all of them,
+        # so Step1 and Step3 clamp alike and neither covers a weight box.
+        step3 = getattr(self, "_step3", None)
+        panels = [p for p in (getattr(self, "_step1_left_panel", None),
+                              getattr(step3, "left_panel", lambda: None)())
+                  if p is not None]
         dock = getattr(self, "_channel_dock", None)
-        if panel is None or dock is None or not panel.isVisible():
+        # Measured only where the dock IS: the chrome below is the panel's
+        # width minus the list's, which means nothing for a panel the dock
+        # has not been mounted in (it read as the whole panel, and the floor
+        # ratcheted up to the column's own width).
+        panel = next((p for p in panels if p.isVisible() and dock is not None
+                      and p.isAncestorOf(dock)), None)
+        if panel is None or dock is None:
             return
         rows = [dock.row(cid) for cid in dock.visible_row_ids()]
         rows = [r for r in rows if r is not None]
@@ -5133,8 +5170,9 @@ class MainWindow(QMainWindow):
         extent = lst.style().pixelMetric(QtWidgets.QStyle.PM_ScrollBarExtent,
                                          None, bar)
         floor = row_min + max(0, chrome) + extent
-        if panel.minimumWidth() != floor:
-            panel.setMinimumWidth(floor)
+        for each in panels:
+            if each.minimumWidth() != floor:
+                each.setMinimumWidth(floor)
 
     def _match_step1_bottom_bar(self):
         """The save slot as tall as Step0's Per-Channel Decision frame, and

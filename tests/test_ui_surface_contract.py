@@ -256,10 +256,12 @@ def test_step1_keeps_its_ruled_layout_and_entries(app):
 
         # The Tissue Navigator entry is on the title line, not in the column.
         # The title line is its own bar since 2026-09-23 (as tall as Step0's
-        # Load bar), and that bar sits directly on the page.
+        # Load bar), and that bar sits in the page frame's title slot, on the
+        # page (block A1b S1).
         nav = w._btn_step1_tissue_nav
         assert nav.parentWidget() is w._step1_title_bar
-        assert w._step1_title_bar.parentWidget() is w._step1_page_widget
+        assert w._step1_title_bar.parentWidget() is w._step1_page_widget.title_slot
+        assert w._step1_page_widget.title_slot.parentWidget() is w._step1_page_widget
         assert w._step1_left_panel.findChildren(QtWidgets.QPushButton).count(
             nav) == 0
 

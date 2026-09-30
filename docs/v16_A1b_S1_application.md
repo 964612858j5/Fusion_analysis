@@ -182,3 +182,30 @@ S1 完成后，UI 规则按上表更新，写入 StepFrame 的几何契约（F1�
 1. **工具行统一高度 25**（Step3 现在的高度），Step1 的 viewer 因此下移 3 px。**建议同意。** 25 写在 `StepFrameMetrics.tool_height` 里，不在代码里散落。
 2. **底部槽里 `← Back to Step 2` 的位置**：按 S0 放在左段，也就是今天的位置，只是行变高。**建议同意。**
 3. **Step0 和 Step2 在 S1 期间仍走比例路径**（与共享宽度之间最多有 1–2 px 的取整差，S2 / S3 之后变为 0）。**建议同意。**
+
+---
+
+## 9. 执行记录（2026-09-30）
+
+**已实施，自动验收通过；待用户真机验收。**
+
+- **`ui/step_frame.py`（新）**：
+  - `StepFrameMetrics`（冻结的 dataclass）：`page_margins` 6/6/6/11、`spacing` 4、`tool_height` 25、`tool_spacing` 6，`title_height` / `bottom_height` 在构建时取自 Step0 的 `_file_bar` / `_decision_box` 的尺寸提示，只取一次；
+  - `StepFrame`：标题槽、splitter 加左右 QTabWidget（`_STEP1_TAB_QSS`、`_free_the_tab_bar`）、`tool_row()`、底部槽。不认识任何 step。
+- **Step1**（`ui/main_window.py`）：`page1_w` 就是 `StepFrame`。标题栏、左右 tab、`sel_row`（工具行）和底栏都放进了对应的槽，所有属性名保留。`ConfigPanel` 的边距在实例上设为 0，类没有改。
+- **Step3**（`ui/step3_page.py`）：`assemble` 往页面内部的 `StepFrame` 里填，新增 `left_panel()`；窗口传入同一份 `metrics`。
+- **列宽**（`_apply_channel_column_fraction`、`_hold_step1_channel_floor`）：
+  - 两个框架页面使用同一个像素宽度；
+  - 共同的下限只在 dock 所在的面板上测量（`isAncestorOf`），并同时加到两个面板上；
+  - 只有显示中的框架可以把宽度撑大并写回共享值。隐藏页面的 splitter 还是 Qt 的默认尺寸，不能用来量。
+- **与申请的一处偏差**：§3.1 写的是「最小值变大时左栏跟着变宽，但 `W_user` 不被改写」，这与同段的「最小值变小时不收窄」互相矛盾。实现按审核的本意：**撑大后的宽度写回 `W_user`**，所以最小值回落时宽度不变（`test_a_floor_that_drops_does_not_narrow_the_column`）。
+- **实施中发现并修正的两个问题**：
+  - 最初在 dock 不在的面板上测量下限，读到了整块面板的宽度，下限逐步上升，结果左栏 478 px。已按 `isAncestorOf` 修正；
+  - 最初用构建时（还没有布局）的 splitter 做夹住和写回，比例被污染成 0.31。已改为只有显示中的框架才能写回。
+- **实测**（`scripts/diagnose_v16_a1b_frame.py`，真实 GL，1600 × 1000）：Step1 与 Step3 的标题槽、两条 tab 栏的行、左右栏、工具行（25）、底部槽（47）、`Channels` 框、dock、graphics viewport、ViewBox、**GPU 层（= ViewBox）全部逐像素相同**。离屏在 1600 × 1000 和 2050 × 1330 下也相同。Step0 仍然不同，要到 S2。
+- **测试**：
+  - 新增 `tests/test_v16_frame_lock.py`（10 条）：4 种窗口尺寸下所有矩形相同；拖动任意一页后两页一起变；两页拉到最窄时一样，而且权重框完整可见；两页持有同一个下限；下限回落时不收窄（因为 Step0 仍走比例路径，容差 1 px）；
+  - `tests/test_ui_surface_contract.py`：标题栏的父部件改为框架的 `title_slot`。
+- **反向注入**：以下三种改法都会让测试变红——下限只加在 Step1、Step3 用自己的工具行、不写回。
+- **回归**：71 个离屏模块加 11 个 GL 模块，每个模块单独一个进程，与 HEAD 对比，**没有新增失败**。
+- **文档**：`UI_SURFACE_RULES.md`（页面框架，以及列宽改为像素宽度）。

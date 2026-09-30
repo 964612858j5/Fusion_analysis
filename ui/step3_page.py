@@ -19,8 +19,10 @@ the Overlay / Fusion pair at its right end.
 from PyQt5 import QtWidgets
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QHBoxLayout, QLabel, QPushButton, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
+
+from .step_frame import StepFrame
 
 #: What the viewer slot says until block 2c-2 connects the viewer.
 VIEWER_PENDING_TEXT = ("The whole-slide view is not connected yet.\n"
@@ -39,30 +41,33 @@ class Step3Page(QWidget):
         self._splitter = None
         self._viewer_layout = None
         self._viewer_notice = None
+        self._frame = None
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
     # ── built once, by the window ─────────────────────────────────────
-    def assemble(self, *, title_bar, tab_qss, free_tab_bar, frame_qss,
+    def assemble(self, *, title_bar, metrics, free_tab_bar, frame_qss,
                  header_widgets, header_margins, header_spacing,
                  weight_widgets, mode_widgets, mask_widgets=(), mask_hint=None,
                  corner_widget=None):
         """Lay out what the window built, where Step1 has it.
 
         `title_bar` is Step1's kind of bar (name + Tissue Navigator);
-        `tab_qss` / `free_tab_bar` are Step1's tab look; `frame_qss` is the
+        `metrics` / `free_tab_bar` are the page frame's (block A1b S1: the
+        same frame, so the same geometry, as Step1's page); `frame_qss` is the
         `Channels` frame's; the widget lists are Step1's controls, already
         connected to Step1's actions. `mask_widgets` and `mask_hint` open
         the viewer's top row (block 4c; the patch strip first, plan step 3);
         the hint takes the spare width. `corner_widget` (the run drop-down)
         sits at the right of the tab bar's row, outside the tab's content.
         """
-        root = QVBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 11)            # Step1's page insets
-        root.setSpacing(4)
-        root.addWidget(title_bar)
-
-        split = QSplitter(Qt.Horizontal)
-        split.setChildrenCollapsible(False)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        frame = StepFrame(metrics, free_tab_bar)
+        outer.addWidget(frame)
+        self._frame = frame
+        frame.set_title(title_bar)
+        split = frame.splitter
         self._splitter = split
 
         # LEFT -- Step1's `Channels` frame: header row, rule, weight tools,
@@ -97,19 +102,13 @@ class Step3Page(QWidget):
         box_lay.addLayout(weights)
         self._channels_host = box_lay
         left_lay.addWidget(box, 1)
-        left_tabs = QtWidgets.QTabWidget()
-        left_tabs.setStyleSheet(tab_qss)
-        free_tab_bar(left_tabs)
-        left_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        left_tabs.setMinimumWidth(0)
-        left_tabs.addTab(left, "Fusion")
-        split.addWidget(left_tabs)
+        self._left_panel = left
+        frame.left_tabs.addTab(left, "Fusion")
 
         # RIGHT -- the mode pair over the viewer slot.
         right = QWidget()
         right.setMinimumSize(300, 300)
         right_lay = QVBoxLayout(right)
-        right_lay.setContentsMargins(0, 0, 0, 0)
         mode_row = QHBoxLayout()
         mode_row.setSpacing(4)
         for widget in mask_widgets:
@@ -122,7 +121,7 @@ class Step3Page(QWidget):
         for widget in mode_widgets:
             mode_row.addWidget(widget)
         mode_row.addSpacing(8)
-        right_lay.addLayout(mode_row)
+        frame.tool_row(right_lay, mode_row)
         notice = QLabel(VIEWER_PENDING_TEXT)
         notice.setAlignment(Qt.AlignCenter)
         notice.setWordWrap(True)
@@ -130,31 +129,26 @@ class Step3Page(QWidget):
         right_lay.addWidget(notice, 1)
         self._viewer_layout = right_lay
         self._viewer_notice = notice
-        right_tabs = QtWidgets.QTabWidget()
-        right_tabs.setStyleSheet(tab_qss)
-        free_tab_bar(right_tabs)
-        right_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        right_tabs = frame.right_tabs
         right_tabs.addTab(right, "Viewer")
         if corner_widget is not None:
             right_tabs.setCornerWidget(corner_widget, Qt.TopRightCorner)
         self._right_tabs = right_tabs
-        split.addWidget(right_tabs)
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 2)
-        root.addWidget(split, 1)
 
-        bottom = QHBoxLayout()
         back = QPushButton("← Back to Step 2")
         back.setStyleSheet("padding:6px 16px;background:#333;color:#ddd;border-radius:4px;")
         back.clicked.connect(self.go_back.emit)
-        bottom.addWidget(back)
-        bottom.addStretch()
-        root.addLayout(bottom)
+        frame.bottom_layout.addWidget(back)
+        frame.bottom_layout.addStretch()
 
     # ── what the window reads ─────────────────────────────────────────
     def channels_host(self):
         """Where the one public channel dock is mounted in Step3."""
         return self._channels_host
+
+    def left_panel(self):
+        """The `Fusion` tab's page: the column whose floor the window holds."""
+        return getattr(self, "_left_panel", None)
 
     def channel_column_splitter(self):
         """The handle that joins the shared channel-column width."""

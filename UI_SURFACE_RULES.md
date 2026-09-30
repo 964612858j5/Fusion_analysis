@@ -224,6 +224,26 @@ row, and the duplicate Tissue Preview button in the step bar.
   dragging Step0's or Step1's moves both, and a window resize keeps them
   together because the share is normalised. Step0 is written through its own
   left-column mechanism so its hidden peer splitter stays at the same width.
+  Block A1b S1 (user ruling 2026-09-30): the pages built on the page frame
+  (Step1, Step3) show ONE PIXEL WIDTH -- the widest clamp of the page on
+  screen, written back into the share -- and hold ONE row floor, measured
+  where the dock is, so neither page ever covers a weight box and a floor
+  that drops never narrows the column. Step0 and Step2 still take the share
+  as a fraction until S2 / S3 (up to ~1 px of rounding).
+* **The page frame** (block A1b, user ruling 2026-09-30;
+  `docs/v16_A1b_application.md`, `ui/step_frame.py`) -- every step page is
+  one `StepFrame`: a title slot, one tab row (left tabs over the left
+  column, right tabs over the right column), the two columns, a fixed-height
+  tool row at the top of each right tab, and a fixed-height bottom slot. All
+  of it comes from ONE `StepFrameMetrics` (page margins 6/6/6/11, spacing 4,
+  tool row 25 px, title and bottom heights taken once from Step0's load bar
+  and Per-Channel Decision frame). The frame knows no step. S1: Step1 and
+  Step3 are on it -- every part of the two pages occupies the same window
+  rectangle to the pixel (`tests/test_v16_frame_lock.py`); Step1's Reset /
+  Load weights row has no extra inset any more (as in Step3); Step3's
+  `← Back to Step 2` row is the bottom slot's height. Step0, Step2, Step4
+  follow in S2-S4 (Step2: tabs `Parameters` / `Tile Status`; Step4: a blank
+  tab row and one merged slot).
 * **Step2 rows** -- tick, swatch, name. Nothing else. **Step3 rows** are
   Step1's rows (block 2b): tick (the fusion command), swatch, name, weight.
 * **Step3's page** (block 2c-1, user ruling 2026-09-26) -- Step1's layout

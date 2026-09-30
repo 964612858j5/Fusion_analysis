@@ -215,17 +215,20 @@ def test_one_camera_across_step1_and_step3(app, tmp_path, monkeypatch):
         _enter(rig, 3)
         w._step3_mount.jump_to_point(vm.SLIDE // 3, vm.SLIDE // 4, vm.SLIDE // 8)
         _pump(20)
-        cx3, cy3, _s3 = w._step3_mount.current_camera()
+        cx3, cy3, s3 = w._step3_mount.current_camera()
         _enter(rig, 1)
-        cx1, cy1, _s1 = w._step1_mount.current_camera()
-        assert abs(cx1 - cx3) < vm.SLIDE * 0.02 and abs(cy1 - cy3) < vm.SLIDE * 0.02
+        cx1, cy1, s1 = w._step1_mount.current_camera()
+        # Block A1: the same place AND the same magnification, exactly.
+        assert abs(cx1 - cx3) < 1e-6 and abs(cy1 - cy3) < 1e-6
+        assert abs(s1 / s3 - 1.0) < 1e-9
         # ...and the other way: moved in Step1, Step3 lands on the same place
         w._step1_mount.jump_to_point(vm.SLIDE * 2 // 3, vm.SLIDE // 2, vm.SLIDE // 8)
         _pump(20)
-        cx1, cy1, _s1 = w._step1_mount.current_camera()
+        cx1, cy1, s1 = w._step1_mount.current_camera()
         _enter(rig, 3)
-        cx3, cy3, _s3 = w._step3_mount.current_camera()
-        assert abs(cx1 - cx3) < vm.SLIDE * 0.02 and abs(cy1 - cy3) < vm.SLIDE * 0.02
+        cx3, cy3, s3 = w._step3_mount.current_camera()
+        assert abs(cx1 - cx3) < 1e-6 and abs(cy1 - cy3) < 1e-6
+        assert abs(s1 / s3 - 1.0) < 1e-9
     finally:
         w.close()
 

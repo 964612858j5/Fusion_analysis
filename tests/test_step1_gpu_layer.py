@@ -345,6 +345,33 @@ def test_viewbox_attach_and_idempotent_dispose(app):
         view.close()
 
 
+def test_the_layer_covers_the_viewbox_not_the_whole_viewport(app):
+    """Block A1 (C1): the world rectangle a submit draws is the ViewBox's
+    range, so the layer sits exactly on the ViewBox (pyqtgraph insets it in
+    the viewport), and follows it when the view is resized."""
+    view = ExploreView()
+    view.resize(400, 300)
+    view.show()
+    _events(app)
+    layer = Step1GpuLayer(max_raw_texture_bytes=4096, require_hardware=True)
+    layer.attach(view)
+    layer.show()
+    _events(app)
+    try:
+        def viewbox_rect():
+            g = view.view_box.geometry()
+            return QtCore.QRect(int(g.x()), int(g.y()), int(g.width()), int(g.height()))
+        assert layer.geometry() == viewbox_rect()
+        assert layer.geometry() != view.graphics.viewport().rect()   # the inset is real
+        view.resize(520, 260)
+        _events(app)
+        assert layer.geometry() == viewbox_rect()
+    finally:
+        layer.dispose()
+        layer.close()
+        view.close()
+
+
 def dataclasses_replace(instance, **changes):
     """Keep snapshot mutation out of the tests and caller contract."""
     import dataclasses

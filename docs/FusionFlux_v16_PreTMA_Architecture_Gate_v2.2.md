@@ -342,6 +342,39 @@ These may change content but never camera geometry:
 
 **Known issues:** the Step1 viewer that is occasionally black, and the ~6.5 s GUI stall on the first Step3 GPU `resizeGL`, are noted. They enter A1 only if A0 shows a shared cause; otherwise they go to the backlog.
 
+#### Execution record: A1 (2026-09-30; application `docs/v16_A1_application.md` v2, approved)
+
+**A1a (camera) implemented and accepted.** Automatic acceptance passed. On 2026-09-30 the user accepted the camera part on the real machine: no zoom on switching, and the same slide position (Step3 = Step0).
+
+**Real-machine acceptance of the full requirement FAILED for layout reasons.** The viewer frames, the channel panels and the tabs occupy different window rectangles in Step0 / 1 / 3 (e.g. viewer centre 982.5 / 947.5 / 937.5 px at 1600 × 1000), so the same slide point lands on different screen pixels.
+- The user ruled that this is solved by **block A1b**: one page frame for Step0–4 — a top slot (title + tab sub-slots), a small left slot, a large right slot and a bottom slot — refactoring Step0 if needed. The extra time is accepted.
+- Application `docs/v16_A1_application.md` v3 §9 (geometry patching) is superseded by A1b; its rulings 1–5 carry over.
+
+**Deferred:**
+- C8 (zoom stall) → the Ubuntu server; the user suspects WSL.
+- The black Step1 viewer after maximising the window reproduces on pre-A1 code too, so it is not A1. It is the known "Step1 occasionally black" issue: the fine / working-set budget refuses a large viewport and fails closed ("The display could not be composed"). → backlog, own block.
+
+- **C1, `ui/step1_gpu_layer.py`:** the layer covers the ViewBox (`mapRectToScene(rect())`, not the padded `sceneBoundingRect`) and follows `sigResized` as well as viewport resizes. It no longer covers the whole viewport.
+- **C6, same file:** the `paintGL` blit target is scaled by `devicePixelRatioF()`. At DPR 1 it is unchanged.
+- **C2, `ui/step1_viewer_mount.py`:** `apply_camera` sets the float rectangle through `controller.set_view_rect_l0`, the same entry Step0 uses, instead of rounding and refitting through `jump_to`.
+- **C3, same file:** on a ViewBox `sigResized`, the last non-resize (centre, scale) is put back with a plain `setRange`, so the request timing is the same as the refit it replaces.
+  - Step1 / Step3 therefore keep their zoom when the window or a splitter changes size. Step0 is unchanged.
+  - No state machine is added: only a cached (camera, size) pair.
+- **Measured.**
+  - Offscreen, the real switch path: every transition and 50 × 0→1→3→1→0 give Δcentre = 0 and Δscale = 0 (6 decimals). Before the fix: −52 px and −2.5 %.
+  - Real GL: the transitions are Δ = 0 and FBO = ViewBox size.
+  - Real GL, `gl-image` (shifts recomputed in the layer's own coordinates, because the script assumed a full-viewport layer): the six tissue patches are within ±0.5 px (were 4–7 px); the aligned mean absolute difference fell from 43.4 to 6.9.
+- **Tests:**
+  - new `tests/test_v16_zero_drift.py` (real `setCurrentIndex` order; exact transitions; 50 loops; resize keeps the camera; a zoom followed by a resize);
+  - `tests/test_step1_gpu_layer.py`: the layer covers the ViewBox;
+  - `tests/test_step3_viewer.py`: Step1 ↔ Step3 camera check made exact, scale included;
+  - `tests/test_step1_gpu_takeover.py`: the test host is 530 × 530 (user-approved whitelist extension, 2026-09-30). With a 512 ViewBox no pixel centre lands exactly on a texel edge; before this, float64 numpy and the float32 shader picked neighbouring texels in one column (difference 2 against a tolerance of 1). The oracle and the tolerance are unchanged.
+- **Regression:** 70 offscreen + 11 real-GL modules, one process each, current tree vs `git archive HEAD`. **No new failure.**
+  - Seen on both sides: font ×2, montage Qt abort, StarDist 1-px flake, GL-context-limit aborts at the same points, and the GPU vendor-name assert.
+  - `test_step0_step1_display_isolation` is intermittent on both sides (3/16 each).
+- **Reverse injection:** each of the following turns tests red — rounding back in `apply_camera`, no resize handler, and the layer back on the whole viewport. C6 cannot be injected at DPR 1.
+- **Docs:** `UI_SURFACE_RULES.md`, `docs/user_guide.md`, `docs/用户指南.md`.
+
 ---
 
 ## 5. Stage A2 — PixelSource (+ NGFF if the probe passes)

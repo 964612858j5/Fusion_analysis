@@ -161,6 +161,9 @@ class Step1WholeSlideMount(QtCore.QObject):
         #: composition, no rectangle on the shared navigator. A mode or a
         #: source that changes meanwhile is recorded and taken up on resume.
         self._paused = False
+        # Block A1 (C3): (camera, ViewBox size) of the last non-resize range change.
+        self._kept_camera = None
+        self._restoring_camera = False
         self._source_pending = None
         #: Whether this mount may take the GPU path at all, and how its
         #: layer is built. Constructor seams, not a user control: the
@@ -1093,12 +1096,19 @@ class Step1WholeSlideMount(QtCore.QObject):
         if not (w_px > 0 and h_px > 0):
             return False
         width, height = w_px / float(scale), h_px / float(scale)
-        moved = self.host.jump_to(int(round(cy - height / 2.0)),
-                                  int(round(cx - width / 2.0)),
-                                  max(1, int(round(width))),
-                                  max(1, int(round(height))))
+        # Block A1 (C2): exactly this rectangle, in floats, both axes set --
+        # the entry Step0 uses (`set_view_rect_l0`). The integer rectangle
+        # this used to hand `jump_to` was then re-fitted by the aspect lock:
+        # up to half a level-0 pixel per entry, always the same way, and the
+        # result became the shared camera, so it accumulated.
+        controller = getattr(stack, "controller", None)
+        if controller is None:
+            return False
+        controller.set_view_rect_l0(cx - width / 2.0, cy - height / 2.0, width, height)
+        self.host.refresh_status()
+        self._kept_camera = (self.current_camera(), (w_px, h_px))
         self.publish_view_rect()
-        return bool(moved)
+        return True
 
     def publish_camera(self, reason=""):
         """Tell the window where this viewer is looking."""
@@ -1169,8 +1179,11 @@ class Step1WholeSlideMount(QtCore.QObject):
             return False
         try:
             view_box.sigRangeChanged.connect(self._on_range_changed)
+            view_box.sigResized.connect(self._on_view_resized)
         except (AttributeError, RuntimeError, TypeError):
             return False
+        self._kept_camera = (self.current_camera(),
+                             (float(view_box.width()), float(view_box.height())))
         try:
             stack._step1_rect_connected = True
         except (AttributeError, RuntimeError):
@@ -1179,8 +1192,63 @@ class Step1WholeSlideMount(QtCore.QObject):
 
     def _on_range_changed(self, *_args):
         """The camera moved -- by hand, by a jump, by a rebuild."""
+        self._keep_camera_unless_resizing()
         self.publish_view_rect()
         self.publish_camera(self._camera_reason)
+
+    # ── a new drawable size keeps the camera (block A1, C3) ───────────
+    # pyqtgraph answers a ViewBox resize by re-fitting its target rectangle
+    # into the new aspect (`ViewBox.resizeEvent` -> `updateViewRange`, THEN
+    # `sigResized`): the centre stays, the magnification changes. On the first
+    # entry into Step1 the page's own layout (dock, bottom bar, channel floor)
+    # shrinks the ViewBox right after the shared camera was applied, and that
+    # re-fit became the shared camera. The rule here is the plan's invariant
+    # (v2.2 §4.3): a drawable may change size, the world anchor and the world
+    # units per pixel do not. `_kept_camera` is (camera, ViewBox size) of the
+    # last range change that was NOT a resize re-fit -- nothing else.
+    def _view_box_size(self):
+        view_box = getattr(getattr(self.host.stack, "view", None), "view_box", None)
+        if view_box is None:
+            return None
+        return (float(view_box.width()), float(view_box.height()))
+
+    def _keep_camera_unless_resizing(self):
+        size = self._view_box_size()
+        kept = getattr(self, "_kept_camera", None)
+        if size is None:
+            return
+        # A range change at another size than the kept one is the re-fit of
+        # a resize in progress; `_on_view_resized` follows it at once.
+        if kept is None or kept[1] == size or getattr(self, "_restoring_camera", False):
+            self._kept_camera = (self.current_camera(), size)
+
+    def _on_view_resized(self, *_args):
+        size = self._view_box_size()
+        kept = getattr(self, "_kept_camera", None)
+        stack = self.host.stack
+        controller = getattr(stack, "controller", None)
+        if size is None or controller is None:
+            return
+        if (self._paused or kept is None or kept[0] is None or kept[1] == size
+                or not (size[0] > 0 and size[1] > 0)):
+            # A paused (hidden) viewer issues no requests; the camera it is
+            # entered with is applied on entry anyway.
+            self._kept_camera = (self.current_camera(), size)
+            return
+        cx, cy, scale = kept[0]
+        width, height = size[0] / scale, size[1] / scale
+        view_box = stack.view.view_box
+        # The same channel as the re-fit it corrects -- a plain range change,
+        # which the controller answers on its own `sigRangeChanged` path and
+        # timers -- only with the right range. Not `set_view_rect_l0`: that
+        # issues both request batches at once, extra work a resize never did.
+        self._restoring_camera = True
+        try:
+            view_box.setRange(xRange=(cx - width / 2.0, cx + width / 2.0),
+                              yRange=(cy - height / 2.0, cy + height / 2.0), padding=0)
+        finally:
+            self._restoring_camera = False
+        self._kept_camera = (self.current_camera(), size)
 
     # ── navigation: the same two gestures, the same camera ────────────
     def show_patch(self, bbox):

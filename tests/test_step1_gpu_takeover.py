@@ -267,7 +267,12 @@ def _mount(app, *, visible=("CD3",), windows=CHANNELS, gpu=True,
     window = _Window(state, domain, seeder=seeder)
     host = Step1ViewerHost(stack_factory=_stack_factory(raws, schedulers))
     host.setAttribute(QtCore.Qt.WA_DontShowOnScreen, True)
-    host.resize(512, 512)
+    # 512 + pyqtgraph's 9 px ViewBox inset on each side: the ViewBox, and so
+    # the GPU layer since block A1 (C1), is 512 x 512 -- the same pixel grid as
+    # before A1. With a world width that is a power-of-two fraction of it no
+    # pixel centre falls EXACTLY on a texel edge, where float64 numpy and the
+    # float32 shader may pick neighbouring texels.
+    host.resize(530, 530)
     host.show()
     app.processEvents()
     mount = Step1WholeSlideMount(window, host=host, gpu=gpu,

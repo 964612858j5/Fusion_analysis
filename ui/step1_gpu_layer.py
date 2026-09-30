@@ -588,6 +588,9 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
         self._attached_viewport.installEventFilter(self)
         view_adapter.view_box.sigRangeChanged.connect(self._attached_range_changed)
+        # Block A1 (C1): the layer covers the ViewBox, not the whole viewport,
+        # so it follows the ViewBox's own geometry as well.
+        view_adapter.view_box.sigResized.connect(self._sync_attached_geometry)
         self._sync_attached_geometry()
 
     def submit(self, source_descriptor: SourceDescriptor, display_snapshot: DisplaySnapshot,
@@ -844,7 +847,11 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         final_fbo, final_texture = self._targets["shown" if self._shown_ready else "final"]
         gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, final_fbo)
         gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, self.defaultFramebufferObject())
-        width, height = self.width(), self.height()
+        # Block A1 (C6): the default framebuffer is in DEVICE pixels; the
+        # widget's width / height are logical. At DPR 1 the two are equal.
+        ratio = float(self.devicePixelRatioF()) or 1.0
+        width = int(round(self.width() * ratio))
+        height = int(round(self.height() * ratio))
         source_width, source_height = self._target_size
         gl.glBlitFramebuffer(0, 0, source_width, source_height, 0, 0, width, height,
                              gl.GL_COLOR_BUFFER_BIT, gl.GL_NEAREST)
@@ -1431,15 +1438,40 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         self._attached_range = (float(ranges[0][0]), float(ranges[0][1]),
                                 float(ranges[1][0]), float(ranges[1][1]))
 
-    def _sync_attached_geometry(self) -> None:
-        if self._attached_viewport is not None:
-            self.setGeometry(self._attached_viewport.rect())
-            self.raise_()
+    def _sync_attached_geometry(self, *_args) -> None:
+        """Cover exactly the ViewBox (block A1, C1).
+
+        The world rectangle every submit draws is the ViewBox's `viewRange()`,
+        and pyqtgraph insets the ViewBox inside the graphics viewport (the
+        layout's default 9 px margins). Covering the whole viewport stretched
+        that rectangle over the margins -- 1.4 % / 2.3 % larger than Step0's
+        CPU picture of the same camera. Covering the ViewBox draws it where
+        the CPU picture is, margins included.
+        """
+        if self._attached_viewport is None:
+            return
+        rect = self._attached_viewport.rect()
+        view = self._attached_view
+        view_box = getattr(view, "view_box", None) if view is not None else None
+        graphics = getattr(view, "graphics", None) if view is not None else None
+        if view_box is not None and graphics is not None:
+            # `rect()`, not `boundingRect()`: pyqtgraph pads the latter by 0.5 px.
+            scene_rect = view_box.mapRectToScene(view_box.rect())
+            top_left = graphics.mapFromScene(scene_rect.topLeft())
+            width, height = int(round(scene_rect.width())), int(round(scene_rect.height()))
+            if width > 0 and height > 0:
+                rect = QtCore.QRect(top_left.x(), top_left.y(), width, height)
+        self.setGeometry(rect)
+        self.raise_()
 
     def _disconnect_attachment(self) -> None:
         if self._attached_view is not None:
             try:
                 self._attached_view.view_box.sigRangeChanged.disconnect(self._attached_range_changed)
+            except (TypeError, RuntimeError):
+                pass
+            try:
+                self._attached_view.view_box.sigResized.disconnect(self._sync_attached_geometry)
             except (TypeError, RuntimeError):
                 pass
         if self._attached_viewport is not None:

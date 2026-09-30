@@ -263,7 +263,13 @@ row, and the duplicate Tissue Preview button in the step bar.
   once per change. The viewer is Step3's own (block 2c-2): a
   second Step1 viewer, resident, paused while Step3 is not on screen (and
   Step1's paused while Step3 is), sharing Step1's camera; a navigator click
-  moves the viewer of the step on screen. When it cannot open, the slot's
+  moves the viewer of the step on screen. Block A1 (user ruling 2026-09-30):
+  switching Step0 / Step1 / Step3 keeps the camera exactly -- the same centre
+  and the same magnification on the slide (the pages' layouts still differ, so
+  the viewer frames are not yet at the same window position: block A1b); the Step1 / Step3 picture covers the ViewBox
+  only, with the same 9 px frame as Step0's; resizing the window or a splitter
+  keeps Step1 / Step3's magnification (the visible area changes, the zoom
+  does not). Step0 still fits on a resize. When it cannot open, the slot's
   notice says why. `← Back to Step 2` below. No Save, no pre-segmentation, no
   second patch strip of its own (it shows Step1's). The column joins the one
   channel-column share. A refusal to open Step3 is said in a (non-modal)

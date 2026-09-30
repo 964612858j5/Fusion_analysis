@@ -93,6 +93,23 @@ The A1 record in v2.2 stands. **A1b** (one page frame for Step0–4) is part of 
 - A1b's F1–F4 frame-lock tests (`tests/test_v16_frame_lock.py`) join the monotonic green rule as soon as each stage lands.
 - A1 + A1b together are the **baseline A7 is measured against**: A7 may not make any F1–F4 or zero-drift invariant worse.
 
+### 4.x A1b execution record (2026-09-30) — DONE
+
+Appended after approval; a record, not a change of plan.
+
+| Stage | Commit | What landed |
+|---|---|---|
+| S0 | `3436953` | Design: one `StepFrame` for Step0–4 (title slot, one tab row, left / right columns, tool row, bottom slot); rulings 1–6 |
+| S1 | `59473b3` (application), `c3b70b1` | `ui/step_frame.py` (`StepFrame`, `StepFrameMetrics`); Step1 + Step3 on it; one pixel column width W = max(W_user, floor), a widened W written back |
+| S2 | `9ae89f6` (application v2), `9a82a32` | Step0 on the frame (tabs `Background Correction` / `Viewer`, Decision + Save in the bottom slot); metrics measured once by Step0; opening width = Step0's 4/3 rule on every page; **one row-independent floor** (the columns' own content, user ruling: a row wider than the column is covered from its right edge); `GlobalChannelRow.hold_own_width()` (whitelist extension approved) |
+| S3 + S4 | `0b5f8bf` (application), `242064d` | Step2 on the frame (tabs `Parameters` / `Tile Status`) and in the shared width + floor; Step4 in the frame's **wide mode** (one real tab widget with an invisible tab: blank tab row, one slot = left column + handle + right column) |
+
+- **Result:** title slot, tab row and bottom slot identical on all five pages; columns and tool row identical on Step0–3; channel panel, graphics viewport, ViewBox and (real GL) GPU layer identical on Step0 / 1 / 3 — to the pixel, offscreen and under real GL, at 1600 × 1000 and 2050 × 1330 (`scripts/diagnose_v16_a1b_frame.py`). Real-machine acceptance passed for S1, S2 and S3 + S4.
+- **Tests:** `tests/test_v16_frame_lock.py` (25 tests) joins the monotonic green rule. Every stage's reverse injections turned it red.
+- **Regressions:** one per stage, module by module (current code; failed modules re-run on HEAD, compared by failing test name): no new failures. One real regression was found and fixed during S2 (the opening-width block is load-bearing when Step1 is shown first). Known pre-existing failures and flaky tests are listed in each application's execution record.
+- **Deviations** from the applications are recorded there: S1 (the widened width is written back), S2 (the row-width hold in the dock; the opening block restored), S3 + S4 (the wide slot built from a real tab widget instead of a probe + look-alike pane).
+- **Open:** the untracked consolidated v2.3 (`..._v2.3_consolidated.md`) predates this record and needs the same paragraph when it is committed.
+
 ---
 
 ## 6.8 A3 additions: schema version and artifact dependencies (new)

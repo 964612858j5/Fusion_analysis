@@ -194,3 +194,50 @@ Step0Page（外层布局，边距 0）
 2. 下限：**彻底消除**残余；下限只取各页 `Channels` 列自身的内容，允许覆盖行右侧的组件（所有 step 的 Channels 都适用）。**批准 v2。**
 3. Decision 左边缘对齐 `Channels` 框，Save 贴右边缘：**同意**。
 4. Step0 的 `Channels` 框内边距改为 4：**同意**。
+
+## 10. 执行记录（2026-09-30）
+
+**已实施，自动验收通过；待用户真机验收。**
+
+- **Step0**（`ui/step0/step0_page.py`）：
+  - 页面组装进 `StepFrame`（`_assemble_frame`）：标题槽 = 加载栏；左 tab「Background Correction」= Channels 列；右 tab「Viewer」= 工具行（toolbar）+ `_view_area`；底部槽 = Decision ｜ stretch ｜ Save。
+  - `main_split` / `sec_c` / `c_split` / `c_right` 以及 `_fix_split_ratio` 已删除；`_bg_c_split` = 框架的 splitter，`_step0_tabs` = 左 tab。
+  - `Channels` 框内边距 4 / 间距 4。Channels 列加上 Step1 / Step3 列同样的 `#1c1c1c` 底色和 3 px 顶边距（这是逐像素相同的必要条件：Step1 那 3 px 本来就是为了对齐 Step0 的 `sec_c` 边距）。所以 §3.4 第 3 条「底色变化」只发生在右栏，左栏的底色与今天相同。
+  - `frame_metrics` 在组装时量一次；`opening_channel_column_width()`（4/3 规则）；`left_panel()`；`_align_bottom_row()`（Decision 对齐 Channels 框左边缘）。
+- **`ui/step_frame.py`**：搬入 `FRAME_TAB_QSS`、`free_tab_bar`；main_window 保留原名作为别名。
+- **`ui/main_window.py`**：
+  - metrics 取自 `self._step0.frame_metrics`；
+  - Step0 并入框架的像素宽度循环，写入仍经 `apply_channel_column_width`（它还没接上隐藏的同步 splitter 时，直接写 splitter）；
+  - 开页宽度：第一次从**显示中**的框架取 4/3 规则并记住；
+  - 下限：三列自身内容最小宽度中的最大值，与行无关；
+  - `_match_step1_bottom_bar` 去掉 +1。
+- **白名单扩展（用户 2026-09-30 批准）**：`ui/widgets/channel_dock/global_dock.py` 新增 `GlobalChannelRow.hold_own_width()`，在 `set_step` 之后和统一名字宽度之后调用，让行不窄于自己的最小宽度。
+  - 起因：长通道名实测发现，列比行窄时，名字列固定宽度不收缩，滑条被画到名字上面；
+  - 现在行从右边被列表视口裁掉，名字完整，也没有横向滚动条。
+- **与申请的偏差**：
+  1. 开页宽度那一段一度被当作多余删掉：在真实程序和 frame_lock 的 rig 里，没有它也开在 346。回归中 `test_a_drag_reaches_step0_s_hidden_peer_too` 失败：先显示 Step1 的窗口里，共享比例是从还没布局的 Step0 splitter 上量来的，每次又从上次的结果重新量，结果三页的列都是 862 px。于是恢复了这一段，这条测试就是它的反向注入证据。
+  2. `test_step0_channel_conditioning`、`test_step0_full_image` 的 tab 断言不需要修改：`_step0_tabs` 就是左 tab，只有「Background Correction」一个。
+  3. 下限实测约 256；因为 tab 控件自身的边框，最窄的列比下限宽 2 px，三页相同。
+- **实测**（`scripts/diagnose_v16_a1b_frame.py`，test1 副本）：
+  - 离屏和真实 GL 下，1600 × 1000 与 2050 × 1330：Step0 / 1 / 3 的标题、左右栏、工具行、graphics viewport、ViewBox、底部槽、`Channels` 框、dock 的 x 和宽度全部相同；
+  - 真实 GL 下 GPU 层 = ViewBox；
+  - 三页开页列宽 346；
+  - 只有 tab 标签的宽度和 dock 的顶边不同（后者是 S0 裁定 (b)）。
+- **测试**：
+  - `test_v16_frame_lock.py` 扩展到三页，共 15 条：矩形相同；任意一页拖动；最窄等于下限；三页同一下限；未进过的页不撑宽；开页 4/3；compare 模式不移动工具行和 view area；下限回落容差 0；
+  - `test_step0_step1_surface_details.py`：`never_covered` 按裁定 2 改写，新增长通道名「从右边遮住、控件不重叠」（Step0、Step1）；
+  - `test_step0_background_correction_tab.py`：`_main_split` 改为 `_bg_c_split` / `_frame.bottom_slot`。
+- **反向注入**（都变红）：
+  - Step0 不加下限（frame_lock 1 条）；
+  - 恢复 9 px 边距（10 条）；
+  - Step0 不走框架宽度（8 条）；
+  - 下限按行算（5 条）；
+  - 开页值写错（1 条）；
+  - 删掉开页那一段（`test_step1_layout_block_a` 1 条）；
+  - 行不保持最小宽度（长名字测试 2 条）。
+- **回归**（离屏 106 个模块 + 真实 GL 11 个，逐个进程运行；只把失败的模块放到 HEAD `9ae89f6` 上重跑，逐条对比失败的测试名）：
+  - 修复后**没有新增失败**。`test_step0_compare_tiles::test_hot_requests_never_outrank_the_foreground` 在回归中失败了一次，单独重跑 3 次都通过，属于不稳定测试；
+  - 两边相同的已有失败：`test_global_channel_dock::test_the_step0_panel_looks_like_the_baseline_panel`、`test_preview_source_provider`、`test_step0_channel_conditioning`（超时，两条不稳定）、`test_step0_no_process_button`、`test_step0_process_incremental`、`test_step1_channel_panel`、`test_tissue_navigator_viewport_sync`、`test_step1_montage_view`（abort）、GL 下的 `test_step1_gpu_takeover` 1 条；
+  - GL 下 `test_step1_fusion_visibility` / `gpu_roi_clip` 三件在两边都 abort，是 GL 环境的问题（上下文上限），不是 S2 引起的；
+  - `test_step3_label_render` 在 GL 下有一次退出时的 139，重跑 3 次都是 rc 0。
+- **文档**：`UI_SURFACE_RULES.md`（Step1 列、列宽、页面框架三处）；两份用户指南。

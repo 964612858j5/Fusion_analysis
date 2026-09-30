@@ -431,6 +431,11 @@ def _fully_shown(widget, panel):
 
 
 def test_step1_channel_column_is_never_covered(many):
+    """The column's frame, scroll bar and Save Fusion Settings are never
+    covered. A ROW may be (block A1b S2, user ruling 2, 2026-09-30): the
+    column's floor is the Channels column's own content, not the widest row,
+    so a row wider than the column is covered from its RIGHT edge -- the
+    weight box first -- and its left end (tick, swatch, name) stays shown."""
     w = many
     _show_step(w, 1)
     w._step1_main_split.setSizes([40, 1440])        # drag the handle far left
@@ -443,11 +448,64 @@ def test_step1_channel_column_is_never_covered(many):
     # Save Fusion Settings lives in the page's bottom bar since the fifth
     # round; it must be whole there, whatever the handle does.
     assert _fully_shown(w._btn_save_fusion_settings, w._step1_page_widget)
+    # The floor is the framed columns' own minimum, the same on every page.
+    floor = max(p.minimumSizeHint().width() for p in (
+        w._step0.left_panel(), panel, w._step3.left_panel()))
+    # (the tab widget's own frame hint adds a pixel or two, on every page alike)
+    assert floor <= panel.width() <= floor + 2
     for cid in ("DAPI", "CH00", "CH38"):
         row = w._channel_dock.row(cid)
-        spin = QtCore.QRect(row.spin.mapTo(lst.viewport(), QtCore.QPoint(0, 0)),
-                            row.spin.size())
-        assert spin.right() < lst.viewport().width(), cid
+        tick = QtCore.QRect(row.checkbox.mapTo(lst.viewport(), QtCore.QPoint(0, 0)),
+                            row.checkbox.size())
+        assert 0 <= tick.left() and tick.right() < lst.viewport().width(), cid
+
+
+_LONG = ["DAPI", "A-VERY-LONG-CHANNEL-NAME-FOR-TESTING", "CD3", "CD8"]
+
+
+@pytest.fixture
+def long_names(app):
+    """A window whose rows are wider than the narrowest column."""
+    import test_step1_channel_panel as panel_tests
+    from block01.ui.main_window import MainWindow
+
+    loader = panel_tests._Loader()
+    loader._names = list(_LONG)
+    loader.ch_map = {c: i for i, c in enumerate(_LONG)}
+    w = MainWindow()
+    w.loader = loader
+    w.config.set_channels(list(_LONG))
+    w.config.load_panel({"markers": {c: 0.5 for c in _LONG[1:]}}, "DAPI")
+    w.config.set_nucleus("DAPI", 1.0)
+    w.resize(1500, 950)
+    w.show()
+    _pump()
+    yield w
+    w.close()
+    _pump()
+
+
+@pytest.mark.parametrize("step", [0, 1])
+def test_a_row_wider_than_the_column_is_covered_from_the_right(long_names, step):
+    """User ruling 2 (2026-09-30), block A1b S2: at the narrowest column a
+    row keeps its own layout and the list cuts it at the right edge -- no
+    control is squeezed over another, and there is no sideways scroll."""
+    w = long_names
+    _show_step(w, step)
+    split = w._step0._bg_c_split if step == 0 else w._step1_main_split
+    split.setSizes([40, sum(split.sizes()) - 40])
+    w._on_channel_column_dragged(split)
+    _pump(10)
+    lst = w._channel_dock.list_widget
+    assert not lst.horizontalScrollBar().isVisible()
+    for cid in _LONG:
+        row = w._channel_dock.row(cid)
+        assert row.width() >= row.minimumSizeHint().width(), cid
+        assert row.width() > lst.viewport().width(), cid        # it IS covered
+        shown = [x for x in (row.checkbox, row.state_slot, row.swatch, row.name_label,
+                             row.slider, row.spin, row.method_cb) if x.isVisible()]
+        for left, right in zip(shown, shown[1:]):
+            assert left.x() + left.width() <= right.x(), (cid, left, right)
 
 
 def test_step1_scroll_bar_is_step0s(many):

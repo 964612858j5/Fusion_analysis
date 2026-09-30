@@ -85,6 +85,7 @@ from ...utils.roi_project import (
 from ...utils import dataset_trace
 from ...utils import perf_trace
 from ...utils import tissue_log
+from ..step_frame import FRAME_TAB_QSS, StepFrame, StepFrameMetrics, free_tab_bar
 from ..widgets.channel_workbench import (
     ChannelWorkbench,
     _PALETTE as CHANNEL_PALETTE,
@@ -541,9 +542,12 @@ class Step0Page(QWidget):
 
     def _build_ui(self):
         # ── 顶层：垂直布局，不用 ScrollArea，充满窗口 ──────────────────
+        # The page is ONE `StepFrame` (block A1b S2), assembled at the end of
+        # this method once the load bar and the Per-Channel Decision frame --
+        # the two widgets its fixed rows are measured from -- exist.
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(6, 6, 6, 6)
-        outer.setSpacing(4)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
         # ══ Section A — 单行横排 file_bar ══════════════════════════════
         file_bar = QWidget()
@@ -629,23 +633,17 @@ class Step0Page(QWidget):
         self._btn_tissue_nav.clicked.connect(self.toggle_tissue_navigator)
         fb.addWidget(self._btn_tissue_nav)
 
-        outer.addWidget(file_bar)   # Section A 固定高度，不拉伸
-        # Step1's title bar takes this bar's height, so both steps' tabs
-        # start on the same line (user ruling, 2026-09-23).
+        # The frame's title slot (block A1b S2). Step1's and Step3's title
+        # bars take this bar's height, so every page's tabs start on the same
+        # line (user ruling, 2026-09-23).
         self._file_bar = file_bar
 
-        # ══ Section B + C — 左右分栏，撑满剩余空间 ════════════════════
-        main_split = QSplitter(Qt.Horizontal)
-        main_split.setStyleSheet("QSplitter::handle{background:#333;width:3px;}")
-        main_split.setChildrenCollapsible(False)
-        self._main_split = main_split   # 保存引用，showEvent里固定比例
-
+        # ══ Section B + C — the frame's two columns ══════════════════════
         # Step0 has one user-facing work area. Channel remapping is edited by
         # the floating Intensity inspector inside Background Correction, so a
         # second top-level Remap tab would expose two competing homes for the
-        # same parameters.
-        self._step0_tabs = QtWidgets.QTabWidget()
-        self._step0_tabs.addTab(main_split, "Background Correction")
+        # same parameters. The work area's two halves are the frame's two
+        # tabs -- `Background Correction` left, `Viewer` right (S0 ruling 3).
         # Keep exactly one ChannelWorkbench alive as the Intensity inspector's
         # owner and the remap config serializer. It is deliberately not added
         # to `_step0_tabs`; its old multichannel canvas is no longer a Step0 UI.
@@ -656,8 +654,7 @@ class Step0Page(QWidget):
         # Background Correction, as the second page of the Patch Preview
         # area, and is built there (Section C) -- one instance, owned by
         # that stack. The trial third tab it replaced is gone.
-        outer.addWidget(self._step0_tabs, stretch=1)   # 占用所有剩余高度
-        # Section C builds `_bg_c_split` later. Keep the established initial
+        # The frame's splitter is `_bg_c_split`. Keep the established initial
         # channel-column width while the hidden workbench still owns the
         # Intensity panel.
         QtCore.QTimer.singleShot(0, self._wire_left_column_sync)
@@ -860,35 +857,30 @@ class Step0Page(QWidget):
         self._roi_patch_section = sec_b   # keep a ref so the orphan isn't GC'd
         sec_b.setVisible(False)
 
-        # ── Section C（右 75%）— Background Correction ────────────────
-        sec_c = QWidget()
-        sec_c.setStyleSheet("background:#1c1c1c;")
-        cl = QVBoxLayout(sec_c)
-        cl.setContentsMargins(4, 4, 4, 4)
-        cl.setSpacing(4)
-
-        # (redundant "C — Background Correction" title removed: the tab is already
-        # named "Background Correction"; the freed vertical space goes entirely to
-        # c_split below — Channels/params/patch on the left, the Original|Tophat|
-        # cucim Patch Preview on the right.)
-        # Section C 内部：左（通道列表+参数+patch选择） / 右（三联预览+metrics+决策）
-        c_split = QSplitter(Qt.Horizontal)
-        c_split.setStyleSheet("QSplitter::handle{background:#333;width:3px;}")
-        self._bg_c_split = c_split   # user-facing channel/content splitter
-        cl.addWidget(c_split, stretch=1)
+        # ── Section C — Background Correction: the frame's two columns ─
+        # Channels on the left, the viewing area on the right; the splitter
+        # between them is the frame's (`_bg_c_split`, set at assembly).
 
         # C-左：通道列表 + 参数滑块 + patch 选择. Capped narrow so the Channels
         # list keeps the established compact left-column width; the freed width
         # goes to the triple Patch Preview on the right.
         c_left = QWidget()
+        # The framed pages' channel column, to the pixel (block A1b S2): the
+        # panel's own dark ground (it also draws the list's scroll bar) and
+        # 3 px above the Channels frame, as Step1's and Step3's columns have.
+        c_left.setStyleSheet("background:#1c1c1c;")
         cll = QVBoxLayout(c_left)
-        cll.setContentsMargins(0, 0, 0, 0)
+        cll.setContentsMargins(0, 3, 0, 0)
         cll.setSpacing(4)
 
         # ── 通道列表（勾选 + 方法下拉 + 状态图标）─────────────────────
         ch_box = QGroupBox("Channels")
         ch_box.setStyleSheet(self._box_style("#61afef"))
         chl = QVBoxLayout(ch_box)
+        # Step1's and Step3's Channels frame margins (block A1b S2, ruling
+        # 4): the one dock sits at the same x and width in every step.
+        chl.setContentsMargins(4, 4, 4, 4)
+        chl.setSpacing(4)
 
         # All选项行
         all_row = QHBoxLayout()
@@ -1078,13 +1070,9 @@ class Step0Page(QWidget):
         # c_right's bottom_row (next to the shrunk Quantitative Metrics). c_left's
         # Channels panel (stretch=2) absorbs the freed vertical space.
 
-        c_split.addWidget(c_left)
+        self._left_column = c_left
 
-        # C-右：三联预览 + metrics + 决策
-        c_right = QWidget()
-        crl = QVBoxLayout(c_right)
-        crl.setContentsMargins(0, 0, 0, 0)
-        crl.setSpacing(4)
+        # C-右：the viewing area (the frame's right tab)
 
         prev_box = QGroupBox("Compare  —  Original | TopHat | cucim")
         prev_box.setStyleSheet(self._box_style("#c678dd"))
@@ -1273,9 +1261,10 @@ class Step0Page(QWidget):
         view_lay = QVBoxLayout(view_box)
         view_lay.setContentsMargins(0, 0, 0, 0)
         view_lay.setSpacing(4)
-        view_lay.addWidget(self._build_view_toolbar())
+        # The toolbar goes into the frame's tool row at assembly.
+        self._view_toolbar = self._build_view_toolbar()
         view_lay.addWidget(self._view_area, stretch=1)
-        crl.addWidget(view_box, stretch=3)
+        self._view_box = view_box
 
         # A right-click anywhere in the compare area goes back to the image.
         # An event filter rather than a handler on the panels: the gesture
@@ -1434,11 +1423,6 @@ class Step0Page(QWidget):
         # Nothing is left under the picture: Preview Patch went to the
         # viewer's toolbar and Per-Channel Decision to the Save row, so the
         # viewing area takes the whole column (user ruling, 2026-09-23).
-        c_split.addWidget(c_right)
-
-        # C内部 左:右 = 1:2
-        c_split.setStretchFactor(0, 1)
-        c_split.setStretchFactor(1, 2)
 
         # (#5) ONE BG-tab Save button — replaces BOTH the old "Run BG correction"
         # preview-batch button AND the page-level "Save Step0" footer. The handler
@@ -1447,9 +1431,6 @@ class Step0Page(QWidget):
         # correction/roi/patch configs + step0_roi_result.json -> emit
         # step0_complete (Step0->Step1 handoff). The per-patch preview-batch button
         # was dropped (its preview duty is not part of the save pipeline).
-        save_row = QHBoxLayout()
-        save_row.addWidget(self._decision_box)
-        save_row.addStretch(1)
         self._btn_continue = QPushButton("Save")
         self._btn_continue.setToolTip(
             "Validate and save the current Intensity remap, run background "
@@ -1462,8 +1443,6 @@ class Step0Page(QWidget):
         )
         self._btn_continue.setFixedHeight(38)
         self._btn_continue.clicked.connect(self._save_and_continue)
-        save_row.addWidget(self._btn_continue)
-        cl.addLayout(save_row)
 
         # v14.4: explicit corrected-output status — honest about whether the last
         # Save wrote a VALID non-empty corrected_channels.zarr.
@@ -1476,11 +1455,65 @@ class Step0Page(QWidget):
         self._bg_corrected_status.setStyleSheet("color:#888;font-size:11px;")
         self._bg_corrected_status.setVisible(False)
 
-        main_split.addWidget(sec_c)
-        # (#10) Section C is the sole child of the BG splitter (Section B relocated
-        # to the Tissue Navigator). No page-level Save footer anymore (#5).
-
+        # No page-level Save footer anymore (#5): Save is the frame's bottom row.
+        self._assemble_frame(outer)
         self._refresh_slider_labels()
+
+    def _assemble_frame(self, outer):
+        """Put the page into its `StepFrame` (block A1b S2).
+
+            title slot   the load bar
+            left tab     `Background Correction`: the Channels column
+            right tab    `Viewer`: tool row = the view toolbar; the view area
+            bottom slot  Per-Channel Decision | stretch | Save
+
+        The frame's fixed rows are measured here, ONCE, from the load bar and
+        the Decision frame, and every other page reads them from
+        `frame_metrics`. Nothing is built or rebuilt here: every widget is
+        the one built above, moved into its slot.
+        """
+        for widget in (self._file_bar, self._decision_box):
+            widget.setParent(self)          # this page's style, then measure
+            widget.ensurePolished()
+        self.frame_metrics = StepFrameMetrics(
+            title_height=self._file_bar.sizeHint().height(),
+            bottom_height=self._decision_box.sizeHint().height(),
+            tab_qss=FRAME_TAB_QSS)
+        frame = StepFrame(self.frame_metrics, free_tab_bar)
+        self._frame = frame
+        frame.set_title(self._file_bar)
+        frame.left_tabs.addTab(self._left_column, "Background Correction")
+        frame.right_tabs.addTab(self._view_box, "Viewer")
+        row = QHBoxLayout()
+        row.addWidget(self._view_toolbar)
+        frame.tool_row(self._view_box.layout(), row)
+        frame.bottom_layout.addWidget(self._decision_box)
+        frame.bottom_layout.addStretch(1)
+        frame.bottom_layout.addWidget(self._btn_continue)
+        self._step0_tabs = frame.left_tabs
+        self._bg_c_split = frame.splitter    # user-facing channel/content splitter
+        outer.addWidget(frame)
+        # The status line's room includes one Background Correction tab,
+        # which exists only now.
+        self._fit_decision_status_width()
+
+    def left_panel(self):
+        """The Channels column -- where the shared column floor is read."""
+        return self._left_column
+
+    def _align_bottom_row(self):
+        """Per-Channel Decision starts under the Channels frame's left edge,
+        as Step1's `Save Fusion Settings` does (block A1b S2, ruling 3)."""
+        frame = getattr(self, "_frame", None)
+        box = getattr(self, "_channels_box", None)
+        if frame is None or box is None:
+            return
+        inset = max(0, box.mapTo(frame, QtCore.QPoint(0, 0)).x()
+                    - frame.root_layout.contentsMargins().left())
+        margins = frame.bottom_layout.contentsMargins()
+        if margins.left() != inset:
+            frame.bottom_layout.setContentsMargins(
+                inset, margins.top(), margins.right(), margins.bottom())
 
     # ── Internal channel-remap host (migrated from Step1.5) ───────────────────
     # Step0 reuses ChannelWorkbench's model, Intensity inspector and config
@@ -3504,16 +3537,32 @@ class Step0Page(QWidget):
         self._syncing_left_cols = False
         # Start both at the LARGER of the two left-pane minimums (+ a little), so the
         # right borders line up and neither is clamped below its own minimum.
-        wa = a.widget(0).minimumSizeHint().width() if a.widget(0) else 0
-        wb = b.widget(0).minimumSizeHint().width() if b.widget(0) else 0
         # v15 user feedback: the BG Channels column starts at 4/3 of the old
         # default. It remains draggable; the hidden peer is only kept in sync
         # because it owns the detached Intensity inspector's original layout.
-        self._left_col_width = (4 * (max(wa, wb, 120) + 4)) // 3
+        self._left_col_width = self.opening_channel_column_width()
         a.splitterMoved.connect(lambda _p, _i: self._on_left_split_dragged(a))
         b.splitterMoved.connect(lambda _p, _i: self._on_left_split_dragged(b))
         self._apply_left_col_width(a)
         self._apply_left_col_width(b)
+
+    def opening_column_minimum(self):
+        """The Channels column's own minimum: what its content (the header
+        row -- `Method ▾`, `Intensity…` and the room the hidden `Show all`
+        keeps) needs. The list's rows are not part of it."""
+        column = getattr(self, "_left_column", None)
+        if column is None:
+            return 0
+        column.ensurePolished()
+        return column.minimumSizeHint().width()
+
+    def opening_channel_column_width(self):
+        """The width the channel column opens at, in every framed step
+        (block A1b S2, ruling 1): 4/3 of the column's minimum (v15 user
+        feedback), and never under the hidden peer's."""
+        b = getattr(getattr(self, "_cond_workbench", None), "_h_split", None)
+        wb = b.widget(0).minimumSizeHint().width() if b is not None and b.widget(0) else 0
+        return (4 * (max(self.opening_column_minimum(), wb, 120) + 4)) // 3
 
     def apply_channel_column_width(self, width):
         """Set the channel column to `width` px, keeping the hidden peer.
@@ -5958,26 +6007,11 @@ class Step0Page(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        self._fix_split_ratio()
+        self._align_bottom_row()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._fix_split_ratio()
-
-    def _fix_split_ratio(self):
-        """强制维持 B:C = 1:3 的分栏比例，不受内容影响。"""
-        if not hasattr(self, '_main_split'):
-            return
-        # (#10) Section B was relocated to the Tissue Navigator; with a single
-        # child (Section C) there is no B:C ratio to fix — let it fill the tab.
-        if self._main_split.count() < 2:
-            return
-        total = self._main_split.width()
-        if total < 10:
-            return
-        b_w = max(80, total // 4)
-        c_w = total - b_w - self._main_split.handleWidth()
-        self._main_split.setSizes([b_w, c_w])
+        self._align_bottom_row()
 
     @staticmethod
     def _box_style(color):

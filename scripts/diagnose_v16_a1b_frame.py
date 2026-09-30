@@ -6,7 +6,7 @@ the path-rewritten test1 copy made by `diagnose_v16_a0_camera.py copy-project`.
     python scripts/diagnose_v16_a1b_frame.py [--size W H ...] [--steps 0 1 3] [--json OUT]
 
 Prints one table per window size and, for every part, whether the steps
-agree. S1 guarantees Step1 == Step3; Step0 / Step2 / Step4 join in S2-S4.
+agree. S2 guarantees Step0 == Step1 == Step3; Step2 / Step4 join in S3-S4.
 """
 
 import argparse
@@ -30,7 +30,8 @@ def measure(w, step):
         return [tl.x(), tl.y(), widget.width(), widget.height()]
 
     out = {}
-    frame = {1: getattr(w, "_step1_page_widget", None),
+    frame = {0: getattr(getattr(w, "_step0", None), "_frame", None),
+             1: getattr(w, "_step1_page_widget", None),
              3: getattr(getattr(w, "_step3", None), "_frame", None)}.get(step)
     if frame is not None and hasattr(frame, "title_slot"):
         out["title"] = rect(frame.title_slot)

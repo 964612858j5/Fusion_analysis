@@ -81,7 +81,7 @@ from .block01_display import (
     STEP2 as _CTX_STEP2, STEP3 as _CTX_STEP3,
 )
 from .step0.config_panel import ConfigPanel
-from .step_frame import StepFrame, StepFrameMetrics
+from .step_frame import FRAME_TAB_QSS, StepFrame, StepFrameMetrics, free_tab_bar
 from .widgets.channel_dock import template as channel_template
 from .step0.search_ctrl import SearchCtrlPanel
 from .step0.result_grid import ResultGridPanel
@@ -174,30 +174,10 @@ FUSION_SETTINGS_VERSION = 2
 STEP1_PREVIEW_OVERLAY = "overlay"
 STEP1_PREVIEW_FUSION = "fusion"
 
-# One tab look for Step1's two tab widgets -- the left column (Channels /
-# Pre-segmentation) and the right one (Viewer / Patch Results) -- so the
-# page reads as one surface rather than two.
-_STEP1_TAB_QSS = (
-    "QTabWidget::pane{border:1px solid #444;border-radius:5px;}"
-    "QTabBar::tab{background:#222;color:#bbb;padding:5px 12px;border:1px solid #444;}"
-    "QTabBar::tab:selected{color:#fff;border-bottom-color:#111;}"
-)
-
-
-def _free_the_tab_bar(tabs):
-    """Let a tab widget be narrower than its labels.
-
-    A QTabBar reports the width of every label as its minimum, and a column
-    whose floor is its tab bar cannot follow a proportion. Eliding and
-    scrolling keeps both tabs reachable at any width.
-    """
-    bar = tabs.tabBar()
-    bar.setElideMode(Qt.ElideRight)
-    bar.setUsesScrollButtons(True)
-    bar.setExpanding(False)
-    bar.setMinimumWidth(1)
-    tabs.setMinimumWidth(1)
-    tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+# The frame's tab look and tab-bar freeing live in `ui/step_frame.py` since
+# A1b S2; the old names stay for this module's callers.
+_STEP1_TAB_QSS = FRAME_TAB_QSS
+_free_the_tab_bar = free_tab_bar
 
 
 class _HeightTwinBar(QtWidgets.QWidget):
@@ -808,17 +788,11 @@ class MainWindow(QMainWindow):
         self._out_path_edit = self._step0._out_path_edit
         self._panel_csv_edit = self._step0._panel_csv_edit
 
-        # THE PAGE FRAME (block A1b S1): one geometry for every step page --
-        # margins, title slot, tab row, columns, tool row, bottom slot. The
-        # numbers are Step0's, taken once here while Step0 still lays itself
-        # out (S2 moves Step0 onto the same metrics). The page margins are
-        # Step0's 6 plus, at the bottom, the 5 px (tab pane border + Section
-        # C's margin) under Step0's bottom row, so the Channels frames of the
-        # two steps end on the same line (user ruling, 2026-09-23).
-        self._frame_metrics = StepFrameMetrics(
-            title_height=self._step0._file_bar.sizeHint().height(),
-            bottom_height=self._step0._decision_box.sizeHint().height(),
-            tab_qss=_STEP1_TAB_QSS)
+        # THE PAGE FRAME (block A1b): one geometry for every step page --
+        # margins, title slot, tab row, columns, tool row, bottom slot. Step0
+        # measures the numbers once when it assembles its own frame (S2) and
+        # every other page reads the same object.
+        self._frame_metrics = self._step0.frame_metrics
         page1_w = StepFrame(self._frame_metrics, _free_the_tab_bar)
         self._step1_frame = page1_w
         root = page1_w.root_layout
@@ -1681,6 +1655,21 @@ class MainWindow(QMainWindow):
         remembered = getattr(self, "_channel_column_fraction", None)
         if remembered is not None:
             return remembered
+        # THE OPENING WIDTH (block A1b S2, ruling 1): every framed page opens
+        # at Step0's rule, 4/3 of the Channels column's own minimum. Taken
+        # from a frame ON SCREEN only -- a splitter not yet laid out has Qt's
+        # default sizes, and a share measured there perpetuates itself (a
+        # window that shows Step1 first opened every column at 862 px of
+        # 1600, `test_a_drag_reaches_step0_s_hidden_peer_too`) -- and
+        # remembered, so it is set once.
+        opening = getattr(getattr(self, "_step0", None),
+                          "opening_channel_column_width", None)
+        for split in self._channel_column_frame_splitters():
+            if (opening is not None and split is not None and split.count() == 2
+                    and split.isVisible() and split.width() > 10):
+                usable = max(1, split.width() - split.handleWidth())
+                self._channel_column_fraction = opening() / float(usable)
+                return self._channel_column_fraction
         for split in self._channel_column_splitters():
             measured = self._fraction_of(split)
             if measured is not None:
@@ -1713,47 +1702,26 @@ class MainWindow(QMainWindow):
         self._apply_channel_column_fraction()
 
     def _apply_channel_column_fraction(self):
-        """Put the shared share on both pages.
-
-        STEP0 IS WRITTEN THROUGH ITS OWN MECHANISM. Its work area's splitter
-        has a hidden peer -- the conditioning workbench's -- that
-        `Step0Page.apply_channel_column_width` keeps in step; setting sizes
-        here directly would leave the two disagreeing, which is the bug that
-        mechanism exists to prevent.
-        """
+        """Put the shared width on every page (block A1b S2: the framed
+        pages as one pixel width, Step2 as a share until S3)."""
         if getattr(self, "_syncing_channel_column", False):
             return
         fraction = self.channel_column_fraction()
         self._syncing_channel_column = True
         try:
-            # STEP0 FIRST, AND ITS ANSWER WINS. Its column has a minimum of
-            # its own, so a drag past it is clamped there; applying the
-            # ORIGINAL request to Step1 afterwards would put the two pages
-            # back at different widths -- the divergence this sync exists to
-            # remove. What Step0 actually did becomes the remembered share.
+            # THE PAGE FRAMES (block A1b: Step0, Step1, Step3) get ONE PIXEL
+            # WIDTH. All hold the same floor, so all clamp alike; the widest
+            # clamp is what every frame shows. A clamp that widened the
+            # column is written back into the share, so a floor that later
+            # drops does not narrow it again (W = max(W_user, floor) and the
+            # widened W becomes W_user).
+            #
+            # STEP0 IS WRITTEN THROUGH ITS OWN MECHANISM. Its splitter has a
+            # hidden peer -- the conditioning workbench's -- that
+            # `Step0Page.apply_channel_column_width` keeps in step; setting
+            # sizes on it directly would leave the two disagreeing.
             step0 = getattr(self, "_step0", None)
             step0_split = getattr(step0, "_bg_c_split", None)
-            if step0_split is not None and step0_split.count() == 2:
-                usable = max(1, step0_split.width() - step0_split.handleWidth())
-                if step0_split.width() > 10:
-                    width = max(1, int(round(usable * fraction)))
-                    apply_width = getattr(step0, "apply_channel_column_width",
-                                          None)
-                    if apply_width is not None:
-                        apply_width(width)
-                    else:
-                        step0_split.setSizes([width, max(1, usable - width)])
-                    settled = self._fraction_of(step0_split)
-                    if settled is not None:
-                        fraction = settled
-                        self._channel_column_fraction = settled
-
-            # THE PAGE FRAMES (block A1b S1: Step1, Step3) get ONE PIXEL
-            # WIDTH. Both hold the same row floor, so both clamp alike; the
-            # widest clamp is what every frame shows. A clamp that widened
-            # the column is written back into the share, so a floor that
-            # later drops does not narrow it again (W = max(W_user, floor)
-            # and the widened W becomes W_user).
             self._hold_step1_channel_floor()
             frames = self._channel_column_frame_splitters()
             framed = [s for s in frames
@@ -1766,7 +1734,15 @@ class MainWindow(QMainWindow):
             for split in shown + [s for s in framed if s not in shown]:
                 usable = max(1, split.width() - split.handleWidth())
                 wanted = max(1, int(round(usable * fraction)))
-                split.setSizes([wanted, max(1, usable - wanted)])
+                apply_width = getattr(step0, "apply_channel_column_width", None)
+                if split is step0_split and apply_width is not None:
+                    apply_width(wanted)
+                    if getattr(step0, "_left_split_a", None) is None:
+                        # Before Step0 has wired its peer (a zero-delay
+                        # timer), its mechanism has nothing to write to.
+                        split.setSizes([wanted, max(1, usable - wanted)])
+                else:
+                    split.setSizes([wanted, max(1, usable - wanted)])
                 if split in shown and split.sizes()[0] > wanted:
                     fraction = split.sizes()[0] / float(usable)
                     self._channel_column_fraction = fraction
@@ -1785,9 +1761,10 @@ class MainWindow(QMainWindow):
             self._syncing_channel_column = False
 
     def _channel_column_frame_splitters(self):
-        """The splitters of the pages built on `StepFrame` (block A1b S1)."""
+        """The splitters of the pages built on `StepFrame` (block A1b)."""
         step3 = getattr(self, "_step3", None)
-        return [getattr(self, "_step1_main_split", None),
+        return [getattr(getattr(self, "_step0", None), "_bg_c_split", None),
+                getattr(self, "_step1_main_split", None),
                 getattr(step3, "channel_column_splitter", lambda: None)()]
 
     def _fix_step1_split_ratio(self):
@@ -5131,45 +5108,34 @@ class MainWindow(QMainWindow):
             error=stats["last_error"] or "")
 
     def _hold_step1_channel_floor(self):
-        """Keep Step1's channel column at least as wide as a Step1 row needs.
+        """ONE floor for every framed page's channel column (block A1b S2).
 
-        The list does not report its rows' minimum upwards, so a column that
-        stopped at its own content's minimum still cut a Step1 row -- slider
-        and weight box -- under the viewer. Step0's column never does: its
-        header row alone is wider than its rows. The floor here is the widest
-        row's minimum, plus the panel's own chrome around the list as it is
-        laid out now, plus a scroll bar whether or not one is showing, so
-        adding channels can never push the weight box out of sight.
+        The floor is the widest of the framed pages' Channels columns' OWN
+        minimum -- what the column's content needs: the header row (Step0's
+        `Method ▾` + `Intensity…` + the room its hidden `Show all` keeps),
+        the frame, the dock's own chrome. The list's ROWS are not part of it
+        (user ruling 2, 2026-09-30): a row wider than the column is covered
+        from its right edge -- the weight box or the method box first -- and
+        widening the column shows it again.
+
+        That is what makes the floor the same whichever page is on screen.
+        The rows take the shape of the page the one dock is mounted in, so a
+        floor read from them could only be read where the dock is -- and a
+        page the user had not visited yet widened the column the first time
+        it was entered. Every column's own minimum is known from its layout
+        whether or not the page has ever been shown.
         """
-        # Block A1b S1: ONE floor for every page frame's channel column --
-        # measured on whichever of them shows the dock, held on all of them,
-        # so Step1 and Step3 clamp alike and neither covers a weight box.
+        step0 = getattr(self, "_step0", None)
         step3 = getattr(self, "_step3", None)
-        panels = [p for p in (getattr(self, "_step1_left_panel", None),
+        panels = [p for p in (getattr(step0, "left_panel", lambda: None)(),
+                              getattr(self, "_step1_left_panel", None),
                               getattr(step3, "left_panel", lambda: None)())
                   if p is not None]
-        dock = getattr(self, "_channel_dock", None)
-        # Measured only where the dock IS: the chrome below is the panel's
-        # width minus the list's, which means nothing for a panel the dock
-        # has not been mounted in (it read as the whole panel, and the floor
-        # ratcheted up to the column's own width).
-        panel = next((p for p in panels if p.isVisible() and dock is not None
-                      and p.isAncestorOf(dock)), None)
-        if panel is None or dock is None:
+        if not panels:
             return
-        rows = [dock.row(cid) for cid in dock.visible_row_ids()]
-        rows = [r for r in rows if r is not None]
-        if not rows:
-            return
-        row_min = max(r.minimumSizeHint().width() for r in rows)
-        lst = dock.list_widget
-        bar = lst.verticalScrollBar()
-        chrome = panel.width() - lst.viewport().width()
-        if bar.isVisible():
-            chrome -= bar.width()
-        extent = lst.style().pixelMetric(QtWidgets.QStyle.PM_ScrollBarExtent,
-                                         None, bar)
-        floor = row_min + max(0, chrome) + extent
+        for panel in panels:
+            panel.ensurePolished()
+        floor = max(p.minimumSizeHint().width() for p in panels)
         for each in panels:
             if each.minimumWidth() != floor:
                 each.setMinimumWidth(floor)
@@ -5190,10 +5156,9 @@ class MainWindow(QMainWindow):
         under = box.height() - (frame.y() + frame.height())
         if slot.height() != box.height() or slot.minimumHeight() != box.height():
             slot.setFixedHeight(box.height())
-        # +1: Step0's row sits inside its tab pane, whose 1 px border is under
-        # it; this bar has none, so the button is lifted by that pixel to
-        # meet Step0's border line exactly.
-        slot.layout().setContentsMargins(0, 0, 0, max(0, under) + 1)
+        # No +1 any more (block A1b S2): Step0's row is in its frame's bottom
+        # slot too, not inside a tab pane, so the two rows share one line.
+        slot.layout().setContentsMargins(0, 0, 0, max(0, under))
         if button.height() != frame.height() or button.minimumHeight() != frame.height():
             button.setFixedHeight(frame.height())
         self._follow_step1_channels_box()

@@ -27,15 +27,40 @@ from PyQt5 import QtWidgets
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QHBoxLayout, QSizePolicy, QSplitter, QVBoxLayout, QWidget
 
+# One tab look for every framed page's two tab widgets, so each page reads as
+# one surface rather than two (moved here from `main_window` in S2: Step0
+# builds its own frame and must not import the window).
+FRAME_TAB_QSS = (
+    "QTabWidget::pane{border:1px solid #444;border-radius:5px;}"
+    "QTabBar::tab{background:#222;color:#bbb;padding:5px 12px;border:1px solid #444;}"
+    "QTabBar::tab:selected{color:#fff;border-bottom-color:#111;}"
+)
+
+
+def free_tab_bar(tabs):
+    """Let a tab widget be narrower than its labels.
+
+    A QTabBar reports the width of every label as its minimum, and a column
+    whose floor is its tab bar cannot follow a proportion. Eliding and
+    scrolling keeps both tabs reachable at any width.
+    """
+    bar = tabs.tabBar()
+    bar.setElideMode(Qt.ElideRight)
+    bar.setUsesScrollButtons(True)
+    bar.setExpanding(False)
+    bar.setMinimumWidth(1)
+    tabs.setMinimumWidth(1)
+    tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+
 
 @dataclass(frozen=True)
 class StepFrameMetrics:
     """The frame's geometry, in one place (block A1b S1).
 
     `title_height` and `bottom_height` are taken ONCE from Step0's load bar
-    and Per-Channel Decision frame while Step0 still lays itself out (S1);
-    from S2 on Step0 reads these numbers too, so no page's font or border
-    moves another page.
+    and Per-Channel Decision frame, when Step0 assembles its own frame (S2);
+    every page reads these numbers, so no page's font or border moves
+    another page.
     """
 
     title_height: int

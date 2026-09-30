@@ -116,8 +116,9 @@ def test_roi_patch_section_not_in_background_correction(app):
     from block01.ui.step0.step0_page import Step0Page
     from block01.ui.step0.overview_panel import OverviewPanel
     s = Step0Page()
-    ms = s._main_split
-    # the BG splitter now holds only Section C (correction + Preview Patch).
+    # The BG work area is the page frame's splitter (block A1b S2): the
+    # Background Correction and Viewer tabs.
+    ms = s._bg_c_split
     kids = [ms.widget(i) for i in range(ms.count())]
     # Section B's overview is NOT rendered in the BG area...
     assert not any(_under(k, s.overview) for k in kids)
@@ -143,8 +144,8 @@ def test_preview_patch_still_in_background_correction(app):
     s = Step0Page()
     # The per-patch SELECTOR is still in Background Correction: since
     # 2026-09-23 (user ruling) it is the viewer toolbar's `Patch ▾` menu and
-    # inline buttons, under the BG splitter (Section C), not in Section B.
-    ms = s._main_split
+    # inline buttons, under the BG splitter (the frame's), not in Section B.
+    ms = s._bg_c_split
     kids = [ms.widget(i) for i in range(ms.count())]
     assert any(_under(k, s._patch_menu_btn) for k in kids)
     # the old box and its info label are kept, off screen
@@ -253,15 +254,17 @@ def test_one_bg_tab_save_button_no_run_no_page_save(app):
     assert not hasattr(s, "_on_start_bg_correction")
     assert hasattr(s, "_btn_continue")
     assert s._btn_continue.text() == "Save"
-    # the BG Save lives inside the BG tab (under main_split), not a page footer
-    w, in_tab = s._btn_continue, False
+    # the BG Save lives in the page frame's bottom slot (block A1b S2, S0
+    # §3.4), with Per-Channel Decision -- not a separate page footer
+    w, in_slot = s._btn_continue, False
     p = w.parent()
     while p is not None:
-        if p is s._main_split:
-            in_tab = True
+        if p is s._frame.bottom_slot:
+            in_slot = True
             break
         p = p.parent()
-    assert in_tab
+    assert in_slot
+    assert s._decision_box.parentWidget() is s._frame.bottom_slot
     # it is wired to the full save/handoff pipeline
     assert s._btn_continue.receivers(s._btn_continue.clicked) >= 1
 
@@ -399,7 +402,7 @@ def test_roi_patch_toolbar_not_in_background_correction(app):
     # toolbar is not shown in the BG tab; sec_b (model views) stays hidden
     assert not s._roi_patch_section.isVisible()
     assert not _under(s._roi_patch_section, s._btn_mode_roi)
-    ms = s._main_split
+    ms = s._bg_c_split
     kids = [ms.widget(i) for i in range(ms.count())]
     assert not any(_under(k, s._btn_mode_roi) for k in kids)
 

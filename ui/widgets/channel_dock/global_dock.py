@@ -261,6 +261,21 @@ class GlobalChannelRow(QtWidgets.QWidget):
             self.state_slot.setText("")
             self.state_slot.setToolTip("")
             self.state_slot.setStyleSheet(template.STATE_SLOT_QSS)
+        self.hold_own_width()
+
+    def hold_own_width(self):
+        """Never laid out narrower than this step's row needs.
+
+        The channel column's floor is not the widest row any more (block A1b
+        S2, user ruling 2, 2026-09-30): a row wider than the column is
+        COVERED from its right edge -- the list's viewport cuts it -- rather
+        than squeezed. Squeezed, the fixed-width name column stayed whole and
+        the accessories were drawn over it. Called again whenever the row's
+        own minimum changes (a step's accessories, the uniform name width).
+        """
+        need = self.minimumSizeHint().width()
+        if self.minimumWidth() != need:
+            self.setMinimumWidth(need)
 
     @staticmethod
     def _retire(widgets, active):
@@ -765,6 +780,8 @@ class GlobalChannelDock(QtWidgets.QWidget):
             self._rows[cid] = row
             self._items[cid] = item
         template.uniform_name_width(list(self._rows.values()))
+        for row in self._rows.values():
+            row.hold_own_width()
         self.list_widget.blockSignals(False)
         self.refresh()
         self._apply_filter()

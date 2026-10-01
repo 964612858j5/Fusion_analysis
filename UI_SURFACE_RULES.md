@@ -334,7 +334,17 @@ row, and the duplicate Tissue Preview button in the step bar.
   shows the new grid with no state at all (the run is not affected), and
   changing back shows every state recorded so far. While a run computes,
   a line under the tile line reads `Running grid: R×C — its progress shows
-  on this grid only`. The
+  on this grid only`. Under Overlap, the checkbox `Skip tiles without
+  tissue` (off by default; locked while a run computes): ticked, the tiles
+  whose read window (with its overlap) holds no tissue on the slide's ~16x
+  level are drawn with a dashed blue-grey border and are not segmented; a
+  click on a tile toggles it -- back to segmenting without a question,
+  skipping a tile WITH tissue only after the `Skip a tile with tissue` Yes /
+  No question (then a dashed purple border); a line under the checkbox
+  counts the tiles left out; changing Rows / Cols / Overlap recomputes the
+  proposal and resets the clicks (the line says so). A skipped tile is drawn
+  solid blue-grey during the run. The Tile Status overview's long side is at
+  most 4096 px (was a fixed 1/32). The
   public `Channels` panel is NOT shown in Step2: its frame and the dock
   mounted in it are kept, hidden, not deleted; Step2's own ticks are kept.
   The Input Data line under `Load zarr info` names no config file (block

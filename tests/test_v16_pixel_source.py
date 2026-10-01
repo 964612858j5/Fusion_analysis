@@ -103,7 +103,9 @@ MIGRATED = {os.path.join("core", "pixel_source.py"),
             # block A3: the P2 raw-source description reads level count and
             # shapes through the contract; the acceptance script drives it
             os.path.join("core", "project_identity.py"),
-            os.path.join("scripts", "diagnose_v16_a3a4_acceptance.py")}
+            os.path.join("scripts", "diagnose_v16_a3a4_acceptance.py"),
+            # block S2T: Step2's tissue plan reads the slide's ~16x level
+            os.path.join("core", "tile_tissue.py")}
 
 
 def test_only_the_migrated_consumers_use_the_contract():

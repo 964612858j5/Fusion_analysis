@@ -118,6 +118,7 @@ class SegmentMergeWorker(QThread):
     """
 
     tile_done  = pyqtSignal(int, int, int)   # tile_idx, n_tiles, n_cells_this_tile
+    tile_skipped = pyqtSignal(int, int)      # tile_idx, n_tiles (block S2T: no tissue / user)
     progress   = pyqtSignal(int, int, str)   # done, total, message
     finished   = pyqtSignal(str, int)        # output_dir, total_cells
     error      = pyqtSignal(str)
@@ -1759,8 +1760,21 @@ class SegmentMergeWorker(QThread):
             cache = self._channel_store.snapshot_metrics() if self._channel_store is not None else {}
         except Exception:
             cache = {}
+        skip = {}
+        plan = self.seg_config.get("skip_tiles")
+        if plan:
+            # Block S2T: which tiles this run left out, and why
+            skip = {"skip_tiles": {
+                "requested": dict(plan),
+                "skipped": sorted(getattr(self, "_skipped_tiles", []) or []),
+                "skipped_without_tissue": sorted(set(getattr(self, "_skipped_tiles", []) or [])
+                                                 - {int(e["tile"]) for e in
+                                                    plan.get("user_forced") or []}),
+                "skipped_by_user_with_tissue": list(plan.get("user_forced") or []),
+            }}
         return {
             **dict(self._tile_strategy_info or {}),
+            **skip,
             "channel_cache": cache,
             "merge_policy": {
                 "shadow_compare_enabled": False,
@@ -1810,9 +1824,68 @@ class SegmentMergeWorker(QThread):
             return False
         return self._config_bool("enable_tile_prefetch", True)
 
+    def _tile_skip_set(self):
+        """Block S2T: the tiles this run does not segment, from the page's
+        plan in ``seg_config["skip_tiles"]`` -- the tiles without tissue the
+        page proposed, minus those the user kept, plus those the user chose
+        to skip although they hold tissue (confirmed in a dialog). No plan:
+        an empty set and nothing new runs. A plan made for another grid or
+        overlap, or for a run of several ROIs, is refused (it would skip the
+        wrong parts of the image). Recovery mode never skips."""
+        if getattr(self, "_skip_cache", None) is not None:
+            return self._skip_cache
+        plan = self.seg_config.get("skip_tiles")
+        if not plan:
+            self._skip_cache = frozenset()
+            return self._skip_cache
+        if not isinstance(plan, dict):
+            raise RuntimeError("skip_tiles: not a plan")
+        grid = [int(v) for v in plan.get("grid") or []]
+        if grid != [int(self.n_rows), int(self.n_cols)] or \
+                int(plan.get("overlap", -1)) != int(self.overlap_px):
+            raise RuntimeError(
+                f"the tile skip plan was made for a {grid} grid with overlap "
+                f"{plan.get('overlap')}, this run is {self.n_rows}x{self.n_cols} with "
+                f"overlap {self.overlap_px}; choose the tiles again")
+        if len(self.rois or []) > 1:
+            raise RuntimeError("skipping tiles is not supported for a run of several ROIs")
+        n = int(self.n_rows) * int(self.n_cols)
+        auto = {int(i) for i in plan.get("auto") or []}
+        kept = {int(i) for i in plan.get("user_kept") or []}
+        forced = {int(e["tile"]) for e in plan.get("user_forced") or []}
+        skip = (auto - kept) | forced
+        if any(not 0 <= i < n for i in skip):
+            raise RuntimeError(f"skip_tiles names a tile outside the {n}-tile grid")
+        if self.recovery_npy_dir is not None:
+            skip = set()
+        self._skip_cache = frozenset(skip)
+        self._skipped_tiles = []
+        return self._skip_cache
+
+    def _skip_tile(self, i, n_tiles, profile_tile_id, stage_seconds, tile_shape):
+        """A tile of the skip plan: its DAPI is already in the global DAPI;
+        no engine, no labels, no paste -- like a tile the engine found empty."""
+        self.step2_profiler.record_tile_metadata(profile_tile_id, labels_count=0, skipped=True)
+        stage_seconds["_profile_tile_id"] = profile_tile_id
+        self._profile_tile_line(i, n_tiles, stage_seconds, 0, tile_shape)
+        self._skipped_tiles.append(int(i))
+        self.tile_skipped.emit(i, n_tiles)
+        gc.collect()
+        self._drop_caches()
+
     def _prepare_tile_payload(self, zarr_path, z, tile, is_hq, is_mesmer_guided,
                               hq_group, hq_channels, is_mesmer, mesmer_group,
-                              dapi_mmap=None, profile_tile_base=None):
+                              dapi_mmap=None, profile_tile_base=None, skip=False):
+        if skip:
+            # Block S2T: a skipped tile still reads its own DAPI (the global
+            # DAPI output has no hole); nothing else.
+            oy0, oy1, ox0, ox1 = tile.own_bbox if hasattr(tile, "own_bbox") else tile['own']
+            if getattr(self, "_channel_store", None) is not None:
+                dapi_own = self._channel_store.read_dapi(zarr_path, oy0, oy1, ox0, ox1)
+            else:
+                dapi_own = self._read_dapi_from_zarr(z, oy0, oy1, ox0, ox1)
+            return {"skipped": True, "tile_data": None, "dapi_own": dapi_own,
+                    "hq_marker_channels": None, "mesmer_channel_source": None}
         if hasattr(tile, "read_bbox"):
             ry0, ry1, rx0, rx1 = tile.read_bbox
             oy0, oy1, ox0, ox1 = tile.own_bbox
@@ -2669,6 +2742,7 @@ class SegmentMergeWorker(QThread):
             lambda idx, t, profile_tile_base=None: self._prepare_tile_payload(
                 zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
                 is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=profile_tile_base,
+                skip=idx in self._tile_skip_set(),
             ),
             logger=log,
         )
@@ -2733,6 +2807,9 @@ class SegmentMergeWorker(QThread):
             mesmer_channel_source_prefetched = payload.get("mesmer_channel_source")
             dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
             stage_seconds["read_tile"] = time.perf_counter() - _t
+            if payload.get("skipped"):
+                self._skip_tile(i, n_tiles, profile_tile_id, stage_seconds, tile_shape)
+                continue
 
             if self.recovery_npy_dir is not None:
                 local_nuclei = None
@@ -3316,6 +3393,7 @@ class SegmentMergeWorker(QThread):
                         f"{self.overlap_px} px; set the overlap to {self._contract['halo_px']}")
                 log.info(f"[Step2] Step1 hand-over: method={self._contract['method']} "
                          f"run={self._contract['preseg_run_id']} combo={self._contract['combo_id']}")
+            self._tile_skip_set()        # block S2T: a skip plan for another grid is refused
             register_legacy_result(self.project_output_dir)
             config_path = self._write_run_segmentation_config()
             log.info(f"run_segmentation_params.json -> {config_path}")
@@ -3612,6 +3690,7 @@ class SegmentMergeWorker(QThread):
                 lambda idx, t, profile_tile_base=None: self._prepare_tile_payload(
                     self.zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
                     is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=profile_tile_base,
+                    skip=idx in self._tile_skip_set(),
                 ),
                 logger=log,
             )
@@ -3674,6 +3753,9 @@ class SegmentMergeWorker(QThread):
                 mesmer_channel_source_prefetched = payload.get("mesmer_channel_source")
                 dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
                 stage_seconds["read_tile"] = time.perf_counter() - _t
+                if payload.get("skipped"):
+                    self._skip_tile(i, n_tiles, profile_tile_id, stage_seconds, tile_shape)
+                    continue
 
                 if self.recovery_npy_dir is not None:
                     local_nuclei = None

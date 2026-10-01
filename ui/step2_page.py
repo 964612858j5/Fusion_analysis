@@ -19,6 +19,9 @@ from PyQt5.QtWidgets import (
 import pyqtgraph as pg
 
 from ..config import OUTPUT_DIR
+
+#: Step2's Tile Status overview: the longest side in pixels (block S2T).
+OVERVIEW_LONG_SIDE = 4096
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
@@ -172,6 +175,11 @@ class Step2Page(QWidget):
         # (rows, cols), "state": {tile_index: "running" | "done" | "skipped"}}.
         # The grid follows the spin boxes; this record follows the run.
         self._run_progress   = None
+        self._run_active     = False
+        # Block S2T: the skip proposal for the drawn grid (None = off) and the
+        # slide tissue masks already computed {(slide, channel): SlideTissue}
+        self._skip_plan      = None
+        self._tissue_cache   = {}
         self._n_rows         = 3
         self._n_cols         = 4
         self._full_h         = 0
@@ -398,6 +406,22 @@ class Step2Page(QWidget):
         ovlp_row.addWidget(self._overlap_spin)
         ovlp_row.addStretch()
         til.addLayout(ovlp_row)
+
+        # Block S2T: skip the tiles whose read window holds no tissue (raw
+        # slide, ~16x level). Off by default; a tile is clicked to change it.
+        self._skip_empty_cb = QCheckBox('Skip tiles without tissue')
+        self._skip_empty_cb.setChecked(False)
+        self._skip_empty_cb.setToolTip(
+            'Tiles whose read window (with its overlap) holds no tissue on the slide '
+            'are not segmented. Click a tile in Tile Status to change it; skipping a '
+            'tile with tissue asks first. A skipped tile has no cells.')
+        self._skip_empty_cb.stateChanged.connect(self._on_skip_toggled)
+        til.addWidget(self._skip_empty_cb)
+        self._skip_hint_lbl = QLabel('')
+        self._skip_hint_lbl.setStyleSheet('color:#aaa;font-size:10px;')
+        self._skip_hint_lbl.setWordWrap(True)
+        self._skip_hint_lbl.setVisible(False)
+        til.addWidget(self._skip_hint_lbl)
 
         self._tile_ram_lbl = QLabel('')
         self._tile_ram_lbl.setStyleSheet('color:#aaa;font-size:10px;')
@@ -1506,7 +1530,9 @@ class Step2Page(QWidget):
         """Load nucleus channel (index 1) downsampled as overview."""
         self._ov_status.setText('Loading overview…')
         try:
-            ds  = 32
+            # Block S2T: long side at most 4096 px (was a fixed 1/32, a mosaic
+            # when zoomed). The read decodes the same chunks at any stride.
+            ds  = max(1, -(-max(int(z.shape[0]), int(z.shape[1])) // OVERVIEW_LONG_SIDE))
             # Read as uint16 then normalise — avoids float setImage issue
             arr_raw = z[::ds, ::ds, 1]
             arr     = arr_raw.astype(np.float32)
@@ -1554,6 +1580,8 @@ class Step2Page(QWidget):
             f'{nr}×{nc} = {nr*nc} tiles  |  '
             f'tile size: {th:,}×{tw:,} px'
         )
+        if self._skip_empty_cb.isChecked() and not self._run_active:
+            self._refresh_skip_plan()
         self._draw_tile_grid()
 
     def _on_auto_tile_strategy_changed(self):
@@ -1635,10 +1663,16 @@ class Step2Page(QWidget):
                     pen=pg.mkPen('#808080', width=1),
                     movable=False, resizable=False,
                 )
+                rect.setAcceptedMouseButtons(Qt.LeftButton)
+                rect.sigClicked.connect(lambda _roi, _ev=None, r=r, c=c:
+                                        self._on_tile_clicked(r, c))
                 self._ov_vb.addItem(rect)
                 self._tile_rects[(r, c)] = rect
                 self._tile_status[(r, c)] = 'idle'
-        self._apply_run_progress()
+        if self._run_active or self._skip_plan is None:
+            self._apply_run_progress()
+        else:
+            self._apply_skip_plan()
 
     def _shows_run_grid(self):
         """True when the drawn grid is the running (or last) run's grid. Its
@@ -1659,8 +1693,136 @@ class Step2Page(QWidget):
                 self._set_tile_colour(r, c, state)
                 self._tile_status[(r, c)] = state
 
+    # ── block S2T: the skip plan ──────────────────────────────────────
+
+    def _plan_skips(self):
+        """The tiles the next run leaves out: proposed (no tissue) minus kept,
+        plus those the user forced (they hold tissue)."""
+        plan = self._skip_plan
+        if plan is None:
+            return set()
+        return (set(plan["auto"]) - plan["user_kept"]) | set(plan["user_forced"])
+
+    def _plan_matches_drawn_grid(self):
+        plan = self._skip_plan
+        return (plan is not None
+                and plan["grid"] == [self._rows_spin.value(), self._cols_spin.value()]
+                and plan["overlap"] == self._overlap_spin.value())
+
+    def _apply_skip_plan(self):
+        if not self._plan_matches_drawn_grid():
+            return
+        nc = self._skip_plan["grid"][1]
+        for idx in self._plan_skips():
+            r, c = divmod(int(idx), nc)
+            state = 'plan_forced' if idx in self._skip_plan["user_forced"] else 'plan_skip'
+            if (r, c) in self._tile_rects:
+                self._set_tile_colour(r, c, state)
+                self._tile_status[(r, c)] = state
+
+    def _skip_hint(self):
+        plan = self._skip_plan
+        if plan is None:
+            return
+        n = len(plan["fractions"])
+        forced = len(plan["user_forced"])
+        text = (f'{len(self._plan_skips())} of {n} tiles skipped '
+                f'({len(set(plan["auto"]) - plan["user_kept"])} without tissue'
+                + (f', {forced} with tissue, chosen by you' if forced else '')
+                + ') — click a tile to change it')
+        if plan.get("reset_note"):
+            text = plan["reset_note"] + ' ' + text
+        self._skip_hint_lbl.setText(text)
+        self._skip_hint_lbl.setVisible(True)
+
+    def _on_skip_toggled(self, *_):
+        self._refresh_skip_plan(reset_note=False)
+        self._draw_tile_grid()
+
+    def _refresh_skip_plan(self, reset_note=True):
+        """(Re)compute the proposal for the drawn grid. A new grid or overlap
+        drops the user's own choices -- they named tiles of another grid."""
+        if not self._skip_empty_cb.isChecked() or not self._zarr_path:
+            self._skip_plan = None
+            self._skip_hint_lbl.setVisible(False)
+            return
+        from ..core import tile_tissue
+        had_choices = bool(self._skip_plan and (self._skip_plan["user_kept"]
+                                                or self._skip_plan["user_forced"]))
+        try:
+            bbox, slide, channel = tile_tissue.fused_region(self._zarr_path)
+            key = (slide, channel)
+            if key not in self._tissue_cache:
+                self._tissue_cache[key] = tile_tissue.SlideTissue(slide, channel)
+            plan = tile_tissue.tile_plan(
+                self._tissue_cache[key], (self._full_h, self._full_w), (bbox[0], bbox[2]),
+                self._rows_spin.value(), self._cols_spin.value(), self._overlap_spin.value())
+        except Exception as exc:
+            self._skip_plan = None
+            self._skip_hint_lbl.setText(f'Skip unavailable: {exc}')
+            self._skip_hint_lbl.setVisible(True)
+            return
+        plan["user_kept"] = set()
+        plan["user_forced"] = {}
+        if reset_note and had_choices:
+            plan["reset_note"] = 'The grid changed: your tile choices were reset.'
+        self._skip_plan = plan
+        self._skip_hint()
+
+    def _on_tile_clicked(self, r, c):
+        """Toggle one tile of the plan. Skipping a tile that holds tissue is
+        asked first (the user's own decision, recorded as such)."""
+        plan = self._skip_plan
+        if plan is None or self._run_active or not self._plan_matches_drawn_grid():
+            return
+        idx = int(r) * plan["grid"][1] + int(c)
+        if idx >= len(plan["fractions"]):
+            return
+        if idx in self._plan_skips():                   # back to segmenting: no question
+            plan["user_forced"].pop(idx, None)
+            if idx in plan["auto"]:
+                plan["user_kept"].add(idx)
+        else:
+            fraction = float(plan["fractions"][idx])
+            if fraction == 0.0:
+                plan["user_kept"].discard(idx)
+            elif self._confirm_forced_skip(idx, fraction):
+                plan["user_forced"][idx] = fraction
+            else:
+                return
+        plan.pop("reset_note", None)
+        self._draw_tile_grid()
+        self._skip_hint()
+
+    def _confirm_forced_skip(self, idx, fraction):
+        """The dialog (a seam: offscreen tests answer it)."""
+        r, c = divmod(idx, self._skip_plan["grid"][1])
+        answer = QMessageBox.question(
+            self, 'Skip a tile with tissue',
+            f'Tile row {r + 1}, column {c + 1} holds tissue ({fraction:.1%} of its '
+            f'window on the slide).\n\nA skipped tile is not segmented: it will have '
+            f'no cells. Skip it anyway?',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return answer == QMessageBox.Yes
+
+    def skip_tiles_config(self):
+        """What the worker gets (`seg_config["skip_tiles"]`), or None."""
+        plan = self._skip_plan
+        if plan is None or not self._skip_empty_cb.isChecked():
+            return None
+        return {"grid": list(plan["grid"]), "overlap": int(plan["overlap"]),
+                "auto": sorted(plan["auto"]), "user_kept": sorted(plan["user_kept"]),
+                "user_forced": [{"tile": int(i), "tissue_fraction": float(f)}
+                                for i, f in sorted(plan["user_forced"].items())],
+                "fractions": [float(f) for f in plan["fractions"]], "mask": plan["mask"]}
+
+    def _on_tile_skipped(self, tile_idx, n_tiles):
+        self._record_tile(tile_idx, 'skipped')
+
     def _begin_run_progress(self, nr, nc):
         """A new run: a new progress record; every drawn tile back to idle."""
+        self._run_active = True
+        self._skip_empty_cb.setEnabled(False)
         self._run_progress = {"grid": (int(nr), int(nc)), "state": {}}
         for key in self._tile_status:
             self._tile_status[key] = 'idle'
@@ -1689,8 +1851,12 @@ class Step2Page(QWidget):
             'running': '#ffc832',
             'done':    '#3cc850',
             'error':   '#dc3c3c',
+            'skipped': '#5a7896',          # block S2T: left out by the plan
+            'plan_skip': '#5a7896',        # the next run will leave it out
+            'plan_forced': '#c678dd',      # ... although it holds tissue (the user's choice)
         }
-        rect.setPen(pg.mkPen(colours.get(state, '#808080'), width=2))
+        style = Qt.DashLine if state in ('plan_skip', 'plan_forced') else Qt.SolidLine
+        rect.setPen(pg.mkPen(colours.get(state, '#808080'), width=2, style=style))
 
     # ── Segmentation params loading ───────────────────────────────────
 
@@ -2082,6 +2248,9 @@ class Step2Page(QWidget):
             'prefetch_queue_size': 2,
             'channel_cache_items': 32,
         })
+        skip = self.skip_tiles_config()           # block S2T: only when chosen
+        if skip is not None:
+            data['skip_tiles'] = skip
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             data.update(params)
         # The Step0 manual channel remap reaches Step2 via source-alignment
@@ -2580,6 +2749,7 @@ class Step2Page(QWidget):
             print(f"[Step2] output_base={self._step2_dir or self._out_edit.text().strip()}")
         self._worker.progress.connect(self._on_progress)
         self._worker.tile_done.connect(self._on_tile_done)
+        self._worker.tile_skipped.connect(self._on_tile_skipped)
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
 
@@ -2655,6 +2825,8 @@ class Step2Page(QWidget):
 
     def _on_finished(self, output_dir, total_cells):
         self._run_grid_lbl.setVisible(False)
+        self._run_active = False
+        self._skip_empty_cb.setEnabled(True)
         self._mark_source_aware_applied()
         runtime = {}
         try:
@@ -2726,6 +2898,8 @@ class Step2Page(QWidget):
         # config) errors, flip the "awaiting worker validation" status to NOT applied.
         self._mark_source_aware_failed(msg)
         self._run_grid_lbl.setVisible(False)
+        self._run_active = False
+        self._skip_empty_cb.setEnabled(True)
         self._prog_lbl.setText('✗ Error — see terminal')
         self._btn_run.setEnabled(True)
         self._btn_back.setEnabled(True)

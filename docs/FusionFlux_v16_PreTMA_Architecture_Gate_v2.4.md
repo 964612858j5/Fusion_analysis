@@ -88,6 +88,8 @@ Insert after the A8 row (week numbers of the (b) branch):
 |---|---|---|---|---|
 | 7 | **A9** performance-gated viewer convergence (§20) | 5–8 development working days (**hard cap 8**) | 1–2 days of baseline profiling and acceptance (**hard cap 2**) | After A6 (the stale rejection it reuses) and A7 (the camera owner it must not write); before the full regression, so the gates see the final viewer |
 
+**Progress** (a record, appended): **A2c done 2026-10-01** — `690ba08` (native-tile patch P1), `8da231c` (Step4 → PixelSource), `028480d` (FullFusionWorker → PixelSource); bitwise equal to the pre-migration path on test1, Step4 0.98×, no new regression failures; the two A2c blockers are resolved for the fusion path (`docs/v16_A2c_application.md` §11). Real-machine check passed 2026-10-01 (GUI fusion and Step4 bitwise equal to the pre-A2c code on the same settings).
+
 The rows after it move by the time A9 actually takes. If A9 passes its gate early, it stops and the rest moves up.
 
 **Cap (ruled, option (α)):** A9 hard cap = **8 development working days + 2 real-machine days**; the overall v16 cap = **10 weeks** from the approval of v2.3, as the upper decision point, with the aim of finishing clearly earlier. v2.3 §13 rule 5 still applies: TMA starts as soon as gates 1–10 pass; the cap is not extended silently. If A9 passes its gate early, it stops and the rest moves up.

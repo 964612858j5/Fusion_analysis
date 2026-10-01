@@ -161,3 +161,44 @@ Step0 本身、预读、预览这些路径仍然走 loader，阻断项对它们�
 3. 只迁移 `FullFusionWorker`；
 4. Oracle 用迁移前的 HEAD，v15-final 只作参照；
 5. Step4 性能门 ≤ 1.05×。
+
+## 11. 执行记录（2026-09-30 / 10-01）
+
+**已实施，三段各自提交，自动验收与真机验收全部通过（2026-10-01）。**
+
+| 段 | 提交 | 内容 |
+|---|---|---|
+| 1 | `690ba08` | P1：`native_tile_shape(level)`、`native_tile_origin(level)`、`read_native_tile(channel, level, tile_y, tile_x)`；OME-TIFF 是 TIFF tile（条带层是 strip），校正 zarr 是 chunk，网格从产品 bbox 原点起算；取代 A2a 那个没有调用方的 `native_chunk_shape()` |
+| 2 | `8da231c` | `JobReader` → `OmeTiffSource`（第 0 层 `read_regions` 委托给同一个 `TiffTileReader`）+ `CorrectedZarrSource`（全局坐标，覆盖不到就报错）；`resolve_quant_job` 不变；oracle 脚本 `scripts/diagnose_v16_a2c_oracle.py` |
+| 3 | `028480d` | `FullFusionWorker(use_pixel_sources=True, corrected_zarr_path, corrected_decisions)`：在任务开始时自己建源，读取后转成 float32，覆盖不到或缺产品就报错；main_window 只加接线 |
+
+- **比对程序先做反向注入**：`X` 改一个 float32 最小步长 → 不同；只改 `uns/provenance_json` → 相同；fused 改一个像素 → 不同；空目录 → 失败。
+  - 第一次注入 `X` 时比对程序报「相同」。原因在注入脚本：`np.nextafter(float32, np.inf)` 按 float64 计算，写回时又舍回了原值。改成 float32 步长后，比对程序正确报告不同。
+- **Oracle（test1 副本，迁移前的路径）**：
+  - Step4：h5ad 47 个数据集加 CSV 逐位相同；
+  - fusion：`fused_Full WSI.zarr` 逐位相同且不是全零。它读了 CD3D、HsBAg 两个校正通道；把已决定的通道改读原始像素后结果不同，说明比对对校正通道敏感。
+- **性能门**：Step4 端到端，迁移前与迁移后交替各 4 次，中位数 10.17 s 对 10.00 s，约 0.98×，满足 ≤ 1.05×。把第 0 层委托改回逐通道读的反向注入是 20.9 s（约 2.1×），能抓到。
+- **新测试**：
+  - `tests/test_v16_pixel_source.py`：P1 共 6 条（每层每个原生块、边缘截短、越界、校正网格原点）；A2a 的「还没有产品模块使用契约」改为「只有已迁移的消费者使用契约」，附明确的允许名单；
+  - `tests/test_v16_a2c_migration.py` 共 8 条：Step4 走契约、校正读 fail-closed、没有校正通道时不开校正源；fusion 两条路径逐位相同、确实读了校正产品、阻断项 (1)（旧路径在越界时悄悄继续，新路径报错）、阻断项 (2)（运行中改 loader 不影响输出）、缺产品时报错。
+- **反向注入**：
+  - 第 1 段越过块边界：5 条变红；
+  - 第 2 段漏掉区域偏移：`test_quant_sources` 2 条、`test_step4_worker` 15 条变红；
+  - 第 3 段去掉覆盖检查：1 条变红；校正通道改读原始像素：4 条变红。
+  - **去掉 float32 转换：不变红。** fusion 的数学部分自己会转成浮点，所以这个转换对输出没有影响；仍然保留，让 dtype 与旧 loader 一致。这与申请 §6 的预期（变红）不同，照实记录。
+- **两个阻断项**：fusion 路径都已消除，有测试为证。Step0、预读、预览仍走 loader，对它们阻断项依然存在，留待以后迁移它们的块处理。
+- **单调绿色回归**：离屏 120 个模块加 GL 11 个，与 A2c 之前的 HEAD `462727c` 逐条对比失败测试名。
+  - 发现 1 个真问题并已修正：测试的允许名单漏了 main_window（它只传 `use_pixel_sources=True` 这个接线参数）。
+  - `test_step0_compare_tiles::test_the_dapi_mapping_is_its_own_channels` 在回归中失败过一次；之后当前代码与 HEAD 各单独跑 6 次，全部通过，判为不稳定测试。
+  - `test_step3_label_render` 在 GL 下有一次退出时崩溃（139），重跑 3 次都是 rc 0。
+  - 其余失败两边相同。结论：没有新增失败。A1 零漂移、A1b 布局锁、A2a 逐位不变性全部通过。
+- **与申请的偏差**：
+  1. 基类新增了 `native_tile_origin(level)`。校正产品的 chunk 网格从 bbox 原点起算，没有它，默认的 `read_native_tile` 会错位。
+  2. 已决定校正、但没有交出校正产品的通道，fusion 现在也 fail-closed。这在裁定 2 的精神之内，但不是阻断项 (1) 本身；旧路径在这种情况下会现场做校正。
+  3. `JobReader` 为校正读用了自己的线程池，原来借用的是 `TiffTileReader` 的池。
+- **真机（2026-10-01，通过）**：用户在 test1 副本上用新代码在界面里生成了一次 fusion、跑了一次 Step4；随后用 A2c 之前的代码（`462727c` 存档）按副本里的同一份设置重跑，作为 oracle，逐位比较：
+  - Step4（工作区 `full_wsi_20260927_121444_6bad`，分割 `seg_20260927_124316_stardist_nuclei_expansion`）：h5ad 全部数据集和 CSV 一致（只排除 `uns/provenance_json`）。
+  - fusion（Step0 Save 新建的工作区 `full_wsi_20261001_155033_48e7`，2×2 分块）：`fused_Full WSI.zarr` 逐位一致，非全零。
+  - 界面没有变化。
+  - 局限：这次的界面会话里没有决定任何校正通道（decisions 为空），CD8、HsBAg 没有提交的显示窗口，不参与融合。所以真机这一次只覆盖了原始通道这条路径。校正通道这条路径由自动验收的 oracle 覆盖（CD3D/HsBAg 来自校正产品，逐位一致）。
+  - 为这次真机测试临时改名的旧 `fused_Full WSI.zarr` 已恢复。

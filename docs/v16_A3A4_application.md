@@ -664,3 +664,74 @@ v2 的这些改动没有扩大白名单（§5），也没有改变估计（§9�
 11. 生产者覆盖范围照 §3.5；
 12. A0 草案 §2、§3 改为冻结版，并加上 P4 对应表；
 13. v2 的修订（§11）。
+
+---
+
+## 13. 执行记录（2026-10-01）
+
+**自动验收与真机验收全部通过（2026-10-01）。** 共五段提交，都只提交、未推送：
+
+| 段 | 提交 | 内容 |
+|---|---|---|
+| A3-1 | `07f57a7` | `core/project_identity.py`（`slide_id`、`region_id` 及多边形规范化、项目 schema、P2 描述、`SlideFrames` 坐标变换、`transforms.json`）、`core/provenance.py`（条目、校验、原子写、按「位置 + 令牌」查找）、`core/artifact_graph.py` 与 `scripts/artifact_graph.py`（只读）；契约文档 §2、§3 冻结，加 P4 表 |
+| A3-2 | `f55be0f` | `ensure_project_manifest`（版本号、`sources`、`transforms.json`、`raw_slide`，manifest 与 transforms 原子写，Save 路径不抛异常）、`write_handoff` 发布后登记 `corrected_channel`、`resolve_quant_job` 拒绝未知项目版本 |
+| A3-3 | `6e4616c` | `FullFusionWorker`、`segment_merge_worker`（两处）、`run_extraction` 各加一次登记调用；验收脚本 `scripts/diagnose_v16_a3a4_acceptance.py` |
+| A4-0 | `eb1a575` | 安装 `pyarrow==25.0.1`（`--no-deps`），环境清单只多出这一行 |
+| A4-1 | `d000579` | `core/object_tables.py`、`scripts/build_object_tables.py` |
+
+**新测试**：`test_v16_project_identity` 39 条、`test_v16_provenance` 25 条、`test_v16_artifact_graph` 21 条（其中整条链 Step0 → fusion → 真实 StarDist 的 Step2 → Step4 都走真实生产者函数）、`test_v16_object_tables` 15 条；`test_v16_pixel_source` 的允许名单 `MIGRATED` 加入 `core/project_identity.py` 和验收脚本。
+
+**比较工具先做反向注入（§7.1）**：在 h5ad 的 `uns` 下多加一个数据集，`same-step4` 报「dataset sets differ: uns/artifact_id」；A2c 已证明的 `X` 改一个最小步长、fused 改一个像素的情况不变。
+
+**A3 门：**
+- G1–G7：全部通过。反向注入共 33 处（A3-1 19 处、A3-2 7 处、A3-3 8 处，含单区域 Step2 那处调用点），全部变红。
+  - 第一次注入 G6-1（只放宽 artifact id 的类型检查）没有变红：第二道检查「必须已登记」仍然拒绝了 region id。于是补了一条测试（即使 `provenance/` 下恰好有同名文件也拒绝），之后变红。
+- G8（test1 的新副本 `~/fusionflux/bench_a3/copy_new`，先用 A3 之前的代码跑 oracle，再执行 `adopt` 与新代码）：
+  - Step4：h5ad 全部数据集和 CSV 逐位相同（只排除 `uns/provenance_json`）；
+  - fusion：`fused_Full WSI.zarr` 逐位相同，不是全零；
+  - 目录树对比：只新增了 `provenance/` 的 5 个条目和 `transforms.json`，只有 `project_manifest.json` 改变（新增 `project_schema_version`、`sources`），没有删除；
+  - 出处记录：fused 依赖 HsBAg（参与融合的那个校正通道）和 `raw_slide`；Step4 依赖 CD3D、HsBAg 和 `raw_slide`；test1 上已有的分割运行是 A3 之前做的，如实显示为 `unresolved_inputs`，没有被猜。
+- G9：Step4 端到端，新旧交替各 4 次，中位数旧 9.80 s、新 9.89 s，约 1.01×。在登记里加 2 s 延时的注入为 11.7–16.1 s（≥ 1.19×），变红。
+
+**A4 门：**
+- G1–G8 在合成数据上全部通过；反向注入 14 处，全部变红。
+- test1 真实结果（分割 `seg_20260927_124316_stardist_nuclei_expansion`）：
+  - 56 872 行；键与 LabelStore 一致且唯一；缺的两个恰好是 Step4 记录的空标签 29630、53238；
+  - 质心、bbox、面积与 h5ad 逐位相同；
+  - 随机 200 个细胞：栅格 bbox 一致，用 Step3 的 `read_label_tile` 在 `world = global + 0.5` 处取到的都是该细胞；
+  - 核数、核面积与按核逐个统计的结果一致；
+  - `regions.parquet`：两个 Full WSI 工作区合并为 1 行；
+  - 生成前后，项目里已有文件一个都没变，只新增了 `objects/` 和 `provenance/` 的条目。
+- 用时：`cells.parquet` 12.7 s，检查 7.5 s。
+
+**单调绿色回归**（在 `6e4616c` 和 `37b11db` 的 `git archive` 副本上，每个模块单独起进程）：
+- 离屏 222 个模块。出现失败或没有汇总行的 23 个模块在 A3 之前的代码上重跑，逐条对比失败的测试名，20 个两边完全相同。
+- 其余 3 个两个方向都有差异，单独各跑 3 次：
+  - `test_seg_runner::test_stardist_in_subprocess_equals_direct_call`：新 2/3 失败、旧 1/3 失败；
+  - `test_step2_engine_unified::…[stardist_nuclei_dapi-full]`：新 1/3、旧 0/3；
+  - `test_step0_floor_prefetch` 的两条：在两边结果完全一致。
+
+  判为不稳定测试（StarDist 1 像素，A0.5 已有记录）。A3 / A4 没有碰分割引擎。
+- GPU 15 个模块在真实 GL 下（`BLOCK01_REQUIRE_STEP1_GPU=1`）两边的失败名完全一致；`roi_clip` / `fusion_visibility` / `montage_view` 两边都崩溃。
+- `test_step0_channel_conditioning` 在两边都超时（A1b 已有记录）。
+- A1 零漂移、A1b 布局锁、A2a / A2c 全部通过。
+- **结论：没有新增失败。**
+
+**与申请的偏差：**
+1. 各生产者的登记逻辑集中放在 `core/provenance.py`（`register_corrected_channels` / `register_fused` / `register_segmentation_run` / `register_step4`），现有文件里只加一次调用；`FullFusionWorker` 多了一个小方法 `_register_fused`。
+2. fused 的 `depends_on` 只放**有已提交显示窗口**、真正进入融合的校正通道；读了但没有参与的写进 `parameters.corrected_read_without_window`。旧的 loader 路径无法知道像素来源，记为 `unresolved_inputs: pixels_via_loader`。
+3. `location` 用 `realpath` 计算，与 Step4 记录的路径一致。
+4. A4-G3：单独去掉 +0.5 时，在像素角点取样仍会落在同一像素（`floor` 的性质），所以 G3 的测试抓不到；这一点由 A3-G5 直接断言（7 → 7.5）覆盖。G3 的注入改为「用 round 取样」和「world = global − 0.5」，都变红。
+5. 回归脚本的问题：第一版取管道末尾的退出码，导致每个模块都记成 rc=0；而且 GPU 模块需要 `BLOCK01_REQUIRE_STEP1_GPU=1` 才真正运行。两处都已修正后重跑，结论以修正后为准。
+6. pyarrow 正式装进环境之前，A4 的开发测试用的是装在临时目录里的 pyarrow，没有动环境；正式安装后在真实环境上重跑，全部通过。
+
+**用户 2026-10-01 的后续裁定（记录，不在本块实施）：**
+- **哈希**：用户认为没有必要。已写入长期规则：任何哈希未经用户本人批准不得加入计划。全仓排查清单已交给用户（A 组为本块新加的：`slide_id`、`region_id`、Parquet 令牌、验收脚本；B 组为旧代码的契约哈希；C 组为脚本），用户决定暂缓讨论。本块已经提交的代码里仍有这些哈希：`slide_sig_v1`、几何 `region_id`、Parquet 的 sha256 令牌、验收脚本的目录 sha256。是否替换等用户再议。
+- **Step0 打开已有项目、Save 覆盖、Save as、正在运行的 Step2 标记「不是最新参数」、Step2 运行期间的 fusion 先放进会话临时目录、Step4 计算期间冻结页面**：用户授权扩大白名单，写进 A6 的申请。
+
+**真机（2026-10-01，通过）**：副本 `~/fusionflux/bench_a3/realmachine`。用户在界面里依次做了 Step0 Save（HsBAg 选 tophat；新建了工作区 `full_wsi_20261001_212025_ab1b`）→ fusion（markers = CD68、HsBAg，HsBAg 有已提交的显示窗口）→ Step2（StarDist nuclei + expansion，`seg_20261001_212316_…`）→ Step4（统计 mean/sum/std/min/max；区域 cell + nucleus + cytoplasm；形态 + 核摘要）。
+- **门 7**：`artifact_graph.py lineage` 只通过 `depends_on` 给出这次 Step4 → 分割运行 → fused → HsBAg 校正通道 → `raw_slide`。没有 `unresolved_inputs`，`issues` 也全为空。项目第一次 Save 时被自动加上 `project_schema_version: 1`、`sources` 和 `transforms.json`。
+- **Step4 逐位**：用 A3 之前的代码（`37b11db`），在同一个运行上、按同样的设置重跑 Step4。h5ad 66 个数据集**按字节完全相同**（只排除 `uns/provenance_json`）；其中 7 个含 NaN（没有核的细胞，核区室的统计是 NaN）。旧代码能在加了新键的项目上正常跑完，这也说明旧代码可以读这个项目。
+  - **比较工具的问题**（记录，未修）：`same-step4`（`scripts/probe_v16_a2b_ngff.py:633`）用 `np.array_equal`，它把 NaN 视为不相等，所以含核区室特征的输出即使逐字节相同也会被报为「不同」。它只会误报不同、不会误报相同，以前判为通过的结论都成立。这次改用按字节比较。
+- **门 5**：`build_object_tables.py` 在这次结果上生成 `cells.parquet`，共 56 948 行；A4-G1 … G4 全部通过（与 h5ad 逐位相同，200 个抽样细胞的栅格 bbox 和 viewer 取样都正确，核数 / 核面积一致）。`cells_parquet` 的 `depends_on` 正是这次的分割运行。`regions.parquet` 中三个 Full WSI 工作区合并为 1 行。
+- 界面没有变化。用户另外提出了 Step0 CPU 并行、Step2 tile 状态显示缺陷、空 tile 跳过，记录在后续块中，与 A3+A4 无关。

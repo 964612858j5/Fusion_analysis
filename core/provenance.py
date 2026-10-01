@@ -90,8 +90,8 @@ def to_posix(path: str, sep: str = os.sep) -> str:
 def location(project_dir, path, member=None) -> Dict:
     """Where an artifact lives: relative to the project with ``/`` separators
     on every OS when inside it, absolute otherwise."""
-    project = os.path.abspath(project_dir)
-    full = os.path.abspath(path)
+    project = os.path.realpath(project_dir)
+    full = os.path.realpath(path)
     try:
         rel = os.path.relpath(full, project)
     except ValueError:                      # another drive (Windows)
@@ -107,7 +107,7 @@ def location(project_dir, path, member=None) -> Dict:
 
 def resolve_location(project_dir, loc: Dict) -> str:
     if loc.get("relative_to") == "project":
-        return os.path.join(os.path.abspath(project_dir), *loc["path"].split("/"))
+        return os.path.join(os.path.realpath(project_dir), *loc["path"].split("/"))
     return loc["path"]
 
 
@@ -231,7 +231,288 @@ def git_commit() -> str:
         return ""
 
 
+# ── producers (block A3 2/3, 3/3) ───────────────────────────────────────
+#
+# Each producer calls ONE of these after its product is committed. They
+# never raise: a failure is logged and the product stays as it is.
+
+def find_workspace(path):
+    """``(project_dir, workspace_dir)`` of a path inside
+    ``<project>/rois/<workspace_id>/...``, or ``(None, None)``."""
+    cur = os.path.abspath(path)
+    while True:
+        parent = os.path.dirname(cur)
+        if os.path.basename(parent) == "rois" and os.path.isfile(
+                os.path.join(cur, "roi_manifest.json")):
+            return os.path.dirname(parent), cur
+        if parent == cur:
+            return None, None
+        cur = parent
+
+
+def _load(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def ensure_raw_slide(project_dir, slide_path) -> str:
+    """The slide's id, registering its `raw_slide` entry if needed (the P2
+    description is its parameters). Raises on failure."""
+    from .project_identity import describe_slide
+    manifest = _load(os.path.join(project_dir, "project_manifest.json")) or {}
+    sid, desc = describe_slide(slide_path, manifest.get("sources"))
+    register(project_dir, "raw_slide", location(project_dir, slide_path), sid,
+             artifact_id=sid, slide_id=sid, parameters=desc)
+    return sid
+
+
+def workspace_regions(workspace_dir, slide_id) -> Dict[str, Dict]:
+    """``{roi_name: {"region_id", "bbox_fullres", "roi"}}`` from the
+    workspace's committed Step0 ``roi_config.json`` (or its
+    ``roi_manifest.json`` for a workspace without one)."""
+    from .project_identity import region_id_of_roi
+    rois = _load(os.path.join(workspace_dir, "step0", "roi_config.json"))
+    if not isinstance(rois, list) or not rois:
+        manifest = _load(os.path.join(workspace_dir, "roi_manifest.json")) or {}
+        rois = [dict(manifest, name=manifest.get("display_name", ""))] if manifest else []
+    out = {}
+    for roi in rois:
+        name = str(roi.get("name") or roi.get("display_name") or "")
+        out[name] = {"region_id": region_id_of_roi(slide_id, roi),
+                     "bbox_fullres": [int(v) for v in roi.get("bbox_fullres") or []],
+                     "roi": roi}
+    return out
+
+
+def _scope(regions, name, bbox):
+    """``(operates_on, flags)`` for a product made for region `name` with
+    `bbox`: the workspace region's id, or nothing and `region_mismatch` when
+    the name is unknown or the geometry differs (never guessed)."""
+    reg = regions.get(str(name))
+    if reg is None or (bbox is not None and [int(v) for v in bbox] != reg["bbox_fullres"]):
+        return [], [FLAG_REGION_MISMATCH]
+    return [reg["region_id"]], []
+
+
+def corrected_group(root, roi_name):
+    """The corrected zarr's group for `roi_name` (the strict rule of
+    `CorrectedZarrSource`: its ``roi_name`` attribute or its folder name)."""
+    from .quant_sources import region_folder
+    hits = [g for g in root.group_keys()
+            if root[g].attrs.get("roi_name") == roi_name or g == region_folder(roi_name)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _corrected_token(attrs):
+    return attrs.get("source_identity") or ""
+
+
+def register_corrected_channels(project_dir, workspace_dir, zarr_path, raw_path):
+    """Step0 (`write_handoff`): one `corrected_channel` per array of the
+    committed corrected product."""
+    try:
+        import zarr
+        sid = ensure_raw_slide(project_dir, raw_path)
+        regions = workspace_regions(workspace_dir, sid)
+        root = zarr.open_group(zarr_path, mode="r")
+        out = []
+        for gname in sorted(root.group_keys()):
+            group = root[gname]
+            roi_name = str(group.attrs.get("roi_name") or gname)
+            bbox = group.attrs.get("bbox_fullres") or None
+            scope, flags = _scope(regions, roi_name, bbox)
+            for name in sorted(group.array_keys()):
+                attrs = dict(group[name].attrs)
+                token = _corrected_token(attrs)
+                if not token:
+                    print(f"[Provenance] corrected {gname}/{name} has no source_identity; "
+                          "not registered")
+                    continue
+                params = {k: attrs.get(k) for k in (
+                    "channel_name", "channel_index", "correction_method",
+                    "correction_param_name", "correction_param_value",
+                    "bg_correction_algo_version", "written_at", "dtype")}
+                params["roi_name"] = roi_name
+                params["valid_bounds"] = [int(v) for v in bbox] if bbox else None
+                out.append(safe_register(
+                    project_dir, "corrected_channel",
+                    location(project_dir, zarr_path, f"{gname}/{name}"), token,
+                    depends_on=[sid], operates_on=scope, flags=flags,
+                    workspace_id=os.path.basename(workspace_dir), slide_id=sid,
+                    parameters=params, software={"git_commit": git_commit()}))
+        return out
+    except Exception as exc:
+        print(f"[Provenance] corrected channels not registered ({type(exc).__name__}: {exc})")
+        return []
+
+
+def corrected_artifact(project_dir, zarr_path, member, token):
+    return lookup(project_dir, "corrected_channel", location(project_dir, zarr_path, member),
+                  token)
+
+
+def register_fused(zarr_path, raw_path, region, corrected_path="", corrected_used=(),
+                   corrected_unused=(), via_loader=False):
+    """Step1 (`FullFusionWorker`): one `fused` after a region is published.
+    `region` is ``{"name", "bbox_fullres"}``; `corrected_used` the corrected
+    channels whose pixels entered the fusion, `corrected_unused` the ones
+    read without a committed display window."""
+    try:
+        import zarr
+        project_dir, ws = find_workspace(zarr_path)
+        if project_dir is None:
+            print(f"[Provenance] {zarr_path} is not inside a project workspace; not registered")
+            return None
+        sid = ensure_raw_slide(project_dir, raw_path)
+        attrs = dict(zarr.open(zarr_path, mode="r").attrs)
+        token = fused_token(attrs)
+        scope, flags = _scope(workspace_regions(ws, sid), region["name"],
+                              region.get("bbox_fullres"))
+        deps, unresolved = [sid], []
+        if via_loader and corrected_used:
+            unresolved.append({"role": "corrected_channels_via_loader",
+                               "channels": sorted(corrected_used), "path": corrected_path})
+        elif corrected_used:
+            root = zarr.open_group(corrected_path, mode="r")
+            gname = corrected_group(root, region["name"])
+            for ch in sorted(corrected_used):
+                token_ch = _corrected_token(root[gname][ch].attrs) if gname else ""
+                aid = corrected_artifact(project_dir, corrected_path, f"{gname}/{ch}", token_ch) \
+                    if gname else None
+                if aid:
+                    deps.append(aid)
+                else:
+                    unresolved.append({"role": "corrected_channel", "channel": ch,
+                                       "path": corrected_path})
+        return safe_register(
+            project_dir, "fused", location(project_dir, zarr_path), token,
+            depends_on=deps, operates_on=scope, flags=flags, unresolved_inputs=unresolved,
+            workspace_id=os.path.basename(ws), slide_id=sid,
+            parameters={**{k: attrs.get(k) for k in ("fusion_formula_version", "config_hash",
+                                                     "artifact_kind", "roi_name",
+                                                     "bbox_fullres", "created_at")},
+                        "corrected_read_without_window": sorted(corrected_unused)},
+            software={"git_commit": git_commit()})
+    except Exception as exc:
+        print(f"[Provenance] fused not registered ({type(exc).__name__}: {exc})")
+        return None
+
+
+def fused_token(attrs) -> str:
+    return f"{attrs.get('created_at', '')}|{attrs.get('config_hash', '')}"
+
+
+def register_segmentation_run(run_dir, meta):
+    """Step2 (`segment_merge_worker`): one `segmentation_run` after its
+    ``segmentation_meta.json`` is written."""
+    try:
+        import zarr
+        project_dir, ws = find_workspace(run_dir)
+        if project_dir is None:
+            print(f"[Provenance] {run_dir} is not inside a project workspace; not registered")
+            return None
+        manifest = _load(os.path.join(ws, "roi_manifest.json")) or {}
+        sid = ensure_raw_slide(project_dir, manifest["source_ome"])
+        regions = workspace_regions(ws, sid)
+        run_id = str(meta.get("run_id") or os.path.basename(run_dir))
+        rois = meta.get("rois") or [{"roi_name": meta.get("roi_display_name", ""),
+                                     "bbox_fullres": meta.get("roi_bbox_fullres"),
+                                     "fused_zarr_path": meta.get("fused_zarr_path")}]
+        scope, flags, deps, unresolved = [], [], [], []
+        for roi in rois:
+            s, f = _scope(regions, roi.get("roi_name"), roi.get("bbox_fullres"))
+            scope += s
+            flags += f
+            fpath = roi.get("fused_zarr_path") or meta.get("fused_zarr_path")
+            if not fpath:
+                continue
+            aid = None
+            if os.path.exists(fpath):
+                aid = lookup(project_dir, "fused", location(project_dir, fpath),
+                             fused_token(dict(zarr.open(fpath, mode="r").attrs)))
+            if aid:
+                deps.append(aid)
+            else:
+                unresolved.append({"role": "fused", "path": fpath})
+        loc = location(project_dir, run_dir)
+        same_id = [e for e in load_entries(project_dir)
+                   if e.get("kind") == "segmentation_run" and e.get("token") == run_id
+                   and not _same_location(e.get("location") or {}, loc)]
+        if same_id:
+            flags.append(FLAG_RUN_ID_COLLISION)
+            print(f"[Provenance] segmentation_run_id {run_id} already exists in "
+                  f"{same_id[0]['workspace_id']}: registered with a collision flag")
+        engine = meta.get("seg_engine") or {}
+        seg_config = meta.get("seg_config") or {}
+        return safe_register(
+            project_dir, "segmentation_run", loc, run_id, depends_on=deps,
+            operates_on=scope, flags=flags, unresolved_inputs=unresolved,
+            workspace_id=os.path.basename(ws), slide_id=sid,
+            parameters={"segmentation_run_id": run_id, "method": meta.get("method"),
+                        "engine": engine.get("engine"), "engine_identity": engine.get("identity"),
+                        "preseg_contract": seg_config.get("preseg_contract")
+                        if isinstance(seg_config, dict) else None,
+                        "files": {"segmentation_meta": "segmentation_meta.json",
+                                  "label_store": meta.get("label_store")}},
+            software={"git_commit": git_commit(), "engine_provenance": engine.get("provenance")})
+    except Exception as exc:
+        print(f"[Provenance] segmentation run not registered ({type(exc).__name__}: {exc})")
+        return None
+
+
+def register_step4(h5ad_path, job, provenance_record):
+    """Step4 (`run_extraction`): one `step4_h5ad` after its outputs are
+    replaced into place."""
+    try:
+        project_dir, ws = find_workspace(h5ad_path)
+        if project_dir is None:
+            print(f"[Provenance] {h5ad_path} is not inside a project workspace; not registered")
+            return None
+        sid = ensure_raw_slide(project_dir, job.slide)
+        y0, y1, x0, x1 = job.bbox
+        scope, flags = _scope(workspace_regions(ws, sid), job.roi_name, [y0, y1, x0, x1])
+        deps, unresolved = [sid], []
+        seg = lookup(project_dir, "segmentation_run", location(project_dir, job.run_dir),
+                     job.run_id)
+        if seg:
+            deps.append(seg)
+        else:
+            unresolved.append({"role": "segmentation_run", "path": job.run_dir})
+        for ch in job.channels:
+            if ch.kind != "corrected":
+                continue
+            aid = corrected_artifact(project_dir, ch.path, ch.array,
+                                     (ch.identity or {}).get("source_identity", ""))
+            if aid:
+                deps.append(aid)
+            else:
+                unresolved.append({"role": "corrected_channel", "channel": ch.name,
+                                   "path": ch.path})
+        outputs = provenance_record.get("outputs") or {}
+        return safe_register(
+            project_dir, "step4_h5ad", location(project_dir, h5ad_path),
+            provenance_record.get("created_at", ""), depends_on=deps, operates_on=scope,
+            flags=flags, unresolved_inputs=unresolved, workspace_id=os.path.basename(ws),
+            slide_id=sid,
+            parameters={"segmentation_run_id": job.run_id, "roi_name": job.roi_name,
+                        "statistics": provenance_record.get("statistics"),
+                        "schema": provenance_record.get("schema"),
+                        "schema_version": provenance_record.get("schema_version"),
+                        "files": {"h5ad": outputs.get("h5ad"), "csv": outputs.get("csv"),
+                                  "provenance": os.path.basename(h5ad_path)[:-5]
+                                  + "_provenance.json"}},
+            software={"git_commit": provenance_record.get("git_commit", "")})
+    except Exception as exc:
+        print(f"[Provenance] Step4 result not registered ({type(exc).__name__}: {exc})")
+        return None
+
+
 __all__ = ["SCHEMA_VERSION", "KINDS", "ProvenanceError", "write_json_atomic", "location",
            "resolve_location", "load_entries", "lookup", "validate", "register",
            "safe_register", "is_artifact_id", "is_region_id", "provenance_dir",
-           "FLAG_RUN_ID_COLLISION", "FLAG_REGION_MISMATCH"]
+           "FLAG_RUN_ID_COLLISION", "FLAG_REGION_MISMATCH", "find_workspace",
+           "ensure_raw_slide", "workspace_regions", "register_corrected_channels",
+           "register_fused", "register_segmentation_run", "register_step4"]

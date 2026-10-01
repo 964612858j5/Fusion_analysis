@@ -48,6 +48,7 @@ from .bg_correction import (
 from ..config import CUCIM_SIGMA_DEFAULT, TOPHAT_RADIUS_DEFAULT
 from ..utils.channel_remap_config import channel_remap_config_hash
 from ..utils.roi_project import mark_roi_step
+from .provenance import register_corrected_channels
 from ..utils import perf_trace
 
 
@@ -339,6 +340,10 @@ def write_handoff(spec, *, superseded=None, tag="0", publication_lock=None):
             # The manifest above is the authoritative handoff commit marker.
             # ROI index bookkeeping is auxiliary; a stale index must not turn
             # a durable handoff into a reported save failure.
+        # Block A3: the committed corrected channels' provenance entries --
+        # auxiliary in the same way (logged, never raised).
+        if os.path.exists(corrected_path) and roi_dir:
+            register_corrected_channels(project_dir, roi_dir, corrected_path, raw_path)
     return {"config": config, "rois": rois, "patches": patches,
             "manifest": manifest, "corrected_report": corrected_report,
             "manifest_path": os.path.abspath(manifest_path)}

@@ -40,6 +40,7 @@ import numpy as np
 
 from . import step3_masks
 from .bg_correction import resolve_effective_correction_params
+from .project_identity import ProjectSchemaError, project_dir_of_workspace, read_project_schema
 
 CORRECTED_METHODS = ("tophat", "cucim")
 CELL, NUCLEUS = "cell", "nucleus"
@@ -261,6 +262,10 @@ def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):
     manifest = _load_json(os.path.join(ws, "roi_manifest.json")) if ws else None
     if not manifest:
         raise QuantSourceError("the run is not inside an ROI workspace (no roi_manifest.json)")
+    try:                                         # block A3: an unknown project schema
+        read_project_schema(project_dir_of_workspace(ws))
+    except ProjectSchemaError as exc:
+        raise QuantSourceError(str(exc)) from exc
     slide = str(manifest.get("source_ome") or "")
     made_on = step3_masks.run_slide(run)
     if not slide or not os.path.isfile(slide):

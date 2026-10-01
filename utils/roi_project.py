@@ -91,6 +91,9 @@ def save_json(path, payload):
 
 
 def ensure_project_manifest(project_dir, raw_ome_path=None):
+    from ..core import project_identity as pid
+    from ..core import provenance as prov
+
     os.makedirs(project_dir, exist_ok=True)
     path = project_manifest_path(project_dir)
     payload = load_json(path, {}) or {}
@@ -100,7 +103,36 @@ def ensure_project_manifest(project_dir, raw_ome_path=None):
     payload["project_dir"] = _abs(project_dir)
     if raw_ome_path:
         payload["source_ome"] = _abs(raw_ome_path)
-    save_json(path, payload)
+    # Block A3: the project schema, the slide's description (P2) and its
+    # transforms. A project of an unknown schema keeps its field and gets
+    # nothing new; nothing here may raise into the Save path.
+    known = True
+    try:
+        pid.check_project_schema(payload.get("project_schema_version"), path)
+        payload["project_schema_version"] = pid.PROJECT_SCHEMA_VERSION
+    except pid.ProjectSchemaError as exc:
+        known = False
+        print(f"[Project] {exc}; the manifest's schema is left as it is and nothing is "
+              "registered")
+    slide = None
+    if known and raw_ome_path:
+        try:
+            sid, desc = pid.describe_slide(raw_ome_path, payload.get("sources"))
+            payload.setdefault("sources", {})[sid] = desc
+            slide = (sid, desc)
+        except Exception as exc:
+            print(f"[Project] the slide could not be described ({type(exc).__name__}: {exc})")
+    prov.write_json_atomic(path, payload)
+    if slide is not None:
+        try:
+            tpath = os.path.join(project_dir, "transforms.json")
+            prov.write_json_atomic(tpath, pid.merged_transforms(load_json(tpath, None),
+                                                                *slide))
+        except Exception as exc:
+            print(f"[Project] transforms.json not written ({type(exc).__name__}: {exc})")
+        prov.safe_register(project_dir, "raw_slide", prov.location(project_dir, raw_ome_path),
+                           slide[0], artifact_id=slide[0], slide_id=slide[0],
+                           parameters=slide[1])
     return payload
 
 

@@ -99,7 +99,11 @@ MIGRATED = {os.path.join("core", "pixel_source.py"),
             # wiring only: it hands FullFusionWorker `use_pixel_sources=True`
             # and the corrected product's path / decisions (A2c 3/3)
             os.path.join("ui", "main_window.py"),
-            os.path.join("scripts", "diagnose_v16_a2c_oracle.py")}
+            os.path.join("scripts", "diagnose_v16_a2c_oracle.py"),
+            # block A3: the P2 raw-source description reads level count and
+            # shapes through the contract; the acceptance script drives it
+            os.path.join("core", "project_identity.py"),
+            os.path.join("scripts", "diagnose_v16_a3a4_acceptance.py")}
 
 
 def test_only_the_migrated_consumers_use_the_contract():

@@ -1,6 +1,6 @@
 # v16 契约草案：PixelSource、坐标、对象表（A0-3）
 
-日期：2026-09-29。**草案，在 A3 冻结**；冻结前任何一条都可以改。依据 v2.1 §2.4、§5.1、§6，以及 A0 申请 v2 §2.3 的调查结论（行号基于 `bf3af2c`）。
+日期：2026-09-29。**§1 在 A2a 冻结，§2、§3 在 A3 冻结（2026-10-01，`docs/v16_A3A4_application.md` v2，用户批准）**；冻结版的权威文本是代码 `core/project_identity.py`、`core/provenance.py`、`core/artifact_graph.py`、`core/object_tables.py` 的模块说明，本文件只作说明。原日期 2026-09-29 的草案文字保留，冻结时的改动写在各节开头。依据 v2.1 §2.4、§5.1、§6，以及 A0 申请 v2 §2.3 的调查结论（行号基于 `bf3af2c`）。
 本文件不授权任何代码改动。「今天」一栏描述现有代码，按 v2.1 §6.2，旧代码不回改。
 
 ---
@@ -50,6 +50,17 @@
 ---
 
 ## 2. 坐标
+
+> **A3 冻结（2026-10-01）**：§2.1、§2.2 按原文冻结，变换由 `core/project_identity.SlideFrames` 实现：
+> - 第 L 层像素 i 的中心在 global 中位于 `(i + 0.5) · s_L − 0.5`；
+> - `viewer_world = global + 0.5`，拾取 `floor(world)`；
+> - 物理尺寸缺失就不可用，不给默认值。
+>
+> 与草案相比有两处改动：
+> - `transforms.json`（§2.3）**按 `slide_id` 分组**，因为一个项目目录里可能有不同切片；
+> - 区域原点**不再**复制进 `transforms.json`：区域的 bbox 只有一处真相，即 Step0 提交的 `roi_config` / `roi_manifest`，`regions.parquet` 是它的表格形式。
+>
+> P4 的对应表见 §2.6。
 
 ### 2.1 坐标系
 
@@ -114,7 +125,36 @@
 
 ---
 
+## 2.6 P4 — 与 OME-NGFF / SpatialData 的语义对应（A3）
+
+FusionFlux 的每个变换都是轴对齐的缩放加平移，所以都能**无损**写成 OME-NGFF 0.4 的 `scale` + `translation`，以及 SpatialData 的 `Scale` / `Translation` / `Sequence`。**反过来不成立**：任意的 NGFF / SpatialData 变换（仿射、旋转、z / t 轴、多重序列）不能映射回 FusionFlux。这里只写语义对应：不引入依赖，不写转换代码（导出见 v2.4 §11 的 `export_to_spatialdata()`）。
+
+| FusionFlux | OME-NGFF 0.4 | SpatialData |
+|---|---|---|
+| 轴 (c, y, x) | `axes`：c 为 channel，y、x 为 space，单位 micrometer（没有物理尺寸就不写单位，即像素） | dims `("c","y","x")` |
+| 第 L 层 → µm | `scale [1, s_y·d_y, s_x·d_x]` + `translation [0, (s_y−1)/2·d_y, (s_x−1)/2·d_x]` | `Sequence([Scale, Translation])` |
+| 第 0 层 → µm | `scale [1, d_y, d_x]` | `Scale([d_y, d_x])` |
+| `region_local` | `translation [y0·d_y, x0·d_x]` | `Translation([y0, x0])` |
+| `viewer_world = global + 0.5` | —（只属于显示） | 内在像素坐标（像素 i 覆盖 [i, i+1)）；实现导出时再对照文档核实 |
+| 细胞表 | — | `tables`，`region` / `instance_key` = `region_id` / `cell_id` |
+| LabelStore | `labels` | `labels`（LabelStore 仍是语义权威） |
+
+---
+
 ## 3. 身份与对象表
+
+> **A3 / A4 冻结（2026-10-01）**，与草案相比有这些改动：
+> - **`region_id` 不再等于 `roi_id`**。原因：一个工作区可以有多个 ROI，但只有第一个有 `roi_id`；而且 Step0 Save 每次都会新建工作区，34 个 "Full WSI" 工作区描述的是同一块组织。
+>   - 冻结后：`region_id = reg_` + sha256(`slide_id`, `type`, `bbox_fullres`, 规范化的多边形) 的前 16 位十六进制；
+>   - `roi_id` 就是 `workspace_id`。
+> - **`slide_id`** = `slide_` + sha256(切片签名 v1：大小、OME-XML、各层形状 / dtype、头尾各 4 MiB) 的前 16 位十六进制。它是身份，不是校验；算法名 `slide_sig_v1` 一起记录。
+> - **`type` 的取值**：今天有 `full_wsi`、`roi`；保留 `TMA_core`、`tumor_region`、`blur`、`fold`、`niche`、`manual_annotation`。
+> - **出处记录**放在 `provenance/<artifact_id>.json`，每个产物一个文件。只有 `depends_on` 是边，`operates_on` 只放 `region_id`。
+> - **最小布局 v1** 冻结为逻辑布局 + §3.5 的对照表。物理上只新增 `transforms.json`、`provenance/`、`objects/`（`objects/<run>/cells.parquet`、项目级 `objects/regions.parquet`）。
+> - **权威**：
+>   - LabelStore 管像素归属；
+>   - `cells.parquet` 管身份键、质心、bbox、面积、核数 / 核面积，与 Step4 h5ad 的同名列必须逐位相同；
+>   - h5ad 管表达量和区室统计。
 
 ### 3.1 层级与 ID
 

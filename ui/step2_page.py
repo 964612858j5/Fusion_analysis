@@ -168,6 +168,10 @@ class Step2Page(QWidget):
         self._worker         = None
         self._tile_rects     = {}
         self._tile_status    = {}
+        # The run's own progress, independent of the drawn grid: {"grid":
+        # (rows, cols), "state": {tile_index: "running" | "done" | "skipped"}}.
+        # The grid follows the spin boxes; this record follows the run.
+        self._run_progress   = None
         self._n_rows         = 3
         self._n_cols         = 4
         self._full_h         = 0
@@ -398,6 +402,12 @@ class Step2Page(QWidget):
         self._tile_ram_lbl = QLabel('')
         self._tile_ram_lbl.setStyleSheet('color:#aaa;font-size:10px;')
         til.addWidget(self._tile_ram_lbl)
+
+        # While a run computes: which grid shows its progress.
+        self._run_grid_lbl = QLabel('')
+        self._run_grid_lbl.setStyleSheet('color:#e5c07b;font-size:10px;')
+        self._run_grid_lbl.setVisible(False)
+        til.addWidget(self._run_grid_lbl)
 
         self._rows_spin.valueChanged.connect(self._update_tile_info)
         self._cols_spin.valueChanged.connect(self._update_tile_info)
@@ -1628,6 +1638,47 @@ class Step2Page(QWidget):
                 self._ov_vb.addItem(rect)
                 self._tile_rects[(r, c)] = rect
                 self._tile_status[(r, c)] = 'idle'
+        self._apply_run_progress()
+
+    def _shows_run_grid(self):
+        """True when the drawn grid is the running (or last) run's grid. Its
+        progress is drawn only then: on another grid a tile index names
+        another part of the image."""
+        rp = self._run_progress
+        return (rp is not None and bool(self._tile_rects)
+                and (self._rows_spin.value(), self._cols_spin.value()) == rp["grid"])
+
+    def _apply_run_progress(self):
+        """Draw the run's recorded progress onto a freshly built grid."""
+        if not self._shows_run_grid():
+            return
+        nc = self._run_progress["grid"][1]
+        for idx, state in self._run_progress["state"].items():
+            r, c = divmod(int(idx), nc)
+            if (r, c) in self._tile_rects:
+                self._set_tile_colour(r, c, state)
+                self._tile_status[(r, c)] = state
+
+    def _begin_run_progress(self, nr, nc):
+        """A new run: a new progress record; every drawn tile back to idle."""
+        self._run_progress = {"grid": (int(nr), int(nc)), "state": {}}
+        for key in self._tile_status:
+            self._tile_status[key] = 'idle'
+            self._set_tile_colour(key[0], key[1], 'idle')
+        self._run_grid_lbl.setText(f'Running grid: {nr}×{nc} — its progress shows on '
+                                   'this grid only')
+        self._run_grid_lbl.setVisible(True)
+
+    def _record_tile(self, tile_idx, state):
+        """Record one tile's state for the run, and draw it only if the
+        drawn grid is the run's grid."""
+        if self._run_progress is None:
+            return
+        self._run_progress["state"][int(tile_idx)] = state
+        if self._shows_run_grid():
+            r, c = divmod(int(tile_idx), self._run_progress["grid"][1])
+            self._set_tile_colour(r, c, state)
+            self._tile_status[(r, c)] = state
 
     def _set_tile_colour(self, row, col, state):
         rect = self._tile_rects.get((row, col))
@@ -2485,10 +2536,7 @@ class Step2Page(QWidget):
         if source == "index" and self._applied_param_file:
             param_file = self._applied_param_file
 
-        # Reset tile colours
-        for key in self._tile_status:
-            self._tile_status[key] = 'idle'
-            self._set_tile_colour(key[0], key[1], 'idle')
+        self._begin_run_progress(nr, nc)
         self._total_cells = 0
         self._cells_lbl.setText('Total cells detected: 0')
 
@@ -2542,9 +2590,7 @@ class Step2Page(QWidget):
         self._worker.start()
 
         # Mark first tile as running
-        if self._tile_rects:
-            self._set_tile_colour(0, 0, 'running')
-            self._tile_status[(0, 0)] = 'running'
+        self._record_tile(0, 'running')
 
     def _stop(self):
         if self._worker:
@@ -2565,20 +2611,11 @@ class Step2Page(QWidget):
         self._prog_lbl.setText(msg)
 
         # Mark next tile as running
-        nr = self._n_rows
-        nc = self._n_cols
         if done < total:
-            r = done // nc
-            c = done  % nc
-            self._set_tile_colour(r, c, 'running')
+            self._record_tile(done, 'running')
 
     def _on_tile_done(self, tile_idx, n_tiles, n_cells):
-        nr = self._n_rows
-        nc = self._n_cols
-        r  = tile_idx // nc
-        c  = tile_idx  % nc
-        self._set_tile_colour(r, c, 'done')
-        self._tile_status[(r, c)] = 'done'
+        self._record_tile(tile_idx, 'done')
         self._total_cells += n_cells
         self._cells_lbl.setText(
             f'Total cells detected: {self._total_cells:,}'
@@ -2617,6 +2654,7 @@ class Step2Page(QWidget):
                 + (f": {first}" if first else "."))
 
     def _on_finished(self, output_dir, total_cells):
+        self._run_grid_lbl.setVisible(False)
         self._mark_source_aware_applied()
         runtime = {}
         try:
@@ -2687,6 +2725,7 @@ class Step2Page(QWidget):
         # v14.5d: if the worker (which re-resolves + cross-checks the attached source-aware
         # config) errors, flip the "awaiting worker validation" status to NOT applied.
         self._mark_source_aware_failed(msg)
+        self._run_grid_lbl.setVisible(False)
         self._prog_lbl.setText('✗ Error — see terminal')
         self._btn_run.setEnabled(True)
         self._btn_back.setEnabled(True)

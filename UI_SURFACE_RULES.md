@@ -328,7 +328,13 @@ row, and the duplicate Tissue Preview button in the step bar.
   row is on screen -- from the index it is the index's method, and Step2's
   own method box is kept, hidden; the box `Recovery from .npy` (its old
   title is the tooltip); the hints wrap; the tile line has no VRAM estimate
-  (it was not accurate). The
+  (it was not accurate). Tile Status (block S2T, user ruling 2026-10-01):
+  a run's tile states (running yellow, done green) are drawn ONLY while the
+  Rows / Cols boxes show the run's own grid; changing them during a run
+  shows the new grid with no state at all (the run is not affected), and
+  changing back shows every state recorded so far. While a run computes,
+  a line under the tile line reads `Running grid: R×C — its progress shows
+  on this grid only`. The
   public `Channels` panel is NOT shown in Step2: its frame and the dock
   mounted in it are kept, hidden, not deleted; Step2's own ticks are kept.
   The Input Data line under `Load zarr info` names no config file (block

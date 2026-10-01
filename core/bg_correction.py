@@ -292,6 +292,23 @@ def _tile_slices(height, width, tile_size, overlap):
             )
 
 
+def _tophat_gpu(arr32, radius):
+    """GPU kernel: cupyx grey_erosion/dilation, SQUARE (2r+1)^2 (no NVRTC JIT)."""
+    size = 2 * radius + 1
+    gpu_arr = cp.asarray(arr32)
+    eroded  = _cupyx_ndi.grey_erosion(gpu_arr,  size=(size, size), mode='reflect')
+    dilated = _cupyx_ndi.grey_dilation(eroded,  size=(size, size), mode='reflect')
+    tophat  = cp.clip(gpu_arr - dilated, 0, None)
+    out = cp.asnumpy(tophat).astype(np.float32, copy=False)
+    del gpu_arr, eroded, dilated, tophat
+    return out
+
+
+def _tophat_cpu(arr32, radius):
+    """CPU kernel: skimage white_tophat with a DISK footprint."""
+    return white_tophat(arr32, footprint=disk(radius), mode='reflect').astype(np.float32)
+
+
 def _apply_tophat_gpu_or_cpu(arr, radius):
     """White TopHat background subtraction.
     GPU path: cupyx.scipy.ndimage.grey_erosion/dilation (no NVRTC JIT).
@@ -302,17 +319,10 @@ def _apply_tophat_gpu_or_cpu(arr, radius):
     arr32 = arr.astype(np.float32, copy=False)
     if GPU_MORPH_AVAILABLE:
         try:
-            size = 2 * radius + 1
-            gpu_arr = cp.asarray(arr32)
-            eroded  = _cupyx_ndi.grey_erosion(gpu_arr,  size=(size, size), mode='reflect')
-            dilated = _cupyx_ndi.grey_dilation(eroded,  size=(size, size), mode='reflect')
-            tophat  = cp.clip(gpu_arr - dilated, 0, None)
-            out = cp.asnumpy(tophat).astype(np.float32, copy=False)
-            del gpu_arr, eroded, dilated, tophat
-            return out
+            return _tophat_gpu(arr32, radius)
         except Exception as _e:
             _disable_gpu_morph(_e, "tophat")
-    return white_tophat(arr32, footprint=disk(radius), mode='reflect').astype(np.float32)
+    return _tophat_cpu(arr32, radius)
 
 
 # Alias kept for backward compatibility — WsiCorrectionWorker etc. call _apply_tophat_cpu
@@ -330,16 +340,77 @@ def _apply_cucim_or_cpu(arr, sigma, prefer_gpu=True):
     arr32 = arr.astype(np.float32, copy=False)
     if prefer_gpu and GPU_MORPH_AVAILABLE:
         try:
-            gpu_arr = cp.asarray(arr32)
-            bg_gpu  = _cupyx_ndi.gaussian_filter(gpu_arr, sigma=sigma, mode='reflect')
-            out_gpu = cp.clip(gpu_arr - bg_gpu, 0, None)
-            out = cp.asnumpy(out_gpu).astype(np.float32, copy=False)
-            del gpu_arr, bg_gpu, out_gpu
-            return out
+            return _cucim_gpu(arr32, sigma)
         except Exception as _e:
             _disable_gpu_morph(_e, "cucim")
+    return _cucim_cpu(arr32, sigma)
+
+
+def _cucim_gpu(arr32, sigma):
+    gpu_arr = cp.asarray(arr32)
+    bg_gpu  = _cupyx_ndi.gaussian_filter(gpu_arr, sigma=sigma, mode='reflect')
+    out_gpu = cp.clip(gpu_arr - bg_gpu, 0, None)
+    out = cp.asnumpy(out_gpu).astype(np.float32, copy=False)
+    del gpu_arr, bg_gpu, out_gpu
+    return out
+
+
+def _cucim_cpu(arr32, sigma):
     bg = sk_gaussian(arr32, sigma=sigma, preserve_range=True, mode='reflect')
     return np.clip(arr32 - bg.astype(np.float32, copy=False), 0, None).astype(np.float32)
+
+
+# ── block S0P: one backend per channel ──────────────────────────────────
+#
+# The Save path decides ONCE per channel which backend computes it and never
+# mixes them: a channel is GPU (square tophat footprint) or CPU (disk) from
+# its first tile to its last, and says which in its attrs. The two kernels
+# above are unchanged; only where the choice is made moves.
+
+class GpuBackendFailed(RuntimeError):
+    """The GPU failed inside a channel frozen to the GPU backend."""
+
+
+def compute_path(method):
+    """The backend a channel of `method` gets on this machine now: "gpu" or
+    "cpu" (the same rule the per-tile functions apply: tophat on the GPU when
+    GPU morphology works; cucim when cuCIM is also available)."""
+    method = str(method or "").strip().lower()
+    if not GPU_MORPH_AVAILABLE:
+        return "cpu"
+    if method == "cucim" and not CUCIM_AVAILABLE:
+        return "cpu"
+    return "gpu"
+
+
+def tophat_footprint(method, path):
+    """``"disk"`` (CPU) / ``"square"`` (GPU) for tophat; None for cucim."""
+    if str(method or "").strip().lower() != "tophat":
+        return None
+    return "square" if path == "gpu" else "disk"
+
+
+def current_compute_signature(method):
+    """``(bg_compute_path, tophat_footprint)`` this machine would write now --
+    the two fields incremental Save adds to its signature."""
+    path = compute_path(method)
+    return path, tophat_footprint(method, path)
+
+
+def correct_tile(arr, method, param, path):
+    """One tile on the given backend. A GPU failure raises
+    `GpuBackendFailed` (and disables the GPU for the session) instead of
+    falling back to the CPU for this tile."""
+    arr32 = arr.astype(np.float32, copy=False)
+    method = str(method).strip().lower()
+    param = max(1, int(param))
+    if path == "gpu":
+        try:
+            return _tophat_gpu(arr32, param) if method == "tophat" else _cucim_gpu(arr32, param)
+        except Exception as exc:
+            _disable_gpu_morph(exc, method)
+            raise GpuBackendFailed(f"{method} on the GPU failed: {exc}") from exc
+    return _tophat_cpu(arr32, param) if method == "tophat" else _cucim_cpu(arr32, param)
 
 
 def _apply_background_method_tiled(arr, method, radius=None, sigma=None,

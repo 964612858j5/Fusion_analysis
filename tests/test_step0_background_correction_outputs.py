@@ -20,6 +20,9 @@ pytest.importorskip("PyQt5")
 zarr = pytest.importorskip("zarr")
 
 from block01.core.bg_correction import BG_CORRECTION_ALGO_VERSION as _V
+# block S0P: the backend part of the signature on this machine
+from block01.core.bg_correction import current_compute_signature as _ccs  # noqa: E402
+_T, _C = _ccs("tophat"), _ccs("cucim")
 
 
 @pytest.fixture(scope="module")
@@ -248,7 +251,7 @@ def test_read_corrected_zarr_state_methods_and_bbox(app, tmp_path):
     zp = str(tmp_path / "corrected_channels.zarr")
     sigs, bboxes = read_corrected_zarr_state(zp)
     # signature = (method, method-specific param); _run_worker uses radius 15 / sigma 50
-    assert sigs == {"CD68": ("tophat", 15, _V), "CK19": ("cucim", 50, _V)}
+    assert sigs == {"CD68": (("tophat", 15, _V) + _T), "CK19": (("cucim", 50, _V) + _C)}
     assert bboxes == [(0, 80, 0, 100)]
 
 
@@ -270,7 +273,7 @@ def test_incremental_adds_new_keeps_old(app, tmp_path):
     arrays = sorted(corrected_zarr_report(zp)["channel_arrays"])
     assert arrays == ["ROI_1/CD68", "ROI_1/Ki67"]      # old retained + new added
     sigs, _ = read_corrected_zarr_state(zp)
-    assert sigs == {"CD68": ("tophat", 15, _V), "Ki67": ("tophat", 15, _V)}
+    assert sigs == {"CD68": (("tophat", 15, _V) + _T), "Ki67": (("tophat", 15, _V) + _T)}
     # emitted decisions describe the FULL merged zarr (loader routes all)
     assert set(out["dec"]) == {"CD68", "Ki67"}
 
@@ -284,8 +287,8 @@ def test_incremental_method_change_reprocesses_only_that_channel(app, tmp_path):
                 {"CD68": "cucim", "Ki67": "tophat"}, rois,
                 process_channels={"CD68"}, incremental=True)
     sigs, _ = read_corrected_zarr_state(str(tmp_path / "corrected_channels.zarr"))
-    assert sigs["CD68"] == ("cucim", 50, _V)   # method changed -> reprocessed
-    assert sigs["Ki67"] == ("tophat", 15, _V)  # untouched
+    assert sigs["CD68"] == (("cucim", 50, _V) + _C)   # method changed -> reprocessed
+    assert sigs["Ki67"] == (("tophat", 15, _V) + _T)  # untouched
 
 
 def test_incremental_no_channels_emits_merged_state(app, tmp_path):
@@ -358,7 +361,7 @@ def test_step0_all_skipped_emits_handoff_without_worker(app, tmp_path, monkeypat
 
     # the corrected zarr already holds both channels with the SAME (method, param)
     monkeypatch.setattr(sp, "read_corrected_zarr_state",
-                        lambda zp: ({"CD68": ("tophat", 15, _V), "Ki67": ("tophat", 15, _V)},
+                        lambda zp: ({"CD68": (("tophat", 15, _V) + _T), "Ki67": (("tophat", 15, _V) + _T)},
                                     [(0, 80, 0, 100)]))
     # a worker must NOT be constructed in the all-skip path
     def _boom(*a, **k):
@@ -577,7 +580,7 @@ def _step0_dispatch_capture(tmp_path, monkeypatch, existing_sigs):
 def test_dispatch_new_channel_only(app, tmp_path, monkeypatch):
     # CD68 already saved (tophat,15); Ki67 is newly assigned -> only Ki67
     cap, _ = _step0_dispatch_capture(
-        tmp_path, monkeypatch, {"CD68": ("tophat", 15, _V)})
+        tmp_path, monkeypatch, {"CD68": (("tophat", 15, _V) + _T)})
     assert cap["started"] is True
     assert cap["process"] == {"Ki67"}
 
@@ -586,7 +589,7 @@ def test_dispatch_param_change_reprocesses_channel(app, tmp_path, monkeypatch):
     # both saved as tophat, but CD68 was saved with radius 9 (param changed -> 15)
     cap, _ = _step0_dispatch_capture(
         tmp_path, monkeypatch,
-        {"CD68": ("tophat", 9, _V), "Ki67": ("tophat", 15, _V)})
+        {"CD68": (("tophat", 9, _V) + _T), "Ki67": (("tophat", 15, _V) + _T)})
     assert cap["started"] is True
     assert cap["process"] == {"CD68"}        # only the param-changed channel
 
@@ -595,14 +598,14 @@ def test_dispatch_method_change_reprocesses_channel(app, tmp_path, monkeypatch):
     # CD68 saved cucim; now assigned tophat -> method changed -> reprocess CD68
     cap, _ = _step0_dispatch_capture(
         tmp_path, monkeypatch,
-        {"CD68": ("cucim", 50, _V), "Ki67": ("tophat", 15, _V)})
+        {"CD68": (("cucim", 50, _V) + _C), "Ki67": (("tophat", 15, _V) + _T)})
     assert cap["process"] == {"CD68"}
 
 
 def test_dispatch_all_unchanged_starts_no_worker(app, tmp_path, monkeypatch):
     cap, _ = _step0_dispatch_capture(
         tmp_path, monkeypatch,
-        {"CD68": ("tophat", 15, _V), "Ki67": ("tophat", 15, _V)})
+        {"CD68": (("tophat", 15, _V) + _T), "Ki67": (("tophat", 15, _V) + _T)})
     assert cap["started"] is False           # nothing to process -> no dialog/worker
     assert cap["process"] is None
 
@@ -612,7 +615,7 @@ def test_dispatch_stale_algo_version_reprocesses(app, tmp_path, monkeypatch):
     # (e.g. the 2*sigma gaussian halo era) -> identity mismatch -> reprocess.
     cap, _ = _step0_dispatch_capture(
         tmp_path, monkeypatch,
-        {"CD68": ("tophat", 15, "1"), "Ki67": ("tophat", 15, _V)})
+        {"CD68": (("tophat", 15, "1") + _T), "Ki67": (("tophat", 15, _V) + _T)})
     assert cap["started"] is True
     assert cap["process"] == {"CD68"}
 
@@ -672,7 +675,7 @@ def test_dispatch_roi_bbox_mismatch_reprocesses_all(app, tmp_path, monkeypatch):
     p._tophat_slider.setValue(15)
     # zarr has both channels but a DIFFERENT ROI bbox -> signature mismatch
     monkeypatch.setattr(sp, "read_corrected_zarr_state",
-                        lambda zp: ({"CD68": ("tophat", 15, _V), "Ki67": ("tophat", 15, _V)},
+                        lambda zp: ({"CD68": (("tophat", 15, _V) + _T), "Ki67": (("tophat", 15, _V) + _T)},
                                     [(0, 999, 0, 999)]))
     monkeypatch.setattr(sp, "WsiCorrectionWorker", _FW)
     monkeypatch.setattr(sp, "_WsiCorrectionProgressDialog", _FD)
@@ -733,7 +736,7 @@ def test_method_change_cucim_to_tophat_overwrites_channel(app, tmp_path):
     assert not np.array_equal(before, after)
     # the read signature + merged decisions reflect tophat
     sigs, _ = read_corrected_zarr_state(zp)
-    assert sigs["CD11b"] == ("tophat", 80, _V)
+    assert sigs["CD11b"] == (("tophat", 80, _V) + _T)
     assert out["dec"]["CD11b"] == "tophat"
 
 
@@ -746,7 +749,7 @@ def test_method_change_tophat_to_cucim_overwrites_channel(app, tmp_path):
     assert _ch_attrs(d, "CD11b") == ("cucim", "cucim_sigma", 3)
     sigs, _ = read_corrected_zarr_state(
         os.path.join(d, "corrected_channels.zarr"))
-    assert sigs["CD11b"] == ("cucim", 3, _V)
+    assert sigs["CD11b"] == (("cucim", 3, _V) + _C)
 
 
 def test_same_method_param_change_overwrites_channel(app, tmp_path):
@@ -756,7 +759,7 @@ def test_same_method_param_change_overwrites_channel(app, tmp_path):
     _run_one(d, "CD11b", "tophat", 80, process_channels={"CD11b"}, incremental=True)
     sigs, _ = read_corrected_zarr_state(
         os.path.join(d, "corrected_channels.zarr"))
-    assert sigs["CD11b"] == ("tophat", 80, _V)   # param updated 50 -> 80
+    assert sigs["CD11b"] == (("tophat", 80, _V) + _T)   # param updated 50 -> 80
 
 
 def test_wsi_finished_refreshes_store_and_cache_with_new_method(app, tmp_path):

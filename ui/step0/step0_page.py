@@ -11138,7 +11138,9 @@ class Step0Page(QWidget):
             param = radius if method == "tophat" else sigma
             # (method, param, algorithm version): a channel saved by an older
             # numeric version never matches, so incremental save reprocesses it.
-            return (method, param, BG_CORRECTION_ALGO_VERSION)
+            # Block S0P: + (backend, tophat footprint) of this machine.
+            from ...core.bg_correction import current_compute_signature
+            return (method, param, BG_CORRECTION_ALGO_VERSION) + current_compute_signature(method)
         current_sigs = {ch: _cur_sig(ch, m) for ch, m in corrected.items()}
 
         existing_sigs, existing_bboxes = read_corrected_zarr_state(zarr_path)

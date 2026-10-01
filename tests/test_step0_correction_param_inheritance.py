@@ -22,6 +22,7 @@ from PyQt5 import QtCore, QtWidgets  # noqa: E402
 
 from block01.core.bg_correction import (  # noqa: E402
     BG_CORRECTION_ALGO_VERSION,
+    current_compute_signature,
     CHANNEL_PARAM_OVERRIDES_SCHEMA,
 )
 from block01.ui.step0 import step0_page as sp  # noqa: E402
@@ -245,7 +246,7 @@ def test_intensity_only_save_reuses_the_real_corrected_artifact(
     expected_radius = local_radius if local_radius is not None else 35
     assert read_corrected_zarr_state(zarr_path) == (
         {"CD3": ("tophat", expected_radius,
-                  BG_CORRECTION_ALGO_VERSION)},
+                  BG_CORRECTION_ALGO_VERSION) + current_compute_signature("tophat")},
         [(0, 24, 0, 28)],
     )
 
@@ -273,7 +274,8 @@ def test_intensity_only_save_reuses_the_real_corrected_artifact(
     assert completed[0][1] == zarr_path
     assert completed[0][2] == {"CD3": "tophat"}
     assert read_corrected_zarr_state(zarr_path)[0]["CD3"] == (
-        "tophat", expected_radius, BG_CORRECTION_ALGO_VERSION)
+        "tophat", expected_radius, BG_CORRECTION_ALGO_VERSION) + \
+        current_compute_signature("tophat")
 
 
 def test_a_global_change_dirties_only_channels_that_still_inherit_it(

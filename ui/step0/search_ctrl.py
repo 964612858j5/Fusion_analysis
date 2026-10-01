@@ -40,6 +40,10 @@ from ...core.bg_correction import (
     _tile_slices,
     method_overlap,
     BG_CORRECTION_ALGO_VERSION,
+    GpuBackendFailed,
+    compute_path,
+    correct_tile,
+    tophat_footprint,
     resolve_effective_correction_params,
     stamp_corrected_channel_identity,
 )
@@ -1921,7 +1925,8 @@ def read_corrected_zarr_state(zarr_path):
     """Inspect an existing corrected_channels.zarr for incremental save.
 
     Returns (signatures, roi_bboxes):
-      signatures : {channel_name: (method, param_value, algo_version)} for
+      signatures : {channel_name: (method, param_value, algo_version,
+                   bg_compute_path, tophat_footprint)} for
                    channels present in EVERY ROI group with a single consistent
                    signature — the v14.5a correction_method attr plus the
                    additive correction_param_value (None when an older zarr did
@@ -1929,7 +1934,12 @@ def read_corrected_zarr_state(zarr_path):
                    int param, so such a channel is safely reprocessed) plus
                    bg_correction_algo_version (missing -> "1", which never
                    matches the current version, forcing a reprocess of legacy
-                   gaussian outputs). A channel present in only some groups, or
+                   gaussian outputs) plus, since block S0P, the backend that
+                   computed it (bg_compute_path "cpu" | "gpu", tophat_footprint
+                   "disk" | "square" | None for cucim; both None in a product
+                   made before S0P, which therefore never matches and is
+                   reprocessed -- its backend cannot be shown to equal this
+                   machine's). A channel present in only some groups, or
                    with a mixed signature, is omitted.
       roi_bboxes : sorted list of each ROI group's bbox_fullres tuple — the ROI
                    signature used to decide whether the cached zarr still matches
@@ -1963,7 +1973,13 @@ def read_corrected_zarr_state(zarr_path):
             # (2*sigma gaussian halo) — their signature never matches the
             # current version, so they are reprocessed on the next Save.
             ver = str(a.get("bg_correction_algo_version") or "1")
-            gm[str(ch)] = (str(m), None if pv is None else int(pv), ver)
+            path = a.get("bg_compute_path")
+            foot = a.get("tophat_footprint")
+            if path is None:
+                foot = "<unrecorded>"     # a pre-S0P product: never equal
+            gm[str(ch)] = (str(m), None if pv is None else int(pv), ver,
+                           None if path is None else str(path),
+                           None if foot is None else str(foot))
         per_group.append(gm)
     common = set(per_group[0])
     for gm in per_group[1:]:
@@ -2135,6 +2151,45 @@ class WsiCorrectionWorker(QThread):
             # the identity check refuses it once level 0 has a new token.
             return False
         return False
+
+    def _correct_channel(self, ds, accumulator, tiles, ch_name, method, param, path,
+                         info, roi_y0, roi_x0, poly_mask, progress):
+        """Every tile of one channel on ONE backend, written and accumulated in
+        tile order. Returns "done" or "canceled"; a GPU failure raises
+        `GpuBackendFailed` (the caller recomputes the channel on the CPU)."""
+        progress_idx, channel_total, completed_units, total_units, started = progress
+        for tile_idx, (core, padded, crop) in enumerate(tiles, start=1):
+            if self._cancel_requested:
+                return "canceled"
+            y0, y1, x0, x1 = core
+            py0, py1, px0, px1 = padded
+            cy0, cy1, cx0, cx1 = crop
+            raw = self.loader._read_roi_zarr(
+                self.loader.ch_map[ch_name],
+                roi_y0 + py0, roi_y0 + py1,
+                roi_x0 + px0, roi_x0 + px1,
+            ).astype(np.float32, copy=False)
+            corr = correct_tile(raw, method, param, path)
+            out = corr[cy0:cy1, cx0:cx1].astype(np.float32, copy=False)
+            self._write_tile(ds, accumulator, out, core, poly_mask)
+            elapsed = max(0.001, time.time() - started)
+            done_units = completed_units + tile_idx
+            remain = int((total_units - done_units) * (elapsed / done_units))
+            self.progress.emit(progress_idx, channel_total, tile_idx, len(tiles),
+                               f"{info['group_name']}/{ch_name}", method, remain)
+        return "done"
+
+    @staticmethod
+    def _write_tile(ds, accumulator, out, core, poly_mask):
+        """One corrected core into level 0, and into the coarse plane while
+        the pixels are still in hand (level 0 is never re-read)."""
+        y0, y1, x0, x1 = core
+        if poly_mask is not None:
+            out = out.copy()
+            out[~poly_mask[y0:y1, x0:x1]] = 0
+        ds[y0:y1, x0:x1] = out
+        if accumulator is not None:
+            accumulator.add(out, y0, x0)
 
     @staticmethod
     def _discard_partial(zarr_path, incremental, group, ch_name):
@@ -2362,83 +2417,72 @@ class WsiCorrectionWorker(QThread):
                     print(f"[WsiCorrectionWorker] processing channel={ch_name} method={method}")
                     overlap = method_overlap(method, param)
                     tiles = list(_tile_slices(roi_h, roi_w, 4096, overlap))
-                    # THIS CHANNEL'S PLANE GOES FIRST. Its level 0 is about
-                    # to be rewritten, so the plane beside it stops being
-                    # true at the first tile written below.
-                    self._drop_plane(sidecar_path, info["group_name"], ch_name)
-                    accumulator = None
-                    if level_stride is not None:
-                        accumulator = _CoarsePlaneAccumulator(
-                            info["bbox"], level_stride[1])
-                    ds = group.create_dataset(
-                        ch_name,
-                        shape=(roi_h, roi_w),
-                        chunks=(min(1024, roi_h), min(1024, roi_w)),
-                        dtype=np.float32,
-                        overwrite=True,
-                    )
-                    # v14.5a: per-channel source identity (metadata only — never
-                    # touches array data/shape). channel_index from the loader's
-                    # channel map; None if unavailable (name/key/shape/dtype still
-                    # recorded).
-                    stamp_corrected_channel_identity(
-                        ds,
-                        channel_name=ch_name,
-                        channel_index=self.loader.ch_map.get(ch_name),
-                        correction_method=method,
-                        roi_name=info["roi_name"],
-                        roi_bbox_fullres=info["bbox"],
-                        correction_param_name=(
-                            "tophat_radius" if method == "tophat" else "cucim_sigma"),
-                        correction_param_value=int(param),
-                    )
-
-                    for tile_idx, (core, padded, crop) in enumerate(tiles, start=1):
-                        if self._cancel_requested:
-                            # Checked per TILE, not per channel: in Full-WSI
-                            # mode one channel is the whole slide, and a
-                            # cancel that waited for it was a cancel that did
-                            # nothing for minutes. The channel in progress is
-                            # partial and is dropped; a fresh save drops the
-                            # whole zarr, an incremental save keeps the
-                            # channels that were already complete before this
-                            # run and drops only the partial dataset.
-                            self._discard_partial(zarr_path, incremental, group, ch_name)
-                            self.canceled.emit(zarr_path)
-                            return
-                        y0, y1, x0, x1 = core
-                        py0, py1, px0, px1 = padded
-                        cy0, cy1, cx0, cx1 = crop
-                        raw = self.loader._read_roi_zarr(
-                            self.loader.ch_map[ch_name],
-                            roi_y0 + py0, roi_y0 + py1,
-                            roi_x0 + px0, roi_x0 + px1,
-                        ).astype(np.float32, copy=False)
-                        if method == "tophat":
-                            corr = _apply_tophat_cpu(raw, param)
-                        else:
-                            corr = _apply_cucim_or_cpu(raw, param, prefer_gpu=CUCIM_AVAILABLE)
-                        out = corr[cy0:cy1, cx0:cx1].astype(np.float32, copy=False)
-                        if poly_mask is not None:
-                            out = out.copy()
-                            out[~poly_mask[y0:y1, x0:x1]] = 0
-                        ds[y0:y1, x0:x1] = out
-                        if accumulator is not None:
-                            # The pixels that were just written, while they
-                            # are still in hand. Level 0 is never re-read.
-                            accumulator.add(out, y0, x0)
-                        elapsed = max(0.001, time.time() - started)
-                        done_units = completed_units + tile_idx
-                        remain = int((total_units - done_units) * (elapsed / done_units))
-                        self.progress.emit(
-                            progress_idx,
-                            channel_total,
-                            tile_idx,
-                            len(tiles),
-                            f"{info['group_name']}/{ch_name}",
-                            method,
-                            remain,
+                    # Block S0P: ONE backend for the whole channel, chosen
+                    # here; a GPU failure part-way discards the channel and
+                    # computes it again on the CPU from tile 0 -- never a
+                    # channel half square-footprint, half disk.
+                    path = compute_path(method)
+                    while True:
+                        # THIS CHANNEL'S PLANE GOES FIRST. Its level 0 is about
+                        # to be rewritten, so the plane beside it stops being
+                        # true at the first tile written below.
+                        self._drop_plane(sidecar_path, info["group_name"], ch_name)
+                        accumulator = None
+                        if level_stride is not None:
+                            accumulator = _CoarsePlaneAccumulator(
+                                info["bbox"], level_stride[1])
+                        ds = group.create_dataset(
+                            ch_name,
+                            shape=(roi_h, roi_w),
+                            chunks=(min(1024, roi_h), min(1024, roi_w)),
+                            dtype=np.float32,
+                            overwrite=True,
                         )
+                        # v14.5a: per-channel source identity (metadata only — never
+                        # touches array data/shape). channel_index from the loader's
+                        # channel map; None if unavailable (name/key/shape/dtype still
+                        # recorded).
+                        stamp_corrected_channel_identity(
+                            ds,
+                            channel_name=ch_name,
+                            channel_index=self.loader.ch_map.get(ch_name),
+                            correction_method=method,
+                            roi_name=info["roi_name"],
+                            roi_bbox_fullres=info["bbox"],
+                            correction_param_name=(
+                                "tophat_radius" if method == "tophat" else "cucim_sigma"),
+                            correction_param_value=int(param),
+                        )
+                        try:
+                            outcome = self._correct_channel(
+                                ds, accumulator, tiles, ch_name, method, param, path,
+                                info, roi_y0, roi_x0, poly_mask,
+                                (progress_idx, channel_total, completed_units,
+                                 total_units, started))
+                        except GpuBackendFailed as exc:
+                            print(f"[WsiCorrectionWorker] {ch_name}: {exc}; the channel "
+                                  f"is discarded and computed again on the CPU from tile 0")
+                            if ch_name in group:
+                                del group[ch_name]
+                            path = "cpu"
+                            continue
+                        break
+                    if outcome == "canceled":
+                        # Checked per TILE, not per channel: in Full-WSI
+                        # mode one channel is the whole slide, and a
+                        # cancel that waited for it was a cancel that did
+                        # nothing for minutes. The channel in progress is
+                        # partial and is dropped; a fresh save drops the
+                        # whole zarr, an incremental save keeps the
+                        # channels that were already complete before this
+                        # run and drops only the partial dataset.
+                        self._discard_partial(zarr_path, incremental, group, ch_name)
+                        self.canceled.emit(zarr_path)
+                        return
+                    # Block S0P: which backend made these pixels -- part of
+                    # the incremental-reuse signature.
+                    ds.attrs["bg_compute_path"] = path
+                    ds.attrs["tophat_footprint"] = tophat_footprint(method, path)
 
                     # WHICH WRITE THIS IS. Minted once per channel per real
                     # recomputation, after its level 0 is whole: the static

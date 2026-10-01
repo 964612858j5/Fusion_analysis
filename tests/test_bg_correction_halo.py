@@ -80,9 +80,11 @@ def test_legacy_zarr_without_version_is_reprocessed(tmp_path):
     from block01.core.bg_correction import BG_CORRECTION_ALGO_VERSION
     path = _make_corrected_zarr(tmp_path, {
         "correction_method": "cucim", "correction_param_value": 50})
+    from block01.core.bg_correction import current_compute_signature
     sigs, bboxes = read_corrected_zarr_state(path)
-    assert sigs["CD3"] == ("cucim", 50, "1")              # legacy -> "1"
-    current = ("cucim", 50, BG_CORRECTION_ALGO_VERSION)
+    # legacy -> version "1"; no backend recorded (block S0P) -> never equal
+    assert sigs["CD3"] == ("cucim", 50, "1", None, "<unrecorded>")
+    current = ("cucim", 50, BG_CORRECTION_ALGO_VERSION) + current_compute_signature("cucim")
     assert sigs["CD3"] != current                          # -> reprocess
 
 
@@ -90,11 +92,14 @@ def test_current_version_zarr_is_skipped(tmp_path):
     """Same method+param+current version -> incremental save may skip."""
     from block01.ui.step0.search_ctrl import read_corrected_zarr_state
     from block01.core.bg_correction import BG_CORRECTION_ALGO_VERSION
+    from block01.core.bg_correction import current_compute_signature
+    here = current_compute_signature("cucim")          # block S0P: this machine's backend
     path = _make_corrected_zarr(tmp_path, {
         "correction_method": "cucim", "correction_param_value": 50,
-        "bg_correction_algo_version": BG_CORRECTION_ALGO_VERSION})
+        "bg_correction_algo_version": BG_CORRECTION_ALGO_VERSION,
+        "bg_compute_path": here[0], "tophat_footprint": here[1]})
     sigs, _ = read_corrected_zarr_state(path)
-    assert sigs["CD3"] == ("cucim", 50, BG_CORRECTION_ALGO_VERSION)
+    assert sigs["CD3"] == ("cucim", 50, BG_CORRECTION_ALGO_VERSION) + here
 
 
 def test_stamp_writes_algo_version(tmp_path):

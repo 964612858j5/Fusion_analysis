@@ -142,3 +142,98 @@ def test_array_results_are_delivered_untouched():
         return data[i].copy()
     for a, b in zip(bp.ordered_results(task, range(6), 4), data):
         assert np.array_equal(a, b)
+
+
+# ── segment 2: one backend per channel (P7) and the reuse signature (P8) ─
+
+zarr = pytest.importorskip("zarr")
+
+
+class _Loader:
+    """A fake slide: 3 tiles of 4096 rows, deterministic pixels per page."""
+
+    def __init__(self, h=9000, w=96):
+        self.shape = (h, w)
+        self.ch_map = {"DAPI": 0, "CD3": 1, "CD20": 2}
+        self.filepath = "/fake/slide.ome.tif"
+        rng = np.random.default_rng(7)
+        self._pages = {p: (rng.random((h, w), dtype=np.float32) * 200) for p in range(3)}
+        self.reads = 0
+
+    def _read_roi_zarr(self, page_idx, y0, y1, x0, x1):
+        self.reads += 1
+        return self._pages[page_idx][y0:y1, x0:x1].copy()
+
+
+def _cfg(method="tophat"):
+    return {"channel_decisions": {"CD3": method},
+            "method_params": {"tophat_radius": 3, "cucim_sigma": 4}, "channel_params": {}}
+
+
+def _roi(h=9000, w=96):
+    return {"name": "R", "bbox_fullres": [0, h, 0, w], "polygon_fullres": None, "shape": [h, w]}
+
+
+def _save(out_dir, loader=None, method="tophat", **kw):
+    from block01.ui.step0 import search_ctrl as sc
+    loader = loader or _Loader()
+    w = sc.WsiCorrectionWorker(loader, str(out_dir), _cfg(method), rois=[_roi()], **kw)
+    got = {"finished": [], "error": [], "canceled": []}
+    w.finished.connect(lambda p, d: got["finished"].append(p))
+    w.error.connect(got["error"].append)
+    w.canceled.connect(got["canceled"].append)
+    w.run()
+    assert got["error"] == [], got["error"]
+    return w, got, zarr.open_group(str(out_dir / "corrected_channels.zarr"), mode="r")["R"]["CD3"]
+
+
+@pytest.mark.parametrize("method", ["tophat", "cucim"])
+def test_the_backend_is_recorded_on_the_array(tmp_path, method):
+    from block01.core.bg_correction import current_compute_signature
+    _w, _g, arr = _save(tmp_path, method=method)
+    assert (arr.attrs["bg_compute_path"], arr.attrs["tophat_footprint"]) == \
+        current_compute_signature(method)
+
+
+def test_a_gpu_failure_mid_channel_recomputes_the_whole_channel_on_the_cpu(tmp_path, monkeypatch):
+    """P7: never half GPU, half CPU."""
+    from block01.core import bg_correction as bg
+    from block01.ui.step0 import search_ctrl as sc
+    _w, _g, ref = _save(tmp_path / "cpu")
+    reference = np.asarray(ref[...])
+    calls = []
+
+    def fake_correct(raw, method, param, path):
+        calls.append(path)
+        if path == "gpu":
+            if sum(1 for c in calls if c == "gpu") == 2:       # the 2nd GPU tile fails
+                raise bg.GpuBackendFailed("simulated")
+            return bg.correct_tile(raw, method, param, "cpu") + 1000.0   # "GPU" pixels
+        return bg.correct_tile(raw, method, param, "cpu")
+    monkeypatch.setattr(sc, "compute_path", lambda method: "gpu")
+    monkeypatch.setattr(sc, "correct_tile", fake_correct)
+    _w, got, arr = _save(tmp_path / "gpu")
+    assert got["finished"]
+    assert calls[:2] == ["gpu", "gpu"] and set(calls[2:]) == {"cpu"}
+    assert (arr.attrs["bg_compute_path"], arr.attrs["tophat_footprint"]) == ("cpu", "disk")
+    assert np.array_equal(np.asarray(arr[...]), reference)        # no GPU tile left
+
+
+def test_reuse_needs_the_same_backend(tmp_path):
+    """P8: a product without the new attrs, or made on another backend, is
+    not reused; the same backend is."""
+    from block01.core.bg_correction import BG_CORRECTION_ALGO_VERSION, current_compute_signature
+    from block01.ui.step0.search_ctrl import read_corrected_zarr_state
+    _save(tmp_path)
+    zp = str(tmp_path / "corrected_channels.zarr")
+    current = ("tophat", 3, BG_CORRECTION_ALGO_VERSION) + current_compute_signature("tophat")
+    assert read_corrected_zarr_state(zp)[0]["CD3"] == current             # same -> skipped
+    g = zarr.open_group(zp, mode="r+")["R"]["CD3"]
+    del g.attrs["bg_compute_path"]
+    del g.attrs["tophat_footprint"]
+    assert read_corrected_zarr_state(zp)[0]["CD3"] != current             # pre-S0P -> recompute
+    g.attrs["bg_compute_path"], g.attrs["tophat_footprint"] = "gpu", "square"
+    other = read_corrected_zarr_state(zp)[0]["CD3"]
+    assert other[3:] == ("gpu", "square")
+    if current_compute_signature("tophat") == ("cpu", "disk"):
+        assert other != current                                           # GPU product on a CPU machine

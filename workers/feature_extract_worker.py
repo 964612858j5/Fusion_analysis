@@ -33,6 +33,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from ..core import quant_engine as qe
 from ..core import quant_sources as qs
+from ..core.provenance import register_step4
 
 INTEGER_COLUMNS = qe.INTEGER_COLUMNS
 EMPTY_IDS_LISTED_UP_TO = 1000
@@ -272,6 +273,7 @@ def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions
             os.replace(part, final)
             renamed.append(final)
         ok = True
+        register_step4(h5_path, job, prov)         # block A3: after the commit, never raises
     finally:
         for p in partials:
             if os.path.exists(p):

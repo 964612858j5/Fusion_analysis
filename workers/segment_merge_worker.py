@@ -26,6 +26,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from ..core import (label_ownership, label_pyramid, nuclei_pairing, preseg_contract,
                     preseg_input, seam_merge)
 from ..core.io_loader import OMETIFFLoader
+from ..core.provenance import register_segmentation_run
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
@@ -3497,6 +3498,7 @@ class SegmentMergeWorker(QThread):
                         "status": "done",
                         "meta_path": os.path.join(rel_run_path, "segmentation_meta.json"),
                     })
+                    register_segmentation_run(self.output_dir, summary_meta)   # block A3
                     print(f"[Step2] run_id={self.result_id}")
                     print(f"[Step2] roi_id={self.roi_id}")
                     print(f"[Step2] method={self.method}")
@@ -4222,6 +4224,7 @@ class SegmentMergeWorker(QThread):
                     "status": "done",
                     "meta_path": os.path.join(rel_run_path, "segmentation_meta.json"),
                 })
+                register_segmentation_run(self.output_dir, meta)           # block A3
                 log.info("[Step2] updated roi_index latest_by_method")
 
             log.info(

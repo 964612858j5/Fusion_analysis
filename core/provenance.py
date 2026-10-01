@@ -372,14 +372,15 @@ def register_fused(zarr_path, raw_path, region, corrected_path="", corrected_use
         scope, flags = _scope(workspace_regions(ws, sid), region["name"],
                               region.get("bbox_fullres"))
         deps, unresolved = [sid], []
-        if via_loader and corrected_used:
-            unresolved.append({"role": "corrected_channels_via_loader",
-                               "channels": sorted(corrected_used), "path": corrected_path})
+        if via_loader:
+            # the page loader decided where each pixel came from: not knowable here
+            unresolved.append({"role": "pixels_via_loader", "path": corrected_path or ""})
         elif corrected_used:
             root = zarr.open_group(corrected_path, mode="r")
             gname = corrected_group(root, region["name"])
             for ch in sorted(corrected_used):
-                token_ch = _corrected_token(root[gname][ch].attrs) if gname else ""
+                token_ch = (_corrected_token(root[gname][ch].attrs)
+                            if gname and ch in root[gname] else "")
                 aid = corrected_artifact(project_dir, corrected_path, f"{gname}/{ch}", token_ch) \
                     if gname else None
                 if aid:

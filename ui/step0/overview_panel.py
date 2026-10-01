@@ -348,6 +348,19 @@ class FullFusionWorker(QThread):
         return {ch: ((corrected, ch) if ch in decided else (raw, int(self.loader.ch_map[ch])))
                 for ch in channels}
 
+    def _register_fused(self, zarr_path, ome_path, rname, bbox, channels):
+        """Block A3: this region's `fused` provenance entry, after it is
+        published. Auxiliary: logged on failure, never raised. The corrected
+        channels it depends on are the decided ones with a committed window
+        (the others were read but take no part, `_channel_norm`)."""
+        from ...core.provenance import register_fused
+        decided = sorted(ch for ch in channels if ch in self._corrected_decisions)
+        used = [ch for ch in decided if self._remap_params.get(ch)]
+        register_fused(zarr_path, ome_path, {"name": rname, "bbox_fullres": list(bbox)},
+                       corrected_path=self._corrected_path, corrected_used=used,
+                       corrected_unused=[ch for ch in decided if ch not in used],
+                       via_loader=not self._use_sources)
+
     def _channel_norm(self, ch, arr):
         """One channel as a [0,1] signal, through its COMMITTED window.
 
@@ -710,6 +723,8 @@ class FullFusionWorker(QThread):
                 gc.collect()
                 self._publish_store(tmp_path, zarr_path)
                 self._tmp_stores.remove(tmp_path)
+                self._register_fused(zarr_path, ome_path, rname, (ry0, ry1, rx0, rx1),
+                                     all_channels)
 
                 zarr_paths[rname] = zarr_path
                 all_meta.append({

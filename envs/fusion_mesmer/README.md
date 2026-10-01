@@ -10,7 +10,7 @@ as dependency sets (plan 7.10).
 | File | What it is |
 |---|---|
 | `conda-linux-64.lock` | conda part, explicit lock: exact package URLs and md5, linux-64 only (161 packages) |
-| `requirements-pip.txt` | pip part: every distribution pip installed, exact versions, installed with `--no-deps` (218 packages; anndata + array-api-compat added for Step4 h5ad, block S4-2) |
+| `requirements-pip.txt` | pip part: every distribution pip installed, exact versions, installed with `--no-deps` (219 packages; anndata + array-api-compat added for Step4 h5ad, block S4-2; pyarrow 25.0.1 for the object layer's Parquet tables, block A4 -- only `core/object_tables.py` imports it) |
 | `environment.yml` | human-readable export of both parts, for review and diffing only |
 | `models.json` | model manifest: where each engine loads its weights from, size and SHA-256 of every file |
 

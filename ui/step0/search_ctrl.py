@@ -47,6 +47,7 @@ from ...core.bg_correction import (
     resolve_effective_correction_params,
     stamp_corrected_channel_identity,
 )
+from ...core.bg_parallel import choose_workers, mem_available_bytes, ordered_results
 from ...core.io_loader import OMETIFFLoader
 from ...viewer import step1_source as sources
 from ...utils.segmentation_config import (
@@ -2156,27 +2157,50 @@ class WsiCorrectionWorker(QThread):
                          info, roi_y0, roi_x0, poly_mask, progress):
         """Every tile of one channel on ONE backend, written and accumulated in
         tile order. Returns "done" or "canceled"; a GPU failure raises
-        `GpuBackendFailed` (the caller recomputes the channel on the CPU)."""
+        `GpuBackendFailed` (the caller recomputes the channel on the CPU).
+
+        Block S0P: on the CPU backend the tiles are read one after another
+        and corrected on up to `choose_workers(...)` threads
+        (`core.bg_parallel`); the GPU backend stays one tile at a time. The
+        results are written here, in tile order, so the product and its
+        coarse plane are bitwise the serial ones. A cancel starts no new tile
+        and writes nothing more."""
         progress_idx, channel_total, completed_units, total_units, started = progress
-        for tile_idx, (core, padded, crop) in enumerate(tiles, start=1):
-            if self._cancel_requested:
-                return "canceled"
-            y0, y1, x0, x1 = core
+        page = self.loader.ch_map[ch_name]
+        n = 1 if path == "gpu" else choose_workers(os.cpu_count(), len(tiles),
+                                                   mem_available_bytes())
+
+        def task(tile, read_done):
+            _core, padded, crop = tile
             py0, py1, px0, px1 = padded
-            cy0, cy1, cx0, cx1 = crop
             raw = self.loader._read_roi_zarr(
-                self.loader.ch_map[ch_name],
-                roi_y0 + py0, roi_y0 + py1,
-                roi_x0 + px0, roi_x0 + px1,
+                page, roi_y0 + py0, roi_y0 + py1, roi_x0 + px0, roi_x0 + px1,
             ).astype(np.float32, copy=False)
+            read_done()
             corr = correct_tile(raw, method, param, path)
-            out = corr[cy0:cy1, cx0:cx1].astype(np.float32, copy=False)
-            self._write_tile(ds, accumulator, out, core, poly_mask)
-            elapsed = max(0.001, time.time() - started)
-            done_units = completed_units + tile_idx
-            remain = int((total_units - done_units) * (elapsed / done_units))
-            self.progress.emit(progress_idx, channel_total, tile_idx, len(tiles),
-                               f"{info['group_name']}/{ch_name}", method, remain)
+            cy0, cy1, cx0, cx1 = crop
+            return corr[cy0:cy1, cx0:cx1].astype(np.float32, copy=True)
+
+        self._tile_stats = {}
+        results = ordered_results(task, tiles, n,
+                                  should_stop=lambda: self._cancel_requested,
+                                  stats=self._tile_stats)
+        written = 0
+        try:
+            for tile_idx, out in enumerate(results, start=1):
+                if self._cancel_requested:
+                    return "canceled"
+                self._write_tile(ds, accumulator, out, tiles[tile_idx - 1][0], poly_mask)
+                written = tile_idx
+                elapsed = max(0.001, time.time() - started)
+                done_units = completed_units + tile_idx
+                remain = int((total_units - done_units) * (elapsed / done_units))
+                self.progress.emit(progress_idx, channel_total, tile_idx, len(tiles),
+                                   f"{info['group_name']}/{ch_name}", method, remain)
+        finally:
+            results.close()
+        if written < len(tiles):
+            return "canceled"
         return "done"
 
     @staticmethod

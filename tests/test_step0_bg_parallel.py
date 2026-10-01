@@ -5,6 +5,7 @@ Segment 1: the bounded in-order executor (`core/bg_parallel.py`) and the
 worker-count rule, on their own.
 """
 
+import os
 import threading
 import time
 
@@ -237,3 +238,150 @@ def test_reuse_needs_the_same_backend(tmp_path):
     assert other[3:] == ("gpu", "square")
     if current_compute_signature("tophat") == ("cpu", "disk"):
         assert other != current                                           # GPU product on a CPU machine
+
+
+# ── segment 3: the Save loop on the executor (P1, P3, P4, P5) ───────────
+
+tifffile = pytest.importorskip("tifffile")
+SH, SW = 9000, 4500
+
+
+@pytest.fixture(scope="module")
+def pyramid_slide(tmp_path_factory):
+    """A real 3-level OME-TIFF, so the coarse plane is written too."""
+    rng = np.random.default_rng(11)
+    data = rng.integers(0, 255, (3, SH, SW), dtype=np.uint8)
+    path = tmp_path_factory.mktemp("s0p") / "slide.ome.tif"
+    with tifffile.TiffWriter(str(path), ome=True) as tw:
+        tw.write(data, subifds=2, tile=(512, 512),
+                 metadata={"axes": "CYX", "Channel": {"Name": ["DAPI", "CD3", "CD20"]}})
+        cur = data
+        for _ in range(2):
+            cur = np.ascontiguousarray(cur[:, ::4, ::4])
+            tw.write(cur, subfiletype=1, tile=(512, 512))
+    return str(path)
+
+
+# an ROI whose origin is not a multiple of the coarse stride, with a polygon
+ROI = {"name": "R", "bbox_fullres": [37, 8937, 61, 4461], "shape": [8900, 4400],
+       "polygon_fullres": [(61, 37), (4461, 37), (4461, 8937), (2000, 8000), (61, 8937)]}
+
+
+def _real_save(out_dir, slide, method, monkeypatch, n=None, hook=None):
+    from block01.core.io_loader import OMETIFFLoader
+    from block01.ui.step0 import search_ctrl as sc
+    if n is not None:
+        monkeypatch.setattr(sc, "choose_workers", lambda cpu, tiles, avail: n)
+    loader = OMETIFFLoader(slide)
+    cfg = {"channel_decisions": {"CD3": method},
+           "method_params": {"tophat_radius": 3, "cucim_sigma": 6}, "channel_params": {}}
+    w = sc.WsiCorrectionWorker(loader, str(out_dir), cfg, rois=[dict(ROI)])
+    got = {"finished": [], "error": [], "canceled": []}
+    w.finished.connect(lambda p, d: got["finished"].append(p))
+    w.error.connect(got["error"].append)
+    w.canceled.connect(got["canceled"].append)
+    if hook:
+        hook(w)
+    w.run()
+    assert got["error"] == [], got["error"]
+    return w, got
+
+
+def _product(out_dir):
+    root = zarr.open_group(str(out_dir / "corrected_channels.zarr"), mode="r")
+    arr = root["R"]["CD3"]
+    plane_root = str(out_dir / "corrected_coarse.zarr")
+    planes = {}
+    if os.path.isdir(plane_root):
+        for base, _d, files in os.walk(plane_root):
+            if ".zarray" in files:
+                planes[os.path.relpath(base, plane_root)] = np.asarray(zarr.open(base, mode="r"))
+    attrs = {k: v for k, v in arr.attrs.items() if k not in ("source_identity", "written_at")}
+    return np.asarray(arr[...]), planes, attrs
+
+
+
+def _independent_reference(slide, method, param):
+    """What the pre-S0P worker computed, rebuilt here from scratch: each
+    4096 tile's padded window read straight from the slide, corrected with
+    the pre-S0P per-tile functions, cropped, zeroed outside the polygon."""
+    from block01.core import bg_correction as bg
+    from block01.ui.step0.search_ctrl import WsiCorrectionWorker
+    y0, y1, x0, x1 = ROI["bbox_fullres"]
+    h, w = y1 - y0, x1 - x0
+    with tifffile.TiffFile(slide) as tf:
+        page = tf.series[0].levels[0].asarray()[1]                 # CD3
+    poly = WsiCorrectionWorker._poly_mask(ROI["polygon_fullres"], y0, x0, h, w)
+    out = np.zeros((h, w), np.float32)
+    for core, padded, crop in bg._tile_slices(h, w, 4096, bg.method_overlap(method, param)):
+        py0, py1, px0, px1 = padded
+        raw = page[y0 + py0:y0 + py1, x0 + px0:x0 + px1].astype(np.float32)
+        corr = (bg._apply_tophat_cpu(raw, param) if method == "tophat"
+                else bg._apply_cucim_or_cpu(raw, param, prefer_gpu=False))
+        cy0, cy1, cx0, cx1 = crop
+        c0, c1, c2, c3 = core
+        out[c0:c1, c2:c3] = corr[cy0:cy1, cx0:cx1]
+    out[~poly] = 0
+    return out
+
+
+@pytest.mark.parametrize("method", ["tophat", "cucim"])
+def test_parallel_save_is_bitwise_the_serial_one(tmp_path, pyramid_slide, monkeypatch, method):
+    """P1: product, coarse plane and attrs (but the per-write token) equal."""
+    _real_save(tmp_path / "serial", pyramid_slide, method, monkeypatch, n=1)
+    ref = _product(tmp_path / "serial")
+    assert ref[1], "the coarse plane must be written for this slide"
+    # and the serial path itself is what the pre-S0P worker computed
+    assert np.array_equal(ref[0], _independent_reference(
+        pyramid_slide, method, 3 if method == "tophat" else 6))
+    for n in (2, 4):
+        w, _ = _real_save(tmp_path / f"n{n}", pyramid_slide, method, monkeypatch, n=n)
+        got = _product(tmp_path / f"n{n}")
+        assert np.array_equal(got[0], ref[0])
+        assert sorted(got[1]) == sorted(ref[1])
+        assert all(np.array_equal(got[1][k], ref[1][k]) for k in ref[1])
+        assert got[2] == ref[2]
+        assert w._tile_stats["workers"] == n
+        assert 1 < w._tile_stats["max_in_flight"] <= n          # P4: bounded, and parallel
+
+
+def test_a_cancel_while_tiles_compute_starts_nothing_and_writes_nothing_more(
+        tmp_path, pyramid_slide, monkeypatch):
+    """P3 at the worker: cancel after the 2nd result with n tiles in flight."""
+    from block01.ui.step0 import search_ctrl as sc
+    writes = []
+    real_write = sc.WsiCorrectionWorker._write_tile
+
+    def spy(ds, acc, out, core, poly):
+        writes.append(core)
+        return real_write(ds, acc, out, core, poly)
+    monkeypatch.setattr(sc.WsiCorrectionWorker, "_write_tile", staticmethod(spy))
+
+    def hook(w):
+        w.progress.connect(lambda *a: w.stop_after_current_channel() if a[2] == 2 else None)
+    t0 = __import__("time").perf_counter()
+    w, got = _real_save(tmp_path, pyramid_slide, "tophat", monkeypatch, n=4, hook=hook)
+    assert got["canceled"] and not got["finished"]
+    assert len(writes) == 2                                      # nothing written after the cancel
+    assert w._tile_stats["submitted"] <= 2 + 4                   # nothing started beyond the window
+    assert not os.path.exists(tmp_path / "corrected_channels.zarr")     # a fresh save drops it
+    assert not [t for t in __import__("threading").enumerate() if t.name.startswith("bg-tiles")]
+    assert __import__("time").perf_counter() - t0 < 120
+
+
+def test_the_gpu_backend_stays_one_tile_at_a_time(tmp_path, monkeypatch):
+    """P5."""
+    from block01.core import bg_correction as bg
+    from block01.ui.step0 import search_ctrl as sc
+    order = []
+
+    def fake(raw, method, param, path):
+        order.append(path)
+        return bg.correct_tile(raw, method, param, "cpu")
+    monkeypatch.setattr(sc, "compute_path", lambda method: "gpu")
+    monkeypatch.setattr(sc, "correct_tile", fake)
+    monkeypatch.setattr(sc, "choose_workers", lambda cpu, tiles, avail: 4)
+    w, got, arr = _save(tmp_path)
+    assert got["finished"] and set(order) == {"gpu"}
+    assert w._tile_stats["workers"] == 1 and w._tile_stats["max_in_flight"] == 1
+    assert arr.attrs["bg_compute_path"] == "gpu" and arr.attrs["tophat_footprint"] == "square"

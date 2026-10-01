@@ -90,6 +90,14 @@ Insert after the A8 row (week numbers of the (b) branch):
 
 **Progress** (a record, appended): **A2c done 2026-10-01** — `690ba08` (native-tile patch P1), `8da231c` (Step4 → PixelSource), `028480d` (FullFusionWorker → PixelSource); bitwise equal to the pre-migration path on test1, Step4 0.98×, no new regression failures; the two A2c blockers are resolved for the fusion path (`docs/v16_A2c_application.md` §11). Real-machine check passed 2026-10-01 (GUI fusion and Step4 bitwise equal to the pre-A2c code on the same settings). **A3 + A4 automatic acceptance passed 2026-10-01** — `07f57a7`, `f55be0f`, `6e4616c` (identity / coordinates / provenance / artifact graph v0), `eb1a575` (pyarrow), `d000579` (object layer v1); Step4 and fusion bitwise unchanged on test1, Step4 1.01×, no new regression failures (`docs/v16_A3A4_application.md` §13). Real-machine check passed 2026-10-01 (GUI Step0 → fusion with a corrected channel → Step2 → Step4; the artifact graph answers the Step4 lineage through `depends_on`; Step4 bytewise equal to the pre-A3 code; object tables from the result).
 
+**User-inserted blocks** (ruled by the user 2026-10-01; not stages of this plan, recorded here instead of a plan revision, stop rule 9). They run after A3 + A4 and before A6, in this order:
+
+| Block | What | Application | State |
+|---|---|---|---|
+| **S2T** | Step2 tile-status display fix; opt-in skipping of tiles without tissue; sharper Step2 overview | `docs/v16_Step2_tiles_application.md` (v2, approved) | implemented `4784401`, `935d809`; regression and real-machine check pending |
+| **S0P** | Step0 background correction (tophat / cucim) in parallel on the CPU; one backend per channel; backend in the attrs and the incremental-reuse signature | `docs/v16_Step0_cpu_parallel_application.md` (v2; rulings 3 / 4 after the §2.4 benchmark) | application |
+| S0G *(later, needs a GPU machine)* | GPU tophat with the same disk footprint as the CPU path | — | backlog |
+
 The rows after it move by the time A9 actually takes. If A9 passes its gate early, it stops and the rest moves up.
 
 **Cap (ruled, option (α)):** A9 hard cap = **8 development working days + 2 real-machine days**; the overall v16 cap = **10 weeks** from the approval of v2.3, as the upper decision point, with the aim of finishing clearly earlier. v2.3 §13 rule 5 still applies: TMA starts as soon as gates 1–10 pass; the cap is not extended silently. If A9 passes its gate early, it stops and the rest moves up.

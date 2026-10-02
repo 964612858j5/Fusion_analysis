@@ -646,7 +646,10 @@ def test_the_saved_run_writes_the_snapshots_mapping(app, tmp_path, monkeypatch):
     try:
         monkeypatch.setattr(mw, "OUTPUT_DIR", str(tmp_path))
         monkeypatch.setattr(mw, "OME_TIFF_FILE", w.loader.filepath)
-        mapping = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
+        # Every weighted channel has a window, as a real snapshot does (the
+        # nucleus too): Generate refuses a weighted channel without one.
+        mapping = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0},
+                   "DAPI": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
         monkeypatch.setattr(type(w), "_display_mapping",
                             lambda self, *a, **k: mapping)
         # What reading the mapping back through the handoff would return: the
@@ -654,8 +657,6 @@ def test_the_saved_run_writes_the_snapshots_mapping(app, tmp_path, monkeypatch):
         monkeypatch.setattr(type(w), "_load_step0_remap_params",
                             lambda self: ({"CD3": {"min": 0.0, "max": 0.1,
                                                    "gamma": 1.0}}, "stale.json"))
-        monkeypatch.setattr(type(w), "_commit_display_mapping_for_save",
-                            lambda self: (True, "committed"))
         monkeypatch.setattr(type(w), "_start_fusion_worker",
                             lambda self, *a, **k: None)
 
@@ -734,18 +735,14 @@ def test_an_old_result_selected_later_keeps_its_own_hash(app, tmp_path,
         w.close()
 
 
-def test_a_save_keeps_the_settings_restorable_after_it_republishes(app, tmp_path,
-                                                                   monkeypatch):
-    """The real order, end to end.
+def test_generate_leaves_step0s_handoff_alone_and_the_settings_restorable(
+        app, tmp_path, monkeypatch):
+    """Block A6 follow-up (user ruling 2026-10-02), the real order end to end.
 
-    Save Fusion Settings binds the snapshot to the manifest as it is. A Save
-    then commits the display mapping, which republishes that manifest in place
-    — same path, new contents — and fuses. Without following that republish the
-    settings just saved would be refused by the next session's restore while
-    this window went on saying "saved".
-
-    The numbers did not change, so the hash does not either: the search that ran
-    on these settings is still a search on these settings.
+    Save Fusion Settings binds the snapshot to the manifest as it is. Generate
+    fuses with that snapshot and touches nothing of Step0: the manifest and
+    Step0's Intensity files keep their bytes, so the snapshot is still bound
+    to the handoff as it is -- no rebind -- and a fresh session restores it.
     """
     from block01.ui import main_window as mw
 
@@ -757,15 +754,20 @@ def test_a_save_keeps_the_settings_restorable_after_it_republishes(app, tmp_path
         monkeypatch.setattr(type(w), "_start_fusion_worker",
                             lambda self, *a, **k: None)
 
+        reached = []
+
         class _NoDialog:
+            # reached only after the point where the old write-back sat
             def __init__(self, *a, **k):
-                pass
+                reached.append(1)
 
             def exec_(self):
                 return QtWidgets.QDialog.Rejected
         monkeypatch.setattr(mw, "TileSelectDialog", _NoDialog)
 
-        # 1. save the settings, 2. search on them
+        mapping = {"CD3": {"min": 0.0, "max": 208.0, "gamma": 1.0},
+                   "DAPI": {"min": 0.0, "max": 175.0, "gamma": 1.0}}
+        monkeypatch.setattr(type(w), "_display_mapping", lambda self, *a, **k: mapping)
         _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         assert w._commit_fusion_settings() is True
@@ -774,91 +776,72 @@ def test_a_save_keeps_the_settings_restorable_after_it_republishes(app, tmp_path
         result = dict(seen["args"]["tasks"][0][2], _phase=2,
                       method="cellpose_wholecell_fusion", diameter=30)
         w._on_param_sel(result)
-        assert w._params_match_committed_settings() is True
+        _chosen(w)
 
-        # 3. Generate: the mapping commit republishes the manifest in place.
-        def _commit_and_republish(self):
-            _publish_manifest(tmp_path, self.loader, remap_hash="remap-2")
-            return True, "committed"
-        monkeypatch.setattr(type(w), "_commit_display_mapping_for_save",
-                            _commit_and_republish)
-
-        _chosen(w)          # block E: Save takes a chosen result only
+        manifest = w.step0_output["step0_manifest_path"]
+        step0_dir = os.path.dirname(manifest)
+        before = {n: open(os.path.join(step0_dir, n), "rb").read()
+                  for n in sorted(os.listdir(step0_dir))
+                  if os.path.isfile(os.path.join(step0_dir, n)) and not n.startswith("step1_")}
+        key_before = w._preseg_current()
         w._save()
+        w._save()                                   # a second Generate, too
+        # the pre-segmentation identity did not move: a chosen result stays
+        # usable for the next Generate (the real-machine G1 finding)
+        assert w._preseg_current() == key_before
+        after = {n: open(os.path.join(step0_dir, n), "rb").read()
+                 for n in sorted(os.listdir(step0_dir))
+                 if os.path.isfile(os.path.join(step0_dir, n)) and not n.startswith("step1_")}
+        assert len(reached) == 2                    # both Generates got through
+        assert after == before                      # Step0 untouched
 
-        # The hash is untouched, so the search result is still valid...
         assert w._committed_fusion_settings()["hash"] == saved_hash
         assert w._params_match_committed_settings() is True
-        assert w._fusion_settings_dirty() is False
+        w._display.fusion.install_committed_snapshot(None)
+        restored = w._restore_fusion_settings()
+        assert restored is not None and restored["hash"] == saved_hash
+    finally:
+        w.close()
 
-        # ...and a fresh session restores exactly this snapshot.
+
+
+
+def test_save_fusion_settings_writes_nothing_into_step0(app, tmp_path):
+    w = _window(app, tmp_path)
+    try:
+        step0_dir = os.path.dirname(w.step0_output["step0_manifest_path"])
+        before = {n: open(os.path.join(step0_dir, n), "rb").read()
+                  for n in sorted(os.listdir(step0_dir))
+                  if os.path.isfile(os.path.join(step0_dir, n)) and not n.startswith("step1_")}
+        _enable(w, "CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.7)
+        assert w._commit_fusion_settings() is True
+        after = {n: open(os.path.join(step0_dir, n), "rb").read()
+                 for n in sorted(os.listdir(step0_dir))
+                 if os.path.isfile(os.path.join(step0_dir, n)) and not n.startswith("step1_")}
+        assert after == before
+    finally:
+        w.close()
+
+
+def test_restored_settings_bring_their_windows_back_as_the_current_intensity(
+        app, tmp_path, monkeypatch):
+    """Q2a (user ruling 2026-10-02): on reopen Step1 shows the windows it was
+    saved with; they become the one current Intensity (through Step0's page,
+    which writes nothing to disk)."""
+    w = _window(app, tmp_path)
+    adopted = []
+    try:
+        mapping = {"CD3": {"min": 0.0, "max": 208.0, "gamma": 1.0}}
+        monkeypatch.setattr(type(w), "_display_mapping", lambda self, *a, **k: mapping)
+        _enable(w, "CD3", True)
+        assert w._commit_fusion_settings() is True
+        saved = w._committed_fusion_settings()
+        monkeypatch.setattr(w._step0, "adopt_intensity",
+                            lambda params, origin="": adopted.append(dict(params)) or True)
         w._display.fusion.install_committed_snapshot(None)
         restored = w._restore_fusion_settings()
         assert restored is not None
-        assert restored["hash"] == saved_hash
-        assert restored["handoff_identity"]["channel_remap_config_hash"] == "remap-2"
-    finally:
-        w.close()
-
-
-def test_a_rebind_that_cannot_be_written_fuses_nothing(app, tmp_path,
-                                                       monkeypatch,
-                                                       _no_modal_dialogs):
-    """Memory and disk must not disagree about which handoff the settings
-    belong to, so a rebind that cannot be written stops the Save and drops the
-    claim rather than fusing against a snapshot nothing could restore."""
-    from block01.ui import main_window as mw
-
-    w = _window(app, tmp_path)
-    try:
-        monkeypatch.setattr(mw, "OUTPUT_DIR", str(tmp_path))
-        fused = []
-        monkeypatch.setattr(type(w), "_start_fusion_worker",
-                            lambda self, *a, **k: fused.append(a))
-
-        class _NoDialog:
-            def __init__(self, *a, **k):
-                pass
-
-            def exec_(self):
-                return QtWidgets.QDialog.Rejected
-        # Unstubbed, this opens a real modal under offscreen Qt and the test
-        # hangs instead of failing.
-        monkeypatch.setattr(mw, "TileSelectDialog", _NoDialog)
-        _enable(w, "CD3", True)
-        w.config._rows["CD3"].spin.setValue(0.5)
-        w._commit_fusion_settings()
-        _chosen(w)
-
-        def _commit_and_republish(self):
-            _publish_manifest(tmp_path, self.loader, remap_hash="remap-2")
-            return True, "committed"
-        monkeypatch.setattr(type(w), "_commit_display_mapping_for_save",
-                            _commit_and_republish)
-        monkeypatch.setattr(type(w), "_write_fusion_settings",
-                            lambda self, snap: (False, OSError("read-only")))
-
-        w._save()
-
-        assert fused == []
-        assert w._committed_fusion_settings() is None
-        assert w._fusion_settings_dirty() is True
-        assert any("could not be tied" in str(a) for a in _no_modal_dialogs)
-    finally:
-        w.close()
-
-
-def test_a_republish_that_changes_nothing_leaves_the_snapshot_alone(app, tmp_path,
-                                                                   monkeypatch):
-    w = _window(app, tmp_path)
-    try:
-        _enable(w, "CD3", True)
-        w._commit_fusion_settings()
-        before = dict(w._committed_fusion_settings())
-
-        ok, why = w._rebind_fusion_settings_to_handoff()
-
-        assert ok is True and why == "unchanged"
-        assert w._committed_fusion_settings() == before
+        assert adopted == [saved["display_mapping"]]
     finally:
         w.close()

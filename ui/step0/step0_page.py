@@ -275,11 +275,6 @@ class Step0Page(QWidget):
     # purpose: it names the channel and nothing else, so another step can drop
     # exactly that channel's derived pixels instead of everything it holds.
     display_mapping_changed = pyqtSignal(str)
-    # The draft mapping has been WRITTEN and locked by a freshly published
-    # manifest. Deliberately a different signal from the one above: "the slider
-    # moved" and "the file on disk now says so" are different facts, and a
-    # listener that redraws on the first must not conclude the second.
-    display_mapping_committed = pyqtSignal(dict)
     # The published handoff no longer matches the geometry in memory and a
     # matching new manifest could NOT be published.  Separate from
     # `geometry_committed` (which means the opposite) and from
@@ -4968,168 +4963,10 @@ class Step0Page(QWidget):
                 draft[ch] = dict(auto)
         return draft
 
-    @staticmethod
-    def _file_bytes(path):
-        """The file's contents, or None when it does not exist."""
-        try:
-            with open(path, "rb") as f:
-                return f.read()
-        except OSError:
-            return None
-
-    @staticmethod
-    def _restore_file(path, previous):
-        """Put one file back the way it was, or remove it if it was not there.
-
-        Called when a commit failed part-way. Leaving a rewritten file behind
-        would leave the step0 directory describing something other than what
-        the published manifest was hashed over.
-        """
-        try:
-            if previous is None:
-                if os.path.exists(path):
-                    os.remove(path)
-                return
-            tmp = path + ".rollback"
-            with open(tmp, "wb") as f:
-                f.write(previous)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, path)
-        except Exception as exc:
-            print(f"[Step0] could not roll the remap config back: {exc}")
-
-    @staticmethod
-    def _mapping_file_holds(path, digest):
-        """True when `path` already contains exactly the mapping `digest` names.
-
-        Not merely "the file exists": a file left half-written by a killed
-        process would have the right name and the wrong contents, and reusing
-        it would publish a manifest hashed over something else.
-        """
-        if not os.path.exists(path):
-            return False
-        try:
-            return channel_remap_config_hash(load_channel_remap_config(path)) == digest
-        except Exception as exc:
-            print(f"[Step0] unreadable mapping file {path}: {exc}")
-            return False
-
-    @staticmethod
-    def _write_mapping_file(cfg, path):
-        """Write one mapping file so it appears complete or not at all."""
-        tmp = path + ".tmp"
-        save_channel_remap_config(cfg, tmp)
-        with open(tmp, "rb+") as f:
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-
-    def commit_display_mapping(self, channels=None, required=None):
-        """Freeze the draft, write it, and republish the manifest — or nothing.
-
-        The frozen mapping goes into a NEW file named after its own hash, so
-        nothing that the published manifest depends on is overwritten while the
-        commit is in flight. The manifest, published atomically, is what names
-        that file: until it lands the previous handoff is intact, and a process
-        that dies in between leaves an unreferenced file and nothing else. The
-        canonical copy is refreshed afterwards for the Intensity workbench,
-        which is not part of the handoff identity.
-
-        Returns (committed, reason).
-        """
-        published = self._published_handoff()
-        if published is None:
-            return False, "no_published_handoff"
-        step0_dir, manifest_path, zarr_path, config, manifest = published
-        if not os.path.exists(zarr_path):
-            return False, "corrected_zarr_missing"
-
-        rois = self._standard_rois()
-        if self._roi_context_signature(rois) != self._roi_context_sig:
-            return False, "roi_geometry_changed"
-
-        snapshot = self.frozen_display_mapping(channels)
-        # A channel that will carry weight into the fusion MUST have a window.
-        # Without one the screen would still draw it and the fusion would leave
-        # it out, so this refuses loudly and names the channels instead of
-        # producing a result that is missing a marker nobody was told about.
-        missing = [str(c) for c in (required or []) if str(c) not in snapshot]
-        if missing:
-            print("[Step0] no display window for: " + ", ".join(sorted(missing)))
-            return False, "no_display_window: " + ", ".join(sorted(missing))
-        wb = getattr(self, "_cond_workbench", None)
-        if wb is None:
-            return False, "no_workbench"
-        cfg_path = self._step0_conditioning_config_path()
-        # The handoff writer also rewrites correction/ROI/patch JSON from the
-        # same in-memory state; keep their bytes so a failure part-way leaves
-        # the whole step0 directory as the published manifest describes it.
-        guarded = [os.path.join(step0_dir, name) for name in
-                   ("correction_config.json", "roi_config.json",
-                    "patch_config.json")]
-        kept = {}
-        for path in guarded:
-            kept[path] = self._file_bytes(path)
-
-        versioned = ""
-        created = ""
-        try:
-            cfg = wb.build_config()
-            cfg_channels = cfg.setdefault("channels", {})
-            for name, params in snapshot.items():
-                cfg_channels[str(name)] = normalize_channel_remap_params(params)
-            digest = channel_remap_config_hash(cfg)
-            versioned = os.path.join(
-                step0_dir, f"step0_channel_remap.{digest[:12]}.json")
-            # Committing the SAME mapping twice lands on the file the published
-            # manifest already names. Rewriting it would edit the authoritative
-            # file in place, and deleting it on a later failure would leave the
-            # published manifest naming nothing at all. An existing file whose
-            # contents hash to this name already IS the mapping: keep it.
-            if self._mapping_file_holds(versioned, digest):
-                print(f"[Step0] mapping already published as "
-                      f"{os.path.basename(versioned)}; reusing it")
-            else:
-                # Deleting on failure is only safe for a name nothing occupied
-                # before: a file that was there and merely unreadable is still
-                # what the published manifest names, and removing it would turn
-                # a corrupt reference into a missing one.
-                fresh = not os.path.exists(versioned)
-                self._write_mapping_file(cfg, versioned)
-                created = versioned if fresh else ""
-            _cfg, _rois, _patches, _manifest = self._write_step0_handoff(
-                config, zarr_path, remap_config_path=versioned)
-        except Exception as exc:
-            print(f"[Step0] display-mapping commit FAILED: {exc}")
-            if created and os.path.exists(created):
-                # Only ever the file THIS commit created: unreferenced, because
-                # the manifest that would have named it was never published.
-                try:
-                    os.remove(created)
-                except OSError:
-                    pass
-            for path, previous in kept.items():
-                self._restore_file(path, previous)
-            return False, f"write_failed: {exc}"
-
-        # Published. The canonical copy is a convenience for the workbench and
-        # is not what any consumer is pointed at, so a failure here is reported
-        # and does not undo the commit.
-        try:
-            save_channel_remap_config(cfg, cfg_path)
-        except Exception as exc:
-            print(f"[Step0] canonical remap copy not refreshed: {exc}")
-        # Superseded mapping files are left in place deliberately: they are a
-        # few hundred bytes each, and an earlier fused result or session may
-        # still name one as the mapping its pixels went through.
-        self._last_saved_remap_path = versioned
-
-        self.display_mapping_committed.emit({
-            "step0_manifest_path": os.path.abspath(manifest_path),
-            "channels": sorted(snapshot),
-        })
-        print(f"[Step0] display mapping committed for {len(snapshot)} channel(s)")
-        return True, "committed"
+    # Block A6 follow-up (user ruling 2026-10-02): `commit_display_mapping`
+    # is gone. Step1's Generate no longer writes its windows into Step0's
+    # Intensity file or republishes Step0's handoff; Step0's file is written
+    # by Step0's own Save only, and Step1 fuses with its committed settings.
 
     def _geometry_persist(self):
         """The one persistence worker, started on first use."""
@@ -11220,6 +11057,27 @@ class Step0Page(QWidget):
 
     _INTENSITY_KEYS = ("enabled", "min", "max", "brightness", "contrast",
                        "gamma", "opacity", "weight", "auto")
+
+    def adopt_intensity(self, params_by_channel, origin=""):
+        """Make `params_by_channel` ({channel: remap params}) the current
+        Intensity -- the ONE shared state (user ruling 2026-10-02, Q2a).
+
+        Used when Step1's committed fusion settings are adopted on reopen, so
+        Step1 shows the windows it was saved with. Nothing is written to disk:
+        Step0's file changes only with Step0's own Save. Applied now when the
+        workbench holds the channels, else when it is engaged."""
+        params = {str(ch): dict(p) for ch, p in (params_by_channel or {}).items()
+                  if isinstance(p, dict)}
+        if not params:
+            return False
+        pending = dict(getattr(self, "_workspace_intensity", None) or {})
+        pending.update(params)
+        self._workspace_intensity = pending
+        self._engage_conditioning_workbench()
+        self._apply_workspace_intensity()
+        print(f"[Step0] Intensity adopted from {origin or 'a saved record'} "
+              f"({len(params)} channel(s))")
+        return True
 
     def _apply_workspace_intensity(self):
         """Put the opened workspace's saved Intensity into the workbench

@@ -785,8 +785,6 @@ class MainWindow(QMainWindow):
         # overlay's remapped pixels for that ONE channel are stale.
         self._step0.display_mapping_changed.connect(
             self._on_display_mapping_changed)
-        self._step0.display_mapping_committed.connect(
-            self._on_display_mapping_committed)
         self._stack.addWidget(self._step0)
 
         self._ome_path_edit = self._step0._ome_path_edit
@@ -7311,18 +7309,6 @@ class MainWindow(QMainWindow):
         # channel and every other channel hits; the raw whole-slide arrays
         # are not re-read.
 
-    def _on_display_mapping_committed(self, payload):
-        """The draft is now on disk and named by a fresh manifest hash.
-
-        Nothing to redraw — the pixels were already being drawn with these
-        numbers — but the committed file has changed, so anything derived from
-        the old one is dropped.
-        """
-        payload = dict(payload or {})
-        self._remap_cache = None
-        print(f"[Step1] display mapping committed for "
-              f"{len(payload.get('channels') or [])} channel(s)")
-
     def _on_channel_color_changed(self, channel, color):
         """One colour, wherever it is changed.
 
@@ -8498,6 +8484,16 @@ class MainWindow(QMainWindow):
             return _refuse("its contents do not match its hash")
         self._display.fusion.install_committed_snapshot(snapshot)
         print(f"[Step1] fusion settings restored: {snapshot['hash'][:12]}")
+        # Q2a (user ruling 2026-10-02): Step1 comes back with the windows it
+        # was saved with -- they become the one current Intensity. Step0's
+        # file is not touched.
+        step0 = self.__dict__.get("_step0")
+        adopt = getattr(step0, "adopt_intensity", None)
+        if adopt is not None and snapshot.get("display_mapping"):
+            try:
+                adopt(snapshot["display_mapping"], origin="Step1's saved fusion settings")
+            except Exception as exc:                        # noqa: BLE001
+                print(f"[Step1] saved windows not adopted: {exc}")
         self._update_fusion_settings_state()
         return snapshot
 
@@ -8584,46 +8580,6 @@ class MainWindow(QMainWindow):
                 pass
             return False, exc
         return True, None
-
-    def _rebind_fusion_settings_to_handoff(self):
-        """Follow the handoff the committed settings are bound to.
-
-        A Save commits the display mapping first, and that republishes the
-        manifest — same path, new contents. The settings the user saved a
-        moment ago still name the manifest as it was, so the fusion about to be
-        written would be refused by the next session's restore while this
-        window went on saying "saved".
-
-        The NUMBERS have not changed, so the hash does not either: a search that
-        ran on these settings is still a search on these settings. Only the
-        record of which handoff they are bound to moves, and it moves on disk
-        and in memory together. Returns (ok, reason).
-        """
-        snapshot = self._committed_fusion_settings()
-        if not snapshot:
-            return True, "nothing committed"
-        identity = self._handoff_identity()
-        if identity is None:
-            return False, "no published handoff to bind to"
-        if identity == snapshot.get("handoff_identity"):
-            return True, "unchanged"
-        rebound = dict(snapshot)
-        rebound["handoff_identity"] = identity
-        rebound["source_identity"] = identity.get("source_identity")
-        rebound["step0_manifest_path"] = identity.get("manifest_path", "")
-        rebound["raw_ome_path"] = identity.get("raw_ome_path", "")
-        rebound["rebound_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        written, exc = self._write_fusion_settings(rebound)
-        if not written:
-            # Memory and disk must not disagree about which handoff these
-            # settings belong to, so neither keeps the claim.
-            self._forget_fusion_settings("the rebind could not be written")
-            return False, str(exc)
-        self._display.fusion.install_committed_snapshot(rebound)
-        print(f"[Step1] fusion settings rebound to the republished handoff "
-              f"({rebound['hash'][:12]} unchanged)")
-        self._update_fusion_settings_state()
-        return True, "rebound"
 
     def _forget_fusion_settings(self, reason=""):
         """Another dataset, or a handoff that no longer holds: the snapshot
@@ -8923,7 +8879,10 @@ class MainWindow(QMainWindow):
         # which never had the key) still compare equal and are not needlessly
         # regenerated.
         dapi_ch = meta.get("dapi_channel")
-        dapi_remap = (self._load_step0_remap_params()[0] or {}).get(dapi_ch) if dapi_ch else None
+        # The windows this run fuses with: Step1's own committed settings
+        # (block A6 follow-up, user ruling 2026-10-02 -- no longer Step0's file).
+        dapi_remap = (self._fusion_display_mapping(worker_fcfg) or {}).get(dapi_ch) \
+            if dapi_ch else None
         if dapi_remap:
             meta["channel_remap_hash"] = self._remap_params_hash({dapi_ch: dapi_remap})
         # The store stamps this into itself, so a finished DAPI-input zarr can
@@ -8939,13 +8898,19 @@ class MainWindow(QMainWindow):
         Min/Max/Gamma changed is a different result even at identical weights,
         so it belongs in the identity rather than outside it.
         """
+        # The numbers only: where they are kept is not part of what the
+        # pixels are (block A6 follow-up -- the path of Step0's file was).
+        return {"hash": self._remap_params_hash(self._fusion_display_mapping(worker_fcfg))}
+
+    def _fusion_display_mapping(self, worker_fcfg=None):
+        """The windows a fusion uses: the run's own config, else Step1's
+        committed settings, else the live draft."""
         params = dict((worker_fcfg or {}).get("channel_remap_params") or {})
         if not params:
-            params = self._display_mapping()
-        return {
-            "source": os.path.abspath(self._load_step0_remap_params()[1] or ""),
-            "hash": self._remap_params_hash(params or {}),
-        }
+            params = dict((self._committed_fusion_settings() or {}).get("display_mapping") or {})
+        if not params:
+            params = dict(self._display_mapping() or {})
+        return params
 
     @staticmethod
     def _remap_params_hash(params):
@@ -9280,7 +9245,7 @@ class MainWindow(QMainWindow):
                 "output_dir": OUTPUT_DIR,
                 "norm_low": NORM_LOW,
                 "norm_high": NORM_HIGH,
-                "channel_remap_params": self._load_step0_remap_params()[0],
+                "channel_remap_params": self._fusion_display_mapping(),
             })
             if method == CELLPOSE_WHOLECELL_FUSION:
                 return self._expected_fused_zarr_meta(fcfg, method)
@@ -9518,27 +9483,6 @@ class MainWindow(QMainWindow):
 
     # ── Save ────────────────────────────────────────────────────────
 
-    def _commit_display_mapping_for_save(self):
-        """Freeze and publish the mapping this Save is about to fuse with.
-
-        The fusion config written moments later reads the COMMITTED file, so
-        after this returns the numbers on screen, the numbers in the config and
-        the numbers in the manifest hash are one set.
-        """
-        step0 = getattr(self, "_step0", None)
-        if step0 is None or not hasattr(step0, "commit_display_mapping"):
-            return True, "no step0 page"
-        required = list(self._fusion_weighted_channels())
-        channels = list(required)
-        for ch in self.config.visible_channels():
-            if ch not in channels:
-                channels.append(ch)
-        try:
-            return step0.commit_display_mapping(channels, required=required)
-        except Exception as exc:
-            print(f"[Step1] display-mapping commit raised: {exc}")
-            return False, f"commit raised: {exc}"
-
     def _display_mapping(self, channels=None, blocking=True,
                          resident_only=False, computed_only=False):
         """The Min/Max/Gamma Step1 should DRAW with, for the channels asked for.
@@ -9728,33 +9672,22 @@ class MainWindow(QMainWindow):
                   "other fusion settings")
             return
 
-        # ── Commit the display mapping, once, before anything is produced ──
-        # Up to here the Min/Max/Gamma the user has been adjusting lived only in
-        # memory. This freezes that draft, writes it, and republishes the
-        # manifest whose hash names it. If it fails, nothing is fused and no
-        # existing result is touched: a fused zarr that cannot say which mapping
-        # made it is exactly what this phase is removing.
-        committed, reason = self._commit_display_mapping_for_save()
-        if committed:
-            # That commit republished the manifest, so the settings the user
-            # saved now name a handoff as it was a moment ago. Follow it, or
-            # stop: fusing against a snapshot the next session would refuse is
-            # how "saved" and "restorable" come apart.
-            rebound, why = self._rebind_fusion_settings_to_handoff()
-            if not rebound:
-                QMessageBox.warning(
-                    self, "Fusion settings",
-                    "The saved fusion settings could not be tied to the "
-                    f"republished Step0 handoff, so nothing was fused.\n\n"
-                    f"Reason: {why}\n\nSave the fusion settings again.")
-                print(f"[Step1] save aborted: settings not rebound ({why})")
-                return
-        if not committed:
+        # ── Every weighted channel has a window ──────────────────────
+        # (Block A6 follow-up, user ruling 2026-10-02: Generate no longer
+        # writes Step1's windows back into Step0's Intensity file -- it fuses
+        # with Step1's own committed settings and touches nothing of Step0.)
+        # A channel that carries weight but has no window would be drawn on
+        # screen and left out of the fusion, so it is refused by name.
+        snapshot_windows = (self._committed_fusion_settings() or {}).get("display_mapping") or {}
+        missing = sorted(str(c) for c in self._fusion_weighted_channels()
+                         if str(c) not in snapshot_windows)
+        if missing:
             QMessageBox.warning(
                 self, "Save",
-                "The channel display mapping could not be saved, so nothing was "
-                f"fused.\n\nReason: {reason}")
-            print(f"[Step1] save aborted: display mapping not committed ({reason})")
+                "These weighted channels have no display window in the saved "
+                "fusion settings, so nothing was fused:\n\n  " + ", ".join(missing)
+                + "\n\nSave the fusion settings again.")
+            print(f"[Step1] save aborted: no display window for {missing}")
             return
 
         # ── What this Save fuses with ─────────────────────────────────

@@ -1,4 +1,7 @@
-"""DAPI/StarDist input-zarr reuse invalidates on a Step0 remap change.
+"""DAPI/StarDist input-zarr reuse invalidates when the DAPI window changes.
+
+(Since the block A6 follow-up the window comes from Step1's committed
+fusion settings; it used to be read from Step0's remap file.)
 
 Before: _dapi_meta_compare_view had no remap fingerprint, so after the user
 changed the DAPI channel's Step0 remap the existing DAPI input zarr was reused
@@ -28,7 +31,11 @@ def _stub(remap):
     s.step0_output = {}
     s._corrected_zarr_path = ""
     s.loader = types.SimpleNamespace(shape=(64, 48), filepath="/x/raw.ome.tiff")
-    s._load_step0_remap_params = lambda: (remap, "")
+    s._load_step0_remap_params = lambda: ({}, "")
+    # Block A6 follow-up (user ruling 2026-10-02): the windows a run fuses
+    # with are Step1's committed settings, not Step0's file.
+    s._committed_fusion_settings = lambda: {"display_mapping": dict(remap or {})}
+    s._fusion_display_mapping = MainWindow._fusion_display_mapping.__get__(s)
     s._remap_params_hash = MainWindow._remap_params_hash
     # The identity now also records which display mapping the pixels went
     # through; the stub gets the real method, bound to itself.

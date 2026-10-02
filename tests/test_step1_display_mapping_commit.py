@@ -170,30 +170,6 @@ def test_an_uncommitted_draft_makes_an_existing_result_unreusable(app, tmp_path)
         w.close()
 
 
-def test_committing_writes_the_mapping_and_republishes_the_manifest(app, tmp_path):
-    w, step0_dir = _window(app, tmp_path)
-    try:
-        wb = _seed_workbench(w._step0, {"CD3": {"min": 0.0, "max": 250.0}})
-        seen = []
-        w._step0.display_mapping_committed.connect(seen.append)
-
-        ok, reason = w._step0.commit_display_mapping(["CD3"])
-        assert ok is True, reason
-
-        from block01.utils.channel_remap_config import (
-            load_channel_remap_config, channel_remap_config_hash)
-        json_path = os.path.join(step0_dir, "step0_channel_remap.json")
-        on_disk = load_channel_remap_config(json_path)
-        assert on_disk["channels"]["CD3"]["max"] == 250.0
-
-        with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
-            manifest = json.load(f)
-        assert manifest["channel_remap_config_hash"] == channel_remap_config_hash(on_disk)
-        assert len(seen) == 1 and "CD3" in seen[0]["channels"]
-    finally:
-        w.close()
-
-
 def test_a_channel_nobody_tuned_gets_one_stable_window(app, tmp_path):
     w, step0_dir = _window(app, tmp_path)
     try:
@@ -231,52 +207,6 @@ def test_a_tuned_channel_keeps_its_own_window(app, tmp_path):
         w.close()
 
 
-def test_a_save_whose_mapping_cannot_be_committed_fuses_nothing(app, tmp_path, monkeypatch):
-    from block01.ui import main_window as mwmod
-
-    w, step0_dir = _window(app, tmp_path)
-    try:
-        monkeypatch.setattr(mwmod, "OUTPUT_DIR", str(tmp_path))
-        monkeypatch.setattr(type(w._step0), "commit_display_mapping",
-                            lambda self, channels=None, required=None:
-                            (False, "disk is full"))
-        warned = []
-        monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
-                            staticmethod(lambda *a, **k: warned.append(a)))
-        for name in ("information", "critical"):
-            monkeypatch.setattr(QtWidgets.QMessageBox, name,
-                                staticmethod(lambda *a, **k: None))
-        started = []
-        monkeypatch.setattr(type(w), "_start_fusion_worker",
-                            lambda self, *a, **k: started.append(a))
-
-        class _NoDialog:
-            def __init__(self, *a, **k):
-                pass
-
-            def exec_(self):
-                return QtWidgets.QDialog.Rejected
-        monkeypatch.setattr(mwmod, "TileSelectDialog", _NoDialog)
-        # The fusion settings are a separate commit point, and Save refuses
-        # while they are unsaved; this test is about the mapping commit that
-        # comes after that gate.
-        assert w._commit_fusion_settings() is True
-        # A pre-segmentation result chosen on those settings (block E: Save
-        # takes nothing else).
-        _chosen(w)
-
-        w._save()
-
-        assert started == []
-        assert warned and "disk is full" in str(warned[-1])
-        # It stopped before producing anything: the record a Save keeps on its
-        # way to fusing (the session's `last_save`, block U1) is not there.
-        assert getattr(w, "_last_save", None) is None
-        assert not os.path.exists(os.path.join(str(tmp_path), "fusion_config.json"))
-    finally:
-        w.close()
-
-
 def test_intensity_editing_is_frozen_while_a_save_fuses(app, tmp_path):
     w, step0_dir = _window(app, tmp_path)
     try:
@@ -290,20 +220,22 @@ def test_intensity_editing_is_frozen_while_a_save_fuses(app, tmp_path):
         w.close()
 
 
-def test_a_draft_change_is_not_a_commit(app, tmp_path):
+def test_a_draft_change_writes_nothing_into_step0(app, tmp_path):
+    """Block A6 follow-up (user ruling 2026-10-02): Step0's Intensity file is
+    Step0's record. Moving a window in the draft writes nothing to it."""
     w, step0_dir = _window(app, tmp_path)
-    committed = []
     try:
-        w._step0.display_mapping_committed.connect(committed.append)
+        before = {n: open(os.path.join(step0_dir, n), "rb").read() for n in os.listdir(step0_dir)
+                  if os.path.isfile(os.path.join(step0_dir, n))}
         wb = _seed_workbench(w._step0, {"CD3": {"min": 0.0, "max": 1000.0}})
         wb._params["CD3"]["max"] = 400.0
         wb.params_changed.emit("CD3")
         QtWidgets.QApplication.processEvents()
-
-        assert committed == []
+        after = {n: open(os.path.join(step0_dir, n), "rb").read() for n in os.listdir(step0_dir)
+                 if os.path.isfile(os.path.join(step0_dir, n))}
+        assert after == before
     finally:
         w.close()
-
 
 def test_the_screen_uses_the_window_the_save_will_freeze(app, tmp_path):
     """An untuned channel is not left to the loader's per-region percentile.
@@ -357,26 +289,40 @@ def test_a_new_dataset_does_not_inherit_the_old_slides_auto_window(app, tmp_path
         w.close()
 
 
-def test_a_weighted_channel_with_no_window_stops_the_save(app, tmp_path):
-    """Refuse rather than fuse a channel the screen shows and the file omits.
+def test_a_weighted_channel_with_no_window_stops_the_save(app, tmp_path, monkeypatch):
+    """Refuse rather than fuse a channel the screen shows and the fusion omits.
 
-    The worker leaves out any channel with no committed window. If the commit
-    let that through, the marker would be visible in the preview and simply
-    absent from fused.zarr, with nothing said. The refusal names the channels.
+    Generate fuses with Step1's committed settings; a weighted channel with no
+    window in them would be absent from fused.zarr with nothing said. The
+    refusal names the channels and nothing is started -- and Step0's files
+    are not touched either way (block A6 follow-up).
     """
     w, step0_dir = _window(app, tmp_path)
+    said, started = [], []
     try:
-        page = w._step0
-        page._workbench_pixels = (
-            lambda ch, blocking=False, resident_only=False: None)  # no pixels
-
-        ok, reason = page.commit_display_mapping(["CD3"], required=["CD3"])
-
-        assert ok is False
-        assert "CD3" in reason
+        before = {n: open(os.path.join(step0_dir, n), "rb").read() for n in os.listdir(step0_dir)
+                  if os.path.isfile(os.path.join(step0_dir, n))}
+        monkeypatch.setattr(w, "_save_allowed", lambda: True)
+        w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30}
+        w._params_source = "manual"
+        monkeypatch.setattr(w, "_require_committed_fusion_settings", lambda *_a: True)
+        monkeypatch.setattr(w, "_params_match_committed_settings", lambda: True)
+        monkeypatch.setattr(w, "_committed_fusion_settings",
+                            lambda: {"hash": "h", "fusion_config": {},
+                                     "display_mapping": {"DAPI": {"min": 0, "max": 1}}})
+        monkeypatch.setattr(w, "_fusion_weighted_channels", lambda: ["DAPI", "CD3"])
+        monkeypatch.setattr(w, "_start_fusion_worker", lambda *a, **k: started.append(1))
+        monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                            staticmethod(lambda *a, **k: said.append(a[2])))
+        w._corrected_zarr_mode = ""
+        w._save()
+        assert started == []
+        assert said and "CD3" in said[-1] and "DAPI" not in said[-1].split(":")[-1]
+        after = {n: open(os.path.join(step0_dir, n), "rb").read() for n in os.listdir(step0_dir)
+                 if os.path.isfile(os.path.join(step0_dir, n))}
+        assert after == before
     finally:
         w.close()
-
 
 def test_the_automatic_window_uses_the_real_pixel_source(app, tmp_path):
     """Drive the real method chain, with nothing on the page stubbed.
@@ -403,145 +349,3 @@ def test_the_automatic_window_uses_the_real_pixel_source(app, tmp_path):
         w.close()
 
 
-def test_a_failed_republish_leaves_the_previous_handoff_valid(app, tmp_path):
-    """Both writes or neither.
-
-    The manifest is hashed over the remap config. Writing the config and then
-    failing to republish left the published manifest naming a file that no
-    longer existed in that form: a handoff that was valid before the Save and
-    invalid after a Save that produced nothing.
-    """
-    from block01.utils.channel_remap_config import channel_remap_config_hash, \
-        load_channel_remap_config
-
-    w, step0_dir = _window(app, tmp_path)
-    try:
-        page = w._step0
-        _seed_workbench(page, {"CD3": {"min": 0.0, "max": 250.0}})
-        assert page.commit_display_mapping(["CD3"])[0] is True
-
-        json_path = os.path.join(step0_dir, "step0_channel_remap.json")
-        with open(json_path, "rb") as f:
-            before = f.read()
-
-        with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
-            published = json.load(f)
-        named = published["channel_remap_config_path"]
-        before_named = open(named, "rb").read()
-
-        page._cond_workbench._params["CD3"]["max"] = 999.0
-        page._write_step0_handoff = lambda *a, **k: (_ for _ in ()).throw(
-            OSError("disk is full"))
-        ok, reason = page.commit_display_mapping(["CD3"])
-
-        assert ok is False and "disk is full" in reason
-        with open(json_path, "rb") as f:
-            assert f.read() == before                 # canonical untouched
-
-        with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
-            manifest = json.load(f)
-        assert manifest["channel_remap_config_path"] == named
-        assert open(named, "rb").read() == before_named
-        assert manifest["channel_remap_config_hash"] == channel_remap_config_hash(
-            load_channel_remap_config(named))         # still names a real file
-
-        # And it left no half-committed mapping file lying around.
-        strays = [f for f in os.listdir(step0_dir)
-                  if f.startswith("step0_channel_remap.")
-                  and f not in (os.path.basename(named), "step0_channel_remap.json")]
-        assert strays == []
-    finally:
-        w.close()
-
-
-def test_the_manifest_names_an_immutable_mapping_file(app, tmp_path):
-    """Publishing the manifest is the only moment a consumer sees a change.
-
-    The frozen mapping is written to a new file named after its own hash, so
-    the file the published manifest points at is never rewritten in place. A
-    commit that dies before the manifest lands leaves that file unreferenced
-    and every reader still on the previous, consistent pair.
-    """
-    from block01.utils.channel_remap_config import channel_remap_config_hash, \
-        load_channel_remap_config
-
-    w, step0_dir = _window(app, tmp_path)
-    try:
-        page = w._step0
-        _seed_workbench(page, {"CD3": {"min": 0.0, "max": 250.0}})
-        assert page.commit_display_mapping(["CD3"])[0] is True
-        with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
-            first = json.load(f)["channel_remap_config_path"]
-        first_bytes = open(first, "rb").read()
-
-        page._cond_workbench._params["CD3"]["max"] = 120.0
-        assert page.commit_display_mapping(["CD3"])[0] is True
-        with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
-            manifest = json.load(f)
-
-        assert manifest["channel_remap_config_path"] != first
-        assert open(first, "rb").read() == first_bytes      # never rewritten
-        assert manifest["channel_remap_config_hash"] == channel_remap_config_hash(
-            load_channel_remap_config(manifest["channel_remap_config_path"]))
-        assert load_channel_remap_config(
-            manifest["channel_remap_config_path"])["channels"]["CD3"]["max"] == 120.0
-    finally:
-        w.close()
-
-
-def test_recommitting_the_same_mapping_never_touches_the_published_file(app, tmp_path):
-    """The file name is the mapping's own hash, so an unchanged mapping lands on
-    the file the published manifest already names. Rewriting it would edit the
-    authoritative file in place, and removing it when a later step fails would
-    leave the manifest naming nothing at all."""
-    from block01.utils.channel_remap_config import channel_remap_config_hash, \
-        load_channel_remap_config
-
-    w, step0_dir = _window(app, tmp_path)
-    try:
-        page = w._step0
-        _seed_workbench(page, {"CD3": {"min": 0.0, "max": 250.0}})
-        assert page.commit_display_mapping(["CD3"])[0] is True
-        with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
-            named = json.load(f)["channel_remap_config_path"]
-        before = open(named, "rb").read()
-        before_mtime = os.path.getmtime(named)
-
-        # Same mapping, and the republish fails.
-        page._write_step0_handoff = lambda *a, **k: (_ for _ in ()).throw(
-            OSError("disk is full"))
-        ok, reason = page.commit_display_mapping(["CD3"])
-
-        assert ok is False and "disk is full" in reason
-        assert os.path.exists(named)                    # not deleted
-        assert open(named, "rb").read() == before       # not rewritten
-        assert os.path.getmtime(named) == before_mtime
-
-        with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
-            manifest = json.load(f)
-        assert manifest["channel_remap_config_path"] == named
-        assert manifest["channel_remap_config_hash"] == channel_remap_config_hash(
-            load_channel_remap_config(named))
-    finally:
-        w.close()
-
-
-def test_a_mapping_file_with_the_wrong_contents_is_not_trusted(app, tmp_path):
-    """A file left half-written by a killed process has the right name and the
-    wrong contents; publishing a manifest hashed over it would be a lie."""
-    w, step0_dir = _window(app, tmp_path)
-    try:
-        page = w._step0
-        _seed_workbench(page, {"CD3": {"min": 0.0, "max": 250.0}})
-        assert page.commit_display_mapping(["CD3"])[0] is True
-        with open(os.path.join(step0_dir, "step0_roi_result.json")) as f:
-            named = json.load(f)["channel_remap_config_path"]
-
-        with open(named, "w", encoding="utf-8") as f:
-            f.write("{}")                               # truncated leftover
-
-        assert page.commit_display_mapping(["CD3"])[0] is True
-        from block01.utils.channel_remap_config import load_channel_remap_config
-        assert load_channel_remap_config(named)["channels"]["CD3"]["max"] == 250.0
-    finally:
-        w.close()

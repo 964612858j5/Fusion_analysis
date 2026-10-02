@@ -236,3 +236,66 @@ Step0 的预览：`:1611`、`:1759`（已经按 patch 并行）、`:1882`。都�
 4. 并行数（预案：`max_workers` 从 4 起，按实测决定是否升到 6 / 8）和内存预算（2 GB，受 P4 约束）；以及 P6 的正式阈值。
 
 **实施阶段的约束（获批后）**：三段提交，每段可单独回退；GPU 后端不走并行；单调绿色规则；真机验收；不改 UI，如需新增设置项先停下来问。
+
+---
+
+## 10. 执行记录（2026-10-02 夜间，用户睡眠期间按授权执行）
+
+**三段提交，都只提交、未推送：**
+
+| 段 | 提交 | 内容 |
+|---|---|---|
+| ① | `71f631b` | `core/bg_parallel.py`：<br>- `ordered_results`：一个通道的 tile 在至多 n 个线程上计算，按 tile 顺序交出结果；已提交、尚未消费的 tile 不超过 n；下一块要等上一块**读取完成**、并且没有取消，才提交；中途退出时，撤销还没开始的、等待正在跑的；<br>- `choose_workers`：按 §9 的公式确定并行数 |
+| ② | `b5b9ef1` | `core/bg_correction.py`：GPU / CPU 的计算核心原样抽成独立函数；新增 `compute_path`、`tophat_footprint`、`current_compute_signature`、`correct_tile`（GPU 失败时抛 `GpuBackendFailed`，不再在这一块上悄悄改走 CPU）。<br>worker：每个通道只用一种后端；GPU 中途失败，就丢弃整个通道，从 tile 0 起用 CPU 重算。<br>数组 attrs 新增 `bg_compute_path` 和 `tophat_footprint`；增量复用的签名扩为 5 项（S0P 之前的产品永远不会被当作「相同」）；`Step0Page._cur_sig` 补上本机的这两项 |
+| ③ | `535e7b0` | `WsiCorrectionWorker._correct_channel`：CPU 后端经 `ordered_results` 并行；写入、粗层累加和进度仍在 worker 线程里按 tile 顺序做；取消后不再启动新的 tile，也不再写入；GPU 后端仍是一次一块 |
+
+**新测试**：`tests/test_step0_bg_parallel.py` 共 26 条：
+- 执行器 13 条；
+- P7 / P8 / attrs 4 条；
+- P1：在真实的 3 层 OME-TIFF 上，ROI 原点不对齐 stride、带多边形，tophat 和 cucim 各一条；串行、n=2、n=4 三者的数组、粗层平面、attrs 逐位相同；而且串行结果等于「按 S0P 之前的做法独立重算」的参照；
+- P3：并行计算中取消；
+- P4：在途 tile 数有上限；
+- P5：GPU 后端不走并行。
+
+**反向注入共 15 处，全部变红：**
+- 第一次有两处没有变红，都改正了：
+  - 「读取不加门」：原测试里，取消标志设置得比主循环提交下一块还快，存在时序竞争。把读取改为需要一段时间后，变红。
+  - P1「任务读错窗口」：串行和并行都走同一个任务函数，所以两边错得一样，比较结果仍然相等。加上独立参照之后，变红。
+
+**白名单的说明：**
+- `tests/test_step0_background_correction_outputs.py` 不在 §4 列出的测试文件里。它测的正是增量 Save 的签名，按用户指令 B（「涉及签名的测试，只加，不删」），把其中 22 处 3 项签名补成 5 项，没有删除任何断言。`tests/test_bg_correction_halo.py` 的 2 处同样处理。
+- `tests/test_wsi_cancel.py`（白名单外）一行都没改，照样通过：执行器「读完才提交下一块」就是为了保持它原有的取消语义。
+- A3 的 `corrected_channel` 登记只抄写一份固定清单里的 attrs，所以新增的两个键**不会**带进 provenance 的 `parameters`（§3.3）。A3 的代码没有改。
+
+**test1 上经过真实 `WsiCorrectionWorker` 的结果**（新代码 `535e7b0` 对比 S0P 之前的 `6b252e2`；每次运行单独起一个进程；本机 GPU 不可用，走 CPU 后端；n=4）：
+
+| 门 | 结果 |
+|---|---|
+| P2a tophat（HsBAg，r=15） | 数组**逐位相同**；attrs 的差异只有 `source_identity`、`written_at`，以及新增的 `bg_compute_path="cpu"`、`tophat_footprint="disk"` |
+| P2b cucim（CD68，σ=50） | 数组**逐位相同**；新增 `bg_compute_path="cpu"`、`tophat_footprint=null` |
+| P6（3 次中位数） | tophat 318.3 s → 92.3 s，**3.45×**；cucim 59.5 s → 18.4 s，**3.24×**（门限：各自 ≥ 2.0×）。**通过** |
+| P4(b) | 峰值 RSS 增量：tophat 1034–1048 MB，cucim 1010–1114 MB（门限 ≤ 3.0 GB）；Save 后 RSS 464–497 MB；swap 前后都是 38 MB。**通过** |
+| P3 | 在第 3 个 tile 写入后取消（此时有 4 个在途）：延迟 tophat 22.0 s（门限 37.5 s）、cucim 4.2 s（门限 7.4 s）；只提交到第 6 块就停止；没有再写入。**通过** |
+
+**单调绿色回归（相关范围；全量回归待补）**：用户 09:30 要关机，来不及跑全量，所以只跑与改动相关的范围。在 `535e7b0` 和 `6b252e2` 的 `git archive` 副本上，每个模块单独起进程。
+
+**范围**：80 个模块：
+- 所有引用 `search_ctrl` / `bg_correction` / `step0_page` / `WsiCorrectionWorker` / `bg_parallel` / `step0_handoff` 的测试；
+- `test_step0_floor_prefetch` 和 `test_step0_method_prefetch`（它们走预览路径，而预览路径用到了这次拆分出来的计算核心）；
+- v16 的不变量测试：零漂移、布局锁、PixelSource、A2c、A3 / A4；
+- S2T 的测试。
+
+只排除了 `test_step0_channel_conditioning`：它在两边都会挂到超时（A1b 已有记录）。
+
+**结果**：
+- 新代码有失败的 9 个模块在旧代码上重跑：7 个的失败名完全相同；
+- `test_step0_compare_tiles` 和 `test_step0_floor_prefetch` 在新代码上多出失败（floor_prefetch 新代码 18 条、旧代码 9 条，这个模块以往在 8–15 条之间浮动）。把多出的 10 条逐条在两边各单独跑 2 次，两边同时运行：
+  - 4 条在**两边都 2/2 通过**（负载下的不稳定）；
+  - 5 条在**两边都 2/2 失败**（旧有失败，只是 S0P 回归那一轮旧代码碰巧没报出来）；
+  - 1 条在两边都是 1 次失败、1 次通过。
+- **结论：没有新增失败。**
+- **全量回归（离屏 222 个模块 + GPU 15 个）待下次开机补跑**，脚本在 `~/fusionflux/bench_s0p/reg/run.sh`。
+
+**真机（2026-10-02，用户验收通过）**：在界面里分别 Save 了 tophat 和 cucim 各一条通道，Save 中途取消一次。
+
+**夜间的一处失误**（照实记录）：test1 上这组测试约 02:30 就跑完了，但本窗口没有挂上完成提醒，一直停到用户 07:40 发消息。按原定顺序，下一步的全量回归因此推迟了约 5.5 小时。后面又因为用户 09:30 要关机，改为只跑与改动相关的范围，全量回归留到下次补跑。

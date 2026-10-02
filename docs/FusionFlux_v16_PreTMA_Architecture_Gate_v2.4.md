@@ -96,6 +96,7 @@ Insert after the A8 row (week numbers of the (b) branch):
 |---|---|---|---|
 | **S2T** | Step2 tile-status display fix; opt-in skipping of tiles without tissue; sharper Step2 overview | `docs/v16_Step2_tiles_application.md` (v2, approved) | **done 2026-10-02** — `4784401`, `935d809`; no new regression failures; real-machine check passed (`docs/v16_Step2_tiles_application.md` §11) |
 | **S0P** | Step0 background correction (tophat / cucim) in parallel on the CPU; one backend per channel; backend in the attrs and the incremental-reuse signature | `docs/v16_Step0_cpu_parallel_application.md` (v2; rulings 3 / 4 after the §2.4 benchmark) | application |
+| **A6 (extended)** | A6 of §15 (async lifecycle, gaps G1–G5) **plus** the user's workspace rules W1–W5: open an existing project's workspace (chooser when several), Save overwrites (warn when the geometry changed), Save as, "made with older settings" / "provenance unknown" marks, fusion staged while Step2 runs | `docs/v16_A6_application.md` (v1) | application; **estimate 5–6 working days instead of ~3, confirmed by the user 2026-10-02** (stop rule 5: the cap is not extended silently — recorded here) |
 | S0G *(later, needs a GPU machine)* | GPU tophat with the same disk footprint as the CPU path | — | backlog |
 
 The rows after it move by the time A9 actually takes. If A9 passes its gate early, it stops and the rest moves up.

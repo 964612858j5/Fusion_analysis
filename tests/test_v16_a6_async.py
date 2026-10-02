@@ -268,20 +268,26 @@ def step2(app, tmp_path, monkeypatch):
     p.deleteLater()
 
 
+def _switch_dataset(p):
+    """Another slide was loaded: the window's display generation moved (the
+    page stands alone here, so it is its own window)."""
+    p._dataset_gen_seen = int(getattr(p, "_dataset_gen_seen", 0) or 0) + 1
+
+
 def _switch_workspace(p, tmp_path):
     b_dir = tmp_path / "proj" / "rois" / "roi_B"
     p.set_roi_context(roi_id="roi_B", roi_dir=str(b_dir),
                       step2_dir=str(b_dir / "step2"))
 
 
-def test_a_step2_run_finishing_after_the_workspace_changed_shows_nothing(step2):
+def test_a_step2_run_finishing_after_the_dataset_changed_shows_nothing(step2):
     p, seen, tmp_path = step2
     p._run()
     worker = p._worker
     assert isinstance(worker, _FakeStep2Run) and not p._btn_run.isEnabled()
     label_before = p._prog_lbl.text()
 
-    _switch_workspace(p, tmp_path)               # e.g. Save as in Step0
+    _switch_dataset(p)                           # another slide was loaded
     worker.finished.emit("/old/run", 1234)       # the old run, late
     _pump()
 
@@ -292,11 +298,11 @@ def test_a_step2_run_finishing_after_the_workspace_changed_shows_nothing(step2):
     assert p._btn_run.isEnabled() and not p._run_active
 
 
-def test_a_step2_run_failing_after_the_workspace_changed_shows_nothing(step2):
+def test_a_step2_run_failing_after_the_dataset_changed_shows_nothing(step2):
     p, seen, tmp_path = step2
     p._run()
     worker = p._worker
-    _switch_workspace(p, tmp_path)
+    _switch_dataset(p)
     worker.error.emit("engine died")
     _pump()
     assert seen["boxes"] == []
@@ -796,7 +802,7 @@ def test_r5_an_old_runs_progress_is_not_drawn_and_the_page_says_where_it_writes(
     worker.output_dir = str(tmp_path / "proj" / "rois" / "roi_A" / "step2" / "run_1")
     label_before = p._prog_lbl.text()
     cells_before = p._cells_lbl.text()
-    _switch_workspace(p, tmp_path)
+    _switch_dataset(p)
     worker.progress.emit(3, 12, "tile 4 of 12")
     worker.tile_done.emit(2, 12, 999)
     _pump()
@@ -934,41 +940,52 @@ def _back_to_workspace_a(p, tmp_path):
     p.set_roi_context(roi_id="roi_A", roi_dir=str(a_dir), step2_dir=str(a_dir / "step2"))
 
 
-def test_a_runs_progress_is_kept_while_the_page_looks_away_and_drawn_on_return(step2):
-    """Save as moved Step2's page to the new workspace; going back to Step2
-    bound it to the run's workspace again. The tiles finished meanwhile stayed
-    grey, the tile running at the switch stayed yellow, the bar froze."""
+def test_save_as_during_a_run_keeps_step2_on_the_runs_workspace_until_it_ends(step2):
+    """User ruling 2026-10-03 (real-machine finding: after Step0's Save as the
+    tiles went grey and the bar froze). While a run is going Step2 stays on
+    the run's workspace and keeps drawing it; the completion box says it now
+    switches to the new workspace, and after the box -- whichever button --
+    Step2 is on the new one."""
     p, seen, tmp_path = step2
     p._rows_spin.setValue(2)
     p._cols_spin.setValue(2)
     p._run()
     worker = p._worker
-    worker.output_dir = str(tmp_path / "run_A")
     worker.tile_done.emit(0, 4, 5)
-    worker.progress.emit(1, 4, "tile 2 of 4")              # tile 1 running
+    worker.progress.emit(1, 4, "tile 2 of 4")
     _pump()
     _switch_workspace(p, tmp_path)                         # Step0 Save as
+    assert p._roi_id == "roi_A"                            # not switched mid-run
     worker.tile_done.emit(1, 4, 7)
     worker.progress.emit(2, 4, "tile 3 of 4")
-    worker.tile_done.emit(2, 4, 3)
-    worker.progress.emit(3, 4, "tile 4 of 4")
     _pump()
-    assert not p._old_run_lbl.isHidden()                   # said, not drawn
-    _back_to_workspace_a(p, tmp_path)                      # back to Step2
-    _pump()
-    states = {k: v for k, v in p._tile_status.items()}
-    assert states[(0, 0)] == "done" and states[(0, 1)] == "done"
-    assert states[(1, 0)] == "done" and states[(1, 1)] == "running"
-    assert p._prog_lbl.text() == "tile 4 of 4"
-    assert p._prog_bar.value() == 75
-    assert "15" in p._cells_lbl.text()
+    assert p._tile_status[(0, 0)] == "done" and p._tile_status[(0, 1)] == "done"
+    assert p._tile_status[(1, 0)] == "running"
+    assert p._prog_lbl.text() == "tile 3 of 4" and p._prog_bar.value() == 50
     assert p._old_run_lbl.isHidden()
+    p._go_back_ctx = (tmp_path / "proj" / "rois" / "roi_A")
+    p.set_roi_context(roi_id="roi_A", roi_dir=str(p._go_back_ctx),
+                      step2_dir=str(p._go_back_ctx / "step2"))   # _go_to_step2's stale copy
+    worker.tile_done.emit(2, 4, 3)
     worker.tile_done.emit(3, 4, 1)
     worker.finished.emit("/run_A", 16)
     _pump()
-    assert p._tile_status[(1, 1)] == "done"
-    assert seen["done"] == ["/run_A"]                       # its own context: reported
+    assert seen["done"] == ["/run_A"]                       # reported as usual
+    assert "roi_B" in seen["boxes"][-1]                     # the box says where it goes
+    assert seen["marked"] == ["roi_A"]
+    assert p._roi_id == "roi_B"                             # switched after the box
 
+
+def test_a_run_that_fails_after_a_save_as_also_switches_afterwards(step2):
+    p, seen, tmp_path = step2
+    p._run()
+    worker = p._worker
+    _switch_workspace(p, tmp_path)
+    assert p._roi_id == "roi_A"
+    worker.error.emit("engine died")
+    _pump()
+    assert seen["boxes"] == ["engine died"]
+    assert p._roi_id == "roi_B"
 
 def test_a_replaced_workers_late_progress_is_not_recorded(step2):
     p, seen, tmp_path = step2
@@ -982,3 +999,21 @@ def test_a_replaced_workers_late_progress_is_not_recorded(step2):
     _pump()
     assert p._prog_lbl.text() != "old tile"
     assert (p._run_progress or {}).get("progress") is None
+
+
+def test_entering_step2_after_a_save_as_binds_the_newest_workspace(app, tmp_path):
+    """`step1_output` still names the previous workspace after Step0's Save as
+    (the new one has no Step1 result yet); entering Step2 must not pull Step2
+    back there (user ruling 2026-10-03)."""
+    w = iso._window(app, tmp_path)
+    try:
+        a, b = tmp_path / "proj" / "rois" / "roi_A", tmp_path / "proj" / "rois" / "roi_B"
+        w.step0_output = dict(w.step0_output, roi_id="roi_B", roi_dir=str(b),
+                              step2_dir=str(b / "step2"))
+        w.step1_output = {"roi_id": "roi_A", "roi_dir": str(a), "step2_dir": str(a / "step2"),
+                          "zarr_path": str(a / "step1" / "fused.zarr"), "output_dir": str(a)}
+        w._go_to_step2()
+        assert w._step2._roi_id == "roi_B"
+        assert w._step2._roi_dir == str(b)
+    finally:
+        w.close()

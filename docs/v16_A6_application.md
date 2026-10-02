@@ -346,3 +346,23 @@ TaskManager、事务框架、新的存储框架（§15.3）；worker 的计算�
 - **第 17 项**：标记文字由 `provenance unknown` 改为 `unknown`（用户裁定）。
 - **第 19 项**：清理本身生效了，真正遗留的 `…inprogress.a499d1f5…` 在 fusion 之后被删掉了。用户手动建的测试文件夹因为名字里的空格没加引号，实际建成了两个文件夹（`fused_Full`、`WSI.zarr.inprogress.test`），它们不匹配 `fused_Full WSI.zarr.inprogress.*`，所以没被删，这是预期行为。
 - **Step2 GPU OOM**：原因是验收清单里的启动命令带了 `LD_LIBRARY_PATH`，StarDist 因此改在 GPU 上跑（之前的成功运行都是 CPU）。StarDist 在 GPU 上不设 `n_tiles`，6 GB 显存放不下一整块 tile。清单已改正。这个 GPU 隐患只记录，没改，等用户裁定。
+
+### 12.12 第 12 项复验失败与重新设计（2026-10-03，用户裁定）
+
+- **复验结果**：Save 成功之后，tile 全部变灰，进度条仍然不动（终端里的进度一直在更新）。切到 Step3 再切回 Step2 之后，tile 和进度条才恢复正常。
+  - 原因：上一次的修复（`f3dcd58`）在页面改绑到别的工作区时，把 tile 全部置灰，并停止绘制。只有页面再被绑回原来的工作区时，才从记录里补画。而直接回到 Step2 时，页面并没有被绑回去；先去 Step3 再回来，才碰巧绑了回去。
+- **用户裁定（新的规则）**：
+  - Step2 跑着的时候，在 Step0 点 Save as，Step2 在运行结束之前**一直绑定旧工作区**；
+  - 运行结束时，完成框里提示「将切换到新工作区」；
+  - 用户点任何一个按钮（Step3、Step4 或 OK），Step2 都切换到最新的工作区。
+- **实施**：
+  - `Step2Page.set_roi_context`：运行进行中，交给它的另一个工作区只记为「待切换」，不改绑。交给它的若是这次运行自己的工作区（比如 `_go_to_step2` 手里那份过时的副本），什么也不做，「待切换」保持不变。
+  - 运行结束时（完成、出错、停止、迟到结束都一样）调用 `_apply_pending_context`，切换到待切换的工作区。完成框的正文最后一行写明「Step2 now switches to the new workspace: <id>」，切换发生在完成框关闭之后，不管按的是哪个按钮。
+  - `MainWindow._go_to_step2`：`step1_output` 和 `step0_output` 指向不同的工作区时（Save as 之后，新工作区还没有 Step1 结果），Step2 绑定 `step0_output` 的工作区，也就是最新的那个，不再被 `step1_output` 拉回旧工作区。
+  - 真正换了切片（数据集代数变了）时，仍按 A6 G2 的规则：不显示旧运行的结果，只显示一行旧运行的提示。
+- **测试**：
+  - 原来 4 条「运行中换工作区 → 什么都不显示」的测试，改成按「换数据集」来触发（保证不变）；
+  - 新增 3 条：运行中 Save as 不改绑、进度照常绘制、完成框写明要切换的工作区、关掉完成框后切换；出错结束时同样切换；进入 Step2 时绑定最新的工作区。
+  - 修复前（`f3dcd58`）新增的 3 条都变红；4 条换数据集的测试在新旧两边都通过。
+  - 相关模块都通过：`test_step2_tile_status`、`test_step2_skip_empty_tiles`、`test_step2_layout`、`test_preseg_contract`、`test_step1_to_step2_handoff`、`test_step1_step2_handoff_e2e`、`test_step1_handoff_invalidation`、`test_step1_dataset_switch`、`test_step0_step1_handoff_contract`、`test_v16_a6_workspace`、`test_step2_remap_integration`、`test_step2_legacy_stop`。
+- **已知不一致（只记录）**：Save as 时，主窗口 `_on_step0_complete` 会立刻把 Step2 的「Output」输入框改成新工作区的 step2 目录。运行结束切换之后，两者才重新一致。这只影响下一次运行的默认输出位置，不影响正在跑的这次（它的输出目录在开始时就已经固定）。

@@ -197,6 +197,9 @@ class Step2Page(QWidget):
         self._roi_id = ""
         self._roi_dir = ""
         self._step2_dir = ""
+        # User ruling 2026-10-03: a workspace handed over while a run is
+        # going (Step0 Save as) waits here; Step2 switches when the run ends.
+        self._pending_context = None
         self._last_remap_status = ""     # v14.5d: last Step0-remap applied/not-applied msg
         self._source_aware_attached = False       # a runtime descriptor was attached
         self._source_aware_summary = ""           # "N marker(s), <mixture>"
@@ -205,6 +208,16 @@ class Step2Page(QWidget):
         self._build_ui()
 
     def set_roi_context(self, roi_id="", roi_dir="", step2_dir=""):
+        # User ruling 2026-10-03: while a run is going, Step2 stays on the
+        # workspace the run was started for. Another workspace waits and is
+        # switched to when the run ends (completed, failed or stopped).
+        token = (self._run_progress or {}).get("token") if self._run_active else None
+        if token is not None:
+            if (roi_id or "", roi_dir or "") != (token.get("roi_id", ""), token.get("roi_dir", "")):
+                self._pending_context = (roi_id or "", roi_dir or "", step2_dir or "")
+                print(f"[Step2] workspace {roi_id or '(none)'} will be opened when the "
+                      f"running segmentation ends")
+            return
         self._roi_id = roi_id or ""
         self._roi_dir = roi_dir or ""
         self._step2_dir = step2_dir or ""
@@ -2945,6 +2958,7 @@ class Step2Page(QWidget):
         self._btn_run.setEnabled(True)
         self._btn_back.setEnabled(True)
         self._btn_stop.setEnabled(False)
+        self._apply_pending_context()
 
     @staticmethod
     def _mark_run_workspace(token):
@@ -2957,6 +2971,13 @@ class Step2Page(QWidget):
             mark_roi_step(project_dir, roi_id, "step2", "done")
         except Exception as e:
             print(f"[Step2] failed to update ROI step2 status: {e}")
+
+    def _apply_pending_context(self):
+        """The run ended: switch to the workspace handed over meanwhile."""
+        pending, self._pending_context = self._pending_context, None
+        if pending is not None:
+            print(f"[Step2] switching to workspace {pending[0] or '(none)'}")
+            self.set_roi_context(*pending)
 
     def _on_finished(self, output_dir, total_cells):
         self._run_grid_lbl.setVisible(False)
@@ -3013,6 +3034,8 @@ class Step2Page(QWidget):
             f'  tile_masks/\n'
             f'    tile_r*_c*_dapi.ome.tiff\n'
             f'    tile_r*_c*_raw_mask.ome.tiff'
+            + (f'\n\nStep2 now switches to the new workspace: {self._pending_context[0]}'
+               if self._pending_context else '')
         )
         btn_qc = msg.addButton('→ Open QC Viewer (Step 3)',
                                QMessageBox.AcceptRole)
@@ -3020,6 +3043,7 @@ class Step2Page(QWidget):
                                  QMessageBox.AcceptRole)
         msg.addButton('OK', QMessageBox.RejectRole)
         msg.exec_()
+        self._apply_pending_context()          # whichever button was pressed
         if msg.clickedButton() is btn_qc:
             self.open_qc_requested.emit(output_dir)
         elif msg.clickedButton() is btn_feat:
@@ -3038,6 +3062,7 @@ class Step2Page(QWidget):
         self._btn_stop.setEnabled(False)
         QMessageBox.critical(self, 'Error', msg)
         print(f'[Step2 Error]\n{msg}')
+        self._apply_pending_context()
 
 
 # ══════════════════════════════════════════════════════════════════════

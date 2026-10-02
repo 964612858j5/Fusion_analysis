@@ -4657,7 +4657,18 @@ class MainWindow(QMainWindow):
         # handoff permanently dead — fused.zarr AND Segmentation Index never
         # populated for ANY segmentation method. Fill the two Input Data fields
         # only when still empty so a manual override / re-entry is never clobbered.
-        if self.step1_output:
+        # User ruling 2026-10-03: Step2 follows the NEWEST workspace. After a
+        # Step0 Save as, `step1_output` still describes the previous
+        # workspace (the new one has no Step1 result yet); it must not pull
+        # Step2 back there.
+        s0, s1 = self.step0_output or {}, self.step1_output or {}
+        if (s1 and s0.get("roi_id") and s1.get("roi_id")
+                and s1.get("roi_id") != s0.get("roi_id")):
+            if hasattr(self._step2, "set_roi_context"):
+                self._step2.set_roi_context(roi_id=s0.get("roi_id", ""),
+                                            roi_dir=s0.get("roi_dir", ""),
+                                            step2_dir=s0.get("step2_dir", ""))
+        elif self.step1_output:
             step2_dir = self.step1_output.get("step2_dir") or (self.step0_output or {}).get("step2_dir")
             if step2_dir:
                 os.makedirs(step2_dir, exist_ok=True)

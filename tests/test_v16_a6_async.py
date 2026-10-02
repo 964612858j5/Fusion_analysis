@@ -486,6 +486,7 @@ def test_step4_is_frozen_while_it_computes_except_stop(step4):
     worker = page._worker
     live = [w for w, on in _controls(page).items() if on]
     assert live == [page._btn_stop]
+    assert not page._marker_list.isEnabled()     # disabled with its group
 
     worker.go.set()
     worker.wait(5000)
@@ -554,3 +555,81 @@ def test_closing_the_batch_dialog_stops_waits_then_closes(app, tmp_path, monkeyp
             wk.leave.set()
             wk.wait(5000)
         dlg.deleteLater()
+
+
+# ── G2: Step2's results index is swapped in whole ───────────────────────
+
+def test_step2s_results_index_survives_a_failed_write(tmp_path, monkeypatch):
+    """The index is read, changed and written back; a write that fails half
+    way leaves the previous index whole (`write_json_atomic`)."""
+    import json
+    from block01.workers.segment_merge_worker import SegmentMergeWorker
+    wk = SegmentMergeWorker("unused.zarr", seg_config={"method": "cellpose_wholecell_fusion"},
+                            output_dir=str(tmp_path / "run"))
+    wk.project_output_dir = str(tmp_path / "step2")
+    entry = {"result_id": "r1", "method": "m", "status": "done"}
+    path = wk._update_results_index(entry)
+    with open(path) as f:
+        before = f.read()
+
+    real_dump = json.dump
+
+    def _half_then_fail(obj, f, *a, **k):
+        if isinstance(obj, dict) and "runs" in obj:
+            f.write('{"runs": [')
+            raise OSError("disk full")
+        return real_dump(obj, f, *a, **k)
+    monkeypatch.setattr(json, "dump", _half_then_fail)
+    with pytest.raises(OSError):
+        wk._update_results_index(dict(entry, result_id="r2"))
+    with open(path) as f:
+        assert f.read() == before
+    assert not glob.glob(os.path.join(os.path.dirname(path), ".*.tmp.*"))
+
+
+# ── §6: the two commit protocols the compliant rows rely on ─────────────
+
+def test_protocol_a_single_file_is_replaced_whole(tmp_path, monkeypatch):
+    """`write_json_atomic`: temp file + fsync + `os.replace`. A failing
+    replace leaves the old file and no temp file."""
+    from block01.core.provenance import write_json_atomic
+    path = str(tmp_path / "x.json")
+    write_json_atomic(path, {"v": 1})
+    real_replace = os.replace
+
+    def _fail(src, dst, *a, **k):
+        if dst == path:
+            raise OSError("killed")
+        return real_replace(src, dst, *a, **k)
+    monkeypatch.setattr(os, "replace", _fail)
+    with pytest.raises(OSError):
+        write_json_atomic(path, {"v": 2})
+    import json
+    with open(path) as f:
+        assert json.load(f) == {"v": 1}
+    assert os.listdir(tmp_path) == ["x.json"]
+
+
+def test_protocol_b_the_completion_mark_is_written_last(tmp_path, monkeypatch):
+    """Step3's label pyramid: built under `.partial`, `complete` last, then
+    renamed. A failure before the mark leaves the previous pyramid readable
+    and no partial directory."""
+    import test_label_pyramid as tlp
+    from block01.core import label_pyramid as lp
+    slide = tlp._slide(tmp_path)
+    bbox = (37, 37 + 176, 101, 101 + 208)
+    src, _ = tlp._mask(tmp_path, (176, 208))
+    out = lp.build(src, str(tmp_path / "pyr.zarr"), lp.raw_level_shapes(slide), bbox, "cell")
+    first = lp.read(out)
+    assert first is not None
+
+    real_attrs = lp._attrs
+
+    def _fail_before_the_mark(*a, **k):
+        raise RuntimeError("died before complete")
+    monkeypatch.setattr(lp, "_attrs", _fail_before_the_mark)
+    with pytest.raises(RuntimeError):
+        lp.build(src, out, lp.raw_level_shapes(slide), bbox, "cell")
+    monkeypatch.setattr(lp, "_attrs", real_attrs)
+    assert lp.read(out) == first
+    assert not os.path.exists(out + ".partial")

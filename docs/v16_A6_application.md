@@ -231,3 +231,18 @@ TaskManager、事务框架、新的存储框架（§15.3）；worker 的计算�
 3. G2：迟到运行的 `progress` / `tile_done` 信号不核对令牌（申请只要求核对 finished / error），在切换后仍可能更新 tile 网格和细胞计数。
 4. G4：§4 白名单对 `main_window.py` 只写了「关窗时」。数据集切换时的停止请求是按 §3.1 G4 ③ 加的（`_discard_step1_context` 的下游页面一段），在此说明。
 5. W1：Intensity 的恢复直接写了 `ChannelWorkbench` 的 `_params` / `_user_adjusted`。这个控件没有公开的设置接口，而 `channel_workbench.py` 不在白名单里。
+
+### 12.5 按 handoff_next2 补齐（T0 = 2026-10-02 15:10）
+
+- **入口条件**：S0P 全量回归完成（`e381dac`），没有测试在跑，工作区干净。
+- **G2–G5 核对**：代码和受控延迟测试都已在 `1f7fce3` 里，不重做。只补缺的：
+  - G2：补原子写入测试 `test_step2s_results_index_survives_a_failed_write`（结果索引写到一半失败，旧文件完整、没有临时文件）；
+  - §6 的两条协议测试：`test_protocol_a_single_file_is_replaced_whole`（`write_json_atomic`）和 `test_protocol_b_the_completion_mark_is_written_last`（Step3 标签金字塔：先写 `.partial`，`complete` 最后写）。两条在新旧两边都通过，说明这两处登记为合规的协议确实成立；
+  - G4：冻结测试补一条断言：标记列表随它所在的组一起被禁用。
+- **反向注入（按 next2 §4.6，旧代码树在 `~/fusionflux/bench_a6/old/block01` = `f8ace2b`）**：`test_v16_a6_async.py` 共 18 条。
+  - 在旧代码上：14 条失败；批处理对话框那条让进程崩溃（rc=139：旧代码销毁了仍在运行的 QThread），也算失败；4 条通过（2 条对照组、2 条协议测试）。
+  - 在工作区：18 条全部通过。
+  - `test_v16_a6_workspace.py` 在旧代码上无法导入（没有 `utils/workspace_session.py`），在工作区 17 条全部通过。
+- **G4 冻结范围与 next2 列表对照**：next2 列的是运行选择、ROI、各勾选项、输出目录、前缀、Batch、Back。实现冻结的是页面上的全部输入控件（只留 Stop），比列表多出两类（记为 advisory，没有改）：
+  - 两个 `Browse` 按钮（属于运行选择和输出目录那两行）；
+  - 6 个分组折叠箭头（`QToolButton`）：计算期间不能折叠或展开分组。

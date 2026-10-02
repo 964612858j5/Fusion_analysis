@@ -366,3 +366,10 @@ TaskManager、事务框架、新的存储框架（§15.3）；worker 的计算�
   - 修复前（`f3dcd58`）新增的 3 条都变红；4 条换数据集的测试在新旧两边都通过。
   - 相关模块都通过：`test_step2_tile_status`、`test_step2_skip_empty_tiles`、`test_step2_layout`、`test_preseg_contract`、`test_step1_to_step2_handoff`、`test_step1_step2_handoff_e2e`、`test_step1_handoff_invalidation`、`test_step1_dataset_switch`、`test_step0_step1_handoff_contract`、`test_v16_a6_workspace`、`test_step2_remap_integration`、`test_step2_legacy_stop`。
 - **已知不一致（只记录）**：Save as 时，主窗口 `_on_step0_complete` 会立刻把 Step2 的「Output」输入框改成新工作区的 step2 目录。运行结束切换之后，两者才重新一致。这只影响下一次运行的默认输出位置，不影响正在跑的这次（它的输出目录在开始时就已经固定）。
+
+### 12.13 第 12 项：切换到新工作区后清空上一次运行的显示（2026-10-03，用户裁定）
+
+- **真机**：Save as 之后，运行结束，点 OK，Step2 确实切到了新工作区，但页面上仍是上一个工作区那次运行的全绿 tile 和 100% 进度。新工作区还没有 Step1 结果，所以概览图也还是旧的。
+- **用户裁定**：切换后**保留概览图**，只清空 tile 和进度。
+- **实施**：Step2 换到另一个工作区时，如果页面上还留着上一个工作区那次运行的记录，就清空它：tile 全部回到灰色，进度条和细胞数归零，旧运行提示隐藏。概览图不动。
+- **测试**：在 `test_save_as_during_a_run_keeps_step2_on_the_runs_workspace_until_it_ends` 里补了 4 条断言：tile 全灰、进度为 0、细胞数为 0、概览图的 zarr 保留。修复前（`52ee0e8`）变红，修复后通过。相关模块都通过。

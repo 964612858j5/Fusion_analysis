@@ -974,6 +974,12 @@ def test_save_as_during_a_run_keeps_step2_on_the_runs_workspace_until_it_ends(st
     assert "roi_B" in seen["boxes"][-1]                     # the box says where it goes
     assert seen["marked"] == ["roi_A"]
     assert p._roi_id == "roi_B"                             # switched after the box
+    # user ruling 2026-10-03: on the new workspace the previous run's tiles,
+    # bar and count are cleared; the overview picture stays
+    assert set(p._tile_status.values()) == {"idle"}
+    assert p._prog_bar.value() == 0 and p._prog_lbl.text() == "—"
+    assert p._cells_lbl.text() == "Total cells detected: 0"
+    assert p._zarr_path                                     # the picture's zarr kept
 
 
 def test_a_run_that_fails_after_a_save_as_also_switches_afterwards(step2):

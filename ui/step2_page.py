@@ -1717,11 +1717,32 @@ class Step2Page(QWidget):
         token = (rp or {}).get("token")
         return token is None or self._run_identity() == token
 
+    def _clear_run_view(self):
+        """No run on this page any more: grey tiles, empty bar and count."""
+        self._run_progress = None
+        self._total_cells = 0
+        for key in list(self._tile_status):
+            self._tile_status[key] = 'idle'
+            self._set_tile_colour(key[0], key[1], 'idle')
+        self._prog_bar.setValue(0)
+        self._prog_lbl.setText('—')
+        self._cells_lbl.setText('Total cells detected: 0')
+        self._old_run_lbl.setVisible(False)
+
     def _refresh_run_view(self):
         """The page's context moved: draw the run's record if it is the
         run's context again, else say an older run is computing."""
         rp = self._run_progress
         if rp is None or rp.get("token") is None:
+            return
+        token = rp["token"]
+        if (not self._run_active
+                and (self._roi_id, self._roi_dir) != (token.get("roi_id", ""),
+                                                      token.get("roi_dir", ""))):
+            # User ruling 2026-10-03: Step2 is now on ANOTHER workspace and the
+            # recorded run was the previous one's -- its tiles, bar and cell
+            # count go; the overview picture stays.
+            self._clear_run_view()
             return
         if self._run_view_live():
             self._old_run_lbl.setVisible(False)

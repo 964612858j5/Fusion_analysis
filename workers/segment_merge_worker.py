@@ -26,7 +26,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from ..core import (label_ownership, label_pyramid, nuclei_pairing, preseg_contract,
                     preseg_input, seam_merge)
 from ..core.io_loader import OMETIFFLoader
-from ..core.provenance import register_segmentation_run
+from ..core.provenance import register_segmentation_run, write_json_atomic
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
@@ -945,8 +945,7 @@ class SegmentMergeWorker(QThread):
         })
         data.setdefault("latest_by_method", {})[entry.get("method")] = rid
         data["updated_at"] = datetime.now().isoformat()
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        write_json_atomic(path, data)                           # block A6 G2
         return path
 
     def _multichannel_source_path(self):
@@ -3344,8 +3343,7 @@ class SegmentMergeWorker(QThread):
             meta["roi_shape"] = meta.get("image_shape")
         meta_path = os.path.join(self.output_dir, f'segmentation_meta_{out_prefix}.json')
         with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(meta_path)):
-            with open(meta_path, 'w') as f:
-                json.dump(meta, f, indent=2)
+            write_json_atomic(meta_path, meta)          # block A6 G2
 
         self._last_region_meta = meta
         log.info(f"  [{out_prefix}] outputs written")
@@ -3563,8 +3561,7 @@ class SegmentMergeWorker(QThread):
                 summary_meta["seg_engine"] = self._engine_meta
                 summary_meta_path = os.path.join(self.output_dir, "segmentation_meta.json")
                 with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(summary_meta_path)):
-                    with open(summary_meta_path, "w") as f:
-                        json.dump(summary_meta, f, indent=2)
+                    write_json_atomic(summary_meta_path, summary_meta)   # block A6 G2
                 self._register_completed_result(summary_meta)
                 if self.roi_dir and self.roi_id:
                     rel_run_path = os.path.relpath(self.output_dir, self.roi_dir)
@@ -4293,8 +4290,7 @@ class SegmentMergeWorker(QThread):
             meta["seg_engine"] = self._engine_meta
             meta_path = os.path.join(self.output_dir, 'segmentation_meta.json')
             with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(meta_path)):
-                with open(meta_path, 'w') as f:
-                    json.dump(meta, f, indent=2)
+                write_json_atomic(meta_path, meta)              # block A6 G2
             self._register_completed_result(meta)
             if self.roi_dir and self.roi_id:
                 rel_run_path = os.path.relpath(self.output_dir, self.roi_dir)

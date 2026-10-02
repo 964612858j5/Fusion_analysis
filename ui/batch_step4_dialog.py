@@ -186,6 +186,9 @@ class BatchStep4Dialog(QDialog):
         self._batch_tasks = []
         self._batch_stats = []
         self._batch_idx = 0
+        # Block A6 G4: Close was pressed during a run; the dialog closes once
+        # the current worker's thread has ended.
+        self._closing = False
 
         self._build_ui()
 
@@ -464,6 +467,8 @@ class BatchStep4Dialog(QDialog):
         self._run_next()
 
     def _run_next(self):
+        if self._closing:
+            return                      # closing: no next sample, no "Done" box
         if self._batch_idx >= len(self._batch_tasks):
             self._run_btn.setEnabled(True)
             self._current_worker = None
@@ -518,6 +523,40 @@ class BatchStep4Dialog(QDialog):
         self._set_status(row, "error ✖")
         # A failed sample never aborts the batch — move to the next one.
         self._advance()
+
+    # ── closing during a run (block A6 G4) ────────────────────────────
+
+    def reject(self):
+        if self._stop_then_close():
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        if self._stop_then_close():
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def _stop_then_close(self):
+        """Stop the running sample and close when its thread has ended
+        (user ruling): its callbacks never reach a dialog that is gone.
+        True when the close is deferred."""
+        worker = self._current_worker
+        if worker is None or not worker.isRunning():
+            return False
+        if not self._closing:
+            self._closing = True
+            worker.stop()
+            self._run_btn.setEnabled(False)
+            self._close_btn.setEnabled(False)
+            self._progress_bar.setFormat("Stopping…")
+            print("[BATCH]   stopping the current sample before closing", flush=True)
+            worker.finished.connect(self._close_after_stop)   # QThread.finished
+        return True
+
+    def _close_after_stop(self):
+        self._current_worker = None
+        super().reject()
 
     def _set_status(self, row, text):
         item = self.table.item(row, COL_STATUS)

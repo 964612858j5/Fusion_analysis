@@ -77,4 +77,7 @@ class RandomPatchJob(QObject):
             answer = run_generation(request)
         except Exception:  # noqa: BLE001 -- reported to the GUI, not raised on a thread
             answer = {"generation": None, "error": traceback.format_exc()}
+        # Block A6 G3: the answer says which slide it was asked about.
+        answer["dataset_gen"] = request.get("dataset_gen")
+        answer["loader"] = request.get("loader")
         self.finished.emit(answer)

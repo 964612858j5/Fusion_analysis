@@ -470,7 +470,7 @@ class _PresegSignals(QtCore.QObject):
     """The run's thread reports through these, so the page updates on its own
     thread (queued across threads by Qt)."""
     record = QtCore.pyqtSignal(object)
-    finished = QtCore.pyqtSignal(object)
+    finished = QtCore.pyqtSignal(object)    # (run_id, records)
 
 
 class MainWindow(QMainWindow):
@@ -2931,6 +2931,11 @@ class MainWindow(QMainWindow):
             self._step2.set_rois([])
             if hasattr(self._step2, "set_roi_context"):
                 self._step2.set_roi_context(roi_id="", roi_dir="", step2_dir="")
+        # Block A6 G4: Step4's extraction is about the old dataset -- asked
+        # to stop (never waited for); its late answer is dropped by its token.
+        step4 = self.__dict__.get("_step4")
+        if step4 is not None:
+            step4.stop_background_jobs()
 
     def _on_step0_complete(self, payload):
         global OME_TIFF_FILE, OUTPUT_DIR
@@ -5434,7 +5439,9 @@ class MainWindow(QMainWindow):
                 "corrected_decisions": dict(self._corrected_decisions or {})}
         sig = self._preseg_sig
         job = PresegRunJob(self._preseg_step1_dir(), run, lambda: open_loader(spec),
-                           on_record=sig.record.emit, on_finished=sig.finished.emit)
+                           on_record=sig.record.emit,
+                           # Block A6 G5: the answer names its run.
+                           on_finished=lambda recs, rid=run_id: sig.finished.emit((rid, recs)))
         self._preseg_job, self._preseg_run, self._preseg_records = job, run, {}
         self._start_results_for_run(combos)
         self._preseg_methods.set_running(True)
@@ -5470,9 +5477,13 @@ class MainWindow(QMainWindow):
                 "Running: " + summary_line(self._preseg_records, len(run["tasks"])))
         self._refresh_preseg_results()
 
-    def _on_preseg_finished(self, records):
+    def _on_preseg_finished(self, answer):
+        run_id, records = answer
         run = self._preseg_run
-        if run is None:
+        if run is None or run.get("run_id") != run_id:
+            # Block A6 G5: a late answer from a run that is no longer shown
+            # must not clear the state of the one that is.
+            print(f"[Step1] dropped the late end of pre-segmentation run {run_id}")
             return
         for tid, rec in (records or {}).items():
             if rec.get("run_id") == run.get("run_id"):
@@ -6072,6 +6083,8 @@ class MainWindow(QMainWindow):
         return {"loader": loader, "channel": channel, "count": int(count),
                 "height": int(height), "width": int(width), "region": region,
                 "polygon": polygon,
+                # Block A6 G3: the dataset this request is about.
+                "dataset_gen": int(self._dataset_gen_seen),
                 "existing": [tuple(int(v) for v in p) for p in self._all_patches]}, ""
 
     def _on_random_patches_requested(self, count, height, width):
@@ -6087,6 +6100,13 @@ class MainWindow(QMainWindow):
 
     def _on_random_patches_done(self, answer):
         self._preseg_patches.set_random_busy(False)
+        # Block A6 G3: patches drawn on another slide's tissue never reach
+        # this one's Step0 page.
+        if (answer.get("dataset_gen") != int(self._dataset_gen_seen)
+                or answer.get("loader") is not getattr(self, "loader", None)):
+            print("[Step1] dropped late random patches: they were drawn for "
+                  "a dataset that is no longer loaded")
+            return
         if answer.get("error"):
             print(f"[Step1] random patches failed:\n{answer['error']}")
             QMessageBox.warning(self, "Random patches",
@@ -6834,6 +6854,14 @@ class MainWindow(QMainWindow):
             event.ignore()
             self._display.resume()
             self.prev_status.setText("Waiting for Step2 segmentation to stop…")
+            QtCore.QTimer.singleShot(500, self.close)
+            return
+        # Block A6 G4: Step4's extraction, the same treatment.
+        step4 = self.__dict__.get("_step4")
+        if step4 is not None and step4.stop_background_jobs():
+            event.ignore()
+            self._display.resume()
+            self.prev_status.setText("Waiting for Step4 feature extraction to stop…")
             QtCore.QTimer.singleShot(500, self.close)
             return
         # The close is CERTAIN from here: nothing above can refuse it any

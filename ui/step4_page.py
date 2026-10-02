@@ -38,6 +38,9 @@ class Step4Page(QWidget):
         self._running = False
         self._open_slide = ""
         self._job = None            # the resolved QuantJob, or None
+        # Block A6 G4: the controls' own enabled states, kept while the page
+        # is frozen for a run and put back after it.
+        self._frozen_states = None
         self._build_ui()
 
     # ── public API ────────────────────────────────────────────────────
@@ -46,6 +49,12 @@ class Step4Page(QWidget):
         """The (run, region) Step4 quantifies -- MainWindow hands over
         Step3's choice. The slide is the run's own; `open_slide` is the one
         open in the program (a run of another slide is refused)."""
+        if self._running:
+            # Block A6 G4: the page is frozen while it computes; the run it
+            # is quantifying is not swapped underneath it.
+            print(f"[Step4] kept the running job; {run_dir!r} not taken "
+                  f"while features are being extracted")
+            return
         if open_slide is not None:
             self._open_slide = open_slide or ""
         self._run_edit.blockSignals(True)
@@ -515,11 +524,15 @@ class Step4Page(QWidget):
             distribution = distribution,
             markers     = markers,
         )
+        # Block A6 G4: the answer is checked against what it was started for.
+        token = self._run_identity()
         self._worker.progress.connect(self._on_progress)
-        self._worker.extraction_done.connect(self._on_finished)
-        self._worker.error.connect(self._on_error)
+        self._worker.extraction_done.connect(
+            lambda out, base, t=token: self._on_run_finished(t, out, base))
+        self._worker.error.connect(lambda m, t=token: self._on_run_error(t, m))
 
         self._running = True
+        self._freeze(True)
         self._update_run_button()
         self._btn_stop.setEnabled(True)
         self._prog_bar.setValue(0)
@@ -529,6 +542,75 @@ class Step4Page(QWidget):
         if self._worker:
             self._worker.stop()
 
+    def stop_background_jobs(self):
+        """Block A6 G4 -- dataset switch or window close: ask the extraction
+        to stop, never wait for it. True while it is still running."""
+        worker = self._worker
+        if worker is None or not worker.isRunning():
+            return False
+        worker.stop()
+        return worker.isRunning()
+
+    def _run_identity(self):
+        """The dataset generation (the window's display generation) and the
+        job this page is quantifying."""
+        win = self.window()
+        job = self._job
+        return {
+            "dataset_gen": int(getattr(win, "_dataset_gen_seen", 0) or 0),
+            "run_dir": getattr(job, "run_dir", "") if job is not None else "",
+            "roi_name": getattr(job, "roi_name", "") if job is not None else "",
+            "open_slide": self._open_slide or "",
+        }
+
+    def _on_run_finished(self, token, out_dir, base_name):
+        if self._run_identity() == token:
+            self._on_finished(out_dir, base_name)
+        else:
+            self._late_run_ended(token, f"finished → {out_dir}")
+
+    def _on_run_error(self, token, msg):
+        if self._run_identity() == token:
+            self._on_error(msg)
+        else:
+            first = str(msg or "").strip().splitlines()[0] if msg else ""
+            self._late_run_ended(token, f"failed: {first}")
+
+    def _late_run_ended(self, token, what):
+        """The extraction was for a dataset no longer loaded: log it, end
+        the frozen state, show nothing of it."""
+        print(f"[Step4] an extraction for {token.get('run_dir') or '(none)'} "
+              f"(dataset generation {token.get('dataset_gen')}) {what}; "
+              f"another dataset is loaded, so nothing is shown")
+        self._running = False
+        self._freeze(False)
+        self._btn_stop.setEnabled(False)
+        self._update_run_button()
+
+    _FREEZE_TYPES = (QtWidgets.QAbstractButton, QtWidgets.QComboBox,
+                     QtWidgets.QLineEdit, QtWidgets.QAbstractSpinBox,
+                     QtWidgets.QGroupBox)     # scroll bars keep scrolling
+
+    def _freeze(self, on):
+        """Block A6 G4 (user ruling): while it computes, every control of
+        the page is locked except Stop; afterwards each gets back the state it
+        had."""
+        if on:
+            if self._frozen_states is not None:
+                return
+            # A widget's OWN state, not `isEnabled()` (which also reflects its
+            # parents), all read before any is changed.
+            states = [(w, not w.testAttribute(Qt.WA_ForceDisabled))
+                      for w in self.findChildren(QtWidgets.QWidget)
+                      if w is not self._btn_stop and isinstance(w, self._FREEZE_TYPES)]
+            for w, _was in states:
+                w.setEnabled(False)
+            self._frozen_states = states
+        else:
+            states, self._frozen_states = self._frozen_states, None
+            for w, was in states or ():
+                w.setEnabled(was)
+
     def _on_progress(self, done, total, msg):
         pct = int(done / total * 100) if total > 0 else 0
         self._prog_bar.setValue(pct)
@@ -537,6 +619,7 @@ class Step4Page(QWidget):
     def _on_finished(self, out_dir, base_name):
         self._prog_bar.setValue(100)
         self._running = False
+        self._freeze(False)
         self._btn_stop.setEnabled(False)
         self._update_run_button()
         outs = (self._worker.outputs or {}) if self._worker is not None else {}
@@ -562,6 +645,7 @@ class Step4Page(QWidget):
     def _on_error(self, msg):
         self._prog_bar.setValue(0)
         self._running = False
+        self._freeze(False)
         self._btn_stop.setEnabled(False)
         self._update_run_button()
         self._prog_lbl.setText(f'✗ {msg.splitlines()[-1] if msg else "Error"}')

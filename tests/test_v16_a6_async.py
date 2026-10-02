@@ -214,3 +214,343 @@ def test_a_new_job_is_refused_while_the_old_thread_is_alive(app, tmp_path, monke
             wk.wait(5000)
         _pump()
         w.close()
+
+
+# ── G2: Step2's run answers ─────────────────────────────────────────────
+
+class _FakeStep2Run(QtCore.QObject):
+    """The SegmentMergeWorker signal contract; `start` runs nothing, the test
+    emits the answers itself, as late as it likes."""
+    progress = QtCore.pyqtSignal(int, int, str)
+    tile_done = QtCore.pyqtSignal(int, int, int)
+    tile_skipped = QtCore.pyqtSignal(int, int)
+    finished = QtCore.pyqtSignal(str, int)
+    error = QtCore.pyqtSignal(str)
+
+    def __init__(self, **kw):
+        super().__init__()
+        self.kw = kw
+
+    def start(self):
+        pass
+
+    def isRunning(self):
+        return False
+
+    def stop(self):
+        pass
+
+
+@pytest.fixture
+def step2(app, tmp_path, monkeypatch):
+    from block01.ui import step2_page as s2
+    zp = str(tmp_path / "fused_Full WSI.zarr")
+    z = zarr.open(zp, mode="w", shape=(64, 64, 2), chunks=(64, 64, 2), dtype=np.uint16)
+    z[...] = 7
+    seen = {"marked": [], "boxes": [], "done": []}
+    monkeypatch.setattr(s2, "SegmentMergeWorker", _FakeStep2Run)
+    monkeypatch.setattr(s2, "mark_roi_step",
+                        lambda project, roi, step, state: seen["marked"].append(roi))
+    monkeypatch.setattr(s2.QMessageBox, "exec_",
+                        lambda self: seen["boxes"].append(self.text()) or 0)
+    monkeypatch.setattr(s2.QMessageBox, "critical",
+                        lambda *a, **k: seen["boxes"].append(a[2]))
+    p = s2.Step2Page()
+    monkeypatch.setattr(p, "_promote_step0_remap", lambda cfg: None)
+    p._zarr_edit.setText(zp)
+    p._load_zarr_info()
+    p._set_param_source("manual")
+    p.segmentation_done.connect(seen["done"].append)
+    a_dir = tmp_path / "proj" / "rois" / "roi_A"
+    p.set_roi_context(roi_id="roi_A", roi_dir=str(a_dir),
+                      step2_dir=str(a_dir / "step2"))
+    yield p, seen, tmp_path
+    p.deleteLater()
+
+
+def _switch_workspace(p, tmp_path):
+    b_dir = tmp_path / "proj" / "rois" / "roi_B"
+    p.set_roi_context(roi_id="roi_B", roi_dir=str(b_dir),
+                      step2_dir=str(b_dir / "step2"))
+
+
+def test_a_step2_run_finishing_after_the_workspace_changed_shows_nothing(step2):
+    p, seen, tmp_path = step2
+    p._run()
+    worker = p._worker
+    assert isinstance(worker, _FakeStep2Run) and not p._btn_run.isEnabled()
+    label_before = p._prog_lbl.text()
+
+    _switch_workspace(p, tmp_path)               # e.g. Save as in Step0
+    worker.finished.emit("/old/run", 1234)       # the old run, late
+    _pump()
+
+    assert seen["done"] == []                    # no hand-off to Step3
+    assert seen["boxes"] == []                   # no "complete" box
+    assert p._prog_lbl.text() == label_before    # no result text
+    assert seen["marked"] == ["roi_A"]           # its OWN workspace, not B
+    assert p._btn_run.isEnabled() and not p._run_active
+
+
+def test_a_step2_run_failing_after_the_workspace_changed_shows_nothing(step2):
+    p, seen, tmp_path = step2
+    p._run()
+    worker = p._worker
+    _switch_workspace(p, tmp_path)
+    worker.error.emit("engine died")
+    _pump()
+    assert seen["boxes"] == []
+    assert p._btn_run.isEnabled()
+
+
+def test_a_step2_run_in_the_same_workspace_reports_as_before(step2):
+    p, seen, tmp_path = step2
+    p._run()
+    p._worker.finished.emit("/run", 5)
+    _pump()
+    assert seen["done"] == ["/run"]
+    assert len(seen["boxes"]) == 1
+    assert seen["marked"] == ["roi_A"]
+
+
+# ── G3: random patches ──────────────────────────────────────────────────
+
+class _Gen:
+    patches = [(0, 16, 0, 16)]
+    shortfall = 0
+    requested = 1
+
+    def record(self):
+        return {"requested": 1}
+
+
+def test_random_patches_for_the_previous_slide_are_dropped(app, tmp_path, monkeypatch):
+    from block01.ui.step1_presegmentation import random_job as rj
+    gate = threading.Event()
+
+    def _slow_generation(request):
+        assert gate.wait(20)
+        return {"generation": _Gen(), "error": ""}
+    monkeypatch.setattr(rj, "run_generation", _slow_generation)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *a, **k: None)
+    w = iso._window(app, tmp_path)
+    w.loader.read_region_lowres = lambda *a, **k: np.zeros((4, 4), np.float32)
+    added = []
+    monkeypatch.setattr(w._step0, "add_patches", lambda p: added.append(p) or list(p))
+    try:
+        w._on_random_patches_requested(1, 16, 16)
+        assert w._random_patch_job.is_running()
+        # The user loads another slide while the job reads the old one.
+        w._dataset_gen_seen += 1
+        w.loader = iso._Loader()
+        gate.set()
+        w._random_patch_job.wait(10)
+        _pump()
+        assert added == []
+    finally:
+        gate.set()
+        w._random_patch_job.wait(10)
+        w.close()
+
+
+def test_random_patches_for_this_slide_still_arrive(app, tmp_path, monkeypatch):
+    from block01.ui.step1_presegmentation import random_job as rj
+    monkeypatch.setattr(rj, "run_generation",
+                        lambda request: {"generation": _Gen(), "error": ""})
+    w = iso._window(app, tmp_path)
+    w.loader.read_region_lowres = lambda *a, **k: np.zeros((4, 4), np.float32)
+    added = []
+    monkeypatch.setattr(w._step0, "add_patches", lambda p: added.append(p) or list(p))
+    try:
+        w._on_random_patches_requested(1, 16, 16)
+        w._random_patch_job.wait(10)
+        _pump()
+        assert added == [_Gen.patches]
+    finally:
+        w.close()
+
+
+# ── G5: the end of a pre-segmentation run ───────────────────────────────
+
+class _FakePresegJob:
+    made = []
+
+    def __init__(self, step1_dir, run, loader_factory, python=None,
+                 on_record=None, on_progress=None, on_finished=None):
+        self.run, self.on_finished = run, on_finished
+        self.running = True
+        _FakePresegJob.made.append(self)
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def is_running(self):
+        return self.running
+
+    def close(self, timeout=30.0):
+        self.running = False       # its thread outlived the close timeout
+
+
+def test_a_late_end_of_an_old_preseg_run_keeps_the_new_run(app, tmp_path, monkeypatch):
+    import test_step1_preseg_run_ui as pre
+    from block01.ui import main_window as mw
+    _FakePresegJob.made = []
+    monkeypatch.setattr(mw, "PresegRunJob", _FakePresegJob)
+    w = pre._window(app, tmp_path, monkeypatch)
+    try:
+        pre._quiet(monkeypatch)
+        w._preseg_methods.adopt(pre.SD, pre._vals(pre.SD))
+        w._on_preseg_run()
+        old = _FakePresegJob.made[-1]
+        old.close()                              # e.g. the Step1 context went away
+        w._on_preseg_run()
+        new = _FakePresegJob.made[-1]
+        assert new is not old and w._preseg_job is new
+
+        old.on_finished({})                      # the old thread finally ends
+        _pump()
+        assert w._preseg_job is new              # the new run is still the run
+        assert not w._preseg_methods.btn_run.isEnabled()
+    finally:
+        w.close()
+
+
+# ── G4: Step4 and its batch dialog ──────────────────────────────────────
+
+class _FakeExtract(QtCore.QThread):
+    """FeatureExtractWorker's contract; runs until stopped or released, then
+    answers the way the real one does."""
+    progress = QtCore.pyqtSignal(int, int, str)
+    extraction_done = QtCore.pyqtSignal(str, str)
+    error = QtCore.pyqtSignal(str)
+    made = []
+
+    def __init__(self, **kw):
+        super().__init__()
+        self.kw = kw
+        self.outputs = {}
+        self.go = threading.Event()
+        self.leave = threading.Event()   # held after answering until set
+        self.leave.set()
+        self.stopped = False
+        _FakeExtract.made.append(self)
+
+    def stop(self):
+        self.stopped = True
+        self.go.set()
+
+    def run(self):
+        self.go.wait(20)
+        if self.stopped:
+            self.error.emit("Stopped by user.")
+        else:
+            self.extraction_done.emit(self.kw.get("output_dir", ""), "cell_features")
+        self.leave.wait(20)
+
+
+@pytest.fixture
+def step4(app, tmp_path, monkeypatch):
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_quant_sources import build_project
+    from block01.ui import step4_page as s4
+    _FakeExtract.made = []
+    monkeypatch.setattr(s4, "FeatureExtractWorker", _FakeExtract)
+    p = build_project(tmp_path)
+    page = s4.Step4Page()
+    page._announced, page._errors = [], []
+    page._announce = lambda title, text: page._announced.append(text)
+    page._report_error = lambda msg: page._errors.append(msg)
+    page.set_run(p["run_dir"], open_slide=p["slide"])
+    assert page._btn_run.isEnabled()
+    yield page
+    for wk in _FakeExtract.made:
+        wk.go.set()
+        wk.wait(5000)
+    page.deleteLater()
+
+
+def _controls(page):
+    return {w: w.isEnabled() for w in page.findChildren(QtWidgets.QWidget)
+            if isinstance(w, (QtWidgets.QAbstractButton, QtWidgets.QComboBox,
+                              QtWidgets.QLineEdit, QtWidgets.QAbstractSpinBox))}
+
+
+def test_step4_is_frozen_while_it_computes_except_stop(step4):
+    page = step4
+    before = _controls(page)
+    page._run()
+    worker = page._worker
+    live = [w for w, on in _controls(page).items() if on]
+    assert live == [page._btn_stop]
+
+    worker.go.set()
+    worker.wait(5000)
+    _pump()
+    after = _controls(page)
+    assert after == before                       # every control as it was
+    assert len(page._announced) == 1
+
+
+def test_step4_does_not_swap_its_job_while_running(step4, tmp_path):
+    page = step4
+    page._run()
+    run_dir = page._job.run_dir
+    page.set_run(str(tmp_path / "another_run"))  # Step3 hands over another
+    assert page._job is not None and page._job.run_dir == run_dir
+
+
+def test_a_step4_answer_after_a_dataset_switch_shows_nothing(step4):
+    page = step4
+    page._run()
+    worker = page._worker
+    page._dataset_gen_seen = 1                   # the page is its own window here
+    assert page.stop_background_jobs() is True   # what the switch asks
+    assert worker.stopped
+    worker.wait(5000)
+    _pump()
+    assert page._announced == [] and page._errors == []
+    assert page._btn_run.isEnabled() and not page._btn_stop.isEnabled()
+
+
+def test_closing_the_batch_dialog_stops_waits_then_closes(app, tmp_path, monkeypatch):
+    from block01.ui import batch_step4_dialog as bd
+    _FakeExtract.made = []
+    monkeypatch.setattr(bd, "FeatureExtractWorker", _FakeExtract)
+    boxes = []
+    monkeypatch.setattr(bd.QMessageBox, "information",
+                        lambda *a, **k: boxes.append(a[2]))
+    ome = tmp_path / "s.ome.tiff"
+    ome.write_bytes(b"x")
+    mask = tmp_path / "run" / "global_mask.dat"
+    mask.parent.mkdir()
+    mask.write_bytes(b"x")
+    dlg = bd.BatchStep4Dialog()
+    dlg._add_row(True, "s", str(ome), str(mask), str(tmp_path / "out"), "s")
+    dlg._add_row(True, "t", str(ome), str(mask), str(tmp_path / "out2"), "t")
+    dlg.show()
+    try:
+        dlg._run_batch()
+        worker = _FakeExtract.made[-1]
+        worker.leave.clear()                     # it answers, then takes a while
+        assert worker.isRunning()
+
+        dlg._close_btn.click()                   # Close, mid-run
+        _pump()
+        assert worker.stopped
+        assert dlg.isVisible()                   # waits for the thread
+        worker.leave.set()
+        worker.wait(5000)
+        _pump()
+        assert not dlg.isVisible()
+        assert len(_FakeExtract.made) == 1       # the next sample never started
+        assert boxes == []                       # no "Batch complete"
+    finally:
+        for wk in _FakeExtract.made:
+            wk.go.set()
+            wk.leave.set()
+            wk.wait(5000)
+        dlg.deleteLater()

@@ -2750,8 +2750,15 @@ class Step2Page(QWidget):
         self._worker.progress.connect(self._on_progress)
         self._worker.tile_done.connect(self._on_tile_done)
         self._worker.tile_skipped.connect(self._on_tile_skipped)
-        self._worker.finished.connect(self._on_finished)
-        self._worker.error.connect(self._on_error)
+        # Block A6 G2: the run carries what it was started for; its answer is
+        # checked against what the page shows when it arrives.
+        token = self._run_identity()
+        worker = self._worker
+        self._run_token = token
+        self._worker.finished.connect(
+            lambda out, n, t=token, wk=worker: self._on_run_finished(t, wk, out, n))
+        self._worker.error.connect(
+            lambda m, t=token, wk=worker: self._on_run_error(t, wk, m))
 
         self._btn_run.setEnabled(False)
         self._btn_back.setEnabled(False)
@@ -2823,6 +2830,62 @@ class Step2Page(QWidget):
                 "Step0 remap NOT applied — worker validation failed"
                 + (f": {first}" if first else "."))
 
+    def _run_identity(self):
+        """Block A6 G2: the dataset generation (the window's display
+        generation) and the workspace this page is bound to."""
+        win = self.window()
+        return {
+            "dataset_gen": int(getattr(win, "_dataset_gen_seen", 0) or 0),
+            "roi_dir": self._roi_dir or "",
+            "roi_id": self._roi_id or "",
+            "zarr_path": self._zarr_path or "",
+        }
+
+    def _on_run_finished(self, token, worker, output_dir, total_cells):
+        if self._run_identity() == token:
+            self._on_finished(output_dir, total_cells)
+            return
+        # The run finished in ITS workspace; the page has moved on. Its own
+        # workspace is still told; this page shows nothing of it.
+        self._mark_run_workspace(token)
+        self._late_run_ended(token, worker, f"finished ({total_cells:,} cells "
+                                            f"→ {output_dir})")
+
+    def _on_run_error(self, token, worker, msg):
+        if self._run_identity() == token:
+            self._on_error(msg)
+            return
+        first = str(msg or "").strip().splitlines()[0] if msg else ""
+        self._late_run_ended(token, worker, f"failed: {first}")
+
+    def _late_run_ended(self, token, worker, what):
+        """A run started for another dataset / workspace has ended: log it,
+        and let go of the Run / Stop state it was holding. No result text, no
+        signal to the window, no box."""
+        print(f"[Step2] a run for workspace {token.get('roi_id') or '(none)'} "
+              f"(dataset generation {token.get('dataset_gen')}) {what}; "
+              f"the page now shows another context, so nothing is shown here")
+        if worker is not self._worker:
+            return
+        self._run_grid_lbl.setVisible(False)
+        self._run_active = False
+        self._skip_empty_cb.setEnabled(True)
+        self._btn_run.setEnabled(True)
+        self._btn_back.setEnabled(True)
+        self._btn_stop.setEnabled(False)
+
+    @staticmethod
+    def _mark_run_workspace(token):
+        """Step2 done, in the run's OWN workspace (not the page's current)."""
+        roi_id, roi_dir = token.get("roi_id"), token.get("roi_dir")
+        if not (roi_id and roi_dir):
+            return
+        try:
+            project_dir = os.path.dirname(os.path.dirname(roi_dir))
+            mark_roi_step(project_dir, roi_id, "step2", "done")
+        except Exception as e:
+            print(f"[Step2] failed to update ROI step2 status: {e}")
+
     def _on_finished(self, output_dir, total_cells):
         self._run_grid_lbl.setVisible(False)
         self._run_active = False
@@ -2852,12 +2915,9 @@ class Step2Page(QWidget):
         self._btn_stop.setEnabled(False)
         self._last_output_dir = output_dir
         self.segmentation_done.emit(output_dir)
-        if self._roi_id and self._roi_dir:
-            try:
-                project_dir = os.path.dirname(os.path.dirname(self._roi_dir))
-                mark_roi_step(project_dir, self._roi_id, "step2", "done")
-            except Exception as e:
-                print(f"[Step2] failed to update ROI step2 status: {e}")
+        # Block A6 G2: the workspace the run was started for.
+        self._mark_run_workspace(getattr(self, "_run_token", None)
+                                 or self._run_identity())
 
         msg = QMessageBox(self)
         msg.setWindowTitle('Segmentation Complete')

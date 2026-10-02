@@ -23,7 +23,7 @@ NO_RUNS_TEXT = "No segmentation results for this ROI"
 # Block A6 W4 (user ruling 2026-10-02): a run without provenance (made before
 # A3) says so, right-aligned at the end of its row; it may cover the right
 # end of the run's name.
-PROVENANCE_UNKNOWN = "provenance unknown"
+PROVENANCE_UNKNOWN = "unknown"     # user ruling 2026-10-02: short
 TAG_ROLE = Qt.UserRole + 1
 
 
@@ -263,7 +263,7 @@ class Step3MaskBar(QtCore.QObject):
 
     def set_runs(self, items, current_dir=None):
         """`items` = [(label, run_dir)] or [(label, run_dir, tag)], newest
-        first; `current_dir` selected. A tag (`provenance unknown`) is drawn
+        first; `current_dir` selected. A tag (`unknown`) is drawn
         right-aligned at the row's end, and is the row's tooltip."""
         combo = self.run_combo
         combo.blockSignals(True)

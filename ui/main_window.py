@@ -1979,7 +1979,7 @@ class MainWindow(QMainWindow):
     def _step3_runs_with_provenance(runs):
         """Block A6 W4 (user ruling 2026-10-02): the run folders that have a
         `segmentation_run` provenance entry (A3). A run without one is shown
-        as `provenance unknown`; nothing is compared, no hash is made."""
+        as `unknown`; nothing is compared, no hash is made."""
         from ..core import provenance as prov
         known, entries_of = set(), {}
         for run in runs:

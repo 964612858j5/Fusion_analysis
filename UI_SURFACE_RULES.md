@@ -462,7 +462,7 @@ row, and the duplicate Tissue Preview button in the step bar.
   computes is announced in one amber line under the progress and opened when
   the extraction ends.
 * **Step3's run list** (block A6 W4, user ruling 2026-10-02) -- a run without
-  provenance (made before A3) ends its row with `provenance unknown`,
+  provenance (made before A3) ends its row with `unknown`,
   right-aligned (it may cover the right end of the name); also in the
   tooltip.
 * **Step1's fusion Cancel** (block A6 G1) -- the progress dialog stays, says

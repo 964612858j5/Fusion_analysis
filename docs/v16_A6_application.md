@@ -325,3 +325,24 @@ TaskManager、事务框架、新的存储框架（§15.3）；worker 的计算�
   - 修复前（`a256f05`）两条都变红：正常结束时 Cancel 处理函数又跑了一遍；对话框对象没有被销毁。
   - 修复后两条都通过。
   - 相关模块都通过：`test_v16_a6_async`（33）、`test_step1_fusion_isolation`、`test_step1_save_progress`、`test_step1_result_publication`、`test_step1_fusion_settings_commit`、`test_step1_display_mapping_commit`、`test_ui_surface_contract`。
+
+### 12.11 真机第二批（2026-10-03 凌晨）与修复
+
+- **第 13、14、15、17、18 项：通过**。第 16 项（批处理窗口）留待以后验。
+- **第 12 项发现**：Step2 正在跑的时候，在 Step0 点 Save as，Step2 的计算没有中断，但 Status Overview 和 Progress 卡住了，直到运行结束才弹出完成框，进度条一下跳到 100%。Save as 那一刻正在跑的 tile 一直是黄色；从它到最后一块之间的 tile 全是灰色。
+  - 原因：
+    - Save as 之后，主窗口读取新的交接，在 `main_window.py:3423` 把 Step2 页面改绑到了新工作区；
+    - A5 的令牌核对因此把旧运行的进度信号**全部丢掉**，既不画，也不记；
+    - 回到 Step2 时，`_go_to_step2` 用的是仍然指向旧工作区的 `step1_output`，又把页面改回了旧工作区。身份重新对上，后面的信号照常画出来，结束时也照常弹框；
+    - 中间被丢掉的那几块 tile，从此没有任何记录。
+  - 修复：
+    - 运行的进度、每块 tile 的状态和细胞数，**一律记进这次运行自己的记录**；
+    - 只有页面绑定的上下文就是这次运行的上下文时，才把它们画出来；
+    - 页面一回到这个上下文（`set_roi_context` 之后），就从记录里把网格、进度条和细胞数整个补画回来，并隐藏「旧运行」那一行提示；
+    - 被替换掉的旧 worker 迟到的信号，一概不记。
+  - 测试：新增 2 条。修复前（`0306bde`）两条都变红，修复后通过。
+  - 相关模块都通过：`test_step2_tile_status`、`test_step2_skip_empty_tiles`、`test_step2_layout`、`test_preseg_contract`、`test_step1_to_step2_handoff`、`test_step1_step2_handoff_e2e`。
+  - 遗留问题（只记录，没改）：Save as 之后，Step2 页面到底应该绑定哪个工作区，现在由 `step0_output` 和 `step1_output` 谁最近被赋值来决定，前后并不一致。这一点留给数据版本管理块：届时「当前版本」是唯一的答案。
+- **第 17 项**：标记文字由 `provenance unknown` 改为 `unknown`（用户裁定）。
+- **第 19 项**：清理本身生效了，真正遗留的 `…inprogress.a499d1f5…` 在 fusion 之后被删掉了。用户手动建的测试文件夹因为名字里的空格没加引号，实际建成了两个文件夹（`fused_Full`、`WSI.zarr.inprogress.test`），它们不匹配 `fused_Full WSI.zarr.inprogress.*`，所以没被删，这是预期行为。
+- **Step2 GPU OOM**：原因是验收清单里的启动命令带了 `LD_LIBRARY_PATH`，StarDist 因此改在 GPU 上跑（之前的成功运行都是 CPU）。StarDist 在 GPU 上不设 `n_tiles`，6 GB 显存放不下一整块 tile。清单已改正。这个 GPU 隐患只记录，没改，等用户裁定。

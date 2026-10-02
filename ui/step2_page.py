@@ -213,6 +213,9 @@ class Step2Page(QWidget):
             self._out_edit.setText(self._step2_dir)
         print(f"[Step2] roi_id={self._roi_id}")
         print(f"[Step2] output_base={self._step2_dir or self._out_edit.text().strip()}")
+        # Block A6: a running run's record is drawn again when the page is
+        # back on its context (or the older-run line shown when it is not).
+        self._refresh_run_view()
 
     def _auto_remap_config_path(self):
         """Path of the Step0 Channel Remap config for this ROI, or '' if none.
@@ -1690,7 +1693,36 @@ class Step2Page(QWidget):
         another part of the image."""
         rp = self._run_progress
         return (rp is not None and bool(self._tile_rects)
-                and (self._rows_spin.value(), self._cols_spin.value()) == rp["grid"])
+                and (self._rows_spin.value(), self._cols_spin.value()) == rp["grid"]
+                and self._run_view_live())
+
+    def _run_view_live(self):
+        """The page shows the context the run was started for (block A6;
+        real-machine finding 2026-10-03). A run's states are RECORDED
+        whatever the page shows; they are DRAWN only while this holds."""
+        rp = self._run_progress
+        token = (rp or {}).get("token")
+        return token is None or self._run_identity() == token
+
+    def _refresh_run_view(self):
+        """The page's context moved: draw the run's record if it is the
+        run's context again, else say an older run is computing."""
+        rp = self._run_progress
+        if rp is None or rp.get("token") is None:
+            return
+        if self._run_view_live():
+            self._old_run_lbl.setVisible(False)
+            self._apply_run_progress()
+            pct, msg = rp.get("progress") or (None, None)
+            if pct is not None:
+                self._prog_bar.setValue(pct)
+                self._prog_lbl.setText(msg)
+            self._cells_lbl.setText(f'Total cells detected: {self._total_cells:,}')
+        elif self._run_active:
+            for key in list(self._tile_status):
+                self._tile_status[key] = 'idle'
+                self._set_tile_colour(key[0], key[1], 'idle')
+            self._say_old_run(rp["token"], self._worker, "is still computing")
 
     def _apply_run_progress(self):
         """Draw the run's recorded progress onto a freshly built grid."""
@@ -2763,6 +2795,8 @@ class Step2Page(QWidget):
         token = self._run_identity()
         worker = self._worker
         self._run_token = token
+        if self._run_progress is not None:
+            self._run_progress["token"] = token
         self._old_run_lbl.setVisible(False)
         self._worker.progress.connect(
             lambda *a, t=token, wk=worker: self._run_signal(t, wk, self._on_progress, a))
@@ -2799,8 +2833,11 @@ class Step2Page(QWidget):
 
     def _on_progress(self, done, total, msg):
         pct = int(done / total * 100) if total > 0 else 0
-        self._prog_bar.setValue(pct)
-        self._prog_lbl.setText(msg)
+        if self._run_progress is not None:
+            self._run_progress["progress"] = (pct, msg)
+        if self._run_view_live():
+            self._prog_bar.setValue(pct)
+            self._prog_lbl.setText(msg)
 
         # Mark next tile as running
         if done < total:
@@ -2809,9 +2846,10 @@ class Step2Page(QWidget):
     def _on_tile_done(self, tile_idx, n_tiles, n_cells):
         self._record_tile(tile_idx, 'done')
         self._total_cells += n_cells
-        self._cells_lbl.setText(
-            f'Total cells detected: {self._total_cells:,}'
-        )
+        if self._run_view_live():
+            self._cells_lbl.setText(
+                f'Total cells detected: {self._total_cells:,}'
+            )
 
     def _mark_source_aware_applied(self):
         """Flip the remap status to applied — only after the worker re-resolved +
@@ -2857,10 +2895,13 @@ class Step2Page(QWidget):
         }
 
     def _run_signal(self, token, worker, handler, args):
-        """A progress / tile signal: drawn only for the page's own context."""
-        if self._run_identity() == token:
-            handler(*args)
-        else:
+        """A progress / tile signal: always recorded for its run (only for
+        the CURRENT run -- a replaced worker's late signal is dropped), drawn
+        only while the page shows the run's context."""
+        if worker is not self._worker:
+            return
+        handler(*args)
+        if self._run_identity() != token:
             self._say_old_run(token, worker, "is still computing")
 
     def _say_old_run(self, token, worker, what):

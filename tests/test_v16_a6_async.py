@@ -925,3 +925,60 @@ def test_the_fusion_dialog_is_destroyed_and_not_re_shown(app, tmp_path, monkeypa
         worker.wait(5000)
         _pump()
         w.close()
+
+
+# ── real-machine finding 2026-10-03: Step2 froze after Step0's Save as ──
+
+def _back_to_workspace_a(p, tmp_path):
+    a_dir = tmp_path / "proj" / "rois" / "roi_A"
+    p.set_roi_context(roi_id="roi_A", roi_dir=str(a_dir), step2_dir=str(a_dir / "step2"))
+
+
+def test_a_runs_progress_is_kept_while_the_page_looks_away_and_drawn_on_return(step2):
+    """Save as moved Step2's page to the new workspace; going back to Step2
+    bound it to the run's workspace again. The tiles finished meanwhile stayed
+    grey, the tile running at the switch stayed yellow, the bar froze."""
+    p, seen, tmp_path = step2
+    p._rows_spin.setValue(2)
+    p._cols_spin.setValue(2)
+    p._run()
+    worker = p._worker
+    worker.output_dir = str(tmp_path / "run_A")
+    worker.tile_done.emit(0, 4, 5)
+    worker.progress.emit(1, 4, "tile 2 of 4")              # tile 1 running
+    _pump()
+    _switch_workspace(p, tmp_path)                         # Step0 Save as
+    worker.tile_done.emit(1, 4, 7)
+    worker.progress.emit(2, 4, "tile 3 of 4")
+    worker.tile_done.emit(2, 4, 3)
+    worker.progress.emit(3, 4, "tile 4 of 4")
+    _pump()
+    assert not p._old_run_lbl.isHidden()                   # said, not drawn
+    _back_to_workspace_a(p, tmp_path)                      # back to Step2
+    _pump()
+    states = {k: v for k, v in p._tile_status.items()}
+    assert states[(0, 0)] == "done" and states[(0, 1)] == "done"
+    assert states[(1, 0)] == "done" and states[(1, 1)] == "running"
+    assert p._prog_lbl.text() == "tile 4 of 4"
+    assert p._prog_bar.value() == 75
+    assert "15" in p._cells_lbl.text()
+    assert p._old_run_lbl.isHidden()
+    worker.tile_done.emit(3, 4, 1)
+    worker.finished.emit("/run_A", 16)
+    _pump()
+    assert p._tile_status[(1, 1)] == "done"
+    assert seen["done"] == ["/run_A"]                       # its own context: reported
+
+
+def test_a_replaced_workers_late_progress_is_not_recorded(step2):
+    p, seen, tmp_path = step2
+    p._run()
+    old = p._worker
+    p._run_active = False
+    p._run()                                               # a new run
+    new = p._worker
+    assert new is not old
+    old.progress.emit(3, 12, "old tile")
+    _pump()
+    assert p._prog_lbl.text() != "old tile"
+    assert (p._run_progress or {}).get("progress") is None

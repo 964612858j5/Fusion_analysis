@@ -1,4 +1,4 @@
-# v16 块 DV — 同一个 session 内的数据版本与分割版本管理：实施申请 v1
+# v16 块 DV — 同一个 session 内的数据版本与分割版本管理：实施申请 v2.1
 
 日期：2026-10-02 夜。分支 `v16`，调查基于 HEAD `a256f05`。
 
@@ -10,9 +10,9 @@
 - 所有数据版本都能**加载回 Step0 和 Step1 重新浏览**；
 - 所有分割版本都能在 viewer 里叠加在 OME-TIFF 上查看；Step3 右上角下拉框的每条记录，最右侧标出它对应的数据版本（label 或 id），可以盖住记录名字的右端。
 
-状态：**申请 v1 定稿，待用户批准实施**。v0 的审阅意见和第 1–9 题的裁定都已写入（§11）。没有改代码。
+状态：**申请 v2.1**。§13 两个阻断问题已由用户裁定（§14），两处文字残留已改正。审核结论：「可以升级成 v2.1 并批准实施，不建议再继续扩设计」。没有改代码。
 
-修订记录：v0 草稿；v1 写入用户审阅：§3.6 改为在 Load 的工作区选择框里按「工作区 + 版本」逐条列出，样式和 Step3 一致；§3.7 没有版本记录的旧数据显示「unknown」；第 1、3–9 题裁定。
+修订记录：v2.1 写入 §13 的裁定：corrected 写时复制的精确规则（§3.15）、A3 来源登记推迟到版本正式提交之后（§3.12），并改正 §3.6 和 §4 的残留；v2 按独立审核意见最小化修订（整份 corrected 共享、ROI 几何冻结、Generate 事务、多 ROI fused、dirty draft、去掉固定路径的残留说法），见 §12；v0 草稿；v1 写入用户审阅：§3.6 改为在 Load 的工作区选择框里按「工作区 + 版本」逐条列出，样式和 Step3 一致；§3.7 没有版本记录的旧数据显示「unknown」；第 1、3–9 题裁定。
 
 ---
 
@@ -58,7 +58,7 @@
 
 - 在 session 内按顺序编号：`v1`、`v2`、`v3`……；文件夹名带时间戳：`v003_20261002_231500`。
 - 用户可以给版本起一个 label（例如「TopHat 40，CD3 0.5」）。没起时，label 就是编号。
-- 两个版本是否「相同」，按今天已有的签名比较：校正签名（方法、参数、算法版本、后端）、Intensity 数值、融合配置。**不新造哈希**，只读取已有字段。
+- 两个版本是否「相同」，按今天已有的字段逐项比较：每个通道的校正签名（方法、参数、算法版本、后端）、Intensity 数值、融合配置，**以及 ROI 几何**（每个区域的名字 / id、`bbox_fullres`、polygon）和切片身份（`slide_id`）。**不新造哈希**，只读取、比较已有字段。
 
 ### 3.3 什么时候产生一个新的数据版本（第 1 题：(b)）
 
@@ -67,17 +67,17 @@
 - 和当前最新版本完全相同（参数没变，Generate 复用已有 fused），就不开新版本。
 - 场景：调 TopHat 半径 → Step0 Save → 改 CD3 权重 → Save Fusion Settings → Generate → 产生 v2；再直接 Generate 一次（什么都没改）→ 仍是 v2。
 
-### 3.4 存放（第 2 题：(b) 共用；第 3 题：(b) 不再使用固定路径）
+### 3.4 存放（v2：整份 corrected 共用、每版一组 fused；第 3 题：(b) 不再使用固定路径）
 
 每个版本一个文件夹 `versions/<版本>/`，里面放这个版本的参数文件（`correction_config.json`、`step0_channel_remap.json`、`step1_fusion_settings.json`）和像素产品。像素产品是存储成本的大头：
-- **校正像素**：一个通道的结果只由「该通道的校正签名」决定。两个版本里签名相同的通道可以共用同一份，按通道存放，版本只记引用，不复制。
-- **fused 像素**：每个版本一份（融合配置一变，fused 就不同）。
+- **校正像素（v2 修订）**：一个数据版本引用**一份完整的** corrected Zarr（今天的 `CorrectedZarrSource` 和 Step1 / Step4 的读取都以一个 `corrected_zarr_path` 为单位）。只有当**整份**产品完全相同时，两个版本才共用同一份：全部通道的校正签名、ROI 几何、source identity 都一致。只要有一个通道或者 ROI 几何不同，就生成新的 corrected Zarr。逐通道去重是以后的优化，**不属于本块**。
+- **fused 像素（v2 修订）**：每个版本**一组** fused 产品，每个区域一个 fused Zarr（`FullFusionWorker` 本来就是每个 ROI 一份；Full WSI 时这一组只有一个）。
 
 今天的固定路径（`step0/corrected_channels.zarr`、`step1/fused_….zarr`）**不再使用**。所有读取都通过版本记录找到当前版本的产品路径（第 3 题 (b)）。读这些路径的地方（Step1、Step2、Step3、Step4、provenance）在实施第一天先用 grep 全部列出，逐个改，并在执行记录里写明。
 
 ### 3.5 分割版本记录它的数据版本
 
-- Step2 开始时，把「当前数据版本」写进运行记录（`segmentation_meta.json` 加 `data_version` 字段），fused 路径也指向那个版本自己的 fused。
+- Step2 开始时，把「当前数据版本」写进运行记录（`segmentation_meta.json` 加 `data_version` 字段）。每个区域的输入 fused，取自这个版本 `regions[]` 里对应的 `fused_zarr_path`（v2）。dirty draft 状态下不允许开始（§3.13）。
 - 之后再出新的数据版本，这个分割的记录不变，它的输入也不会被覆盖。
 
 ### 3.6 加载回 Step0 / Step1 浏览（按用户审阅修改）
@@ -88,7 +88,7 @@
   - 没有版本记录的旧工作区，行尾显示 `unknown`；
   - 最后一行仍是「Start a new workspace (open none)」。
 - 选一行：Step0 恢复它的校正方法、参数和 Intensity（复用 A6 W1 的恢复代码），读它自己的校正像素；Step1 恢复它的融合设置和 Intensity，读它自己的 fused。
-- 浏览旧版本时点 Save（第 4 题 (a)）：在这个旧版本的基础上，产生一个新版本；旧版本永远不变。
+- 浏览旧版本时点 Save（第 4 题 (a)；v2.1 改正）：在这个旧版本的基础上，建立或更新一个 **dirty draft**，旧版本不变。下一次 Generate 成功之后，才产生新的正式版本（§3.3、§3.13）。
 
 ### 3.7 Step3 下拉框的版本标记
 
@@ -106,7 +106,63 @@
 
 ### 3.10 磁盘占用（第 7 题）
 
-本块不做删除。选择框的每一行显示这个版本独占的磁盘大小（共用的校正通道不重复计算）。
+本块不做删除。选择框的每一行显示这个版本独占的磁盘大小（共用的 corrected Zarr 不重复计算）。
+
+### 3.11 `version.json` 记录什么（v2 修订）
+
+每个版本冻结自己生成时的全部空间语义，不依赖工作区当前的 `roi_manifest.json`：
+- `version`、`label`、`created_at`；
+- `slide_id` 和切片路径（`raw_ome_path`）；
+- `corrected_zarr_path`（这个版本引用的那份完整 corrected Zarr）；
+- 参数文件：`correction_config.json`、`step0_channel_remap.json`、`step1_fusion_settings.json` 的副本；
+- `regions[]`：每个区域一条，包含 `roi_name`、`roi_id`、`bbox_fullres`、`polygon_fullres`（没有就写 null）、`fused_zarr_path`。Full WSI 时只有一条。
+
+工作区以后即使通过 `rewrite_geometry()`（A6 W2 的「Overwrite」）改了 ROI，也**不会**反过来改变旧版本：旧版本按它自己的 `regions[]` 解释。加载旧版本时，Step0 / Step1 按这个版本自己的 ROI 几何恢复浏览。Step2 从当前数据版本的 `regions[]` 取每个区域的输入 fused。
+
+### 3.12 Generate 的事务边界（v2 修订）
+
+一个新的数据版本，只有在 Step1 Generate **全部成功完成**之后才正式存在。流程：
+1. 冻结本次的 Step0 + Step1 配置和 ROI 几何；
+2. 在版本自己的文件夹里生成产品（见下面的说明）；
+3. 所有区域的 fused 和 meta 都成功完成；
+4. 最后写 `version.json`，`complete: true` 最后写；
+5. 最后才更新 `versions/index.json` 和「当前版本」（原子写入）；
+6. **此时才登记**这个正式版本的 corrected 和 fused 的 A3 来源记录，以这个版本冻结的 `regions[]` 为准（不依赖工作区之后可能改变的 ROI 几何）；
+7. 然后 Step2 才可以使用这个版本。
+
+**为什么 A3 登记要推迟（用户裁定，v2.1）**：今天 `FullFusionWorker` 每发布一个区域的 fused，就立即 `_register_fused()`；Step0 Save 完成交接后也立即 `register_corrected_channels()`。A3 的记录写下就不再改。场景：v3 有 4 个 ROI，ROI1、ROI2 成功并已登记，ROI3 报错。按规则 v3 不存在，下次打开时它的文件夹被清掉，但 A3 里已经留下了指向被删文件的记录。推迟到第 6 步之后，在第 1–5 步任何地方出错，都是「没有版本、没有 index、没有 A3」，整个文件夹直接清掉即可。dirty draft 里的 corrected 和 fused **一律不登记** A3。
+
+Cancel、报错或程序中断时：
+- 不产生正式版本；
+- 不修改「当前版本」；
+- 不修改任何已有版本；
+- 留下的未完成文件夹（不在 `index.json` 里，或者 `version.json` 没有 `complete: true`），在下次打开工作区时清理。
+
+说明：审核意见建议的是先在 `versions/.pending_<id>/` 里生成，再改名成正式名字。但 fused 发布后会立即登记 A3 的来源记录，记录里写的是**当时的路径**；如果之后再改名，来源记录就指向一个不存在的路径。所以改为**直接在正式文件夹名下生成**，用「`complete` 最后写 + `index.json` 最后更新」作为发布点。这正是 §6 协议 B 已经验证过的「标记最后写」做法，效果相同：没有完成，就不存在版本。
+
+### 3.13 dirty draft（v2 新增）
+
+- Step0 Save 或 Save Fusion Settings 之后，如果参数（含 ROI 几何）和当前已提交的数据版本不同，而又还没有 Generate，状态就是 **dirty draft**。
+- dirty draft **不是**数据版本。
+- dirty draft 状态下，Step2 **不允许开始新的运行**，因为那会把新参数和旧 fused 混在一起。Step2 页面显示一行原因，Run 按钮不可用。
+- 只有在 Generate 成功产生正式版本之后，或者用户重新加载某个已有版本之后，Step2 才能继续。
+- 例子：在 v2 上把 CD3 权重从 0.5 改成 0.8 并 Save Fusion Settings，没有 Generate，就去 Step2 点 Run → 不允许，提示「先 Generate，或者重新加载 v2」。
+
+### 3.14 已有版本只读（v2 新增）
+
+已发布的版本文件夹（参数文件、corrected Zarr、fused Zarr、`version.json`）此后**不再被任何 Save 或 Generate 写入**。Step0 增量 Save 不能在已发布版本的 corrected Zarr 上原地修改，见 §3.15。
+
+### 3.15 corrected 的写时复制（v2.1，用户裁定 §13 第 1 条 (a)）
+
+一句话：**已发布的版本是只读母版；只有真的要改 corrected 像素时，才复印一份出来继续改。**
+
+| 这次 Step0 / Step1 改了什么 | corrected 怎么处理 |
+|---|---|
+| 只改了 Step1 的权重 / Intensity，或 Step0 的 Intensity；corrected 像素本身没变 | **不复制**，继续引用当前版本的 corrected |
+| ROI 和 source 完全相同，只改了部分通道的背景校正（例如 CD8 的 TopHat 半径 25 → 40） | 第一次需要改时，把已发布的 corrected 整份**复制成新的 draft corrected**，再用现有的增量算法只重算有变化的通道 |
+| ROI 几何或 source identity 改了 | **不复制**旧的；直接建立新的 draft corrected，重新计算需要校正的全部通道（旧 Zarr 的空间结构已经不对应新的 ROI） |
+
+一旦 draft corrected 已经存在，之后的 Save 都只改这份 draft，**绝不再碰**任何已发布版本的产品。下一次 Generate 成功时，draft corrected 随新版本一起发布；如果它和某个已有版本的 corrected 整份完全相同，就改为引用那一份，草稿丢弃（§3.4）。
 
 ## 4. 封闭白名单
 
@@ -118,15 +174,15 @@
   - 选择框改为「工作区 + 版本」逐条列出，行尾右对齐显示版本号，与 Step3 同样式；
   - 选中某个版本后，恢复它的 Step0 内容（复用 W1 的恢复）；
   - Save 把校正像素写到「当前草稿」的位置。
-- **`ui/step0/search_ctrl.py`**：校正像素按「通道 + 校正签名」存放和复用（只改输出路径和复用判断，不改校正算法）。
-- **`core/step0_handoff.py`**：交接里的 `corrected_zarr_path` 写成当前版本（或草稿）的路径（只改这一个字段的来源）。
+- **`ui/step0/search_ctrl.py`**：支持 draft corrected 的输出路径，以及写时复制之后的增量更新（§3.15）；不改背景校正算法。
+- **`core/step0_handoff.py`**：交接里的 `corrected_zarr_path` 写成当前版本（或草稿）的路径（只改这一个字段的来源）；Step0 Save 时**不再立即**登记 corrected 的 A3 来源记录，改为在版本正式提交时登记（§3.12，只改调用时机）。
 - **`ui/main_window.py`**：
   - Generate 时建立 / 复用版本；
   - fused 的输出路径指向版本；
   - Step2 交接带上当前版本；
   - 打开工作区或选中某个版本时，Step1 自动恢复这个版本的融合设置和 Intensity（第 8 题）；
   - Step3 下拉框标记的接线。
-- **`ui/step0/overview_panel.py`**：`FullFusionWorker` 的输出路径（只改路径）。
+- **`ui/step0/overview_panel.py`**：`FullFusionWorker` 的输出路径（只改路径）；每个区域发布后**不再立即**调用 `_register_fused()`，改为在版本正式提交时统一登记（§3.12，只改调用时机）。
 - **`ui/step2_page.py`**：输入 fused 的路径来自当前版本（只改路径来源）。
 - **`workers/segment_merge_worker.py`**：`segmentation_meta.json` 记录 `data_version`。
 - **`ui/step3_mask_bar.py`**：
@@ -148,7 +204,15 @@
   - 分割 A（v1）、分割 B（v2）各自的输入路径指向自己版本的 fused，文件都在；
   - 加载 v1 回 Step0 / Step1：参数和 Intensity 与 v1 一致，读的是 v1 的像素；
   - 内容相同的 Save（No changes）不产生新版本；
-  - 签名相同的校正通道在 v1、v2 之间共用一份，不复制；
+  - 两个版本的整份 corrected 产品完全相同时，共用同一份 corrected Zarr；有任何一个通道不同时，生成新的一份；
+  - **参数相同、ROI 几何不同**：一定产生不同的数据版本，corrected 不得错误复用；
+  - **Cancel 不产生版本；报错不产生版本**；v1 已经存在、v2 生成失败时，「当前版本」仍是 v1，v1 逐字节不变；留下的未完成文件夹在下次打开时被清理；
+  - **多 ROI**：一个版本的 `regions[]` 正确记录每个区域的 fused Zarr；Step2 按 `regions[]` 取每个区域的输入；
+  - **加载旧版本时用的是这个版本自己的 ROI 几何**：工作区在之后用 Overwrite 改了 ROI，旧版本的 `regions[]` 和加载结果都不变；
+  - **dirty draft 状态下不能开始新的 Step2**（Run 不可用，并说明原因）；Generate 成功或重新加载某个已有版本之后才可以；
+  - **所有已有版本只读**：之后的 Save、增量 Save、Generate，都不改动已发布版本文件夹里的任何文件（逐字节比较）；
+  - **写时复制**：只改 Intensity / 权重时不复制 corrected；只改部分通道的校正时，复制一次，然后只重算变化的通道；改了 ROI 几何时，新建 draft 并全部重算；
+  - **A3 登记推迟**：多 ROI 的 Generate 在中途某个区域报错时，A3 里没有这次的任何 corrected / fused 记录；版本正式提交之后，A3 记录齐全，并且和 `regions[]` 一致；dirty draft 不登记 A3；
   - Step3 下拉框：分割 A 行尾显示 v1，分割 B 显示 v2；没有版本记录的旧分割显示 `unknown`；
   - Load 的选择框：每个「工作区 + 版本」一行，行尾右对齐显示版本号，和 Step3 用同一个 delegate；旧工作区登记为 v1；
   - 选中 v1 后，Step1 自动恢复 v1 的融合设置和 Intensity，不用点 Load Previous Step1 Session；
@@ -163,8 +227,8 @@
 
 | 风险 | 对策 |
 |---|---|
-| 磁盘占用：每个版本一份 fused（真实切片可能几 GB） | 校正像素按通道共用；fused 每版一份不可避免。第 7 题定清理策略；Step0 / Step1 显示每个版本的占用 |
-| 现有读取固定路径的代码很多（Step1、Step2、Step3、Step4、provenance） | 第 3 题：保留固定路径作为「当前版本」，旧代码不改也能工作 |
+| 磁盘占用：每个版本一组 fused，加上整份不同时的一份 corrected（真实切片可能几 GB） | 整份完全相同时才共用 corrected；本块不做删除（第 7 题），选择框显示每个版本的占用 |
+| 现有读取固定路径的代码很多（Step1、Step2、Step3、Step4、provenance） | 实施前先用 grep 列出所有读取固定路径的地方。通过 manifest 或版本记录间接读取的，保持不动；自己写死了固定路径的，必须改。发现需要改的文件超出已批准的白名单时，停下来报告 |
 | 和 A7 / A8 的关系 | A8（项目状态的唯一持有者）会接管「当前打开的是哪个 session、哪个数据版本」；本块的 `utils/data_versions.py` 就是那份状态，A8 只是把它提升为 ProjectState，不另造一份 |
 | 打开工作区时，Step1 不会自动恢复上次的设置（今天的现状：要点 Load Previous Step1 Session） | 第 8 题 |
 
@@ -216,9 +280,41 @@
 - **§3.6**：不加单独的版本下拉。Load 后的工作区选择框，每一行是「工作区 + 数据版本」，行尾右对齐显示版本号，样式和 Step3 下拉框的每条记录一致。
 - **§3.7**：正常记录行尾显示数据版本号；非常早期的数据显示 `unknown`。
 - 第 1 题：**(b)**，只有 Generate 时才开新版本。
-- 第 2 题：**(b) 共用**（用户确认）。同一个通道在两个版本里校正签名（方法、参数、算法版本、后端）完全相同，才共用一份。例如 CD3 两版都是 TopHat r=25，就只存一份；CD45 v1 用 cuCIM、v2 用 TopHat，就各存一份。fused 每个版本一份，不共用。
+- 第 2 题：用户先确认了 (b)（逐通道共用）；**v2 按独立审核意见改为整份共用**（§12 第 1 条）：只有整份 corrected 产品完全相同才共用，逐通道去重以后再做。fused 每个版本一组，不共用。
 - 第 3 题：**(b)**，所有读取改为通过版本记录找路径，固定路径不再使用。
 - 第 4 题：**(a)**，在旧版本上 Save，会产生一个新版本，旧版本不变。
 - 第 5 题：**(a)**，只显示版本号；没有版本记录的显示 `unknown`（不再是「provenance unknown」）。
 - 第 6 题：**(b)**，旧工作区第一次打开时登记为 v1，但它已有的分割不挂到任何版本，显示 `unknown`。用户说明：现在是开发阶段，不用担心旧数据。
 - 第 7、8、9 题：**同意**。不做删除，显示每个版本的磁盘占用；打开工作区时，Step1 自动恢复当前版本的融合设置；先做本块，再做 A7。
+
+## 12. v2 修订：独立审核意见（2026-10-03，由用户转来）→ 修改后的规则
+
+| # | 原问题 | 修改后的规则 | 位置 |
+|---|---|---|---|
+| 1 | 方案写的是不同版本之间按单个通道共用 corrected 像素，但 `CorrectedZarrSource` 和 Step1 / Step4 的读取都以一个 `corrected_zarr_path` 为单位 | 一个版本引用一份完整的 corrected Zarr；只有整份完全相同（全部通道签名、ROI 几何、source identity）才共用；任何不同都生成新的一份。逐通道去重是以后的优化，不属于本块 | §3.4 |
+| 2 | 版本没有冻结 ROI 几何，只依赖工作区当前的 `roi_manifest.json` | `version.json` 记录 `slide_id` 和 `regions[]`（`roi_name`、`roi_id`、`bbox_fullres`、`polygon_fullres`）。比较两个版本是否相同时，ROI 几何也参与比较。加载旧版本时按它自己的几何恢复。工作区之后 `rewrite_geometry()` 不影响旧版本 | §3.2、§3.11 |
+| 3 | Generate 没有事务边界 | 产品全部成功之后才写 `version.json`（`complete` 最后写），最后再更新 `index.json` 和「当前版本」。Cancel、报错、中断都不产生版本，不改「当前版本」，也不改已有版本；未完成的文件夹在下次打开时清理。审核建议的 `.pending_<id>` 加改名，改为「直接写在正式文件夹名下，用标记最后写来发布」，原因见 §3.12 | §3.12 |
+| 4 | 「每个版本一份 fused」与多 ROI 不符 | 每个版本一组 fused：`regions[]` 里每个区域一条 `fused_zarr_path`，Full WSI 只有一条。Step2 从当前版本的 `regions[]` 取输入。不实现 TMA | §3.4、§3.11 |
+| 5 | 风险表里还留着「保留固定路径作为当前版本」的旧方案 | 删除。改为：先 grep 所有读取固定路径的地方；通过 manifest 或版本记录间接读取的不动；写死固定路径的必须改；超出白名单就停下报告 | §7 |
+| 6 | 没有「改了参数但还没 Generate」的状态 | dirty draft：它不是版本；dirty draft 下 Step2 不能开始新运行；Generate 成功或重新加载某个已有版本之后才可以 | §3.13 |
+| 7 | 没有写明已有版本只读 | 已发布的版本文件夹此后不再被任何 Save 或 Generate 写入 | §3.14 |
+
+白名单（§4）不变；验收门（§6）按上表补齐。
+
+## 13. 修订时发现的阻断级问题（需要用户裁定）
+
+1. **Step0 增量 Save 和「已有版本只读」冲突。**
+   - 今天的增量 Save，是在**同一份** corrected Zarr 上原地改写有变化的通道（`mode="a"`）。版本发布以后，这份 Zarr 已经属于某个版本。下一次 Step0 Save 如果还在它上面原地改，就违反了 §3.14 的只读规则；如果每次都从头算所有通道，又失去了增量 Save。
+   - 场景：v2 已经发布，你只把 CD8 的 TopHat 半径从 25 改成 40，然后 Step0 Save。
+   - 最小规则（推荐）：**写时复制**。版本发布之后的第一次 Step0 Save，先把当前版本的 corrected Zarr 整份复制成新的草稿，再在草稿上只重算 CD8。之后同一个草稿上的 Save 照旧增量。下一次 Generate 时，这份草稿随新版本一起发布。
+   - 代价：每产生一个新版本，就多一份完整的 corrected Zarr（`…_6bad` 里约 221 MB）。这和 §12 第 1 条「整份共用、不逐通道去重」是一致的。
+   - 另一种做法：草稿每次都从头重算所有被校正的通道。不复制，但每次 Save 都慢。
+   - 请选：(a) 写时复制（推荐）；(b) 每次重算全部。
+
+2. **Generate 的发布方式和审核建议不同**（§3.12 的说明）。审核建议 `.pending_<id>` 再改名；但 fused 发布时立即登记的 A3 来源记录里写的是当时的路径，改名之后来源记录就指向不存在的路径。所以改为「直接写在正式文件夹名下 + 标记最后写」。效果相同，但和审核原文不一样，请确认。
+
+## 14. 用户对 §13 的裁定（2026-10-03）
+
+1. **(a) 写时复制**，规则按 §3.15 的表：只改 Intensity / 权重时不复制；ROI 和 source 相同、只改部分通道的校正时，复制一次后增量；ROI 几何或 source 改了，就新建并全部重算；draft 存在后，只改 draft。
+2. **有条件同意**：不需要 `.pending` 加改名，采用「最终目录写入 → `complete` 最后发布 → index / 当前版本最后切换」。附加条件：**未提交的 draft 不登记永久的 A3；corrected 和 fused 的 A3 登记，全部推迟到版本正式提交之后**，以冻结的 `regions[]` 为准（§3.12 第 6 步）。
+3. 顺带改正两处文字残留：§3.6（浏览旧版本时 Save 只更新 dirty draft）、§4 `search_ctrl.py` 那一行（不再写逐通道存放）。

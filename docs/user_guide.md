@@ -127,6 +127,11 @@ Read in the raw big image, **circle the region you actually care about (ROI)**, 
 
 **Output:** `corrected_channels.zarr` (corrected image), `roi_config.json`, `patch_config.json`, `correction_config.json`, `step0_roi_result.json`. These are read automatically by all later steps.
 
+**Workspaces — coming back to a project:** every Save writes into a **workspace** (a folder under `<output>/rois/`). When you load a slide into an output folder that already holds workspaces of **the same slide**, Step 0 opens one (it asks which one when there are several) and restores its region, patches, channel methods, parameters and Intensity. The Load line then ends with `Workspace: <id>`.
+- **Save** writes back into the open workspace; with nothing changed it says *No changes* and rewrites nothing.
+- **Save ▾ › Save as new workspace** always starts a new workspace; the old one is left as it is and the next steps use the new one.
+- If you redrew the analysis region, Save asks first: *Save as new workspace* (recommended) or *Overwrite this workspace*.
+
 <!-- image placeholder: images/03_step0_overview_and_roi.png — the overview in Step 0 with an ROI box already drawn -->
 <!-- image placeholder: images/04_step0_channel_groups.png — the Channels / Nucleus Channel grouping and weights panel -->
 <!-- image placeholder: images/05_step0_bg_correction_compare.png — the Original | TopHat | cucim three-way comparison preview -->
@@ -238,6 +243,7 @@ Time to **produce the table.** Step 4 goes through every cell of one Step 2 resu
    - **Outputs**: h5ad (always), **CSV** (only when you tick it).
    - An orange **Risk** line appears for a result made before Step 2's tile-seam fix (2026-09-27) when you measure nuclei / cytoplasm: a few nuclei on tile seams may lie partly outside their cell, so those cells' nucleus / cytoplasm values carry that error; the numbers are still produced and the provenance file counts the affected pixels. Re-run Step 2 to remove it.
 3. **Output dir** defaults to `<workspace>/step4/quantification_runs/<run>/<region>/`; you can change it. The line under it names the files and what `X` holds (e.g. `X = cell mean`). Click `▶ Extract Features`.
+   - While it computes, the page is frozen: only **⏹ Stop** works. Closing the **Batch** window during a run stops the current sample first, then closes.
 
 **Output:**
 - `cell_features.h5ad` — **one** AnnData for scanpy, one row per cell (per nucleus for a nuclei-only result):

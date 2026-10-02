@@ -438,7 +438,25 @@ row, and the duplicate Tissue Preview button in the step bar.
   opens the comparison and Esc / a right-click leave it), no `Reopen full
   image`, and no `downsampled ×N preview` banner over the picture.
 * **Step0's Load row** -- the project's own status. A patch geometry save that
-  worked announces nothing there.
+  worked announces nothing there. Once a workspace is open it ends with
+  `Workspace: <workspace id>` (block A6 W1).
+* **Step0's workspaces** (block A6 W1-W3, user rulings 2026-10-01 / 2026-10-02)
+  -- `▶ Load` into a project that already has workspaces of the same slide
+  (A3 `slide_id`, not the path) opens one: the only one directly, several
+  through an `Open a workspace` chooser (with `Start a new workspace (open
+  none)`). Its region, patches, channel decisions, parameters and Intensity
+  come back, so an unchanged Save says `No changes`. `Save` writes the open
+  workspace; the `▾` joined to its right holds one item, `Save as new
+  workspace`. A Save whose analysis region differs from the open workspace's
+  asks first: `Save as new workspace` (default) / `Overwrite this workspace`
+  / Cancel.
+* **Step4 while it computes** (block A6 G4) -- every control of the page is
+  disabled except `⏹ Stop`, and each gets its own state back afterwards.
+  The Batch dialog's Close during a run stops the current sample, waits for
+  it (`Stopping…`), then closes.
+* **Step1's fusion Cancel** (block A6 G1) -- the progress dialog stays, says
+  `Stopping…` with Cancel disabled, and the page unlocks only when the job's
+  thread has ended.
 * **Weights** -- edited in Step1's rows, and in Step3's, which are the same
   rows (block 2b). There is no separate weight window.
 * **Intensity** -- the shared window, opened from Step0's and Step1's own

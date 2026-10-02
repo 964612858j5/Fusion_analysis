@@ -6,7 +6,7 @@
 - 合并基准 §15（A6：异步生命周期，E5，门 9）、§0.2 E5、§9 门 9、§0.4 块规则（规则 6：A6 可以在现有回调里加代数检查）；
 - 用户 2026-10-01 的裁定（记忆 `a6-scope-step0-session-save`）：Step0 打开已有项目、Save 覆盖当前工作区、Save 旁边加 Save as 下拉；正在运行的 Step2 跑完后标记「不是最新参数」；Step2 运行期间做的 fusion 先放进本会话的临时目录；Step4 计算期间冻结页面；fusion 只确认「取消后等线程真正退出才解锁」；viewer / Step3 的晚到结果按过期丢弃处理。**用户授权为这些新需求扩大白名单**（包括 UI 改动，并同步更新三份 UI 文档）。
 
-状态：**申请 v1，用户 2026-10-02 批准**（「批准申请、可以提交」；§10 第 1–7 题按 §11 裁定）。还没有改代码，实施从下一次开机开始。
+状态：**申请 v1，用户 2026-10-02 批准**（「批准申请、可以提交」；§10 第 1–7 题按 §11 裁定）。**实施中**：G1–G5、W1–W3 已在本地提交，W4、W5 未开始，见 §12。
 
 修订记录：v0 夜间草稿；v1 写入用户 2026-10-02 上午对第 1–7 题的裁定。
 
@@ -189,3 +189,45 @@ TaskManager、事务框架、新的存储框架（§15.3）；worker 的计算�
 - W5：暂存的 fusion 在下次打开工作区时询问用户是否启用。
 - G4：批处理对话框关闭时，先停止、等它退出，再关闭。
 - 这些都是 UI 改动，`UI_SURFACE_RULES.md` 和两份用户指南要同步更新（§4 已经列出）。
+
+**实施中补充的裁定（2026-10-02，用户在终端里选择）**：
+8. **W1 恢复方法和参数**：打开已有工作区时，从它的 `step0/correction_config.json` 恢复每个通道的方法和参数（以及它保存过的 Intensity）。corrected zarr 里已有、而且签名（方法、参数、算法版本、后端）相同的通道，算作「已计算」。所以不改任何东西直接 Save，会提示「No changes」，不重写任何文件。这只适用于打开已有工作区；新项目仍按 v15「不预先填入」的规则。
+   - 理由：不恢复的话，重新打开后直接 Save，会把这个工作区里已经校正好的通道覆盖成 raw。
+
+---
+
+## 12. 执行记录（2026-10-02）
+
+### 12.1 提交（本地，未推送；基准 `f8ace2b`）
+
+| 提交 | 行 | 内容 |
+|---|---|---|
+| `4b73c5a` | G1 | fusion：等 `QThread.finished` 之后才解锁，重启门；取消后对话框显示「Stopping…」，Cancel 置灰；临时目录 `<zarr>.inprogress.<uuid>`（旧的固定名 `.inprogress` 作为遗留清掉）；发布前再查一次 `_stop`；`fusion_meta.json` / `roi_config.json` 原子写入，预览 PNG 先写临时文件再 `os.replace` |
+| `1f7fce3` | G2–G5 | G2 Step2：令牌 `(dataset_gen, roi_dir, roi_id, zarr_path)`；迟到时只记日志，释放 Run / Stop，在**它自己的**工作区 `mark_roi_step`；`segmentation_meta*.json` 与 `segmentation_results_index.json` 原子写入。G3 随机 patch：请求和回传带 `dataset_gen` 与 loader。G4 Step4：计算期间除 Stop 外全部冻结，结束后各控件恢复原状态；令牌；`stop_background_jobs`；冻结期间不接受 `set_run`；批处理对话框关闭时先停止、等线程退出、再关闭（不再启动下一样本，不弹「Batch complete」）。G5：finished 带上 `run_id`，与当前运行比对 |
+| `ffbfe12` | W1–W3 | 新模块 `utils/workspace_session.py`（按 A3 `slide_id` 找同一张切片、已提交 Step0 的工作区）；Load 时打开（只有一个就直接打开，多个弹选择框，可选「Start a new workspace」）；恢复区域、patch、方法、参数、Intensity；Save 写回当前工作区；区域变了先问（Save as / Overwrite / Cancel）；Save 旁的 `▾` 里有 `Save as new workspace`；Load 状态行显示 `Workspace: <id>` |
+| （本提交） | 文档 | `UI_SURFACE_RULES.md`、两份用户指南、本记录、v2.4 §12 A6 行 |
+
+**W4、W5 没有开始**，留待下一次。
+
+### 12.2 改动的已有测试（都因为已批准的行为变化）
+
+- `tests/test_step1_result_publication.py`（G1）：临时目录名变了，两处断言从 `.inprogress` 改为 glob `.inprogress*`。
+- `tests/test_step0_background_correction_outputs.py`、`tests/test_step0_authoritative_save_barrier.py`（W2）：这几条测试重画区域后再 Save。现在会先弹询问（裁定 3a），测试改为回答推荐项 Save as，原来「新建工作区」的断言不变。
+
+### 12.3 验收
+
+- **反向注入**：`test_v16_a6_async.py` 的 15 条在 `f8ace2b` 的代码树上逐条变红（G1 5 条、G2 2 条、G3 1 条、G4 4 条、G5 1 条；另外 2 条是「同一上下文照常工作」的对照组，在新旧两边都通过）。在工作区里 15 条全部通过。`test_v16_a6_workspace.py` 17 条全部通过（旧代码里没有这个模块和这些入口）。
+- **相关范围**（工作区代码，逐模块单独跑）都通过：`test_step2_tile_status`、`test_step2_skip_empty_tiles`、`test_preseg_contract`、`test_step2_legacy_stop`、`test_step2_runner_path`、`test_step4_page`、`test_batch_step4_dialog`、`test_step1_preseg_run_ui`、`test_random_patches`、`test_step1_fusion_isolation`、`test_step1_save_progress`、`test_step1_result_publication`、`test_step0_background_correction_outputs`、`test_step0_authoritative_save_barrier`、`test_step0_correction_param_inheritance`、`test_step0_background_correction_tab`、`test_step0_dataset_switch`、`test_step0_full_image_first`、`test_step0_full_image_recovery`、`test_step0_bg_parallel`、`test_ui_surface_contract`。
+  - `test_step0_process_incremental` 有 5 条失败，与 S0P 回归中 old（`6b252e2`）的失败名单完全相同，是 A6 之前就有的。
+  - `test_step1_preseg_run_ui` 第一次跑有 1 条失败（与 S0P 全量回归并发，用时 376 s），单独重跑 10/10 通过。
+- **实施中发现并修复**：区域变了而用户选择 Overwrite 时，「无校正通道」那条分支仍然会提示「No changes」，导致 manifest 已经改写、handoff 却没有更新。现在改写区域本身就算作有变化。
+- **A6 全量单调绿色回归**：还没有跑，要等 S0P 全量回归跑完。
+- **真机**（§6）：留给用户。
+
+### 12.4 advisory（未处理，等用户裁定）
+
+1. G1：每次运行用自己的临时目录名以后，被强行杀掉的进程留下的 `.inprogress.<uuid>` 不会被下一次运行清掉（只清旧的固定名）。目前只能手工删。
+2. G2：`utils/segmentation_registry.save_registry` 的注册表写入不在白名单里，仍然是直接写入。只把 worker 里的 `segmentation_results_index.json` 改成了原子写入。
+3. G2：迟到运行的 `progress` / `tile_done` 信号不核对令牌（申请只要求核对 finished / error），在切换后仍可能更新 tile 网格和细胞计数。
+4. G4：§4 白名单对 `main_window.py` 只写了「关窗时」。数据集切换时的停止请求是按 §3.1 G4 ③ 加的（`_discard_step1_context` 的下游页面一段），在此说明。
+5. W1：Intensity 的恢复直接写了 `ChannelWorkbench` 的 `_params` / `_user_adjusted`。这个控件没有公开的设置接口，而 `channel_workbench.py` 不在白名单里。

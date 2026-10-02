@@ -428,6 +428,9 @@ def _step0_for_context(tmp_path, monkeypatch):
                         lambda self, *a, **k: None)
     monkeypatch.setattr(Step0Page, "_ensure_empty_corrected_zarr",
                         lambda self, *a, **k: None)
+    # Block A6 W2: a changed region now ASKS (user ruling 3a); these tests
+    # take the recommended answer, which is today's behaviour: a new context.
+    monkeypatch.setattr(Step0Page, "_ask_region_changed", lambda self: "save_as")
     return p, calls
 
 

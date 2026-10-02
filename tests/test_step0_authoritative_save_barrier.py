@@ -469,6 +469,8 @@ def test_real_save_entry_mints_new_roi_and_clears_worker_authority(
     page.patches = [(0, 16, 0, 16)]
     monkeypatch.setattr(page, "_confirm_raw_channels", lambda: True)
     monkeypatch.setattr(page, "_persist_step0_remap_config", lambda: True)
+    # Block A6 W2: a redrawn region now asks; Save as is today's answer.
+    monkeypatch.setattr(page, "_ask_region_changed", lambda: "save_as")
     monkeypatch.setattr(step0_module.QMessageBox, "information",
                         lambda *_a, **_k: None)
     try:
@@ -526,6 +528,8 @@ def test_same_window_full_save_rebinds_mainwindow_and_reenters_step1(
     page.patches = [(0, 16, 0, 16)]
     monkeypatch.setattr(page, "_confirm_raw_channels", lambda: True)
     monkeypatch.setattr(page, "_persist_step0_remap_config", lambda: True)
+    # Block A6 W2: a redrawn region now asks; Save as is today's answer.
+    monkeypatch.setattr(page, "_ask_region_changed", lambda: "save_as")
     monkeypatch.setattr(main_window_module.QMessageBox, "information",
                         lambda *_a, **_k: None)
     monkeypatch.setattr(main_window_module.QMessageBox, "warning",

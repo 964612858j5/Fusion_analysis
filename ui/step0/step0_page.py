@@ -77,6 +77,7 @@ from ...utils.roi_project import (
     mark_roi_step,
     roi_shape_from_bbox,
 )
+from ...utils import workspace_session
 # Step0 keeps the shared ChannelWorkbench as an internal lifecycle/config owner.
 # Its Intensity inspector is exposed from Background Correction; the former
 # user-facing Channel Remap tab is gone. GUI-only -- these are the same UI-local
@@ -392,6 +393,11 @@ class Step0Page(QWidget):
         self._roi_selected_idx = -1
         self._roi_context = None
         self._roi_context_sig = None     # (#1) analysis-region identity for reuse
+        # Block A6 W1-W3: Save as in progress; the corrected channels the open
+        # workspace already holds {channel: signature} (counted as computed).
+        self._save_as_requested = False
+        self._workspace_saved_sigs = {}
+        self._workspace_intensity = None     # saved Intensity awaiting the workbench
         self._project_output_dir = OUTPUT_DIR
         self._analysis_region_mode = "roi"
         self._patch_selected_idx = -1
@@ -1438,11 +1444,36 @@ class Step0Page(QWidget):
             "+ the Step0->Step1 handoff, and mark Step0 complete.")
         self._btn_continue.setStyleSheet(
             "QPushButton{background:#2a5;color:white;border-radius:4px;"
+            "border-top-right-radius:0px;border-bottom-right-radius:0px;"
             "padding:8px 22px;font-size:13px;font-weight:bold;}"
             "QPushButton:hover{background:#3b6;}"
+            "QPushButton:disabled{background:#333;color:#666;}"
         )
         self._btn_continue.setFixedHeight(38)
         self._btn_continue.clicked.connect(self._save_and_continue)
+        # Block A6 W3: Save writes the CURRENT workspace; the triangle beside
+        # it holds the one way to start another.
+        self._btn_save_menu = QtWidgets.QToolButton()
+        self._btn_save_menu.setText("▾")
+        self._btn_save_menu.setToolTip("More ways to save")
+        self._btn_save_menu.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self._btn_save_menu.setFixedHeight(38)
+        self._btn_save_menu.setStyleSheet(
+            "QToolButton{background:#2a5;color:white;border-radius:4px;"
+            "border-top-left-radius:0px;border-bottom-left-radius:0px;"
+            "border-left:1px solid #1d7a3d;padding:0px 8px;font-size:13px;"
+            "font-weight:bold;}"
+            "QToolButton:hover{background:#3b6;}"
+            "QToolButton:disabled{background:#333;color:#666;}"
+            "QToolButton::menu-indicator{image:none;width:0px;}")
+        self._save_menu = QtWidgets.QMenu(self._btn_save_menu)
+        self._save_as_action = self._save_menu.addAction(
+            "Save as new workspace")
+        self._save_as_action.setToolTip(
+            "Save into a NEW workspace; the current one is left as it is and "
+            "the following steps use the new one.")
+        self._save_as_action.triggered.connect(self._save_as_new_workspace)
+        self._btn_save_menu.setMenu(self._save_menu)
 
         # v14.4: explicit corrected-output status — honest about whether the last
         # Save wrote a VALID non-empty corrected_channels.zarr.
@@ -1489,7 +1520,11 @@ class Step0Page(QWidget):
         frame.tool_row(self._view_box.layout(), row)
         frame.bottom_layout.addWidget(self._decision_box)
         frame.bottom_layout.addStretch(1)
-        frame.bottom_layout.addWidget(self._btn_continue)
+        save_pair = QHBoxLayout()
+        save_pair.setSpacing(0)
+        save_pair.addWidget(self._btn_continue)
+        save_pair.addWidget(self._btn_save_menu)
+        frame.bottom_layout.addLayout(save_pair)
         self._step0_tabs = frame.left_tabs
         self._bg_c_split = frame.splitter    # user-facing channel/content splitter
         outer.addWidget(frame)
@@ -4236,6 +4271,7 @@ class Step0Page(QWidget):
             # are missing or still provisional get seeded here. A dataset
             # switch is a different channel set (or a clear), which reseeds.
             preserve_params=True)
+        self._apply_workspace_intensity()
         # No separate DAPI reference read: DAPI is a normal channel in `images`
         # above and is lazy-loaded on demand like any other (#2-new).
         print(f"[Step0] conditioning workbench synced: {len(images)} channels "
@@ -5250,8 +5286,13 @@ class Step0Page(QWidget):
         ch_map = getattr(loader, "ch_map", None)
         if loader is None or not shape or len(shape) < 2:
             return "No project loaded."
-        return (f"Loaded: {int(shape[0]):,}x{int(shape[1]):,} px  |  "
+        text = (f"Loaded: {int(shape[0]):,}x{int(shape[1]):,} px  |  "
                 f"{len(ch_map or {})} channels")
+        # Block A6 W1: which workspace Save writes.
+        ctx = getattr(self, "_roi_context", None)
+        if ctx:
+            text += f"  |  Workspace: {ctx.get('roi_id')}"
+        return text
 
     def _clear_geometry_status(self):
         """Give the Load row back to the project.
@@ -6322,6 +6363,9 @@ class Step0Page(QWidget):
         self._load_existing_config()
         self._rebuild_channel_list()
         self._rebuild_patch_buttons()
+        # Block A6 W1: a project that already has this slide's workspaces
+        # opens one, so Save writes back into it.
+        self._open_existing_workspace()
         if unbound:
             # A panel that could neither be cleared NOR taken off the screen.
             # The switch cannot be rolled back, so this says what is wrong --
@@ -9004,6 +9048,32 @@ class Step0Page(QWidget):
         for ch in list(self._channel_order):
             self._refresh_channel_state(ch)
 
+    @staticmethod
+    def _save_signature(config, ch, method):
+        """What the corrected zarr records for a channel saved with `config`:
+        (method, param, algorithm version) -- a channel saved by an older
+        numeric version never matches, so incremental save reprocesses it --
+        + (backend, tophat footprint) of this machine (block S0P)."""
+        from ...core.bg_correction import (
+            BG_CORRECTION_ALGO_VERSION, current_compute_signature)
+        radius, sigma = resolve_effective_correction_params(
+            config.get("method_params") or {}, config.get("channel_params") or {}, ch)
+        param = radius if method == "tophat" else sigma
+        return (method, param, BG_CORRECTION_ALGO_VERSION) + current_compute_signature(method)
+
+    def _saved_in_workspace(self, ch):
+        """Block A6 W1 (user ruling 2026-10-02): the open workspace already
+        holds `ch` corrected exactly as it is decided now -- it counts as
+        computed, and Save leaves it alone."""
+        saved = (self._workspace_saved_sigs or {}).get(ch)
+        method = self._channel_final_decision(ch)
+        if saved is None or method not in ("tophat", "cucim"):
+            return False
+        try:
+            return saved == self._save_signature(self._build_config(), ch, method)
+        except ValueError:
+            return False
+
     def _raw_save_channels(self):
         """Marker channels Save would write as RAW: assigned Original, or
         with no current computed result for the method they are assigned.
@@ -9021,7 +9091,8 @@ class Step0Page(QWidget):
             # out, neither of which is a correction decision.
             if self._channel_final_decision(ch) == "original":
                 raw.append(ch)
-            elif self._channel_compute_state(ch) != "computed":
+            elif (self._channel_compute_state(ch) != "computed"
+                    and not self._saved_in_workspace(ch)):
                 raw.append(ch)
         return raw
 
@@ -10917,6 +10988,7 @@ class Step0Page(QWidget):
         # A's roi_context and write B's outputs into A's roi_dir.
         self._roi_context = None
         self._roi_context_sig = None
+        self._workspace_saved_sigs = {}
         # The exact remap config path Step0 last wrote; MainWindow hands it to
         # Step1 in preference to re-resolving. It points inside A's output
         # tree, so it must not survive into B.
@@ -10991,6 +11063,202 @@ class Step0Page(QWidget):
     # with that button; the BG-tab Save (_save_and_continue) is the single
     # entry that runs correction + writes outputs + the handoff.
 
+    # ── workspaces: open an existing one (block A6 W1) ────────────────
+
+    def _choose_workspace(self, found):
+        """Several workspaces of this slide (user ruling 2b): the user picks
+        one, or starts a new one. A seam: tests answer directly."""
+        new_label = "Start a new workspace (open none)"
+        labels = [w.label() for w in found] + [new_label]
+        current = next((i for i, w in enumerate(found) if w.active), 0)
+        item, ok = QInputDialog.getItem(
+            self, "Open a workspace",
+            "This project already has workspaces of this slide.\n"
+            "Save writes into the one you open; Save ▾ › Save as new "
+            "workspace makes another.",
+            labels, current, False)
+        if not ok or item == new_label:
+            return None
+        return found[labels.index(item)]
+
+    def _open_existing_workspace(self):
+        """Find this slide's workspaces in the output directory's project
+        and open one: its region, patches, channel decisions, parameters and
+        Intensity come back, so an unchanged Save says "No changes"."""
+        self._workspace_intensity = None
+        try:
+            _sid, found = workspace_session.find_workspaces(self.output_dir, self.ome_path)
+        except Exception as exc:                      # noqa: BLE001 -- never blocks a Load
+            print(f"[Workspace] project not read ({type(exc).__name__}: {exc})")
+            return None
+        if not found:
+            return None
+        ws = found[0] if len(found) == 1 else self._choose_workspace(found)
+        if ws is None:
+            print("[Workspace] no workspace opened; the first Save makes a new one")
+            return None
+        try:
+            self._restore_workspace(ws)
+        except Exception as exc:                      # noqa: BLE001
+            # A workspace that cannot be read back is not half-opened.
+            print(f"[Workspace] {ws.workspace_id} could not be opened "
+                  f"({type(exc).__name__}: {exc}); the first Save makes a new one")
+            self._roi_context = None
+            self._roi_context_sig = None
+            self._workspace_saved_sigs = {}
+            self._workspace_intensity = None
+            return None
+        print(f"[Workspace] opened {ws.workspace_id} ({ws.display_name}); "
+              f"Save writes into it")
+        return ws
+
+    def _restore_workspace(self, ws):
+        published = step0_handoff.published_handoff(ws.step0_dir)
+        if published is None:
+            raise ValueError("no committed Step0 result")
+        _dir, _manifest_path, zarr_path, config, manifest = published
+        roi_path, patch_path = step0_handoff.manifest_geometry_paths(manifest, ws.step0_dir)
+        saved_rois = workspace_session._load(roi_path) or []
+        saved_patches = workspace_session._load(patch_path) or []
+        full = (manifest.get("analysis_region_type") == "full_wsi"
+                or ws.region_type == "full_wsi")
+
+        # The region and the patches, on every overview and in the model --
+        # never through the edit path, which would write them back.
+        rois = [] if full else [{k: v for k, v in r.items() if k != "polygon_display"}
+                                for r in saved_rois if isinstance(r, dict)]
+        from .roi_context_model import patch_from_record
+        patches = [patch_from_record(p) for p in saved_patches if isinstance(p, dict)]
+        self._roi_model.adopt(rois=rois, patches=patches, full_wsi_mode=False)
+        for panel in self._registered_roi_overviews():
+            panel.set_rois_and_patches(list(self._roi_model.rois),
+                                       list(self._roi_model.patches), False)
+        self._feed_popup_from_model()
+        self._on_patches_changed(list(self._roi_model.patches))
+        self.adopt_published_geometry_revision(manifest)
+
+        # The workspace Save writes, and the region it was saved with.
+        self._roi_context = workspace_session.open_context(ws)
+        cur = [self._full_wsi_roi()] if self._is_full_wsi_mode() else list(
+            self.overview.get_rois() if self.overview else self.rois)
+        self._roi_context_sig = self._roi_context_signature(cur)
+
+        # Decisions and parameters (user ruling 2026-10-02).
+        mp = (config or {}).get("method_params") or {}
+        for slider, key, default in ((self._tophat_slider, "tophat_radius",
+                                      TOPHAT_RADIUS_DEFAULT),
+                                     (self._cucim_slider, "cucim_sigma",
+                                      CUCIM_SIGMA_DEFAULT)):
+            slider.blockSignals(True)
+            slider.setValue(int(mp.get(key, default)))
+            slider.blockSignals(False)
+        self._channel_params = {}
+        for ch, raw in ((config or {}).get("channel_params") or {}).items():
+            clean = {name: int(raw[name]) for name in ("tophat_radius", "cucim_sigma")
+                     if name in (raw or {})}
+            if clean:
+                self._channel_params[ch] = clean
+        self._channel_decisions.clear()
+        for ch, method in ((config or {}).get("channel_decisions") or {}).items():
+            if ch in self._channel_order and ch != self.nucleus_channel:
+                self._set_channel_decision(
+                    ch, step0_handoff.migrate_correction_decision(method))
+        self._refresh_slider_labels()
+        self._update_decision_ui()
+        self._refresh_all_channel_states()
+
+        # What the workspace already holds corrected counts as computed.
+        sigs, _bboxes = read_corrected_zarr_state(zarr_path)
+        self._workspace_saved_sigs = dict(sigs)
+        corrected = {ch: m for ch, m in self._channel_decisions.items()
+                     if m in ("tophat", "cucim")}
+        if corrected and os.path.isdir(zarr_path):
+            self._apply_corrected_store(zarr_path, corrected)
+
+        # Intensity: applied when the workbench is (lazily) engaged.
+        try:
+            from ...utils.channel_remap_config import load_channel_remap_config
+            remap = load_channel_remap_config(self._step0_conditioning_config_path())
+            self._workspace_intensity = dict(remap.get("channels") or {})
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"[Workspace] no saved Intensity restored ({exc})")
+            self._workspace_intensity = None
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is not None and wb.has_channel_data():
+            self._apply_workspace_intensity()
+
+        workspace_session.mark_active(ws)
+        self._load_status.setText(self._project_status_text())
+
+    _INTENSITY_KEYS = ("enabled", "min", "max", "brightness", "contrast",
+                       "gamma", "opacity", "weight", "auto")
+
+    def _apply_workspace_intensity(self):
+        """Put the opened workspace's saved Intensity into the workbench
+        (once): its numbers are kept as the user's, so neither a re-sync nor
+        a lazy load re-seeds over them."""
+        saved = getattr(self, "_workspace_intensity", None)
+        wb = getattr(self, "_cond_workbench", None)
+        if not saved or wb is None or not wb.has_channel_data():
+            return
+        from ...utils.channel_remap_config import normalize_channel_remap_params
+        params = getattr(wb, "_params", {})
+        for ch, entry in saved.items():
+            if ch not in params or not isinstance(entry, dict):
+                continue
+            merged = dict(params[ch])
+            merged.update({k: entry[k] for k in self._INTENSITY_KEYS if k in entry})
+            params[ch] = normalize_channel_remap_params(merged)
+            wb._user_adjusted[ch] = True
+            wb.note_params_seeded(ch)
+            self._display_seeded.add(ch)
+            self._adopt_workbench_window(ch)
+        active = wb.active_channel()
+        if active in saved and hasattr(wb, "_load_params_into_controls"):
+            wb._load_params_into_controls(active)
+        self._workspace_intensity = None
+
+    # ── workspaces: Save / Save as (block A6 W2, W3) ──────────────────
+
+    def _set_save_enabled(self, on):
+        self._btn_continue.setEnabled(bool(on))
+        self._btn_save_menu.setEnabled(bool(on))
+
+    def _save_as_new_workspace(self):
+        """Save into a new workspace whatever the current one is."""
+        self._save_as_requested = True
+        try:
+            self._save_and_continue()
+        finally:
+            self._save_as_requested = False
+
+    def _ask_region_changed(self):
+        """The analysis region differs from the current workspace's (user
+        ruling 3a): suggest Save as, let the user overwrite.
+        `save_as` / `overwrite` / `cancel`."""
+        ctx = self._roi_context or {}
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Analysis region changed")
+        box.setText(
+            f"The analysis region is not the one workspace "
+            f"{ctx.get('roi_id', '')} was saved with.\n\n"
+            "Saving it as a NEW workspace is recommended: the current one and "
+            "every later step made from it stay as they are.\n\n"
+            "Overwriting rewrites this workspace's Step0 results for the new "
+            "region; its later steps were made for the old one.")
+        save_as = box.addButton("Save as new workspace", QMessageBox.AcceptRole)
+        overwrite = box.addButton("Overwrite this workspace", QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(save_as)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is save_as:
+            return "save_as"
+        if clicked is overwrite:
+            return "overwrite"
+        return "cancel"
+
     def _confirm_raw_channels(self):
         """Name the channels Save will write as RAW, once, and ask.
 
@@ -11050,10 +11318,33 @@ class Step0Page(QWidget):
         # context only on the first Save or when the mode / ROI bbox changes.
         self._project_output_dir = self.output_dir
         sig = self._roi_context_signature(rois)
+        # Block A6 W2 / W3: Save writes the current workspace (opened from the
+        # project, or made by an earlier Save); Save as always makes another.
+        # A changed region is no longer a silent new workspace: the user is
+        # told and chooses.
+        has_context = getattr(self, "_roi_context", None) is not None
         context_reused = (
-            getattr(self, "_roi_context", None) is not None
+            has_context and not self._save_as_requested
             and getattr(self, "_roi_context_sig", None) == sig)
         raw_confirmed = False
+        region_rewritten = False     # an overwrite with a new region is a change
+        if (has_context and not self._save_as_requested
+                and getattr(self, "_roi_context_sig", None) != sig):
+            choice = self._ask_region_changed()
+            if choice == "cancel":
+                return
+            if choice == "overwrite":
+                # Asked before the workspace is touched, like a new one.
+                if not self._confirm_raw_channels():
+                    return
+                raw_confirmed = True
+                workspace_session.rewrite_geometry(
+                    self._roi_context, rois[0], full_wsi=self._is_full_wsi_mode())
+                self._roi_context_sig = sig
+                context_reused = True
+                region_rewritten = True
+                print(f"[Step0] overwriting workspace {self._roi_context['roi_id']} "
+                      f"with a changed analysis region (the user chose to)")
         if context_reused:
             print(f"[Step0] reusing roi_context roi_id={self._roi_context['roi_id']} "
                   f"(analysis region unchanged)")
@@ -11072,6 +11363,8 @@ class Step0Page(QWidget):
                 self._roi_context = create_roi_context(
                     self._project_output_dir, rois[0], self.ome_path)
             self._roi_context_sig = sig
+            self._workspace_saved_sigs = {}     # a new workspace has nothing saved
+            self._load_status.setText(self._project_status_text())
         step0_dir = self._roi_context["step_dirs"]["step0"]
         os.makedirs(step0_dir, exist_ok=True)
         print("[Step0] writing ROI-specific outputs")
@@ -11105,7 +11398,7 @@ class Step0Page(QWidget):
             # decision + handoff so downstream still works, and tell the user
             # plainly there is nothing to save + where to go next.
             if (not correction_changed and not intensity_changed
-                    and os.path.exists(zarr_path)):
+                    and not region_rewritten and os.path.exists(zarr_path)):
                 self._show_save_no_changes()
                 return
             # What will NOT be corrected, said once and only for a Save that
@@ -11130,18 +11423,8 @@ class Step0Page(QWidget):
         # Incremental save: skip channels already in the corrected zarr with the
         # same (method, method-specific parameter), when the ROI set is unchanged.
         # Process only new/changed channels; merge into (not overwrite) the zarr.
-        mp = config.get("method_params") or {}
-        cp_all = config.get("channel_params") or {}
-        def _cur_sig(ch, method):
-            from ...core.bg_correction import BG_CORRECTION_ALGO_VERSION
-            radius, sigma = resolve_effective_correction_params(mp, cp_all, ch)
-            param = radius if method == "tophat" else sigma
-            # (method, param, algorithm version): a channel saved by an older
-            # numeric version never matches, so incremental save reprocesses it.
-            # Block S0P: + (backend, tophat footprint) of this machine.
-            from ...core.bg_correction import current_compute_signature
-            return (method, param, BG_CORRECTION_ALGO_VERSION) + current_compute_signature(method)
-        current_sigs = {ch: _cur_sig(ch, m) for ch, m in corrected.items()}
+        current_sigs = {ch: self._save_signature(config, ch, m)
+                        for ch, m in corrected.items()}
 
         existing_sigs, existing_bboxes = read_corrected_zarr_state(zarr_path)
         current_bboxes = sorted(
@@ -11161,7 +11444,7 @@ class Step0Page(QWidget):
             # Everything already saved with the same method -> no reprocessing.
             # The zarr already holds every channel; (re)wire the handoff and
             # reconcile the cache (corrected re-read; withdrawn revert to raw).
-            if not correction_changed and not intensity_changed:
+            if not correction_changed and not intensity_changed and not region_rewritten:
                 self._show_save_no_changes()
                 return
             if not _confirm_actual_save():
@@ -11182,7 +11465,7 @@ class Step0Page(QWidget):
             return
         _write_current_correction_config()
         self._incremental_processed = set(to_process)
-        self._btn_continue.setEnabled(False)
+        self._set_save_enabled(False)
         self._btn_load.setEnabled(False)
         self._wsi_dialog = _WsiCorrectionProgressDialog(self)
         self._wsi_worker = WsiCorrectionWorker(
@@ -11298,7 +11581,7 @@ class Step0Page(QWidget):
         if self._wsi_dialog is not None:
             self._wsi_dialog.allow_close()
             self._wsi_dialog.reject()
-        self._btn_continue.setEnabled(True)
+        self._set_save_enabled(True)
         self._btn_load.setEnabled(True)
         QMessageBox.information(
             self, "Canceled",
@@ -11309,7 +11592,7 @@ class Step0Page(QWidget):
         if self._wsi_dialog is not None:
             self._wsi_dialog.allow_close()
             self._wsi_dialog.reject()
-        self._btn_continue.setEnabled(True)
+        self._set_save_enabled(True)
         self._btn_load.setEnabled(True)
         QMessageBox.critical(self, "Background Correction Error", msg)
         print(f"[Step0 WSI Error]\n{msg}")
@@ -11541,7 +11824,7 @@ class Step0Page(QWidget):
             return applied
 
     def _emit_complete(self, config, zarr_path, decisions):
-        self._btn_continue.setEnabled(True)
+        self._set_save_enabled(True)
         self._btn_load.setEnabled(True)
         # Background Correction Save is the sole Step0 save boundary. Persist
         # and validate the remap before writing/emitting the downstream handoff.

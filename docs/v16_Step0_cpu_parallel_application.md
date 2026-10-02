@@ -277,7 +277,7 @@ Step0 的预览：`:1611`、`:1759`（已经按 patch 并行）、`:1882`。都�
 | P4(b) | 峰值 RSS 增量：tophat 1034–1048 MB，cucim 1010–1114 MB（门限 ≤ 3.0 GB）；Save 后 RSS 464–497 MB；swap 前后都是 38 MB。**通过** |
 | P3 | 在第 3 个 tile 写入后取消（此时有 4 个在途）：延迟 tophat 22.0 s（门限 37.5 s）、cucim 4.2 s（门限 7.4 s）；只提交到第 6 块就停止；没有再写入。**通过** |
 
-**单调绿色回归（相关范围；全量回归待补）**：用户 09:30 要关机，来不及跑全量，所以只跑与改动相关的范围。在 `535e7b0` 和 `6b252e2` 的 `git archive` 副本上，每个模块单独起进程。
+**单调绿色回归（相关范围；全量回归见下，已补跑）**：用户 09:30 要关机，来不及跑全量，所以只跑与改动相关的范围。在 `535e7b0` 和 `6b252e2` 的 `git archive` 副本上，每个模块单独起进程。
 
 **范围**：80 个模块：
 - 所有引用 `search_ctrl` / `bg_correction` / `step0_page` / `WsiCorrectionWorker` / `bg_parallel` / `step0_handoff` 的测试；
@@ -294,7 +294,15 @@ Step0 的预览：`:1611`、`:1759`（已经按 patch 并行）、`:1882`。都�
   - 5 条在**两边都 2/2 失败**（旧有失败，只是 S0P 回归那一轮旧代码碰巧没报出来）；
   - 1 条在两边都是 1 次失败、1 次通过。
 - **结论：没有新增失败。**
-- **全量回归（离屏 222 个模块 + GPU 15 个）待下次开机补跑**，脚本在 `~/fusionflux/bench_s0p/reg/run.sh`。
+- **全量回归（2026-10-02 补跑完成，14:47）**：脚本 `~/fusionflux/bench_s0p/reg/run.sh`（带看门狗）。上午第一次运行因关机断在第 13 个模块，原脚本一启动就清空进度，所以改成可续跑，09:50 起重新跑。
+  - 范围：new = `535e7b0`、old = `6b252e2`，都是 `git archive` 副本。离屏 226 个模块和 GPU 15 个模块都在 new 上跑；有失败、超时或崩溃的 30 个模块再到 old 上重跑。
+  - 结论：**没有「new 失败、old 通过」的测试。**
+  - 逐条对比失败的测试名，只有 1 条出现在 new、没出现在 old：`test_seg_runner_engines::test_stardist_expansion_returns_the_nuclei_from_before_expanding`。单独重跑：new 3/3 失败，old 2/3 失败。测试文件两边相同，S0P 也不碰分割引擎，判为两边都不稳定的旧问题。
+  - `test_preseg_run` 在 new 上卡满 25 分钟超时，old 68 s 全过。单独重跑 new 3 次：2 次全过（65–75 s），1 次 `test_the_job_equals_the_steps_done_by_hand` 失败。超时是执行窗口并行跑其他 pytest 抢资源造成的；那 1 条失败判为不稳定。
+  - GPU 的 `test_step1_gpu_roi_clip`：new 超时，old 崩溃（rc=134），单独重跑 new 也崩溃（rc=134）。另外 `test_step1_gpu_roi_polygon_clip`、`gpu_roi_clip_product_path`、`fusion_visibility`、`montage_view` 在两边都崩溃（rc=134），崩溃前的失败模式相同。这些是 S0P 之前就有的 GPU 环境问题，不在本块范围。
+  - `test_step0_channel_conditioning` 在两边都超时（25 分钟）。
+  - 其余 22 个有失败的模块，两边失败的测试名完全一致。其中 Mesmer 的 2 条失败是模型文件缺失（`/sda1/...`）。
+  - 用时约 5 小时：4 个模块各卡满 25 分钟超时；每个模块单独起进程，都要重新导入 TensorFlow、Qt；执行窗口还在并行跑测试。用户 2026-10-02 裁定：以后每块只跑相关范围，每个里程碑跑一次全量；超时改为 10 分钟。
 
 **真机（2026-10-02，用户验收通过）**：在界面里分别 Save 了 tophat 和 cucim 各一条通道，Save 中途取消一次。
 

@@ -454,6 +454,17 @@ row, and the duplicate Tissue Preview button in the step bar.
   disabled except `⏹ Stop`, and each gets its own state back afterwards.
   The Batch dialog's Close during a run stops the current sample, waits for
   it (`Stopping…`), then closes.
+* **Step2's old-run line** (block A6, user ruling 2026-10-02) -- under
+  `Progress`: when a run started for another workspace / dataset is still
+  computing (or has just ended), one amber line says so with the folder it
+  writes to; that run's progress and tiles are never drawn on the page.
+* **Step4's hand-over line** (block A6) -- a run chosen in Step3 while Step4
+  computes is announced in one amber line under the progress and opened when
+  the extraction ends.
+* **Step3's run list** (block A6 W4, user ruling 2026-10-02) -- a run without
+  provenance (made before A3) ends its row with `provenance unknown`,
+  right-aligned (it may cover the right end of the name); also in the
+  tooltip.
 * **Step1's fusion Cancel** (block A6 G1) -- the progress dialog stays, says
   `Stopping…` with Cancel disabled, and the page unlocks only when the job's
   thread has ended.

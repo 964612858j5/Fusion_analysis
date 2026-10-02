@@ -243,7 +243,7 @@ Time to **produce the table.** Step 4 goes through every cell of one Step 2 resu
    - **Outputs**: h5ad (always), **CSV** (only when you tick it).
    - An orange **Risk** line appears for a result made before Step 2's tile-seam fix (2026-09-27) when you measure nuclei / cytoplasm: a few nuclei on tile seams may lie partly outside their cell, so those cells' nucleus / cytoplasm values carry that error; the numbers are still produced and the provenance file counts the affected pixels. Re-run Step 2 to remove it.
 3. **Output dir** defaults to `<workspace>/step4/quantification_runs/<run>/<region>/`; you can change it. The line under it names the files and what `X` holds (e.g. `X = cell mean`). Click `▶ Extract Features`.
-   - While it computes, the page is frozen: only **⏹ Stop** works. Closing the **Batch** window during a run stops the current sample first, then closes.
+   - While it computes, the page is frozen: only **⏹ Stop** works. Closing the **Batch** window during a run stops the current sample first, then closes. A run you choose in Step 3 meanwhile is opened when the extraction ends (a line says so).
 
 **Output:**
 - `cell_features.h5ad` — **one** AnnData for scanpy, one row per cell (per nucleus for a nuclei-only result):

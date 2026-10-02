@@ -313,3 +313,15 @@ TaskManager、事务框架、新的存储框架（§15.3）；worker 的计算�
     - 在 `…_48e7` 的临时副本上走真实的 Load：Load 后 `step0_done=True`、`step1_ready=True`，`_go_to_step1()` 进入 Step1。
 - G1、G5 要进 Step1，等修复后补验。
 - G3（随机 patch 期间切换切片）：生成太快，真机上来不及切换。用户认为实际使用中也一样。改由自动测试 `test_random_patches_for_the_previous_slide_are_dropped`（受控延迟）覆盖，不做真机。
+
+### 12.10 真机：G1 复验通过；fusion 对话框残留的修复（2026-10-02 夜）
+
+- 去掉 Generate 写回（`a256f05`）之后，用户复验 **G1：通过**。取消后可以马上再 Generate，也能正常跑完。
+- **发现**：不论是取消后停止，还是正常 Save 完成，屏幕上都会残留一个空白的黑色「Step1 — Fusion」窗口。
+  - 原因 1：`QProgressDialog.close()` 会发出 `canceled`，于是每次正常结束都会再走一遍 Cancel 的处理函数，并重新 `show()` 对话框。这就是 REV 的 advisory A4，当时判断为「今天无害」，判断有误。
+  - 原因 2：对话框只是被 `close()`，引用丢掉之后对象并没有销毁，它的原生窗口还留着。在 WSLg 上做了实测：close 之后，这个原生窗口仍在应用的窗口列表里，合成器能否把它真正移除取决于时机。
+- **修复**：`_close_fusion_dialog` 依次 blockSignals → hide → close → deleteLater；Cancel 处理函数在对话框已被撤下时直接返回。
+- **测试**：`test_the_fusion_dialog_is_destroyed_and_not_re_shown`，正常结束和取消后结束各一条。
+  - 修复前（`a256f05`）两条都变红：正常结束时 Cancel 处理函数又跑了一遍；对话框对象没有被销毁。
+  - 修复后两条都通过。
+  - 相关模块都通过：`test_v16_a6_async`（33）、`test_step1_fusion_isolation`、`test_step1_save_progress`、`test_step1_result_publication`、`test_step1_fusion_settings_commit`、`test_step1_display_mapping_commit`、`test_ui_surface_contract`。

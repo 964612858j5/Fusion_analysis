@@ -8804,6 +8804,8 @@ class MainWindow(QMainWindow):
 
     def _on_fusion_cancel_requested(self):
         """Cancel asks the job to stop; the dialog stays until it has."""
+        if getattr(self, "_fusion_dialog", None) is None:
+            return              # the dialog is being taken down: not a Cancel
         self._fusion_stopping = True
         worker = self._fusion_worker
         if worker is not None:
@@ -10035,10 +10037,20 @@ class MainWindow(QMainWindow):
             w for w in self._retired_fusion_workers if w is not worker]
 
     def _close_fusion_dialog(self):
+        """Take the progress dialog down for good.
+
+        `QProgressDialog.close()` emits `canceled`, which would run the Cancel
+        handler again (and re-show the dialog) on every normal end; and a
+        closed dialog keeps its native window, which under WSLg can stay on
+        screen as an empty black window. So: no signals, hide, close, destroy
+        (real-machine finding 2026-10-02)."""
         d = getattr(self, "_fusion_dialog", None)
+        self._fusion_dialog = None
         if d is not None:
+            d.blockSignals(True)
+            d.hide()
             d.close()
-            self._fusion_dialog = None
+            d.deleteLater()
 
 
 

@@ -873,3 +873,55 @@ def test_b9_a_run_is_known_only_with_its_segmentation_run_entry(tmp_path):
     runs = [SimpleNamespace(run_dir=known), SimpleNamespace(run_dir=legacy),
             SimpleNamespace(run_dir=str(tmp_path / "outside"))]
     assert MainWindow._step3_runs_with_provenance(runs) == {known}
+
+
+# ── real-machine finding: the fusion dialog is gone after the job ends ──
+
+def _end_normally(w, worker):
+    worker.finished.emit("/x/fused.zarr")      # the business answer
+    worker.release()                           # the thread ends
+    worker.wait(5000)
+    _pump()
+
+
+@pytest.mark.parametrize("cancel_first", [False, True])
+def test_the_fusion_dialog_is_destroyed_and_not_re_shown(app, tmp_path, monkeypatch,
+                                                         cancel_first):
+    """A closed QProgressDialog emits `canceled` (the Cancel handler ran again
+    and re-showed it) and kept its native window, which WSLg can leave on
+    screen as an empty black window -- after a successful Save as well."""
+    import sip
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *a, **k: None)
+    w = iso._window(app, tmp_path)
+    monkeypatch.setattr(w, "_on_fusion_done", lambda path: w._after_fusion_thread_exit(
+        w._close_fusion_dialog))
+    worker = _SlowStop() if cancel_first else iso._FakeFusion()
+    try:
+        w.show()
+        w._start_fusion_worker(worker, job_name="fusion", n_rows=1, n_cols=1)
+        _pump()
+        dialog = w._fusion_dialog
+        assert dialog is not None and dialog.isVisible()
+        if cancel_first:
+            dialog.findChild(QtWidgets.QPushButton).click()
+            _pump()
+            worker.exit_gate.set()
+            worker.wait(5000)
+            _pump()
+        else:
+            stops_before = worker.stop_called
+            _end_normally(w, worker)
+            assert worker.stop_called == stops_before      # no Cancel on a normal end
+            assert w._fusion_stopping is False
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        _pump()
+        assert w._fusion_dialog is None
+        assert sip.isdeleted(dialog)                       # its window is gone too
+    finally:
+        worker.release()
+        if hasattr(worker, "exit_gate"):
+            worker.exit_gate.set()
+        worker.wait(5000)
+        _pump()
+        w.close()

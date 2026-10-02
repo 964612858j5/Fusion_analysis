@@ -309,6 +309,10 @@ class FullFusionWorker(QThread):
         # store the next run was writing, and the next run's start could delete
         # the one the stopped run was still writing. A uuid, not a hash.
         self._run_tag = uuid.uuid4().hex
+        # Set by the window when no other fusion thread of this process is
+        # alive: then every `.inprogress.*` beside the target is a leftover of
+        # a killed run, and is removed (user ruling 2026-10-02).
+        self.sweep_leftovers = False
 
     def stop(self):
         self._stop = True
@@ -587,6 +591,12 @@ class FullFusionWorker(QThread):
                 legacy_tmp = zarr_path + ".inprogress"
                 if os.path.isdir(legacy_tmp):
                     shutil.rmtree(legacy_tmp, ignore_errors=True)
+                if self.sweep_leftovers:
+                    import glob as _glob
+                    for left in _glob.glob(_glob.escape(zarr_path) + ".inprogress.*"):
+                        if os.path.isdir(left):
+                            print(f"[Fusion] removing a killed run's leftover {left}")
+                            shutil.rmtree(left, ignore_errors=True)
                 tmp_path = f"{zarr_path}.inprogress.{self._run_tag}"
                 self._tmp_stores.append(tmp_path)
 
@@ -710,30 +720,10 @@ class FullFusionWorker(QThread):
                     del poly_mask
                     gc.collect()
 
-                # Preview PNG for this region
-                try:
-                    import cv2
-                    ds = self.preview_ds
-                    cyto_ds = out_zarr[::ds, ::ds, 0].astype(np.float32) / 65535.0
-                    nuc_ds  = out_zarr[::ds, ::ds, 1].astype(np.float32) / 65535.0
-                    r_ = (np.clip(cyto_ds, 0, 1) * 255).astype(np.uint8)
-                    g_ = np.zeros_like(r_)
-                    b_ = (np.clip(nuc_ds,  0, 1) * 255).astype(np.uint8)
-                    rgb = np.stack([r_, g_, b_], axis=-1)
-                    prev_name = region["zarr_name"].replace(".zarr", "_preview.png")
-                    prev_path = os.path.join(output_dir, prev_name)
-                    # Written aside and swapped in, so a reader never sees half
-                    # a PNG (the `.png` suffix tells cv2 the format).
-                    prev_tmp = os.path.join(
-                        output_dir, f".{prev_name}.{self._run_tag}.png")
-                    try:
-                        if cv2.imwrite(prev_tmp, cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)):
-                            os.replace(prev_tmp, prev_path)
-                    finally:
-                        if os.path.exists(prev_tmp):
-                            os.remove(prev_tmp)
-                except Exception as e:
-                    print(f"[Fusion] Preview failed ({rname}): {e}")
+                # No preview PNG (user ruling 2026-10-02): nothing read it --
+                # Step2 draws its overview from the fused zarr itself -- and a
+                # late Cancel could leave a new picture beside an unpublished
+                # result.
 
                 # Block A6 G1: a stop pressed after the last tile must still
                 # keep this result off the real path.

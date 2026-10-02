@@ -11222,7 +11222,9 @@ class Step0Page(QWidget):
 
     def _set_save_enabled(self, on):
         self._btn_continue.setEnabled(bool(on))
-        self._btn_save_menu.setEnabled(bool(on))
+        menu = self.__dict__.get("_btn_save_menu")
+        if menu is not None:
+            menu.setEnabled(bool(on))
 
     def _save_as_new_workspace(self):
         """Save into a new workspace whatever the current one is."""

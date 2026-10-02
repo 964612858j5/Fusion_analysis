@@ -106,7 +106,7 @@ from .shared_camera import snapshot_from
 from .step1_viewer_mount import Step1WholeSlideMount
 from .step2_page import Step2Page
 from .step3_page import Step3Page
-from .step3_mask_bar import Step3MaskBar
+from .step3_mask_bar import PROVENANCE_UNKNOWN, Step3MaskBar
 from ..core import step3_masks
 from .step4_page import Step4Page
 
@@ -1978,6 +1978,29 @@ class MainWindow(QMainWindow):
         return label
 
     @staticmethod
+    def _step3_runs_with_provenance(runs):
+        """Block A6 W4 (user ruling 2026-10-02): the run folders that have a
+        `segmentation_run` provenance entry (A3). A run without one is shown
+        as `provenance unknown`; nothing is compared, no hash is made."""
+        from ..core import provenance as prov
+        known, entries_of = set(), {}
+        for run in runs:
+            project_dir, _ws = prov.find_workspace(run.run_dir)
+            if project_dir is None:
+                continue
+            if project_dir not in entries_of:
+                try:
+                    entries_of[project_dir] = [
+                        e.get("location") or {} for e in prov.load_entries(project_dir)
+                        if e.get("kind") == "segmentation_run"]
+                except (OSError, ValueError):
+                    entries_of[project_dir] = []
+            loc = prov.location(project_dir, run.run_dir)
+            if any(prov._same_location(loc, other) for other in entries_of[project_dir]):
+                known.add(run.run_dir)
+        return known
+
+    @staticmethod
     def _step3_source_key(sources):
         """What makes two mask selections the same: per kind, the mask, its
         region and its pyramid's place."""
@@ -2021,7 +2044,9 @@ class MainWindow(QMainWindow):
         self._step3_mask_runs = runs
         self._step3_mask_key = entry.key if entry is not None else None
         several = {r.run_dir: len(step3_masks.run_regions(r)) > 1 for r in runs}
-        bar.set_runs([(self._step3_run_label(e, current_ws, several[e.run.run_dir]), e.key)
+        recorded = self._step3_runs_with_provenance(runs)
+        bar.set_runs([(self._step3_run_label(e, current_ws, several[e.run.run_dir]), e.key,
+                       "" if e.run.run_dir in recorded else PROVENANCE_UNKNOWN)
                       for e in items], entry.key if entry is not None else None)
         mount = self.__dict__.get("_step3_mount")
         stack = getattr(getattr(mount, "host", None), "stack", None) if mount else None
@@ -9950,6 +9975,11 @@ class MainWindow(QMainWindow):
         self._fusion_worker = worker
         self._fusion_exit_actions = []
         self._fusion_stopping = False
+        # No other fusion thread of this window is alive (a retired one may
+        # still be writing): only then are `.inprogress.*` dirs leftovers.
+        if hasattr(worker, "sweep_leftovers"):
+            worker.sweep_leftovers = not any(
+                w.isRunning() for w in self._retired_fusion_workers)
         self._fusion_run_id += 1
         token = {
             "run": self._fusion_run_id,

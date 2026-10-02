@@ -268,3 +268,34 @@ TaskManager、事务框架、新的存储框架（§15.3）；worker 的计算�
 7. Step2 的 progress / tile 信号不核对令牌（即 §12.4 第 3 条）。
 8. Step4 冻结比 handoff 列表多出 Browse 和分组折叠箭头（即 §12.5）。
 9. 字面白名单偏差：G5 在请求发起处加了 `run_id` 包装；G1 改了已有测试的两行断言（§12.2 已记录）。
+
+### 12.7 A6 全量回归（2026-10-02 15:25–17:39）
+
+- new = `bf048c7`（代码冻结点），old = `f8ace2b`。脚本 `~/fusionflux/bench_a6/reg/run.sh` 按用户当天的裁定提速：每个模块超时 10 分钟；33 个既不导入 Qt 也不加载真引擎的模块合成一组跑；S0P 回归里两边都坏的 7 个模块只跑 new 一侧。另有磁盘门和内存门。
+- **结论：没有 A6 造成的新增失败。**
+  - 逐条对比失败测试名，只在 new 上失败的有 2 条：
+    - `test_seg_runner_engines::test_stardist_expansion_returns_the_nuclei_from_before_expanding`：S0P 回归时已确认两边都不稳定；
+    - `test_step0_step1_handoff_contract::test_step0_write_failure_does_not_emit`：**W3 引起**。测试用 `Step0Page.__new__` 造了一个只有部分属性的页面，缺少 W3 新加的 `_btn_save_menu`。真实路径走不到这里。修复见 §12.8（`_set_save_enabled` 用 `self.__dict__.get`，与页面里现有的写法一致；没有改测试）。
+  - `test_step0_floor_prefetch` 在两边都超过 10 分钟。放宽到 25 分钟各重跑一次：new 12 条失败，old 13 条失败，没有「new 失败、old 通过」。
+  - 其余有失败、超时或崩溃的模块，两边表现相同。
+
+### 12.8 REV 后修正（用户 2026-10-02 下午在终端裁定）
+
+| 项 | 内容 |
+|---|---|
+| A1 | 批处理对话框：先连接 `QThread.finished`，再 `stop()`；接线后复查一次 `isRunning()`；`_close_after_stop` 只执行一次 |
+| A2 | fusion 不再写 `fused_*_preview.png`。没有任何代码读它；Step2 的概览图直接取自 fused zarr |
+| A3 | Step4 运行中收到的交接（Step3 → Step4）先记下，页面上显示一行「Another run was chosen: … It is opened when this extraction ends.」，结束后自动打开 |
+| A5 | Step2 的 progress / tile_done / tile_skipped 也核对令牌；对不上时不绘制，页面「Progress」下方显示一行旧运行的提示，并给出它的输出目录绝对路径（运行中显示「still computing」，结束后显示「has finished / has stopped」） |
+| A6 | `utils/segmentation_registry.save_registry` 改为 `write_json_atomic` |
+| A7 | fusion 开始时，只要窗口里没有仍在运行的已退役 fusion 线程，就删除目标旁边遗留的 `.inprogress.*`（被强行杀掉的运行留下的）。这一点由 MainWindow 判断，通过 worker 的 `sweep_leftovers` 告诉它 |
+| B9（W4 的一部分） | Step3 运行下拉框：没有 `segmentation_run` provenance 记录的运行，在行尾右对齐显示「provenance unknown」，可以盖住名字的右端；tooltip 里也有。只看有没有记录，不比较令牌，不新造哈希。下拉框收起时显示的当前项不带这个标记 |
+| 兼容 | `_set_save_enabled`：没有 `_btn_save_menu` 的页面对象跳过（§12.7） |
+
+- 测试：`test_v16_a6_async.py` 新增 11 条（r1、r2、r3、r5 ×2、r6、r7 ×3、b9 ×2）。
+  - 在修正前的代码（`ec5846a`）上：10 条失败，1 条通过（r7 中不允许清理的那组对照）；
+  - 在当前代码上：整个文件 31 条全部通过。
+  - `test_step0_step1_handoff_contract`：在修正前失败 1 条，修正后 39 条全部通过。
+- 相关模块（逐个单独跑）都通过：`test_v16_a6_workspace`、`test_step2_tile_status`、`test_step2_skip_empty_tiles`、`test_step4_page`、`test_batch_step4_dialog`、`test_step1_result_publication`、`test_step1_fusion_isolation`、`test_step3_masks`、`test_step3_mask_bar`、`test_step3_mask_wiring`、`test_ui_surface_contract`。
+  - `test_step2_runner_path` 的 StarDist 交接测试不稳定：同一条测试连跑 3 次，结果是失败 1 条、全过、失败 2 条，每次失败的参数组合都不同。它不涉及本次改动的页面代码，和 §12.7 的 StarDist 不稳定是同一类。
+- **执行窗口的失误（如实记录）**：17:39 回归跑完后，只在终端里告诉了用户，没有按协议发邮件；16:21 之后也没有再按 30 分钟的间隔查邮件。用户 18:19 的邮件直到 21:33 才回复。这段时间也没有跑修正的测试。21:33 起恢复按协议执行。

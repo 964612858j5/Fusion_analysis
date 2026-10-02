@@ -41,6 +41,7 @@ class Step4Page(QWidget):
         # Block A6 G4: the controls' own enabled states, kept while the page
         # is frozen for a run and put back after it.
         self._frozen_states = None
+        self._pending_run = None     # (run_dir, roi_name, open_slide) handed over mid-run
         self._build_ui()
 
     # ── public API ────────────────────────────────────────────────────
@@ -51,9 +52,18 @@ class Step4Page(QWidget):
         open in the program (a run of another slide is refused)."""
         if self._running:
             # Block A6 G4: the page is frozen while it computes; the run it
-            # is quantifying is not swapped underneath it.
-            print(f"[Step4] kept the running job; {run_dir!r} not taken "
-                  f"while features are being extracted")
+            # is quantifying is not swapped underneath it. The hand-over is
+            # kept and opened when the extraction ends.
+            current = getattr(self._job, "run_dir", "") if self._job is not None else ""
+            if run_dir and (os.path.abspath(run_dir) != os.path.abspath(current or "")
+                            or roi_name not in (None, getattr(self._job, "roi_name", None))):
+                self._pending_run = (run_dir, roi_name, open_slide)
+                self._pending_lbl.setText(
+                    f"Another run was chosen: {run_dir}"
+                    + (f"  ({roi_name})" if roi_name else "")
+                    + ". It is opened when this extraction ends.")
+                self._pending_lbl.setVisible(True)
+                print(f"[Step4] {run_dir!r} will be opened when the extraction ends")
             return
         if open_slide is not None:
             self._open_slide = open_slide or ""
@@ -403,6 +413,14 @@ class Step4Page(QWidget):
         self._prog_lbl.setWordWrap(True)
         root.addWidget(self._prog_lbl)
 
+        # Block A6 (user ruling 2026-10-02, option b): a run handed over
+        # while this page computes is opened when the extraction ends.
+        self._pending_lbl = QLabel('')
+        self._pending_lbl.setStyleSheet('color:#e5c07b;font-size:10px;padding:2px;')
+        self._pending_lbl.setWordWrap(True)
+        self._pending_lbl.setVisible(False)
+        root.addWidget(self._pending_lbl)
+
         root.addStretch()
 
         # ── Navigation ────────────────────────────────────────────────
@@ -610,6 +628,15 @@ class Step4Page(QWidget):
             states, self._frozen_states = self._frozen_states, None
             for w, was in states or ():
                 w.setEnabled(was)
+            self._open_pending_run()
+
+    def _open_pending_run(self):
+        """The run handed over during the extraction, now that it ended."""
+        pending, self._pending_run = self._pending_run, None
+        self._pending_lbl.setVisible(False)
+        if pending is not None:
+            run_dir, roi_name, open_slide = pending
+            self.set_run(run_dir, roi_name, open_slide=open_slide)
 
     def _on_progress(self, done, total, msg):
         pct = int(done / total * 100) if total > 0 else 0

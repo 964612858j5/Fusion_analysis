@@ -546,15 +546,21 @@ class BatchStep4Dialog(QDialog):
             return False
         if not self._closing:
             self._closing = True
+            # Listen BEFORE asking: a thread that ends between the two would
+            # otherwise end unheard and leave the dialog on "Stopping…".
+            worker.finished.connect(self._close_after_stop)   # QThread.finished
             worker.stop()
             self._run_btn.setEnabled(False)
             self._close_btn.setEnabled(False)
             self._progress_bar.setFormat("Stopping…")
             print("[BATCH]   stopping the current sample before closing", flush=True)
-            worker.finished.connect(self._close_after_stop)   # QThread.finished
+            if not worker.isRunning():
+                self._close_after_stop()
         return True
 
     def _close_after_stop(self):
+        if self._current_worker is None:
+            return                      # already closed (once only)
         self._current_worker = None
         super().reject()
 

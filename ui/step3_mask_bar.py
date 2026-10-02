@@ -20,6 +20,32 @@ from .step3_label_binding import CELL, DEFAULT_STYLES, NUCLEUS
 
 LABELS = {CELL: "Cell mask", NUCLEUS: "Nucleus mask"}
 NO_RUNS_TEXT = "No segmentation results for this ROI"
+# Block A6 W4 (user ruling 2026-10-02): a run without provenance (made before
+# A3) says so, right-aligned at the end of its row; it may cover the right
+# end of the run's name.
+PROVENANCE_UNKNOWN = "provenance unknown"
+TAG_ROLE = Qt.UserRole + 1
+
+
+class _TaggedItemDelegate(QtWidgets.QStyledItemDelegate):
+    """A row with its tag (TAG_ROLE) drawn right-aligned over its end."""
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        tag = index.data(TAG_ROLE)
+        if not tag:
+            return
+        painter.save()
+        fm = option.fontMetrics
+        width = fm.horizontalAdvance(tag) + 12
+        rect = QtCore.QRect(option.rect.right() - width, option.rect.top(),
+                            width, option.rect.height())
+        selected = bool(option.state & QtWidgets.QStyle.State_Selected)
+        painter.fillRect(rect, option.palette.highlight() if selected
+                         else option.palette.base())
+        painter.setPen(QtGui.QColor("#e5c07b"))
+        painter.drawText(rect.adjusted(0, 0, -6, 0), Qt.AlignRight | Qt.AlignVCenter, tag)
+        painter.restore()
 FILL_NOTE = "Fill uses one colour per cell"
 #: The preset swatches, RGB 0..1: green, cyan, yellow, magenta, orange, red, white.
 PRESET_COLOURS = ((0.0, 1.0, 0.0), (0.0, 0.8, 1.0), (1.0, 1.0, 0.0), (1.0, 0.0, 1.0),
@@ -205,6 +231,7 @@ class Step3MaskBar(QtCore.QObject):
             "QComboBox{color:#ddd;background:#182230;border:1px solid #354a63;"
             "border-radius:4px;padding:1px 6px;font-size:10px;}")
         self.run_combo.activated.connect(self._run_activated)
+        self.run_combo.setItemDelegate(_TaggedItemDelegate(self.run_combo))
         # Block B3: any Step2 result of the open slide, from anywhere.
         self.load_button = QtWidgets.QPushButton("Load…")
         self.load_button.setStyleSheet(MODE_BUTTON_QSS)
@@ -235,7 +262,9 @@ class Step3MaskBar(QtCore.QObject):
         return self._corner
 
     def set_runs(self, items, current_dir=None):
-        """`items` = [(label, run_dir)], newest first; `current_dir` selected."""
+        """`items` = [(label, run_dir)] or [(label, run_dir, tag)], newest
+        first; `current_dir` selected. A tag (`provenance unknown`) is drawn
+        right-aligned at the row's end, and is the row's tooltip."""
         combo = self.run_combo
         combo.blockSignals(True)
         combo.clear()
@@ -243,8 +272,14 @@ class Step3MaskBar(QtCore.QObject):
             combo.addItem(NO_RUNS_TEXT, "")
             combo.setEnabled(False)
         else:
-            for label, run_dir in items:
+            for item in items:
+                label, run_dir = item[0], item[1]
+                tag = item[2] if len(item) > 2 else ""
                 combo.addItem(label, run_dir)
+                if tag:
+                    row = combo.count() - 1
+                    combo.setItemData(row, tag, TAG_ROLE)
+                    combo.setItemData(row, f"{label}  —  {tag}", Qt.ToolTipRole)
             combo.setEnabled(True)
             index = combo.findData(current_dir) if current_dir else -1
             combo.setCurrentIndex(max(0, index))

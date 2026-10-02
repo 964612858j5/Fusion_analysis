@@ -693,3 +693,183 @@ def test_a_dataset_switch_stops_step4_and_drops_its_answer(app, tmp_path, monkey
             wk.wait(5000)
         _pump()
         w.close()
+
+
+# ── post-REV corrections (user rulings 2026-10-02) ──────────────────────
+
+class _StopsAtOnce(_FakeExtract):
+    """Ends INSIDE `stop()`: the thread is gone before the caller's next line."""
+
+    def stop(self):
+        super().stop()
+        self.wait(5000)
+
+
+def test_r1_a_sample_that_ends_inside_stop_still_closes_the_dialog(app, tmp_path, monkeypatch):
+    from block01.ui import batch_step4_dialog as bd
+    _FakeExtract.made = []
+    monkeypatch.setattr(bd, "FeatureExtractWorker", _StopsAtOnce)
+    monkeypatch.setattr(bd.QMessageBox, "information", lambda *a, **k: None)
+    ome = tmp_path / "s.ome.tiff"
+    ome.write_bytes(b"x")
+    mask = tmp_path / "run" / "global_mask.dat"
+    mask.parent.mkdir()
+    mask.write_bytes(b"x")
+    dlg = bd.BatchStep4Dialog()
+    dlg._add_row(True, "s", str(ome), str(mask), str(tmp_path / "out"), "s")
+    dlg.show()
+    try:
+        dlg._run_batch()
+        assert _FakeExtract.made[-1].isRunning()
+        dlg._close_btn.click()
+        _pump()
+        assert not dlg.isVisible()
+    finally:
+        for wk in _FakeExtract.made:
+            wk.go.set()
+            wk.wait(5000)
+        dlg.deleteLater()
+
+
+def test_r2_fusion_writes_no_preview_png(tmp_path):
+    pub._worker(tmp_path).run()
+    assert os.path.isdir(tmp_path / "fused.zarr")
+    assert not glob.glob(str(tmp_path / "*_preview.png"))
+
+
+@pytest.mark.parametrize("sweep", [True, False])
+def test_r7_a_killed_runs_leftover_is_swept_only_when_allowed(tmp_path, sweep):
+    dead = tmp_path / "fused.zarr.inprogress.deadbeef"
+    dead.mkdir()
+    (dead / "chunk").write_bytes(b"x")
+    wk = pub._worker(tmp_path)
+    wk.sweep_leftovers = sweep
+    wk.run()
+    assert dead.exists() is (not sweep)
+
+
+def test_r7_the_window_allows_the_sweep_only_with_no_live_retired_thread(app, tmp_path,
+                                                                        monkeypatch):
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *a, **k: None)
+    w = iso._window(app, tmp_path)
+    retired, fresh = _SlowStop(), _SlowStop()
+    retired.sweep_leftovers = fresh.sweep_leftovers = None
+    try:
+        retired.start()
+        w._retired_fusion_workers.append(retired)
+        w._start_fusion_worker(fresh, job_name="fusion", n_rows=1, n_cols=1)
+        assert fresh.sweep_leftovers is False         # a retired one may still write
+    finally:
+        for wk in (retired, fresh):
+            wk.release()
+            wk.exit_gate.set()
+            wk.wait(5000)
+        _pump()
+        w.close()
+
+
+def test_r6_the_segmentation_registry_survives_a_failed_write(tmp_path, monkeypatch):
+    import json
+    from block01.utils import segmentation_registry as reg
+    reg.save_registry(str(tmp_path), {"version": 1, "results": [{"id": "a"}]})
+    path = reg.registry_path(str(tmp_path))
+    with open(path) as f:
+        before = f.read()
+    real_dump = json.dump
+
+    def _half(obj, f, *a, **k):
+        if isinstance(obj, dict) and "results" in obj:
+            f.write('{"results": [')
+            raise OSError("disk full")
+        return real_dump(obj, f, *a, **k)
+    monkeypatch.setattr(json, "dump", _half)
+    with pytest.raises(OSError):
+        reg.save_registry(str(tmp_path), {"version": 1, "results": [{"id": "b"}]})
+    with open(path) as f:
+        assert f.read() == before
+
+
+def test_r5_an_old_runs_progress_is_not_drawn_and_the_page_says_where_it_writes(step2):
+    p, seen, tmp_path = step2
+    p._run()
+    worker = p._worker
+    worker.output_dir = str(tmp_path / "proj" / "rois" / "roi_A" / "step2" / "run_1")
+    label_before = p._prog_lbl.text()
+    cells_before = p._cells_lbl.text()
+    _switch_workspace(p, tmp_path)
+    worker.progress.emit(3, 12, "tile 4 of 12")
+    worker.tile_done.emit(2, 12, 999)
+    _pump()
+    assert p._prog_lbl.text() == label_before
+    assert p._cells_lbl.text() == cells_before
+    assert not p._old_run_lbl.isHidden()
+    text = p._old_run_lbl.text()
+    assert "roi_A" in text and os.path.abspath(worker.output_dir) in text
+    assert "still computing" in text
+    worker.finished.emit("/old/run", 5)
+    _pump()
+    assert "has finished" in p._old_run_lbl.text()
+
+
+def test_r5_the_own_runs_progress_is_drawn(step2):
+    p, seen, tmp_path = step2
+    p._run()
+    p._worker.progress.emit(3, 12, "tile 4 of 12")
+    _pump()
+    assert p._prog_lbl.text() == "tile 4 of 12"
+    assert p._old_run_lbl.isHidden()
+
+
+def test_r3_a_run_handed_over_mid_extraction_is_opened_afterwards(step4, tmp_path):
+    from test_quant_sources import build_project
+    page = step4
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    other = build_project(other_dir)
+    page._run()
+    first = page._job.run_dir
+    page.set_run(other["run_dir"], open_slide=other["slide"])
+    assert page._job.run_dir == first                  # not swapped mid-run
+    assert not page._pending_lbl.isHidden()
+    assert other["run_dir"] in page._pending_lbl.text()
+    page._worker.go.set()
+    page._worker.wait(5000)
+    _pump()
+    assert os.path.realpath(page._job.run_dir) == os.path.realpath(other["run_dir"])
+    assert page._pending_lbl.isHidden()
+
+
+def test_b9_runs_without_provenance_are_tagged_right_aligned(app):
+    from PyQt5.QtCore import Qt
+    from block01.ui.step3_mask_bar import PROVENANCE_UNKNOWN, TAG_ROLE, Step3MaskBar
+    bar = Step3MaskBar()
+    bar.set_runs([("cellpose · 2026-10-02 10:00", "/r/new\x1fFull WSI", ""),
+                  ("cellpose · 2026-09-27 12:00", "/r/old\x1fFull WSI", PROVENANCE_UNKNOWN)])
+    combo = bar.run_combo
+    assert combo.itemData(0, TAG_ROLE) in (None, "")
+    assert combo.itemData(1, TAG_ROLE) == PROVENANCE_UNKNOWN
+    assert combo.itemText(1) == "cellpose · 2026-09-27 12:00"     # the name is unchanged
+    assert PROVENANCE_UNKNOWN in combo.itemData(1, Qt.ToolTipRole)
+    bar.set_runs([("x", "/r/x")])                                  # two-field items still work
+    assert combo.itemText(0) == "x"
+
+
+def test_b9_a_run_is_known_only_with_its_segmentation_run_entry(tmp_path):
+    import json
+    from types import SimpleNamespace
+    from block01.core import provenance as prov
+    from block01.ui.main_window import MainWindow
+    proj = tmp_path / "proj"
+    ws = proj / "rois" / "ws1"
+    (ws / "step2" / "segmentation_runs" / "known").mkdir(parents=True)
+    (ws / "step2" / "segmentation_runs" / "legacy").mkdir(parents=True)
+    (ws / "roi_manifest.json").write_text("{}")
+    (proj / "project_manifest.json").write_text(json.dumps({"version": 1,
+                                                            "project_schema_version": 1}))
+    known = str(ws / "step2" / "segmentation_runs" / "known")
+    legacy = str(ws / "step2" / "segmentation_runs" / "legacy")
+    prov.register(str(proj), "segmentation_run", prov.location(str(proj), known), "known",
+                  workspace_id="ws1")
+    runs = [SimpleNamespace(run_dir=known), SimpleNamespace(run_dir=legacy),
+            SimpleNamespace(run_dir=str(tmp_path / "outside"))]
+    assert MainWindow._step3_runs_with_provenance(runs) == {known}

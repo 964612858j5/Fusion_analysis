@@ -75,9 +75,12 @@ def load_registry(project_output_dir):
 
 
 def save_registry(project_output_dir, data):
+    # Block A6 (user ruling 2026-10-02): read, changed and written back by
+    # every finished Step2 run -- swapped in whole, so a failed write leaves
+    # the previous registry readable.
+    from ..core.provenance import write_json_atomic
     os.makedirs(registry_dir(project_output_dir), exist_ok=True)
-    with open(registry_path(project_output_dir), "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    write_json_atomic(registry_path(project_output_dir), data)
 
 
 def upsert_result(project_output_dir, entry):

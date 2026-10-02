@@ -282,6 +282,16 @@ class Step2Page(QWidget):
         )
         self._prog_lbl.setWordWrap(True)
         ll.addWidget(self._prog_lbl)
+        # Block A6 (user ruling 2026-10-02): a run started for another
+        # workspace / dataset is still computing, or has just finished: said
+        # here, with where it writes. Its numbers are never shown above.
+        self._old_run_lbl = QLabel('')
+        self._old_run_lbl.setStyleSheet(
+            'color:#e5c07b;font-size:10px;padding:2px 4px;')
+        self._old_run_lbl.setWordWrap(True)
+        self._old_run_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._old_run_lbl.setVisible(False)
+        ll.addWidget(self._old_run_lbl)
 
         self._prog_bar = QProgressBar()
         self._prog_bar.setRange(0, 100)
@@ -2747,14 +2757,19 @@ class Step2Page(QWidget):
         if self._roi_id:
             print(f"[Step2] roi_id={self._roi_id}")
             print(f"[Step2] output_base={self._step2_dir or self._out_edit.text().strip()}")
-        self._worker.progress.connect(self._on_progress)
-        self._worker.tile_done.connect(self._on_tile_done)
-        self._worker.tile_skipped.connect(self._on_tile_skipped)
         # Block A6 G2: the run carries what it was started for; its answer is
-        # checked against what the page shows when it arrives.
+        # checked against what the page shows when it arrives -- its progress
+        # and tile states too (user ruling 2026-10-02).
         token = self._run_identity()
         worker = self._worker
         self._run_token = token
+        self._old_run_lbl.setVisible(False)
+        self._worker.progress.connect(
+            lambda *a, t=token, wk=worker: self._run_signal(t, wk, self._on_progress, a))
+        self._worker.tile_done.connect(
+            lambda *a, t=token, wk=worker: self._run_signal(t, wk, self._on_tile_done, a))
+        self._worker.tile_skipped.connect(
+            lambda *a, t=token, wk=worker: self._run_signal(t, wk, self._on_tile_skipped, a))
         self._worker.finished.connect(
             lambda out, n, t=token, wk=worker: self._on_run_finished(t, wk, out, n))
         self._worker.error.connect(
@@ -2841,6 +2856,20 @@ class Step2Page(QWidget):
             "zarr_path": self._zarr_path or "",
         }
 
+    def _run_signal(self, token, worker, handler, args):
+        """A progress / tile signal: drawn only for the page's own context."""
+        if self._run_identity() == token:
+            handler(*args)
+        else:
+            self._say_old_run(token, worker, "is still computing")
+
+    def _say_old_run(self, token, worker, what):
+        where = os.path.abspath(str(getattr(worker, "output_dir", "") or ""))
+        self._old_run_lbl.setText(
+            f"An older run (workspace {token.get('roi_id') or '(none)'}) {what}; "
+            f"its results are not shown here. It writes to:\n{where}")
+        self._old_run_lbl.setVisible(True)
+
     def _on_run_finished(self, token, worker, output_dir, total_cells):
         if self._run_identity() == token:
             self._on_finished(output_dir, total_cells)
@@ -2865,6 +2894,8 @@ class Step2Page(QWidget):
         print(f"[Step2] a run for workspace {token.get('roi_id') or '(none)'} "
               f"(dataset generation {token.get('dataset_gen')}) {what}; "
               f"the page now shows another context, so nothing is shown here")
+        self._say_old_run(token, worker, "has finished" if what.startswith("finished")
+                          else "has stopped")
         if worker is not self._worker:
             return
         self._run_grid_lbl.setVisible(False)

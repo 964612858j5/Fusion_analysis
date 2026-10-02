@@ -94,7 +94,7 @@ Insert after the A8 row (week numbers of the (b) branch):
 
 | Block | What | Application | State |
 |---|---|---|---|
-| **S2T** | Step2 tile-status display fix; opt-in skipping of tiles without tissue; sharper Step2 overview | `docs/v16_Step2_tiles_application.md` (v2, approved) | implemented `4784401`, `935d809`; regression and real-machine check pending |
+| **S2T** | Step2 tile-status display fix; opt-in skipping of tiles without tissue; sharper Step2 overview | `docs/v16_Step2_tiles_application.md` (v2, approved) | **done 2026-10-02** — `4784401`, `935d809`; no new regression failures; real-machine check passed (`docs/v16_Step2_tiles_application.md` §11) |
 | **S0P** | Step0 background correction (tophat / cucim) in parallel on the CPU; one backend per channel; backend in the attrs and the incremental-reuse signature | `docs/v16_Step0_cpu_parallel_application.md` (v2; rulings 3 / 4 after the §2.4 benchmark) | application |
 | S0G *(later, needs a GPU machine)* | GPU tophat with the same disk footprint as the CPU path | — | backlog |
 

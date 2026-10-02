@@ -633,3 +633,63 @@ def test_protocol_b_the_completion_mark_is_written_last(tmp_path, monkeypatch):
     monkeypatch.setattr(lp, "_attrs", real_attrs)
     assert lp.read(out) == first
     assert not os.path.exists(out + ".partial")
+
+
+# ── REV blocker 1: a same-dataset handoff invalidation does not stop Step4 ─
+
+def _window_with_step4_running(app, tmp_path, monkeypatch):
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_quant_sources import build_project
+    from block01.ui import step4_page as s4
+    _FakeExtract.made = []
+    monkeypatch.setattr(s4, "FeatureExtractWorker", _FakeExtract)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *a, **k: None)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: None)
+    w = iso._window(app, tmp_path)
+    page = w._step4
+    page._errors, page._announced = [], []
+    page._report_error = lambda msg: page._errors.append(msg)
+    page._announce = lambda title, text: page._announced.append(text)
+    (tmp_path / "q").mkdir()
+    p = build_project(tmp_path / "q")
+    page.set_run(p["run_dir"], open_slide=p["slide"])
+    page._run()
+    return w, page, _FakeExtract.made[-1]
+
+
+def test_a_same_dataset_invalidation_leaves_step4_running(app, tmp_path, monkeypatch):
+    """Step4 extracting, the user edits a saved ROI in Step0: the handoff is
+    invalidated for the SAME dataset. Step4 is not stopped and no
+    "Stopped by user." is reported."""
+    w, page, worker = _window_with_step4_running(app, tmp_path, monkeypatch)
+    try:
+        w._step0.handoff_invalidated.emit({
+            "step0_manifest_path": w.step0_output["step0_manifest_path"],
+            "reason": "roi_changed"})
+        _pump()
+        assert worker.stopped is False
+        assert page._running is True and page._errors == []
+    finally:
+        for wk in _FakeExtract.made:
+            wk.go.set()
+            wk.wait(5000)
+        _pump()
+        w.close()
+
+
+def test_a_dataset_switch_stops_step4_and_drops_its_answer(app, tmp_path, monkeypatch):
+    w, page, worker = _window_with_step4_running(app, tmp_path, monkeypatch)
+    try:
+        w._step0.dataset_committed.emit({"gen": int(w._dataset_gen_seen) + 1})
+        worker.wait(5000)
+        _pump()
+        assert worker.stopped is True
+        assert page._errors == [] and page._announced == []
+        assert not page._running
+    finally:
+        for wk in _FakeExtract.made:
+            wk.go.set()
+            wk.wait(5000)
+        _pump()
+        w.close()

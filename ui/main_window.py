@@ -2760,6 +2760,13 @@ class MainWindow(QMainWindow):
         if gen and gen <= self._dataset_gen_seen:
             return
         self._dataset_gen_seen = max(gen, self._dataset_gen_seen)
+        # Block A6 G4: a DIFFERENT dataset only (not a same-dataset handoff
+        # invalidation, which also discards Step1's state): Step4's
+        # extraction is about the old slide -- asked to stop, never waited
+        # for; its late answer is dropped by its token.
+        step4 = self.__dict__.get("_step4")
+        if step4 is not None:
+            step4.stop_background_jobs()
 
         # The snapshot described the previous slide's channels -- and so did
         # the draft, its groups, its provenance and any weight named before
@@ -2931,11 +2938,6 @@ class MainWindow(QMainWindow):
             self._step2.set_rois([])
             if hasattr(self._step2, "set_roi_context"):
                 self._step2.set_roi_context(roi_id="", roi_dir="", step2_dir="")
-        # Block A6 G4: Step4's extraction is about the old dataset -- asked
-        # to stop (never waited for); its late answer is dropped by its token.
-        step4 = self.__dict__.get("_step4")
-        if step4 is not None:
-            step4.stop_background_jobs()
 
     def _on_step0_complete(self, payload):
         global OME_TIFF_FILE, OUTPUT_DIR

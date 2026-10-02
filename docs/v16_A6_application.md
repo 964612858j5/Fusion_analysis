@@ -229,7 +229,7 @@ TaskManager、事务框架、新的存储框架（§15.3）；worker 的计算�
 1. G1：每次运行用自己的临时目录名以后，被强行杀掉的进程留下的 `.inprogress.<uuid>` 不会被下一次运行清掉（只清旧的固定名）。目前只能手工删。
 2. G2：`utils/segmentation_registry.save_registry` 的注册表写入不在白名单里，仍然是直接写入。只把 worker 里的 `segmentation_results_index.json` 改成了原子写入。
 3. G2：迟到运行的 `progress` / `tile_done` 信号不核对令牌（申请只要求核对 finished / error），在切换后仍可能更新 tile 网格和细胞计数。
-4. G4：§4 白名单对 `main_window.py` 只写了「关窗时」。数据集切换时的停止请求是按 §3.1 G4 ③ 加的（`_discard_step1_context` 的下游页面一段），在此说明。
+4. G4：§4 白名单对 `main_window.py` 只写了「关窗时」。数据集切换时的停止请求是按 §3.1 G4 ③ 加的。REV 发现最初的位置不对（见 §12.6 B1），现在放在 `_on_step0_dataset_committed`。
 5. W1：Intensity 的恢复直接写了 `ChannelWorkbench` 的 `_params` / `_user_adjusted`。这个控件没有公开的设置接口，而 `channel_workbench.py` 不在白名单里。
 
 ### 12.5 按 handoff_next2 补齐（T0 = 2026-10-02 15:10）
@@ -246,3 +246,25 @@ TaskManager、事务框架、新的存储框架（§15.3）；worker 的计算�
 - **G4 冻结范围与 next2 列表对照**：next2 列的是运行选择、ROI、各勾选项、输出目录、前缀、Batch、Back。实现冻结的是页面上的全部输入控件（只留 Stop），比列表多出两类（记为 advisory，没有改）：
   - 两个 `Browse` 按钮（属于运行选择和输出目录那两行）；
   - 6 个分组折叠箭头（`QToolButton`）：计算期间不能折叠或展开分组。
+
+### 12.6 REV：独立审核（Fable 5.1 + codex gpt-6-astra medium；Fable 整合）
+
+审核范围：G1–G5（`4b73c5a`、`1f7fce3`、`d487c45`）。两位审核员都没有发现新增哈希或新机制，也都确认同一上下文下令牌不会误丢合法结果。最终结论：**1 条 blocker（已修），9 条 advisory**。
+
+**B1（已修，提交见下）**
+- 问题：Step4 的停止请求原来挂在 `_discard_step1_dataset_state` 里。这个函数也被**同一数据集**的 handoff 失效调用（Step4 运行中回 Step0 改已经 Save 过的 ROI）。这时数据集代数不变，令牌相同，于是提取被中止，还弹出「Stopped by user.」。
+- 修复：停止请求移到 `_on_step0_dataset_committed`，只有真正切换数据集时才停止。
+- 测试：
+  - `test_a_same_dataset_invalidation_leaves_step4_running`：修复前（`d487c45`）红，修复后绿；
+  - 对照组 `test_a_dataset_switch_stops_step4_and_drops_its_answer`：修复前后都是绿。
+
+**advisory（没有改，等用户裁定）**
+1. 批处理对话框 `_stop_then_close` 先 `stop()`、后连接 `QThread.finished`。线程如果恰好在这几行之间结束，对话框会停在「Stopping…」，但 Esc 或 ✕ 仍能关闭。codex 判为 blocker，Fable 整合后判为 advisory：窗口只有微秒级，公开路径无法有意复现，也不违反 G4 验收门。修复很小（先 connect，再 stop，然后复查一次 `isRunning()`），并有确定性的测试思路。
+2. G1：发布前的 `_stop` 检查放在预览 PNG 写入之后。很晚的取消会留下一张新预览图，而对应的 zarr 并没有发布。
+3. G4：运行中 `set_run` 被拒绝，Step3 → Step4 的交接被丢掉，运行结束后也不补。
+4. G1：`QProgressDialog.close()` 会发出 `canceled`，所以 `_close_fusion_dialog` 会重入取消 handler。今天无害，属于潜在重入。
+5. 测试证明力：协议 B 的测试没有观察 `complete` 确实最后写；G3 的测试用私有属性模拟切换，没有走 `dataset_committed`。
+6. `save_registry` 仍是直接写入（即 §12.4 第 2 条）。
+7. Step2 的 progress / tile 信号不核对令牌（即 §12.4 第 3 条）。
+8. Step4 冻结比 handoff 列表多出 Browse 和分组折叠箭头（即 §12.5）。
+9. 字面白名单偏差：G5 在请求发起处加了 `run_id` 包装；G1 改了已有测试的两行断言（§12.2 已记录）。

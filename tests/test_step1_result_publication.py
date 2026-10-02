@@ -12,6 +12,7 @@ Two ways a result that was not what it claimed used to reach Step2:
 Own module: page-heavy PyQt suites crash pyqtgraph offscreen when combined.
 """
 
+import glob
 import os
 
 import numpy as np
@@ -105,7 +106,7 @@ def test_a_stopped_run_leaves_the_previous_result_alone(tmp_path):
     assert errors                                   # it reported the stop
     assert z.attrs["config_hash"] == "first"        # untouched
     assert np.array_equal(np.array(z[:]), before)
-    assert not os.path.isdir(path + ".inprogress")  # and cleaned up after itself
+    assert not glob.glob(path + ".inprogress*")  # and cleaned up after itself
 
 
 def test_a_failed_publish_still_leaves_the_previous_result(tmp_path, monkeypatch):
@@ -139,7 +140,7 @@ def test_a_failed_publish_still_leaves_the_previous_result(tmp_path, monkeypatch
     assert z.attrs["config_hash"] == "first"        # previous result still there
     assert z.attrs["complete"] is True
     assert np.array_equal(np.array(z[:]), before)
-    assert not os.path.isdir(path + ".inprogress")
+    assert not glob.glob(path + ".inprogress*")
     assert not os.path.isdir(path + ".previous")
 
 

@@ -608,6 +608,11 @@ class MainWindow(QMainWindow):
         # reference is kept until the thread physically ends, so the C++ object
         # is never destroyed while it is still running.
         self._retired_fusion_workers = []
+        # Block A6 G1: what waits for the current job's thread to PHYSICALLY
+        # end (closing the dialog, unlocking, the result box), and whether the
+        # user has pressed Cancel on it.
+        self._fusion_exit_actions = []
+        self._fusion_stopping     = False
 
         self._preload_debounce = QTimer()
         self._preload_debounce.setSingleShot(True)
@@ -8688,12 +8693,11 @@ class MainWindow(QMainWindow):
         self._fusion_pbar.setValue(pct)
         self._fusion_lbl.setText(msg)
         d = getattr(self, "_fusion_dialog", None)
-        if d is not None:
+        if d is not None and not self._fusion_stopping:
             d.setValue(pct)
             d.setLabelText(msg)
 
     def _on_fusion_done(self, zarr_path):
-        self._close_fusion_dialog()
         self._fusion_pbar.setValue(100)
         method = CELLPOSE_WHOLECELL_FUSION
         if self._p2_params:
@@ -8733,7 +8737,6 @@ class MainWindow(QMainWindow):
         ):
             self._write_fused_zarr_meta(self._pending_fused_zarr_meta, zarr_path)
         self._save_step1_session()
-        self._unlock_ui()
         # Count per-ROI zarrs from meta
         meta_path = os.path.join(OUTPUT_DIR, "fusion_meta.json")
         n_zarrs = 1
@@ -8743,20 +8746,65 @@ class MainWindow(QMainWindow):
             n_zarrs = len(meta.get("regions", [1]))
         except Exception:
             pass
-        QMessageBox.information(
-            self, f"{result_name} complete",
-            f"{'ROI' if self._rois else 'Full WSI'} {result_name.lower()} done  "
-            f"({n_zarrs} zarr(s))\n\n"
-            f"First zarr → {zarr_path}\n\n"
-            f"Click  [Next → Step 2]  to proceed to segmentation."
-        )
+
+        def _release():
+            self._close_fusion_dialog()
+            self._unlock_ui()
+            QMessageBox.information(
+                self, f"{result_name} complete",
+                f"{'ROI' if self._rois else 'Full WSI'} {result_name.lower()} done  "
+                f"({n_zarrs} zarr(s))\n\n"
+                f"First zarr → {zarr_path}\n\n"
+                f"Click  [Next → Step 2]  to proceed to segmentation."
+            )
+        self._after_fusion_thread_exit(_release)
 
     def _on_fusion_error(self, msg):
-        self._close_fusion_dialog()
         self._fusion_lbl.setText(f"✗  Fusion error — see terminal for details")
-        self._unlock_ui()
-        QMessageBox.critical(self, "Fusion Error", msg)
         print(f"[Fusion Error]\n{msg}")
+
+        def _release():
+            self._close_fusion_dialog()
+            self._unlock_ui()
+            QMessageBox.critical(self, "Fusion Error", msg)
+        self._after_fusion_thread_exit(_release)
+
+    def _after_fusion_thread_exit(self, action):
+        """Block A6 G1: run `action` once the current job's thread has ended.
+
+        The worker emits `finished`/`error` from INSIDE `run()`, before its
+        `finally` has cleared its half-built stores; unlocking there let a new
+        Save start while the old thread was still deleting files. The reuse
+        paths call `_on_fusion_done` with no thread running: they run now.
+        """
+        worker = self._fusion_worker
+        if worker is not None and worker.isRunning():
+            self._fusion_exit_actions.append(action)
+        else:
+            action()
+
+    def _on_fusion_thread_exited(self, worker):
+        """`QThread.finished()` of a fusion job: run what waited for it."""
+        if worker is not self._fusion_worker:
+            return      # retired: its waiting actions were dropped with it
+        actions, self._fusion_exit_actions = self._fusion_exit_actions, []
+        for action in actions:
+            action()
+
+    def _on_fusion_cancel_requested(self):
+        """Cancel asks the job to stop; the dialog stays until it has."""
+        self._fusion_stopping = True
+        worker = self._fusion_worker
+        if worker is not None:
+            worker.stop()
+        d = getattr(self, "_fusion_dialog", None)
+        if d is not None:
+            # QProgressDialog.cancel() hides the dialog; it is shown again,
+            # with its button disabled (not deleted: we are inside its click).
+            d.setLabelText("Stopping…  (waiting for the current tile to finish)")
+            for button in d.findChildren(QtWidgets.QPushButton):
+                button.setEnabled(False)
+            d.show()
 
     def _dapi_input_meta_path(self):
         return os.path.join(OUTPUT_DIR, "dapi_input_meta.json")
@@ -9862,7 +9910,16 @@ class MainWindow(QMainWindow):
         called synchronously by the reuse paths, where there is no worker and
         nothing to invalidate.
         """
+        old = self._fusion_worker
+        if old is not None and old is not worker and old.isRunning():
+            # Block A6 G1: the UI is locked until a job's thread has ended, so
+            # this is not reachable from the screen; refuse rather than run two.
+            print("[Step1] fusion not started: the previous job's thread "
+                  "has not ended yet")
+            return None
         self._fusion_worker = worker
+        self._fusion_exit_actions = []
+        self._fusion_stopping = False
         self._fusion_run_id += 1
         token = {
             "run": self._fusion_run_id,
@@ -9877,6 +9934,10 @@ class MainWindow(QMainWindow):
             self._guarded_fusion_callback(token, self._on_fusion_done, "finished"))
         worker.error.connect(
             self._guarded_fusion_callback(token, self._on_fusion_error, "error"))
+        # Physical exit: the base `QThread.finished()`, which the worker's own
+        # `finished(str)` shadows.
+        QtCore.QThread.finished.__get__(worker, QtCore.QThread).connect(
+            lambda w=worker: self._on_fusion_thread_exited(w))
 
         self._lock_ui()
         self._fusion_pbar.setValue(0)
@@ -9893,7 +9954,7 @@ class MainWindow(QMainWindow):
         self._fusion_dialog.setMinimumDuration(0)
         self._fusion_dialog.setAutoClose(False)
         self._fusion_dialog.setAutoReset(False)
-        self._fusion_dialog.canceled.connect(worker.stop)
+        self._fusion_dialog.canceled.connect(self._on_fusion_cancel_requested)
         self._fusion_dialog.setValue(0)
         self._fusion_dialog.show()
         worker.start()
@@ -9948,6 +10009,8 @@ class MainWindow(QMainWindow):
         self._fusion_token = None
         worker = self._fusion_worker
         self._fusion_worker = None
+        self._fusion_exit_actions = []
+        self._fusion_stopping = False
         self._close_fusion_dialog()
         if hasattr(self, "_fusion_bar_widget"):
             self._fusion_bar_widget.setVisible(False)

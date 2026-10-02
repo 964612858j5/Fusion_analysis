@@ -9,6 +9,7 @@ import json
 import time
 import traceback
 import shutil
+import uuid
 import weakref
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -35,6 +36,7 @@ from ...core.fusion_engine import (
     FusionEngine, FUSION_FORMULA_VERSION, fuse_channels,
 )
 from ...core.channel_remap import apply_channel_remap
+from ...core.provenance import write_json_atomic
 from ...utils import dataset_trace
 from ...utils import tissue_log
 from ...utils import perf_trace
@@ -302,6 +304,11 @@ class FullFusionWorker(QThread):
         # Half-built stores still on disk, so a stop or a crash does not leave
         # them behind for the next run to trip over.
         self._tmp_stores = []
+        # Block A6 G1: this run's own name for its half-built stores. With one
+        # fixed `.inprogress` name a stopped run's `finally` could delete the
+        # store the next run was writing, and the next run's start could delete
+        # the one the stopped run was still writing. A uuid, not a hash.
+        self._run_tag = uuid.uuid4().hex
 
     def stop(self):
         self._stop = True
@@ -575,9 +582,12 @@ class FullFusionWorker(QThread):
                 # describing the previous, complete one — which the reuse check
                 # would then accept.
                 self._recover_interrupted_publish(zarr_path)
-                tmp_path = zarr_path + ".inprogress"
-                if os.path.isdir(tmp_path):
-                    shutil.rmtree(tmp_path, ignore_errors=True)
+                # The fixed pre-A6 name is no run's any more: a leftover of an
+                # older build, safe to clear. Other runs' tagged stores are not.
+                legacy_tmp = zarr_path + ".inprogress"
+                if os.path.isdir(legacy_tmp):
+                    shutil.rmtree(legacy_tmp, ignore_errors=True)
+                tmp_path = f"{zarr_path}.inprogress.{self._run_tag}"
                 self._tmp_stores.append(tmp_path)
 
                 out_zarr = zarr.open(
@@ -712,9 +722,24 @@ class FullFusionWorker(QThread):
                     rgb = np.stack([r_, g_, b_], axis=-1)
                     prev_name = region["zarr_name"].replace(".zarr", "_preview.png")
                     prev_path = os.path.join(output_dir, prev_name)
-                    cv2.imwrite(prev_path, cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+                    # Written aside and swapped in, so a reader never sees half
+                    # a PNG (the `.png` suffix tells cv2 the format).
+                    prev_tmp = os.path.join(
+                        output_dir, f".{prev_name}.{self._run_tag}.png")
+                    try:
+                        if cv2.imwrite(prev_tmp, cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)):
+                            os.replace(prev_tmp, prev_path)
+                    finally:
+                        if os.path.exists(prev_tmp):
+                            os.remove(prev_tmp)
                 except Exception as e:
                     print(f"[Fusion] Preview failed ({rname}): {e}")
+
+                # Block A6 G1: a stop pressed after the last tile must still
+                # keep this result off the real path.
+                if self._stop:
+                    self.error.emit("Fusion stopped by user.")
+                    return
 
                 # Publish: mark complete, close the handle, then swap the
                 # finished store into place.
@@ -747,15 +772,14 @@ class FullFusionWorker(QThread):
                 "regions":    all_meta,
                 "created_at": datetime.now().isoformat(),
             }
+            # Block A6 G1: both written aside and swapped in.
             meta_path = os.path.join(output_dir, "fusion_meta.json")
-            with open(meta_path, "w") as f:
-                json.dump(meta, f, indent=2)
+            write_json_atomic(meta_path, meta)
 
             # Save ROI config alongside meta
             if self.rois:
                 roi_cfg_path = os.path.join(output_dir, "roi_config.json")
-                with open(roi_cfg_path, "w", encoding="utf-8") as f:
-                    json.dump(self.rois, f, indent=2, ensure_ascii=False)
+                write_json_atomic(roi_cfg_path, self.rois)
 
             # Return first zarr path for "Next" button
             first_zarr = list(zarr_paths.values())[0] if zarr_paths else ""

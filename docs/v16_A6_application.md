@@ -299,3 +299,17 @@ TaskManager、事务框架、新的存储框架（§15.3）；worker 的计算�
 - 相关模块（逐个单独跑）都通过：`test_v16_a6_workspace`、`test_step2_tile_status`、`test_step2_skip_empty_tiles`、`test_step4_page`、`test_batch_step4_dialog`、`test_step1_result_publication`、`test_step1_fusion_isolation`、`test_step3_masks`、`test_step3_mask_bar`、`test_step3_mask_wiring`、`test_ui_surface_contract`。
   - `test_step2_runner_path` 的 StarDist 交接测试不稳定：同一条测试连跑 3 次，结果是失败 1 条、全过、失败 2 条，每次失败的参数组合都不同。它不涉及本次改动的页面代码，和 §12.7 的 StarDist 不稳定是同一类。
 - **执行窗口的失误（如实记录）**：17:39 回归跑完后，只在终端里告诉了用户，没有按协议发邮件；16:21 之后也没有再按 30 分钟的间隔查邮件。用户 18:19 的邮件直到 21:33 才回复。这段时间也没有跑修正的测试。21:33 起恢复按协议执行。
+
+### 12.9 真机验收第一批（用户，2026-10-02 晚）与修复
+
+- **W1–W3 第 1–6 项：通过**。
+- 第 7 项（另一张切片）：用户找不到别的 OME-TIFF。机器上有一张合成切片 `/home/ming/fusionflux/synthetic/synthetic_2x2_mirror.ome.tif`，可用来补验。
+- **发现：打开已有工作区后进不了 Step1**（Step2 可以进）。
+  - 原因：Step1 的入口要求窗口已绑定一份 Step0 handoff，而绑定只在 `step0_complete` 时发生。打开工作区不发这个信号；不改东西直接 Save 只显示「No changes」，也不发。
+  - 用户的规则：之前 Save 过 Step0、而且 Step0 没有改动的工作区，就应该能进 Step1。
+  - 修复：打开工作区后，在 Load 的最末尾（`dataset_committed` 之后，因为它的处理会清掉窗口里 Step1 的状态），把这个工作区**已经提交**的 handoff 原样发出去。不重写任何文件；由窗口的权威读取器照常验证。发 `step0_complete` 的 payload 改由 `_handoff_payload` 统一构造，Save 和打开工作区共用。
+  - 验证：
+    - `test_v16_a6_workspace` 新增 2 条（打开后发出一次、内容是磁盘上的 handoff、不重写；没有打开工作区时不发）；
+    - 在 `…_48e7` 的临时副本上走真实的 Load：Load 后 `step0_done=True`、`step1_ready=True`，`_go_to_step1()` 进入 Step1。
+- G1、G5 要进 Step1，等修复后补验。
+- G3（随机 patch 期间切换切片）：生成太快，真机上来不及切换。用户认为实际使用中也一样。改由自动测试 `test_random_patches_for_the_previous_slide_are_dropped`（受控延迟）覆盖，不做真机。

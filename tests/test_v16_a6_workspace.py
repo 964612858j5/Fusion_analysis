@@ -343,3 +343,32 @@ def test_a_new_project_still_makes_its_first_workspace(page, tmp_path):
     assert len(page._seen["created"]) == 1
     page._save_and_continue()                           # same region: the same one
     assert len(page._seen["created"]) == 1
+
+
+def test_an_opened_workspace_announces_its_committed_handoff_unchanged(page, tmp_path, slides):
+    """Real-machine finding 2026-10-02: an opened workspace could not enter
+    Step1 -- nothing told the window about its handoff, and an unchanged Save
+    says "No changes" without announcing. The committed handoff is announced
+    once, as it is on disk."""
+    proj, made = _project(tmp_path, slides["a"])
+    sent = []
+    page.step0_complete.connect(sent.append)
+    before = _tree(made[0]["roi_dir"])
+    page._open_existing_workspace()
+    assert sent == []                                  # not before the load commits
+    assert page._announce_opened_workspace() is True
+    assert len(sent) == 1
+    step0 = made[0]["step_dirs"]["step0"]
+    assert sent[0]["step0_manifest_path"] == os.path.join(step0, "step0_roi_result.json")
+    assert sent[0]["roi_id"] == made[0]["roi_id"]
+    assert sent[0]["corrected_zarr_path"] == os.path.join(step0, "corrected_channels.zarr")
+    assert _tree(made[0]["roi_dir"]) == before         # nothing rewritten
+    assert page._announce_opened_workspace() is False  # once
+
+
+def test_no_workspace_opened_announces_nothing(page, tmp_path, slides):
+    _project(tmp_path, slides["b"])
+    sent = []
+    page.step0_complete.connect(sent.append)
+    page._open_existing_workspace()
+    assert page._announce_opened_workspace() is False and sent == []

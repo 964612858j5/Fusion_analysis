@@ -398,6 +398,7 @@ class Step0Page(QWidget):
         self._save_as_requested = False
         self._workspace_saved_sigs = {}
         self._workspace_intensity = None     # saved Intensity awaiting the workbench
+        self._workspace_handoff_pending = None   # opened workspace's handoff, to announce
         self._project_output_dir = OUTPUT_DIR
         self._analysis_region_mode = "roi"
         self._patch_selected_idx = -1
@@ -6403,6 +6404,9 @@ class Step0Page(QWidget):
             "ome_path": os.path.abspath(self.ome_path) if self.ome_path else "",
             "output_dir": os.path.abspath(self.output_dir) if self.output_dir else "",
         })
+        # Block A6 W1: an opened workspace's committed handoff, after the
+        # switch has been announced.
+        self._announce_opened_workspace()
 
     def _roi_count(self):
         """ROIs drawn on the overview the user draws on (the navigator's when
@@ -11086,6 +11090,7 @@ class Step0Page(QWidget):
         and open one: its region, patches, channel decisions, parameters and
         Intensity come back, so an unchanged Save says "No changes"."""
         self._workspace_intensity = None
+        self._workspace_handoff_pending = None
         try:
             _sid, found = workspace_session.find_workspaces(self.output_dir, self.ome_path)
         except Exception as exc:                      # noqa: BLE001 -- never blocks a Load
@@ -11107,10 +11112,25 @@ class Step0Page(QWidget):
             self._roi_context_sig = None
             self._workspace_saved_sigs = {}
             self._workspace_intensity = None
+            self._workspace_handoff_pending = None
             return None
         print(f"[Workspace] opened {ws.workspace_id} ({ws.display_name}); "
               f"Save writes into it")
         return ws
+
+    def _announce_opened_workspace(self):
+        """Hand the opened workspace's committed handoff to the window --
+        the same signal a Save sends, with nothing rewritten."""
+        pending, self._workspace_handoff_pending = (
+            getattr(self, "_workspace_handoff_pending", None), None)
+        if pending is None:
+            return False
+        config, rois, decisions, manifest, zarr_path = pending
+        self.step0_complete.emit(
+            self._handoff_payload(config, rois, decisions, manifest, zarr_path))
+        print(f"[Workspace] announced the committed handoff of "
+              f"{manifest.get('roi_id', '')} (nothing rewritten)")
+        return True
 
     def _restore_workspace(self, ws):
         published = step0_handoff.published_handoff(ws.step0_dir)
@@ -11189,6 +11209,14 @@ class Step0Page(QWidget):
 
         workspace_session.mark_active(ws)
         self._load_status.setText(self._project_status_text())
+        # Announced at the END of the load, after `dataset_committed` (whose
+        # handler discards the window's Step1 state): the workspace's own
+        # committed handoff, unchanged, so Step1 can be entered without a
+        # Save that would change nothing.
+        decisions = dict(manifest.get("corrected_decisions") or corrected)
+        self._workspace_handoff_pending = (config, list(saved_rois), decisions,
+                                           dict(manifest, step0_roi_result_path=_manifest_path),
+                                           zarr_path)
 
     _INTENSITY_KEYS = ("enabled", "min", "max", "brightness", "contrast",
                        "gamma", "opacity", "weight", "auto")
@@ -11853,7 +11881,15 @@ class Step0Page(QWidget):
                 "Step0 outputs could not be committed, so Step1 was not notified.\n\n"
                 f"Details: {e}")
             return False
-        payload = {
+        self.step0_complete.emit(
+            self._handoff_payload(config, rois, decisions, manifest, zarr_path))
+        return True
+
+    def _handoff_payload(self, config, rois, decisions, manifest, zarr_path):
+        """What `step0_complete` carries for a committed handoff: a loader
+        hint and where the committed manifest is (the window's authoritative
+        reader validates the rest)."""
+        return {
             "loader": self.loader,
             "patches": list(self.patches),
             "rois": list(rois),
@@ -11881,5 +11917,3 @@ class Step0Page(QWidget):
             "handoff_schema_version": manifest.get("handoff_schema_version", 1),
             "geometry_revision": int(manifest.get("geometry_revision") or 0),
         }
-        self.step0_complete.emit(payload)
-        return True

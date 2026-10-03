@@ -236,6 +236,11 @@ def content_key(record) -> Dict:
                                  (corr.get("signatures") or {}).items()},
         "corrected_bboxes": sorted([int(x) for x in b] for b in corr.get("bboxes") or []),
         "corrected_source": corr.get("source_identity") or None,
+        # which channels are corrected, and how: a channel switched back to
+        # raw leaves its old array in the product, so signatures alone miss it
+        "corrected_decisions": {str(k): str(v).strip().lower() for k, v in
+                                (record.get("channel_decisions") or {}).items()
+                                if str(v).strip().lower() in ("tophat", "cucim")},
         "step0_remap_hash": record.get("step0_remap_hash") or "",
         "fusion_settings_hash": record.get("fusion_settings_hash") or "",
         "method": record.get("method") or "",

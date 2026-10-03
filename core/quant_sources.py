@@ -234,6 +234,19 @@ def _run_data_version(ws, meta):
     return dict(rec, folder_path=data_versions.version_dir(ws, rec.get("folder", "")))
 
 
+def _version_referencing(ws, corrected_path):
+    """The newest data version whose corrected product is `corrected_path`."""
+    if not ws:
+        return None
+    from ..utils import data_versions
+    want = os.path.abspath(corrected_path)
+    for rec in reversed(data_versions.list_versions(ws)):
+        path = (rec.get("corrected") or {}).get("path")
+        if path and os.path.abspath(path) == want:
+            return dict(rec, folder_path=data_versions.version_dir(ws, rec.get("folder", "")))
+    return None
+
+
 def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):
     """The `QuantJob` of one region of a run, or QuantSourceError.
 
@@ -306,6 +319,12 @@ def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):
     # correction config and corrected product, not the workspace's current
     # ones (a later version may have changed them).
     version = _run_data_version(ws, run.meta)
+    # A run made before data versions records the corrected product it read;
+    # that product is kept (read-only) by the version that references it.
+    recorded_corrected = str(((run.meta or {}).get("paths") or {})
+                             .get("corrected_channels_zarr") or "")
+    if version is None and recorded_corrected:
+        version = _version_referencing(ws, recorded_corrected)
     if version is not None:
         vcfg = os.path.join(version["folder_path"], "correction_config.json")
         if os.path.isfile(vcfg):
@@ -328,6 +347,7 @@ def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):
     zpath, root, container, offset, gshape = "", None, None, (0, 0), None
     if wanted:
         zpath = ((version or {}).get("corrected") or {}).get("path") \
+            or (recorded_corrected if os.path.isdir(recorded_corrected) else "") \
             or handoff.get("corrected_zarr_path") \
             or os.path.join(step0_dir, "corrected_channels.zarr")
         try:

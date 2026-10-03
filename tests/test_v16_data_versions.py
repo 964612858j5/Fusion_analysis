@@ -172,6 +172,14 @@ from test_v16_a6_workspace import (  # noqa: E402,F401  (fixtures)
 from PyQt5 import QtCore, QtWidgets  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_modal_dialogs(monkeypatch):
+    """A dialog nobody answers fails the test instead of hanging it."""
+    def _refuse(dlg, *a, **k):
+        raise AssertionError(f"unexpected modal dialog: {dlg.windowTitle()!r}")
+    monkeypatch.setattr(QtWidgets.QDialog, "exec_", _refuse)
+
+
 class _FakeWsi(QtCore.QThread):
     """WsiCorrectionWorker's contract (a QThread whose business `finished`
     shadows the base one); records what it was asked to do, runs nothing."""
@@ -208,7 +216,9 @@ def _published_with_tophat(tmp_path, slides):
     os.makedirs(sidecar)
     # a version references it: from now on it is read-only (§3.14)
     alloc = dv.new_version_folder(ctx["roi_dir"])
-    dv.commit_version(ctx["roi_dir"], alloc, dict(_record(), corrected={"path": z}))
+    # (no Step1 settings saved: the version records none, so no draft)
+    dv.commit_version(ctx["roi_dir"], alloc, dict(_record(), corrected={"path": z},
+                                                  fusion_settings_hash=""))
     return proj, ctx, z
 
 
@@ -309,6 +319,9 @@ def test_once_a_draft_exists_saves_only_touch_the_draft(dv_page, tmp_path, slide
     m = _json.load(open(manifest))
     m["corrected_zarr_path"] = draft
     _json.dump(m, open(manifest, "w"))
+    from block01.ui.step0.step0_page import Step0Page, DRAFT_TAG
+    monkeypatch.setattr(Step0Page, "_choose_workspace",
+                        lambda self, rows: next(r for r in rows if r[2] == DRAFT_TAG))
     dv_page._open_existing_workspace()
     held = _sigs(dv_page, {"tophat_radius": 25, "cucim_sigma": 30},
                  {"CD3": "tophat", "CD8": "tophat"})
@@ -610,7 +623,8 @@ def test_the_chooser_lists_one_row_per_workspace_and_version(page, tmp_path, sli
     from block01.utils import workspace_session as wsess
     from block01.ui.step3_mask_bar import TAG_ROLE, TaggedItemDelegate
     proj, made = _project(tmp_path, slides["a"], n=2)
-    _two_versions(made[0])
+    _v1, v2 = _two_versions(made[0])
+    _workspace_as(made[0], v2)                 # no draft: see the draft-row tests
     found = wsess.find_workspaces(proj, slides["a"])[1]
     rows = page._workspace_rows(found)
     tags = {(r[0].workspace_id, r[2]) for r in rows}
@@ -665,10 +679,29 @@ def test_loading_an_older_version_restores_it_and_republishes_the_handoff(
     assert [v["version"] for v in dv.list_versions(ws)] == ["v001", "v002"]
 
 
+def _workspace_as(ctx, rec):
+    """The workspace's Step0 says exactly what version `rec` says."""
+    ws, step0 = ctx["roi_dir"], ctx["step_dirs"]["step0"]
+    vdir = dv.version_dir(ws, rec["folder"])
+    for name in ("correction_config.json", "step0_channel_remap.json"):
+        shutil.copy2(os.path.join(vdir, name), os.path.join(step0, name))
+    mpath = os.path.join(step0, "step0_roi_result.json")
+    with open(mpath) as f:
+        manifest = json.load(f)
+    manifest["corrected_zarr_path"] = rec["corrected"]["path"]
+    with open(mpath, "w") as f:
+        json.dump(manifest, f)
+    step1 = os.path.join(ws, "step1")
+    os.makedirs(step1, exist_ok=True)
+    with open(os.path.join(step1, "step1_fusion_settings.json"), "w") as f:
+        json.dump({"hash": rec.get("fusion_settings_hash") or ""}, f)
+
+
 def test_opening_the_current_version_rewrites_nothing(page, tmp_path, slides, monkeypatch):
     from block01.ui.step0.step0_page import Step0Page
     proj, made = _project(tmp_path, slides["a"])
-    _two_versions(made[0])
+    _v1, v2 = _two_versions(made[0])
+    _workspace_as(made[0], v2)
     monkeypatch.setattr(Step0Page, "_choose_workspace",
                         lambda self, rows: next(r for r in rows if r[1] and r[1]["version"] == "v002"))
     monkeypatch.setattr(Step0Page, "_write_step0_handoff",
@@ -765,7 +798,7 @@ def test_a_generate_keeps_step1s_session_in_the_version(app, tmp_path, monkeypat
         alloc, _worker = _pending(w, ws, ["R1"], ["R1"])
         w._dv_commit_pending()
         with open(os.path.join(alloc["path"], "step1_session.json")) as f:
-            assert json.load(f) == {"saved": "at generate"}
+            assert json.load(f)["saved"] == "at generate"
     finally:
         w.close()
 
@@ -827,3 +860,248 @@ def test_an_earlier_workspace_without_every_fused_region_is_not_registered(
             os.listdir(dv.versions_dir(ws)) == []
     finally:
         w.close()
+
+
+# ── codex review (astra, low) 2026-10-03: findings 1-6 ─────────────────────
+
+def test_a_handoff_write_never_touches_a_published_corrected_product(tmp_path):
+    """Finding 1: the writer stamps attributes into the corrected product;
+    a published one is read-only."""
+    import test_v16_artifact_graph as ag_t
+    slide = ag_t._slide(tmp_path)
+    project, ctx = ag_t._workspace(tmp_path, slide)
+    step0 = ctx["step_dirs"]["step0"]
+    os.makedirs(step0, exist_ok=True)
+    z = ag_t._corrected_product(step0)
+    alloc = dv.new_version_folder(ctx["roi_dir"])
+    dv.commit_version(ctx["roi_dir"], alloc, dict(_record(), corrected={"path": z}))
+    before = _tree(z)
+    from block01.core import step0_handoff
+    real = step0_handoff.write_handoff
+
+    def _ro(spec, **kw):
+        return real(dict(spec, corrected_read_only=True), **kw)
+    step0_handoff.write_handoff = _ro
+    try:
+        ag_t._handoff(project, ctx, slide)
+    finally:
+        step0_handoff.write_handoff = real
+    assert _tree(z) == before
+
+
+def test_the_page_marks_a_published_product_read_only_for_the_writer(dv_page, tmp_path,
+                                                                       slides):
+    proj, ctx, published = _published_with_tophat(tmp_path, slides)
+    dv_page._open_existing_workspace()
+    assert dv_page._handoff_spec({}, published)["corrected_read_only"] is True
+    draft = dv.new_corrected_folder(ctx["roi_dir"])
+    assert dv_page._handoff_spec({}, draft)["corrected_read_only"] is False
+
+
+def test_a_new_outline_with_the_same_boxes_goes_into_a_copy(dv_page, tmp_path, slides):
+    proj, ctx, published = _published_with_tophat(tmp_path, slides)
+    dv_page._open_existing_workspace()
+    path = dv_page._dv_draft_for_geometry(published, copy=True)
+    assert path != published and os.path.isfile(os.path.join(path, "marker.bin"))
+    fresh = dv_page._dv_draft_for_geometry(published, copy=False)
+    assert fresh != published and not os.path.exists(fresh)
+    assert dv_page._dv_draft_for_geometry(path, copy=True) == path    # a draft: in place
+
+
+def test_a_channel_switched_back_to_raw_is_another_version(tmp_path):
+    """Finding 2: the old array stays in the product, so its signature does
+    too; the decision is what changed."""
+    a = dict(_record(), channel_decisions={"CD3": "tophat", "CD8": "original"})
+    b = dict(_record(), channel_decisions={"CD3": "original", "CD8": "original"})
+    assert not dv.same_content(a, b)
+    assert dv.same_content(a, dict(a))
+
+
+def test_the_candidate_record_carries_the_correction_decisions(app, tmp_path, monkeypatch):
+    w, ws = _dv_window(app, tmp_path)
+    try:
+        with open(os.path.join(ws, "step0", "correction_config.json"), "w") as f:
+            json.dump({"channel_decisions": {"CD3": "tophat"}}, f)
+        monkeypatch.setattr(w, "_dv_regions", lambda: [])
+        assert w._dv_candidate_record("m")["channel_decisions"] == {"CD3": "tophat"}
+    finally:
+        w.close()
+
+
+def test_the_frozen_session_names_the_versions_own_products(app, tmp_path, monkeypatch):
+    """Finding 4: the session is saved before the new fused path reaches the
+    window; the version's copy names its own products."""
+    from block01.core import provenance as prov
+    w, ws = _dv_window(app, tmp_path)
+    try:
+        step1 = os.path.join(ws, "step1")
+        os.makedirs(step1)
+        w.step0_output = dict(w.step0_output, step1_dir=step1)
+        monkeypatch.setattr(prov, "register_corrected_channels", lambda *a, **k: None)
+
+        def _save():
+            with open(os.path.join(step1, "step1_session.json"), "w") as f:
+                json.dump({"fusion_zarr_path": "/the/previous/fused.zarr"}, f)
+        monkeypatch.setattr(w, "_save_step1_session", _save)
+        alloc, _worker = _pending(w, ws, ["R1"], ["R1"])
+        committed = w._dv_commit_pending()
+        with open(os.path.join(alloc["path"], "step1_session.json")) as f:
+            sess = json.load(f)
+        assert sess["fusion_zarr_path"] == committed["regions"][0]["fused_zarr_path"]
+        assert sess["corrected_zarr_path"] == "/x/corrected.zarr"
+    finally:
+        w.close()
+
+
+class _FinishesAnyway(iso._FakeFusion):
+    """Cancel arrives after the last stop check: the job completes."""
+
+    def run(self):
+        self._release.wait(10)
+        self.finished.emit("/fused/anyway.zarr")
+
+
+def test_a_cancel_before_the_completion_publishes_no_version(app, tmp_path, monkeypatch):
+    """Finding 5."""
+    for name in ("information", "critical", "warning"):
+        monkeypatch.setattr(QtWidgets.QMessageBox, name, lambda *a, **k: None)
+    w, ws = _dv_window(app, tmp_path)
+    dv.commit_version(ws, dv.new_version_folder(ws), _record())         # v1
+    worker = _FinishesAnyway()
+    try:
+        alloc, _jobs = _pending(w, ws, ["R1"], ["R1"])
+        pending = w._dv_pending
+        w._start_fusion_worker(worker, job_name="fusion", n_rows=1, n_cols=1)
+        w._dv_pending = pending
+        w._fusion_dialog.findChild(QtWidgets.QPushButton).click()        # Cancel
+        a6._pump()
+        assert w._fusion_stopping
+        worker.release()
+        worker.wait(5000)
+        a6._pump()
+        assert not os.path.exists(alloc["path"])
+        assert [v["version"] for v in dv.list_versions(ws)] == ["v001"]
+        assert dv.current_version(ws)["version"] == "v001"
+        assert w.config.isEnabled()
+    finally:
+        worker.release()
+        worker.wait(5000)
+        a6._pump()
+        w.close()
+
+
+def test_step4_reads_the_corrected_product_an_earlier_run_recorded(tmp_path):
+    """Finding 6: a run made before data versions read the product that is
+    now v1's; a later version's product must not be used for it."""
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_quant_sources import build_project, _edit_json
+    from block01.core import quant_sources as qs
+    p = build_project(tmp_path)
+    ws = p["ws"]
+    old = p["zarr"]
+    # v1 = the earlier workspace, its product in place; the run recorded it
+    alloc = dv.new_version_folder(ws)
+    shutil.copy2(p["cfg"], os.path.join(alloc["path"], "correction_config.json"))
+    dv.commit_version(ws, alloc, dict(_record(), corrected={"path": old}))
+    _edit_json(os.path.join(p["run_dir"], "segmentation_meta.json"),
+               lambda d: d.setdefault("paths", {}).update(corrected_channels_zarr=old))
+    # v2 made another product, and the handoff now names it
+    newer = os.path.join(ws, "versions", "corrected", "c002", "corrected_channels.zarr")
+    shutil.copytree(old, newer)
+    handoff = os.path.join(ws, "step0", "step0_roi_result.json")
+    _edit_json(handoff, lambda d: d.update(corrected_zarr_path=newer))
+    job = qs.resolve_quant_job(p["run_dir"], open_slide=p["slide"])
+    cd3 = next(c for c in job.channels if c.name == "CD3")
+    assert os.path.abspath(cd3.path) == os.path.abspath(old)
+
+
+# ── user ruling 2026-10-03 (finding 3, option a): the `draft` row ─────────
+
+def _draft_saved(ctx):
+    """Step0 saved after the current version, no Generate."""
+    with open(os.path.join(ctx["step_dirs"]["step0"], "correction_config.json"), "w") as f:
+        json.dump({"method_params": {"tophat_radius": 77, "cucim_sigma": 30},
+                   "channel_decisions": {"CD3": "tophat", "CD8": "original"},
+                   "channel_params": {}}, f)
+
+
+def test_a_dirty_draft_is_its_own_row_first_and_preselected(page, tmp_path, slides,
+                                                             monkeypatch):
+    from block01.utils import workspace_session as wsess
+    from block01.ui.step0.step0_page import DRAFT_TAG
+    proj, made = _project(tmp_path, slides["a"])
+    _v1, v2 = _two_versions(made[0])
+    _workspace_as(made[0], v2)
+    found = wsess.find_workspaces(proj, slides["a"])[1]
+    assert [r[2] for r in page._workspace_rows(found)] == ["v002  (current)", "v001"]
+    _draft_saved(made[0])
+    rows = page._workspace_rows(found)
+    assert [r[2] for r in rows] == [DRAFT_TAG, "v002  (current)", "v001"]
+    monkeypatch.setattr(QtWidgets.QDialog, "exec_", lambda dlg: QtWidgets.QDialog.Accepted)
+    assert page._choose_workspace(rows)[2] == DRAFT_TAG
+
+
+def test_the_draft_row_continues_the_draft(page, tmp_path, slides, monkeypatch):
+    from block01.ui.step0.step0_page import Step0Page, DRAFT_TAG
+    proj, made = _project(tmp_path, slides["a"])
+    _v1, v2 = _two_versions(made[0])
+    _workspace_as(made[0], v2)
+    _draft_saved(made[0])
+    monkeypatch.setattr(Step0Page, "_choose_workspace",
+                        lambda self, rows: next(r for r in rows if r[2] == DRAFT_TAG))
+    monkeypatch.setattr(Step0Page, "_write_step0_handoff",
+                        lambda *a, **k: pytest.fail("the draft is not republished"))
+    page._open_existing_workspace()
+    assert page._tophat_slider.value() == 77
+    sent = []
+    page.step0_complete.connect(sent.append)
+    page._announce_opened_workspace()
+    assert sent[0]["data_version_loaded"] == ""
+    assert dv.current_version(made[0]["roi_dir"])["version"] == "v002"
+
+
+def test_choosing_the_current_version_over_a_draft_loads_the_version(
+        page, tmp_path, slides, monkeypatch):
+    """Reloading a version ends the dirty draft (§3.13)."""
+    from block01.ui.step0.step0_page import Step0Page
+    proj, made = _project(tmp_path, slides["a"])
+    _v1, v2 = _two_versions(made[0])
+    _workspace_as(made[0], v2)
+    _draft_saved(made[0])
+    monkeypatch.setattr(Step0Page, "_choose_workspace",
+                        lambda self, rows: next(r for r in rows if r[1] and r[1]["version"] == "v002"))
+    wrote = []
+    monkeypatch.setattr(Step0Page, "_write_step0_handoff",
+                        lambda self, config, zarr_path, remap_config_path=None: (
+                            wrote.append(zarr_path) or (config, [], [], {})))
+    page._open_existing_workspace()
+    assert page._tophat_slider.value() == 40 and wrote == [v2["corrected"]["path"]]
+    sent = []
+    page.step0_complete.connect(sent.append)
+    page._announce_opened_workspace()
+    assert sent[0]["data_version_loaded"] == "v002"
+
+
+def test_step1_settings_saved_since_the_version_are_a_draft_too(page, tmp_path, slides,
+                                                                 monkeypatch):
+    from block01.utils import workspace_session as wsess
+    from block01.ui.step0.step0_page import Step0Page, DRAFT_TAG
+    proj, made = _project(tmp_path, slides["a"])
+    _v1, v2 = _two_versions(made[0])
+    _workspace_as(made[0], v2)
+    step1 = os.path.join(made[0]["roi_dir"], "step1")
+    os.makedirs(step1, exist_ok=True)
+    with open(os.path.join(step1, "step1_fusion_settings.json"), "w") as f:
+        json.dump({"hash": "saved-after-v002"}, f)
+    found = wsess.find_workspaces(proj, slides["a"])[1]
+    assert page._workspace_rows(found)[0][2] == DRAFT_TAG
+    monkeypatch.setattr(Step0Page, "_choose_workspace",
+                        lambda self, rows: next(r for r in rows if r[1] and r[1]["version"] == "v002"))
+    monkeypatch.setattr(Step0Page, "_write_step0_handoff",
+                        lambda *a, **k: pytest.fail("Step0 is the version's: not republished"))
+    page._open_existing_workspace()
+    sent = []
+    page.step0_complete.connect(sent.append)
+    page._announce_opened_workspace()
+    assert sent[0]["data_version_loaded"] == "v002"            # Step1 comes back

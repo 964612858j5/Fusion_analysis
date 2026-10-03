@@ -350,3 +350,20 @@ Cancel、报错或程序中断时：
 第 5、6 段的针对性回归（20 个调用了被改函数的模块 + DV、A6 工作区、A6 异步三个模块）：全部通过。`test_step0_step1_display_isolation::test_step0_work_does_not_make_step1_load_or_redraw` 在后台批量运行中失败过一次，单独在新、旧代码上各重跑两次都通过，判为偶发（与本段无关的定时器时序）。
 
 下一步：codex（gpt-6-astra，low）代码审核 → 全量回归（新 = DV 最终提交，旧 = `905079f`）→ 真机验收。
+
+### 16.1 codex 审核（gpt-6-astra，low，2026-10-03）与修正
+
+codex 提了 6 条，逐条对照代码核实，6 条都是真问题。原文见 `~/fusionflux/bench_a6/dv_review/codex_low.txt`。
+
+| # | 问题 | 修正 |
+|---|---|---|
+| 1 | Step0 交接写入会把属性写进已发布的 corrected 产品（只改 Intensity 的 Save、加载旧版本时都会写） | 交接写入跳过已发布产品（`corrected_read_only`）；Save 改了区域、只改外形不改外框时，先复制成 draft 再写进 draft；外框也改了时，新建一份空的 draft |
+| 2 | 通道从校正改回原图后，旧数组还留在产品里，版本被误判为「没变化」，复用了旧的 fused | 版本内容比较加上各通道的校正决定（`channel_decisions`，已有字段） |
+| 3 | 有 dirty draft 时选当前版本，打开的是 draft | 用户裁定 (a)：draft 单独一行，行尾标 `draft`，排在最前并默认选中；选任何版本（包括当前版本）都加载那个版本，dirty draft 结束；只改了 Step1 融合设置也算 draft |
+| 4 | 存进版本的 Step1 会话指向上一次的 fused | 提交时把会话副本里的 fused / corrected 路径改成本版本自己的 |
+| 5 | Cancel 点在最后一次停止检查之后，任务跑完仍发布了版本 | 完成时已点过 Cancel：丢弃本次的版本文件夹，当前版本不变 |
+| 6 | Step4 定量旧运行时读当前版本的 corrected | 先按运行记录的 corrected 路径找引用它的版本，找不到时才用当前交接 |
+
+新增测试 12 条（`test_v16_data_versions.py` 共 53 条）。第 1、2、4、5、6 条的 8 条测试在 `8bc8263` 上全部失败；draft 行的 4 条和依赖新 Step0 代码的 3 条，在旧 Step0 代码上失败；新代码上全部通过。测试模块加了自动拦截：没有被回答的模态对话框直接让测试失败，不再卡住。
+
+针对性回归（35 个引用了被改函数的模块）：全部通过；`test_step0_channel_conditioning` 超时，这是新旧代码上都有的已知情况；`test_v16_data_versions` 第一次超时，原因是测试数据造出了 draft 行、弹出了没人回答的选择框，修正测试数据后通过。

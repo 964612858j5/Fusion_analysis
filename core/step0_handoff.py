@@ -160,7 +160,10 @@ def write_handoff(spec, *, superseded=None, tag="0", publication_lock=None):
                 analysis_region_type=analysis_region_type, roi_id=roi_id,
                 roi_dir=roi_dir, out_dir=step0_dir)
 
-        if os.path.exists(corrected_path):
+        # Block DV (§3.14): a product a data version references is read-only;
+        # its attributes already describe it (Save makes a draft first when
+        # the geometry they record would change).
+        if os.path.exists(corrected_path) and not spec.get("corrected_read_only"):
             try:
                 root = zarr.open_group(corrected_path, mode="a")
                 root.attrs["mode"] = "roi_only"

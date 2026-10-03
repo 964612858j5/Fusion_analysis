@@ -8785,6 +8785,18 @@ class MainWindow(QMainWindow):
             d.setLabelText(msg)
 
     def _on_fusion_done(self, zarr_path):
+        if self._dv_pending is not None and self._fusion_stopping:
+            # Block DV (§3.12): Cancel was pressed; the job finished anyway.
+            # Cancelled means no version: the current one stays.
+            print("[Step1] fusion finished after Cancel: no data version made")
+            self._fusion_lbl.setText("Fusion cancelled — no data version was made")
+
+            def _release():
+                self._dv_discard_pending("cancelled")
+                self._close_fusion_dialog()
+                self._unlock_ui()
+            self._after_fusion_thread_exit(_release)
+            return
         if self._dv_pending is not None:
             try:
                 committed = self._dv_commit_pending()
@@ -10045,8 +10057,15 @@ class MainWindow(QMainWindow):
         corrected = str(self._corrected_zarr_path or s0.get("corrected_zarr_path") or "")
         sigs, bboxes = read_corrected_zarr_state(corrected) if corrected else ({}, [])
         snapshot = self._committed_fusion_settings() or {}
+        try:
+            with open(os.path.join(str(s0.get("step0_dir") or ""), "correction_config.json"),
+                      encoding="utf-8") as f:
+                decisions = dict((json.load(f) or {}).get("channel_decisions") or {})
+        except (OSError, ValueError):
+            decisions = {}
         return {
             "slide_id": workspace_session.slide_id_of(raw, sources) or "",
+            "channel_decisions": decisions,
             "raw_ome_path": raw,
             "method": str(method or ""),
             "regions": self._dv_regions(),
@@ -10111,6 +10130,17 @@ class MainWindow(QMainWindow):
         for src, name in copies:
             if src and os.path.isfile(src):
                 shutil.copy2(src, os.path.join(alloc["path"], name))
+        # The session was saved before this Generate's fused path reached the
+        # window: the frozen copy names the version's own products.
+        frozen = os.path.join(alloc["path"], "step1_session.json")
+        if os.path.isfile(frozen):
+            from ..core.provenance import write_json_atomic
+            with open(frozen, encoding="utf-8") as f:
+                sess = json.load(f) or {}
+            sess["fusion_zarr_path"] = regions[0]["fused_zarr_path"]
+            if (record.get("corrected") or {}).get("path"):
+                sess["corrected_zarr_path"] = record["corrected"]["path"]
+            write_json_atomic(frozen, sess)
         committed = data_versions.commit_version(ws, alloc, record)
         self._dv_pending = None         # published: nothing left to discard
         project = os.path.dirname(os.path.dirname(ws))

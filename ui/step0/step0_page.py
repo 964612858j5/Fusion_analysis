@@ -259,6 +259,11 @@ class _FixedWidthStatusLabel(QLabel):
         super().setText(shown)
 
 
+#: Block DV (user ruling 2026-10-03): the row of a workspace's dirty draft
+#: in the "Open a workspace" chooser.
+DRAFT_TAG = "draft"
+
+
 class Step0Page(QWidget):
     step0_complete = pyqtSignal(dict)
     # A dataset switch that has been COMMITTED (not a load attempt, not a path
@@ -10917,7 +10922,13 @@ class Step0Page(QWidget):
             if not versions:
                 rows.append((ws, None, "unknown"))
                 continue
-            cur = (data_versions.current_version(ws.workspace_dir) or {}).get("version")
+            current = data_versions.current_version(ws.workspace_dir)
+            cur = (current or {}).get("version")
+            # User ruling 2026-10-03 (codex finding 3, option a): Step0 or
+            # Step1 saved since the current version, no Generate yet -- the
+            # dirty draft is its own row, `draft`, first and preselected.
+            if current is not None and self._dv_has_draft(ws, current):
+                rows.append((ws, None, DRAFT_TAG))
             for rec in reversed(versions):
                 tag = rec["version"] + ("  (current)" if rec["version"] == cur else "")
                 rows.append((ws, rec, tag))
@@ -10946,7 +10957,10 @@ class Step0Page(QWidget):
             lst.addItem(item)
         lst.addItem("Start a new workspace (open none)")
         current = next((i for i, (_w, rec, tag) in enumerate(rows)
-                        if "(current)" in tag), 0)
+                        if tag == DRAFT_TAG), None)
+        if current is None:
+            current = next((i for i, (_w, rec, tag) in enumerate(rows)
+                            if "(current)" in tag), 0)
         lst.setCurrentRow(current)
         lay.addWidget(lst)
         box = QtWidgets.QDialogButtonBox(
@@ -11033,11 +11047,16 @@ class Step0Page(QWidget):
         # Block DV (§3.6, §3.11): loading a version that is not the current
         # one -- its own parameters, its own frozen region geometry and its
         # own corrected product; Step0's handoff is republished for it below.
-        switch = None
+        # Choosing a version -- the current one too -- while the workspace
+        # holds a dirty draft loads that version: reloading a version ends the
+        # dirty draft (§3.13). The `draft` row continues the draft instead.
+        switch, step1_differs = None, False
         if version is not None:
             cur = data_versions.current_version(ws.workspace_dir)
-            if cur is None or cur.get("version") != version.get("version"):
+            if cur is None or cur.get("version") != version.get("version") \
+                    or self._dv_step0_differs(ws, version, config, zarr_path):
                 switch = version
+            step1_differs = self._dv_step1_differs(ws, version)
         if switch is not None:
             vdir = data_versions.version_dir(ws.workspace_dir, switch.get("folder", ""))
             vcfg = workspace_session._load(os.path.join(vdir, "correction_config.json"))
@@ -11143,10 +11162,49 @@ class Step0Page(QWidget):
             data_versions.set_current(ws.workspace_dir, switch["version"])
             print(f"[Workspace] data version {switch['version']} loaded: Step0's "
                   f"handoff now describes it")
+        loaded = version["version"] if (switch is not None or step1_differs) else ""
         self._workspace_handoff_pending = (config, list(saved_rois), decisions,
                                            dict(manifest, step0_roi_result_path=_manifest_path),
-                                           zarr_path,
-                                           switch["version"] if switch else "")
+                                           zarr_path, loaded)
+
+    @classmethod
+    def _dv_has_draft(cls, ws, version):
+        """Has the workspace been saved (Step0, or Step1's fusion settings)
+        since `version`, without a Generate?"""
+        published = step0_handoff.published_handoff(ws.step0_dir)
+        if published is None:
+            return False
+        _dir, _manifest_path, zarr_path, config, _manifest = published
+        return (cls._dv_step0_differs(ws, version, config, zarr_path)
+                or cls._dv_step1_differs(ws, version))
+
+    @staticmethod
+    def _dv_step0_differs(ws, version, config, zarr_path):
+        """Does the workspace's Step0 say something its version does not --
+        another corrected product, correction config or Intensity file?"""
+        vdir = data_versions.version_dir(ws.workspace_dir, version.get("folder", ""))
+        vpath = (version.get("corrected") or {}).get("path") or ""
+        if vpath and os.path.abspath(vpath) != os.path.abspath(zarr_path or ""):
+            return True
+        vcfg = workspace_session._load(os.path.join(vdir, "correction_config.json"))
+        if isinstance(vcfg, dict) and vcfg != config:
+            return True
+        vremap = os.path.join(vdir, "step0_channel_remap.json")
+        mine = os.path.join(ws.step0_dir, "step0_channel_remap.json")
+        if os.path.isfile(vremap):
+            if not os.path.isfile(mine):
+                return True
+            with open(vremap, "rb") as a, open(mine, "rb") as b:
+                return a.read() != b.read()
+        return False
+
+    @staticmethod
+    def _dv_step1_differs(ws, version):
+        """Are the workspace's committed fusion settings not the version's?"""
+        saved = workspace_session._load(
+            os.path.join(ws.workspace_dir, "step1", "step1_fusion_settings.json"))
+        mine = str((saved or {}).get("hash") or "")
+        return mine != str(version.get("fusion_settings_hash") or "")
 
     @staticmethod
     def _step0_conditioning_config_path_for(ws):
@@ -11257,6 +11315,19 @@ class Step0Page(QWidget):
         if published is not None and published[2] and os.path.isdir(published[2]):
             return published[2]
         return data_versions.new_corrected_folder(ws)
+
+    def _dv_draft_for_geometry(self, base_path, copy):
+        """A Save that changes the region geometry without recomputing any
+        channel: a published product stays as it is; the geometry goes into a
+        draft (a copy of it when `copy`, else a new empty one)."""
+        ws = (self._roi_context or {}).get("roi_dir")
+        if not ws or not data_versions.is_published_product(ws, base_path):
+            return base_path
+        if copy:
+            return self._dv_prepare_draft(base_path, True)[0]
+        draft = data_versions.new_corrected_folder(ws)
+        print(f"[Step0] corrected draft: new at {draft} for the changed region")
+        return draft
 
     def _dv_prepare_draft(self, base_path, incremental):
         """The draft to correct into, and whether to correct incrementally.
@@ -11434,6 +11505,10 @@ class Step0Page(QWidget):
             if not _confirm_actual_save():
                 return
             _write_current_correction_config()
+            if region_rewritten:
+                # Block DV (§3.15): another geometry is never recorded in a
+                # published product -- a new draft records it.
+                zarr_path = self._dv_draft_for_geometry(zarr_path, copy=False)
             if not os.path.exists(zarr_path):
                 self._ensure_empty_corrected_zarr(zarr_path, rois)
             # Reconciles the cache: previously corrected channels revert to raw.
@@ -11478,6 +11553,10 @@ class Step0Page(QWidget):
             if not _confirm_actual_save():
                 return
             _write_current_correction_config()
+            if region_rewritten:
+                # Block DV (§3.15): same boxes, another outline -- the pixels
+                # are reused from a copy that records the new geometry.
+                zarr_path = self._dv_draft_for_geometry(zarr_path, copy=True)
             self._apply_corrected_store(zarr_path, corrected)
             completed = self._emit_complete(config, zarr_path, corrected)
             if completed and intensity_changed and not correction_changed:
@@ -11807,6 +11886,11 @@ class Step0Page(QWidget):
             # Block DV (§3.12): corrected provenance is registered when a
             # version is committed, never for the draft.
             "register_corrected": False,
+            # Block DV (§3.14): a published product's attributes are not
+            # rewritten by any handoff write.
+            "corrected_read_only": bool(
+                ctx.get("roi_dir") and zarr_path and data_versions.is_published_product(
+                    ctx["roi_dir"], zarr_path)),
         }
 
     def _apply_handoff_result(self, result):

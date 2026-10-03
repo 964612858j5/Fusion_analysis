@@ -444,7 +444,16 @@ row, and the duplicate Tissue Preview button in the step bar.
   -- `▶ Load` into a project that already has workspaces of the same slide
   (A3 `slide_id`, not the path) opens one: the only one directly, several
   through an `Open a workspace` chooser (with `Start a new workspace (open
-  none)`). Its region, patches, channel decisions, parameters and Intensity
+  none)`). Block DV: the chooser has one row per workspace AND data version
+  (its newest version first), the version right-aligned at the row's end in
+  Step3's run-list style (`v002  (current)`; `unknown` for a workspace with
+  no versions yet); the current version is preselected, and a single row
+  opens directly. Loading an older version restores ITS region, parameters,
+  Intensity file and corrected product, republishes Step0's handoff for it
+  and makes it current; entering Step1 then restores its fusion settings and
+  session once, by itself. A workspace made before data versions is
+  registered as `v1` the first time it is opened (its products referenced
+  where they are). Its region, patches, channel decisions, parameters and Intensity
   come back, so an unchanged Save says `No changes`. `Save` writes the open
   workspace; the `▾` joined to its right holds one item, `Save as new
   workspace`. A Save whose analysis region differs from the open workspace's
@@ -461,8 +470,9 @@ row, and the duplicate Tissue Preview button in the step bar.
 * **Step4's hand-over line** (block A6) -- a run chosen in Step3 while Step4
   computes is announced in one amber line under the progress and opened when
   the extraction ends.
-* **Step3's run list** (block A6 W4, user ruling 2026-10-02) -- a run without
-  provenance (made before A3) ends its row with `unknown`,
+* **Step3's run list** (block A6 W4, user ruling 2026-10-02; block DV
+  ruling 5a) -- each run ends its row with the data version it was made
+  from (`v002`); a run that records none ends it with `unknown`,
   right-aligned (it may cover the right end of the name); also in the
   tooltip.
 * **Step1's fusion Cancel** (block A6 G1) -- the progress dialog stays, says

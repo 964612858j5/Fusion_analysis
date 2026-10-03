@@ -10907,21 +10907,59 @@ class Step0Page(QWidget):
 
     # ── workspaces: open an existing one (block A6 W1) ────────────────
 
-    def _choose_workspace(self, found):
-        """Several workspaces of this slide (user ruling 2b): the user picks
-        one, or starts a new one. A seam: tests answer directly."""
-        new_label = "Start a new workspace (open none)"
-        labels = [w.label() for w in found] + [new_label]
-        current = next((i for i, w in enumerate(found) if w.active), 0)
-        item, ok = QInputDialog.getItem(
-            self, "Open a workspace",
+    def _workspace_rows(self, found):
+        """Block DV (§3.6): one row per workspace AND data version, newest
+        workspace first; a workspace without versions is one row tagged
+        `unknown`. Each row: (workspace, version record or None, tag)."""
+        rows = []
+        for ws in found:
+            versions = data_versions.list_versions(ws.workspace_dir)
+            if not versions:
+                rows.append((ws, None, "unknown"))
+                continue
+            cur = (data_versions.current_version(ws.workspace_dir) or {}).get("version")
+            for rec in reversed(versions):
+                tag = rec["version"] + ("  (current)" if rec["version"] == cur else "")
+                rows.append((ws, rec, tag))
+        return rows
+
+    def _choose_workspace(self, rows):
+        """Several (workspace, version) rows (user rulings 2b, DV §3.6): the
+        user picks one, or starts a new workspace. Each row's version is
+        right-aligned at its end, in the style of Step3's run list. A seam:
+        tests answer directly. Returns a row or None."""
+        from ..step3_mask_bar import TAG_ROLE, TaggedItemDelegate
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Open a workspace")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(
             "This project already has workspaces of this slide.\n"
-            "Save writes into the one you open; Save ▾ › Save as new "
-            "workspace makes another.",
-            labels, current, False)
-        if not ok or item == new_label:
+            "Save writes into the one you open; Save \u25be \u203a Save as new "
+            "workspace makes another. Each row is a workspace and one of its "
+            "data versions."))
+        lst = QtWidgets.QListWidget()
+        lst.setItemDelegate(TaggedItemDelegate(lst))
+        for ws, rec, tag in rows:
+            item = QtWidgets.QListWidgetItem(ws.label())
+            item.setData(TAG_ROLE, tag)
+            item.setToolTip(f"{ws.label()}  \u2014  {tag}")
+            lst.addItem(item)
+        lst.addItem("Start a new workspace (open none)")
+        current = next((i for i, (_w, rec, tag) in enumerate(rows)
+                        if "(current)" in tag), 0)
+        lst.setCurrentRow(current)
+        lay.addWidget(lst)
+        box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        box.accepted.connect(dlg.accept)
+        box.rejected.connect(dlg.reject)
+        lst.itemDoubleClicked.connect(lambda _i: dlg.accept())
+        lay.addWidget(box)
+        dlg.resize(720, 360)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return None
-        return found[labels.index(item)]
+        row = lst.currentRow()
+        return rows[row] if 0 <= row < len(rows) else None
 
     def _open_existing_workspace(self):
         """Find this slide's workspaces in the output directory's project
@@ -10936,12 +10974,15 @@ class Step0Page(QWidget):
             return None
         if not found:
             return None
-        ws = found[0] if len(found) == 1 else self._choose_workspace(found)
-        if ws is None:
+        rows = self._workspace_rows(found)
+        chosen = rows[0] if len(rows) == 1 else self._choose_workspace(rows)
+        if chosen is None:
             print("[Workspace] no workspace opened; the first Save makes a new one")
             return None
+        # (a test may answer with the workspace alone: its current version)
+        ws, version = (chosen[0], chosen[1]) if isinstance(chosen, tuple) else (chosen, None)
         try:
-            self._restore_workspace(ws)
+            self._restore_workspace(ws, version)
         except Exception as exc:                      # noqa: BLE001
             # A workspace that cannot be read back is not half-opened.
             print(f"[Workspace] {ws.workspace_id} could not be opened "
@@ -10963,14 +11004,18 @@ class Step0Page(QWidget):
             getattr(self, "_workspace_handoff_pending", None), None)
         if pending is None:
             return False
-        config, rois, decisions, manifest, zarr_path = pending
-        self.step0_complete.emit(
-            self._handoff_payload(config, rois, decisions, manifest, zarr_path))
+        config, rois, decisions, manifest, zarr_path, loaded = pending
+        payload = self._handoff_payload(config, rois, decisions, manifest, zarr_path)
+        # Block DV: the window restores Step1 automatically (§3.9), with the
+        # loaded version's Step1 files when a version was switched to.
+        payload["opened_workspace"] = True
+        payload["data_version_loaded"] = loaded
+        self.step0_complete.emit(payload)
         print(f"[Workspace] announced the committed handoff of "
               f"{manifest.get('roi_id', '')} (nothing rewritten)")
         return True
 
-    def _restore_workspace(self, ws):
+    def _restore_workspace(self, ws, version=None):
         # Block DV (§3.12): a Generate that was cancelled, failed or killed
         # left a version folder that is not a version: it goes now.
         removed = data_versions.cleanup_incomplete(ws.workspace_dir)
@@ -10985,6 +11030,37 @@ class Step0Page(QWidget):
         saved_patches = workspace_session._load(patch_path) or []
         full = (manifest.get("analysis_region_type") == "full_wsi"
                 or ws.region_type == "full_wsi")
+        # Block DV (§3.6, §3.11): loading a version that is not the current
+        # one -- its own parameters, its own frozen region geometry and its
+        # own corrected product; Step0's handoff is republished for it below.
+        switch = None
+        if version is not None:
+            cur = data_versions.current_version(ws.workspace_dir)
+            if cur is None or cur.get("version") != version.get("version"):
+                switch = version
+        if switch is not None:
+            vdir = data_versions.version_dir(ws.workspace_dir, switch.get("folder", ""))
+            vcfg = workspace_session._load(os.path.join(vdir, "correction_config.json"))
+            if isinstance(vcfg, dict):
+                config = vcfg
+            zarr_path = (switch.get("corrected") or {}).get("path") or zarr_path
+            vremap = os.path.join(vdir, "step0_channel_remap.json")
+            if os.path.isfile(vremap):
+                shutil.copy2(vremap, self._step0_conditioning_config_path_for(ws))
+            regions = switch.get("regions") or []
+            h, w = (int(v) for v in self.loader.shape[:2])
+            full = (len(regions) == 1 and not regions[0].get("polygon_fullres")
+                    and [int(v) for v in regions[0].get("bbox_fullres") or []] == [0, h, 0, w])
+            def _outline(r):
+                # a region frozen as a box only is drawn as that box
+                if r.get("polygon_fullres"):
+                    return r["polygon_fullres"]
+                y0, y1, x0, x1 = (int(v) for v in r.get("bbox_fullres") or [0, 0, 0, 0])
+                return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+            saved_rois = [{"name": r.get("roi_name"), "roi_id": r.get("roi_id"),
+                           "bbox_fullres": r.get("bbox_fullres"),
+                           "polygon_fullres": _outline(r),
+                           "type": "roi"} for r in regions]
 
         # The region and the patches, on every overview and in the model --
         # never through the edit path, which would write them back.
@@ -11057,9 +11133,24 @@ class Step0Page(QWidget):
         # committed handoff, unchanged, so Step1 can be entered without a
         # Save that would change nothing.
         decisions = dict(manifest.get("corrected_decisions") or corrected)
+        if switch is not None:
+            # Step0's handoff now describes the loaded version; it becomes
+            # the current one (§3.6). Nothing of any version is written.
+            _cfg, rois_out, _patches, manifest = self._write_step0_handoff(
+                config, zarr_path)
+            _manifest_path = manifest.get("step0_roi_result_path") or _manifest_path
+            saved_rois = rois_out
+            data_versions.set_current(ws.workspace_dir, switch["version"])
+            print(f"[Workspace] data version {switch['version']} loaded: Step0's "
+                  f"handoff now describes it")
         self._workspace_handoff_pending = (config, list(saved_rois), decisions,
                                            dict(manifest, step0_roi_result_path=_manifest_path),
-                                           zarr_path)
+                                           zarr_path,
+                                           switch["version"] if switch else "")
+
+    @staticmethod
+    def _step0_conditioning_config_path_for(ws):
+        return os.path.join(ws.step0_dir, "step0_channel_remap.json")
 
     _INTENSITY_KEYS = ("enabled", "min", "max", "brightness", "contrast",
                        "gamma", "opacity", "weight", "auto")

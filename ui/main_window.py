@@ -1980,6 +1980,14 @@ class MainWindow(QMainWindow):
         return label
 
     @staticmethod
+    def _step3_run_tag(run):
+        """Block DV §3.7 (ruling 5a): the data version a run was made from,
+        right-aligned at its row's end; a run that records none is
+        `unknown`."""
+        version = (getattr(run, "meta", None) or {}).get("data_version")
+        return str(version) if version else PROVENANCE_UNKNOWN
+
+    @staticmethod
     def _step3_runs_with_provenance(runs):
         """Block A6 W4 (user ruling 2026-10-02): the run folders that have a
         `segmentation_run` provenance entry (A3). A run without one is shown
@@ -2046,9 +2054,8 @@ class MainWindow(QMainWindow):
         self._step3_mask_runs = runs
         self._step3_mask_key = entry.key if entry is not None else None
         several = {r.run_dir: len(step3_masks.run_regions(r)) > 1 for r in runs}
-        recorded = self._step3_runs_with_provenance(runs)
         bar.set_runs([(self._step3_run_label(e, current_ws, several[e.run.run_dir]), e.key,
-                       "" if e.run.run_dir in recorded else PROVENANCE_UNKNOWN)
+                       self._step3_run_tag(e.run))
                       for e in items], entry.key if entry is not None else None)
         mount = self.__dict__.get("_step3_mount")
         stack = getattr(getattr(mount, "host", None), "stack", None) if mount else None
@@ -2991,6 +2998,14 @@ class MainWindow(QMainWindow):
 
         self.step1_done = False
         self._step2._out_edit.setText(self.step0_output.get("step2_dir") or OUTPUT_DIR)
+        # Block DV (§3.6, §3.9): a loaded data version brings its own Step1
+        # files back; an opened workspace restores Step1 on entry, once.
+        if accepted is True and self.step0_output.get("opened_workspace"):
+            self._dv_register_legacy()
+        if accepted is True and self.step0_output.get("data_version_loaded"):
+            self._dv_install_step1_files(self.step0_output["data_version_loaded"])
+        self._dv_auto_step1 = bool(accepted is True
+                                   and self.step0_output.get("opened_workspace"))
         # SAVE-ONLY: stay in Step0; the user enters Step1 explicitly.
         self._update_next_button()
         self._log_step1_layout("Step0 complete (save-only, no auto-jump)")
@@ -4806,6 +4821,11 @@ class MainWindow(QMainWindow):
                 self._stack.setCurrentIndex(1)
             self._set_step_active(1)
         self._log_step1_layout("enter Step1")
+        # Block DV Q8 (§3.9): an opened workspace's Step1 comes back by
+        # itself, once -- no "Load Previous Step1 Session" click.
+        if self.__dict__.get("_dv_auto_step1"):
+            self._dv_auto_step1 = False
+            self._load_previous_step1_session(auto=True)
 
     def _go_to_step1_5(self):
         """Open Step 1.5 (Background Correction + Channel Conditioning / Remap).
@@ -10079,9 +10099,15 @@ class MainWindow(QMainWindow):
         record["regions"] = regions
         s0 = self.step0_output or {}
         step0_dir = str(s0.get("step0_dir") or "")
+        # Step1's session too, so loading this version back restores its
+        # Step1 as it was (§3.9).
+        self._save_step1_session()
+        settings_path = self._fusion_settings_path()
         copies = [(os.path.join(step0_dir, "correction_config.json"), "correction_config.json"),
                   (str(s0.get("channel_remap_config_path") or ""), "step0_channel_remap.json"),
-                  (self._fusion_settings_path(), "step1_fusion_settings.json")]
+                  (settings_path, "step1_fusion_settings.json"),
+                  (os.path.join(os.path.dirname(settings_path), "step1_session.json"),
+                   "step1_session.json")]
         for src, name in copies:
             if src and os.path.isfile(src):
                 shutil.copy2(src, os.path.join(alloc["path"], name))
@@ -10096,6 +10122,108 @@ class MainWindow(QMainWindow):
         print(f"[Step1] data version {committed['version']} published "
               f"({len(regions)} region(s))")
         return committed
+
+    def _dv_register_legacy(self):
+        """Block DV §3.8 (ruling 6b): a workspace made before data versions,
+        opened for the first time, has its present state registered as v1 --
+        its products referenced where they are, read-only from now on. Its
+        segmentations are not attached to any version (they stay `unknown`).
+        Nothing is registered without a fused product for every region."""
+        from ..utils import data_versions
+        ws = self._dv_workspace()
+        if not ws or data_versions.load_index(ws)["versions"] or \
+                data_versions.list_versions(ws):
+            return None
+        step1_dir = str((self.step0_output or {}).get("step1_dir") or "")
+        if not step1_dir:
+            return None
+        meta_paths = {}
+        try:
+            with open(os.path.join(step1_dir, "fusion_meta.json"), encoding="utf-8") as f:
+                for reg in (json.load(f) or {}).get("regions") or []:
+                    meta_paths[str(reg.get("roi_name"))] = str(reg.get("zarr_path") or "")
+        except (OSError, ValueError):
+            return None
+        record = self._dv_candidate_record("")
+        regions = []
+        for reg in record["regions"]:
+            here = os.path.join(step1_dir, f"fused_{reg['roi_name']}.zarr")
+            path = here if os.path.isdir(here) else meta_paths.get(reg["roi_name"], "")
+            if not path or not os.path.isdir(path):
+                print(f"[Step1] earlier workspace not registered as v1: region "
+                      f"{reg['roi_name']!r} has no fused product")
+                return None
+            regions.append(dict(reg, fused_zarr_path=os.path.abspath(path)))
+        record["regions"] = regions
+        settings_path = self._fusion_settings_path()
+        try:
+            with open(settings_path, encoding="utf-8") as f:
+                record["fusion_settings_hash"] = str((json.load(f) or {}).get("hash") or "")
+        except (OSError, ValueError):
+            record["fusion_settings_hash"] = ""
+        record["label"] = data_versions.LEGACY_LABEL
+        record["legacy"] = True
+        alloc = data_versions.new_version_folder(ws)
+        try:
+            s0 = self.step0_output or {}
+            step0_dir = str(s0.get("step0_dir") or "")
+            for src, name in (
+                    (os.path.join(step0_dir, "correction_config.json"), "correction_config.json"),
+                    (str(s0.get("channel_remap_config_path") or ""), "step0_channel_remap.json"),
+                    (settings_path, "step1_fusion_settings.json"),
+                    (os.path.join(step1_dir, "step1_session.json"), "step1_session.json")):
+                if src and os.path.isfile(src):
+                    shutil.copy2(src, os.path.join(alloc["path"], name))
+            committed = data_versions.commit_version(ws, alloc, record)
+        except Exception as exc:                            # noqa: BLE001
+            shutil.rmtree(alloc["path"], ignore_errors=True)
+            print(f"[Step1] earlier workspace not registered as v1: {exc}")
+            return None
+        print(f"[Step1] earlier workspace registered as data version "
+              f"{committed['version']} (its products are referenced in place)")
+        return committed
+
+    def _dv_install_step1_files(self, version_id):
+        """A version was loaded in Step0 (§3.6): its Step1 session and fusion
+        settings become the workspace's Step1 files. They were saved against
+        the handoff Step0 has just republished for this same version, so they
+        are bound to it again; their contents are not changed."""
+        from ..utils import data_versions
+        s0 = self.step0_output or {}
+        step1_dir = str(s0.get("step1_dir") or "")
+        ws = os.path.dirname(os.path.abspath(step1_dir)) if step1_dir else ""
+        rec = data_versions.get_version(ws, version_id) if ws else None
+        if rec is None:
+            print(f"[Step1] data version {version_id!r} not found; Step1 files kept")
+            return False
+        vdir = data_versions.version_dir(ws, rec.get("folder", ""))
+        identity = self._handoff_identity()
+        manifest = str(s0.get("step0_manifest_path") or "")
+        try:
+            with open(manifest, "r", encoding="utf-8") as f:
+                source_identity = (json.load(f) or {}).get("source_identity")
+        except (OSError, ValueError):
+            source_identity = s0.get("source_identity")
+        from ..core.provenance import write_json_atomic
+        installed = []
+        settings = os.path.join(vdir, "step1_fusion_settings.json")
+        if identity is not None and os.path.isfile(settings):
+            with open(settings, "r", encoding="utf-8") as f:
+                snap = json.load(f) or {}
+            snap["handoff_identity"] = identity
+            write_json_atomic(self._fusion_settings_path(), snap)
+            installed.append("fusion settings")
+        session = os.path.join(vdir, "step1_session.json")
+        if os.path.isfile(session):
+            with open(session, "r", encoding="utf-8") as f:
+                sess = json.load(f) or {}
+            sess["step0_manifest_path"] = os.path.abspath(manifest) if manifest else ""
+            sess["source_identity"] = source_identity
+            write_json_atomic(os.path.join(step1_dir, "step1_session.json"), sess)
+            installed.append("session")
+        print(f"[Step1] data version {version_id}: Step1 "
+              f"{' and '.join(installed) or 'files'} installed")
+        return True
 
     def _dv_discard_pending(self, reason):
         """Cancel / error / not started: no version, the folder goes (§3.12)."""

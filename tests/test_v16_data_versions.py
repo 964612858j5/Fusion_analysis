@@ -580,3 +580,250 @@ def test_skip_empty_tiles_finds_the_workspace_of_a_versioned_fused_product(tmp_p
     v.mkdir(parents=True)
     (ws / "roi_manifest.json").write_text("{}")
     assert tile_tissue._workspace_of(str(v / "fused_R1.zarr")) == str(ws)
+
+
+# ── part 5: loading a workspace + version (§3.6, §3.7, §3.9) ───────────────
+
+def _two_versions(ws_ctx):
+    """v001 (a ROI, TopHat r=10, its own corrected product) and v002 (current)."""
+    ws = ws_ctx["roi_dir"]
+    made = []
+    for n, (bbox, radius) in enumerate((([0, 10, 0, 20], 10), ([0, 30, 0, 40], 40)), 1):
+        alloc = dv.new_version_folder(ws)
+        corrected = os.path.join(ws, "versions", "corrected", f"c00{n}", "corrected_channels.zarr")
+        os.makedirs(corrected)
+        with open(os.path.join(alloc["path"], "correction_config.json"), "w") as f:
+            json.dump({"method_params": {"tophat_radius": radius, "cucim_sigma": 30},
+                       "channel_decisions": {"CD3": "tophat", "CD8": "original"},
+                       "channel_params": {}}, f)
+        with open(os.path.join(alloc["path"], "step0_channel_remap.json"), "w") as f:
+            json.dump({"version_marker": n}, f)
+        rec = dict(_record(bbox=bbox), corrected={"path": corrected},
+                   regions=[{"roi_name": f"ROI {n}", "roi_id": f"r{n}", "bbox_fullres": bbox,
+                             "polygon_fullres": None, "fused_zarr_path": "/x"}])
+        made.append(dv.commit_version(ws, alloc, rec))
+    return made
+
+
+def test_the_chooser_lists_one_row_per_workspace_and_version(page, tmp_path, slides,
+                                                              monkeypatch):
+    from block01.utils import workspace_session as wsess
+    from block01.ui.step3_mask_bar import TAG_ROLE, TaggedItemDelegate
+    proj, made = _project(tmp_path, slides["a"], n=2)
+    _two_versions(made[0])
+    found = wsess.find_workspaces(proj, slides["a"])[1]
+    rows = page._workspace_rows(found)
+    tags = {(r[0].workspace_id, r[2]) for r in rows}
+    assert (made[0]["roi_id"], "v002  (current)") in tags
+    assert (made[0]["roi_id"], "v001") in tags
+    assert (made[1]["roi_id"], "unknown") in tags and len(rows) == 3
+    # newest version of a workspace first
+    own = [r[2] for r in rows if r[0].workspace_id == made[0]["roi_id"]]
+    assert own == ["v002  (current)", "v001"]
+    # the dialog: Step3's delegate, tags right-aligned, the current row chosen
+    shown = {}
+
+    def _exec(dlg):
+        lst = dlg.findChild(QtWidgets.QListWidget)
+        shown["delegate"] = type(lst.itemDelegate())
+        shown["tags"] = [lst.item(i).data(TAG_ROLE) for i in range(lst.count())]
+        return QtWidgets.QDialog.Accepted
+    monkeypatch.setattr(QtWidgets.QDialog, "exec_", _exec)
+    chosen = page._choose_workspace(rows)
+    assert shown["delegate"] is TaggedItemDelegate
+    assert shown["tags"][:3] == [r[2] for r in rows] and shown["tags"][3] is None
+    assert chosen[2] == "v002  (current)"
+
+
+def test_loading_an_older_version_restores_it_and_republishes_the_handoff(
+        page, tmp_path, slides, monkeypatch):
+    from block01.ui.step0.step0_page import Step0Page
+    proj, made = _project(tmp_path, slides["a"])
+    v1, v2 = _two_versions(made[0])
+    ws = made[0]["roi_dir"]
+    monkeypatch.setattr(Step0Page, "_choose_workspace",
+                        lambda self, rows: next(r for r in rows if r[1] and r[1]["version"] == "v001"))
+    wrote = []
+
+    def _write(self, config, zarr_path, remap_config_path=None):
+        wrote.append((dict(config), zarr_path, list(self._standard_rois())))
+        return config, wrote[-1][2], [], {"roi_id": made[0]["roi_id"]}
+    monkeypatch.setattr(Step0Page, "_write_step0_handoff", _write)
+    page._open_existing_workspace()
+    # the version's own parameters, geometry and corrected product
+    assert page._tophat_slider.value() == 10
+    assert len(wrote) == 1 and wrote[0][1] == v1["corrected"]["path"]
+    assert [r.get("bbox_fullres") for r in wrote[0][2]] == [[0, 10, 0, 20]]
+    with open(os.path.join(made[0]["step_dirs"]["step0"], "step0_channel_remap.json")) as f:
+        assert json.load(f) == {"version_marker": 1}
+    assert dv.current_version(ws)["version"] == "v001"
+    sent = []
+    page.step0_complete.connect(sent.append)
+    assert page._announce_opened_workspace() is True
+    assert sent[0]["data_version_loaded"] == "v001" and sent[0]["opened_workspace"] is True
+    # nothing of any version was written
+    assert [v["version"] for v in dv.list_versions(ws)] == ["v001", "v002"]
+
+
+def test_opening_the_current_version_rewrites_nothing(page, tmp_path, slides, monkeypatch):
+    from block01.ui.step0.step0_page import Step0Page
+    proj, made = _project(tmp_path, slides["a"])
+    _two_versions(made[0])
+    monkeypatch.setattr(Step0Page, "_choose_workspace",
+                        lambda self, rows: next(r for r in rows if r[1] and r[1]["version"] == "v002"))
+    monkeypatch.setattr(Step0Page, "_write_step0_handoff",
+                        lambda *a, **k: pytest.fail("the current version is not republished"))
+    before = _tree(made[0]["roi_dir"])
+    page._open_existing_workspace()
+    assert _tree(made[0]["roi_dir"]) == before
+    sent = []
+    page.step0_complete.connect(sent.append)
+    page._announce_opened_workspace()
+    assert sent[0]["data_version_loaded"] == "" and sent[0]["opened_workspace"] is True
+
+
+def test_a_loaded_versions_step1_files_are_installed_and_bound_again(app, tmp_path, monkeypatch):
+    w, ws = _dv_window(app, tmp_path)
+    try:
+        step1 = os.path.join(ws, "step1")
+        os.makedirs(step1)
+        manifest = os.path.join(ws, "step0", "step0_roi_result.json")
+        with open(manifest, "w") as f:
+            json.dump({"source_identity": {"dataset_path": "/now"}}, f)
+        w.step0_output = dict(w.step0_output, step1_dir=step1, step0_manifest_path=manifest)
+        alloc = dv.new_version_folder(ws)
+        with open(os.path.join(alloc["path"], "step1_fusion_settings.json"), "w") as f:
+            json.dump({"hash": "h1", "fusion_config": {"a": 1},
+                       "handoff_identity": {"manifest_digest": "old"}}, f)
+        with open(os.path.join(alloc["path"], "step1_session.json"), "w") as f:
+            json.dump({"weights": {"CD3": 2}, "step0_manifest_path": "/old",
+                       "source_identity": {"dataset_path": "/old"}}, f)
+        dv.commit_version(ws, alloc, _record())
+        monkeypatch.setattr(w, "_handoff_identity", lambda: {"manifest_digest": "new"})
+        assert w._dv_install_step1_files("v001") is True
+        with open(os.path.join(step1, "step1_fusion_settings.json")) as f:
+            snap = json.load(f)
+        assert snap["handoff_identity"] == {"manifest_digest": "new"}
+        assert snap["hash"] == "h1" and snap["fusion_config"] == {"a": 1}
+        with open(os.path.join(step1, "step1_session.json")) as f:
+            sess = json.load(f)
+        assert sess["step0_manifest_path"] == manifest and sess["weights"] == {"CD3": 2}
+        assert sess["source_identity"] == {"dataset_path": "/now"}
+        # the version's own copies are untouched
+        with open(os.path.join(alloc["path"], "step1_session.json")) as f:
+            assert json.load(f)["step0_manifest_path"] == "/old"
+    finally:
+        w.close()
+
+
+def test_an_opened_workspace_restores_step1_by_itself_once(app, tmp_path, monkeypatch):
+    w, ws = _dv_window(app, tmp_path)
+    try:
+        calls = []
+        monkeypatch.setattr(w, "_load_step0_roi_result", lambda *a, **k: True)
+        monkeypatch.setattr(w, "_dv_register_legacy", lambda: calls.append("legacy"))
+        monkeypatch.setattr(w, "_dv_install_step1_files", lambda v: calls.append(("install", v)))
+        monkeypatch.setattr(w, "_load_previous_step1_session",
+                            lambda *a, **k: calls.append(("restore", k.get("auto"))))
+        w._on_step0_complete(dict(w.step0_output, opened_workspace=True,
+                                  data_version_loaded="v002"))
+        assert calls == ["legacy", ("install", "v002")]
+        w._go_to_step1()
+        w._go_to_step1()
+        assert calls[2:] == [("restore", True)]                       # once
+        # a plain Save does not restore Step1 by itself
+        calls.clear()
+        w._on_step0_complete(dict(w.step0_output, opened_workspace=False,
+                                  data_version_loaded=""))
+        w._go_to_step1()
+        assert calls == []
+    finally:
+        w.close()
+
+
+def test_step3_rows_show_their_runs_data_version():
+    from types import SimpleNamespace
+    from block01.ui.main_window import MainWindow
+    assert MainWindow._step3_run_tag(SimpleNamespace(meta={"data_version": "v002"})) == "v002"
+    assert MainWindow._step3_run_tag(SimpleNamespace(meta={"data_version": None})) == "unknown"
+    assert MainWindow._step3_run_tag(SimpleNamespace(meta={})) == "unknown"
+
+
+def test_a_generate_keeps_step1s_session_in_the_version(app, tmp_path, monkeypatch):
+    from block01.core import provenance as prov
+    w, ws = _dv_window(app, tmp_path)
+    try:
+        step1 = os.path.join(ws, "step1")
+        os.makedirs(step1)
+        w.step0_output = dict(w.step0_output, step1_dir=step1)
+        monkeypatch.setattr(prov, "register_corrected_channels", lambda *a, **k: None)
+
+        def _save():
+            with open(os.path.join(step1, "step1_session.json"), "w") as f:
+                json.dump({"saved": "at generate"}, f)
+        monkeypatch.setattr(w, "_save_step1_session", _save)
+        alloc, _worker = _pending(w, ws, ["R1"], ["R1"])
+        w._dv_commit_pending()
+        with open(os.path.join(alloc["path"], "step1_session.json")) as f:
+            assert json.load(f) == {"saved": "at generate"}
+    finally:
+        w.close()
+
+
+# ── part 6: an earlier workspace becomes v1 (§3.8) ─────────────────────────
+
+def _legacy(w, ws, fused_regions):
+    step1 = os.path.join(ws, "step1")
+    os.makedirs(step1)
+    w.step0_output = dict(w.step0_output, step1_dir=step1)
+    for name in fused_regions:
+        os.makedirs(os.path.join(step1, f"fused_{name}.zarr"))
+    with open(os.path.join(step1, "fusion_meta.json"), "w") as f:
+        json.dump({"regions": [{"roi_name": n, "zarr_path": "/moved/elsewhere"}
+                               for n in fused_regions]}, f)
+    with open(os.path.join(step1, "step1_fusion_settings.json"), "w") as f:
+        json.dump({"hash": "h_legacy"}, f)
+    corrected = os.path.join(ws, "step0", "corrected_channels.zarr")
+    os.makedirs(corrected)
+    return step1, corrected
+
+
+def test_an_earlier_workspace_is_registered_as_v1_in_place(app, tmp_path, monkeypatch):
+    w, ws = _dv_window(app, tmp_path)
+    try:
+        step1, corrected = _legacy(w, ws, ["R1"])
+        rec = dict(_record(), corrected={"path": corrected},
+                   regions=[{"roi_name": "R1", "roi_id": "r1", "bbox_fullres": [0, 5, 0, 5],
+                             "polygon_fullres": None}])
+        monkeypatch.setattr(w, "_dv_candidate_record", lambda method: dict(rec))
+        before = _tree(step1)
+        v1 = w._dv_register_legacy()
+        assert v1["version"] == "v001" and v1["label"] == dv.LEGACY_LABEL
+        assert dv.current_version(ws)["version"] == "v001"
+        assert v1["regions"][0]["fused_zarr_path"] == os.path.join(step1, "fused_R1.zarr")
+        assert v1["fusion_settings_hash"] == "h_legacy"
+        # referenced where they are: read-only from now on, nothing moved
+        assert dv.is_published_product(ws, corrected)
+        assert dv.is_published_product(ws, os.path.join(step1, "fused_R1.zarr"))
+        assert _tree(step1) == before
+        assert w._dv_register_legacy() is None                         # once
+        assert len(dv.list_versions(ws)) == 1
+    finally:
+        w.close()
+
+
+def test_an_earlier_workspace_without_every_fused_region_is_not_registered(
+        app, tmp_path, monkeypatch):
+    w, ws = _dv_window(app, tmp_path)
+    try:
+        _step1, corrected = _legacy(w, ws, ["R1"])
+        rec = dict(_record(), regions=[
+            {"roi_name": n, "roi_id": n, "bbox_fullres": [0, 5, 0, 5], "polygon_fullres": None}
+            for n in ("R1", "R2")])
+        monkeypatch.setattr(w, "_dv_candidate_record", lambda method: dict(rec))
+        assert w._dv_register_legacy() is None
+        assert dv.list_versions(ws) == []
+        assert not os.path.isdir(dv.versions_dir(ws)) or \
+            os.listdir(dv.versions_dir(ws)) == []
+    finally:
+        w.close()

@@ -264,9 +264,11 @@ def test_several_workspaces_ask_which_one(page, tmp_path, slides, monkeypatch):
     proj, made = _project(tmp_path, slides["a"], n=3)
     offered = []
 
-    def _choose(self, found):
-        offered.append([w.workspace_id for w in found])
-        return found[-1]                               # the oldest
+    def _choose(self, rows):
+        # Block DV: rows are (workspace, version, tag); none has versions here
+        offered.append([r[0].workspace_id for r in rows])
+        assert all(r[1] is None and r[2] == "unknown" for r in rows)
+        return rows[-1]                                # the oldest
     monkeypatch.setattr(Step0Page, "_choose_workspace", _choose)
     opened = page._open_existing_workspace()
     assert len(offered) == 1 and len(offered[0]) == 3

@@ -132,6 +132,12 @@ Read in the raw big image, **circle the region you actually care about (ROI)**, 
 - **Save ▾ › Save as new workspace** always starts a new workspace; the old one is left as it is and the next steps use the new one.
 - If you redrew the analysis region, Save asks first: *Save as new workspace* (recommended) or *Overwrite this workspace*.
 
+**Data versions:** every successful Step 1 **Generate** keeps the Step 0 + Step 1 parameters of that moment and the corrected / fused products they made as a **data version** (`v001`, `v002`, … under `<workspace>/versions/`). A version is never rewritten afterwards; Generate with nothing changed goes back to the existing version.
+- The chooser at Load has one row per workspace and version, the version right-aligned at the end (`(current)` marks the current one; a workspace without versions shows `unknown`). Pick an older version and Step 0 comes back with its region, parameters and corrected product; entering Step 1 restores its fusion settings by itself, without *Load Previous Step1 Session*.
+- With parameters changed but not yet generated, Step 2 cannot start a new run; the line under Progress says why.
+- In Step 3's run list each run ends with the data version it used; older runs without one show `unknown`.
+- A workspace made before data versions is registered as `v1` the first time it is opened (its files stay where they are).
+
 <!-- image placeholder: images/03_step0_overview_and_roi.png — the overview in Step 0 with an ROI box already drawn -->
 <!-- image placeholder: images/04_step0_channel_groups.png — the Channels / Nucleus Channel grouping and weights panel -->
 <!-- image placeholder: images/05_step0_bg_correction_compare.png — the Original | TopHat | cucim three-way comparison preview -->

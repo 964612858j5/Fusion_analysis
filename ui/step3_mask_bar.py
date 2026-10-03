@@ -302,3 +302,7 @@ class Step3MaskBar(QtCore.QObject):
         run_dir = self.run_combo.itemData(index) or ""
         if run_dir:
             self.run_chosen.emit(run_dir)
+
+
+# Block DV: the same row style for Step0's "Open a workspace" list.
+TaggedItemDelegate = _TaggedItemDelegate

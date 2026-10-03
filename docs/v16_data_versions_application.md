@@ -329,3 +329,24 @@ Cancel、报错或程序中断时：
   - `viewer/step1_source.py`：coarse sidecar 本来就和 corrected 产品放在同一个文件夹，二者一起搬进版本文件夹后，读写两端自动一致，用测试确认；
   - `utils/segmentation_registry.py` 的 `register_legacy_result`：遗留代码，写死了路径，实际几乎不会命中。
 - 白名单内的高风险点：`step0_page._handoff_spec` 用 corrected 产品路径反推「step0 文件夹」。改为从工作区上下文取，否则参数文件和交接会被写进版本文件夹。
+
+## 16. 执行记录（2026-10-03）
+
+分 6 段实施，每段都做了反向注入（新测试放进上一段的代码树里确认变红，在新代码上变绿）和只跑相关模块的针对性回归。
+
+| 段 | 提交 | 内容 |
+|---|---|---|
+| 1 | `44ef5ef` | `utils/data_versions.py`：版本只有「`version.json` 写了 `complete: true` 且在 `index.json` 里」才存在；编号 = 计数 + 时间戳（无哈希）；按已有字段（含 ROI 几何）比较两个版本是否相同；整份 corrected 共用规则；清理未完成的文件夹；已发布产品只读的识别 |
+| 2 | `be76f12`、`498cb14` | Step0 Save 的写时复制（§3.15）：draft 是 `versions/corrected/cNNN_<时间>/` 里自己的一份 corrected，版本原地引用它，不移动、不重发交接；交接和参数文件留在工作区的 `step0/`；draft 不登记 A3 |
+| 3 | `b1f2b1a` | Generate 是一个事务（§3.12）：fused 写进新版本自己的文件夹，所有区域都成功后才写 `version.json`（`complete` 最后）、最后更新 index 和当前版本，然后才登记 A3；取消、报错、某区域缺产品都不产生版本；什么都没改就回到原版本；打开时清理未完成的文件夹 |
+| 4 | `c3caca8` | Step2 只在当前版本上运行，每个区域的 fused 取自 `regions[]`，`segmentation_meta.json` 记 `data_version`；dirty draft 时拒绝新运行并说明原因；Step4 定量一次运行时读这次运行自己版本的 corrected 和配置；「跳过空 tile」向上查找 `roi_manifest.json` |
+| 5 | （本段） | Load 的选择框改为「工作区 + 版本」逐行列出，版本号右对齐在行尾，和 Step3 用同一个 delegate（`step3_mask_bar.TaggedItemDelegate`），当前版本预选，只有一行时直接打开；加载非当前版本：按该版本的 `regions[]`（只有 bbox 的区域按矩形画）、`correction_config.json`、`step0_channel_remap.json` 和 corrected 恢复 Step0，重发 Step0 交接并设为当前版本；主窗口把该版本的 `step1_fusion_settings.json` 和 `step1_session.json` 装回工作区的 `step1/`，重新绑定到刚重发的交接（内容不变）；打开工作区后第一次进入 Step1 自动恢复一次（第 8 题）；Generate 提交时把 Step1 会话一起存进版本；Step3 下拉框每行显示这次运行的 `data_version`，没有的显示 `unknown`（第 5 题 (a)） |
+| 6 | （本段） | 数据版本之前做的工作区，第一次打开时把现状登记为 `v1`（`label` = `v1 (registered from an earlier workspace)`，`legacy: true`），产品原地引用（此后只读），每个区域都必须有 fused，否则不登记；已有的分割不挂到任何版本，显示 `unknown`（第 6 题 (b)） |
+
+测试：`tests/test_v16_data_versions.py` 共 41 条（第 5、6 段新增 9 条）；`tests/test_v16_a6_workspace.py` 中「多个工作区时询问」一条改为新的行格式。第 5、6 段的 10 条在 `c3caca8` 上全部失败、在新代码上全部通过。
+
+改动的文件全部在白名单内（§4，加 §15 的两个文件）。`MainWindow._step3_runs_with_provenance` 不再用于 Step3 下拉框的标记（第 5 题 (a)：只看版本），函数和它的测试保留，未删除。
+
+第 5、6 段的针对性回归（20 个调用了被改函数的模块 + DV、A6 工作区、A6 异步三个模块）：全部通过。`test_step0_step1_display_isolation::test_step0_work_does_not_make_step1_load_or_redraw` 在后台批量运行中失败过一次，单独在新、旧代码上各重跑两次都通过，判为偶发（与本段无关的定时器时序）。
+
+下一步：codex（gpt-6-astra，low）代码审核 → 全量回归（新 = DV 最终提交，旧 = `905079f`）→ 真机验收。

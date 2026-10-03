@@ -111,10 +111,16 @@ def build_project(root, *, decisions=None, n_cells=40, seed=0, rois=None, nuclei
     slide_data = rng.integers(0, 256, size=(len(NAMES),) + SLIDE_SHAPE, dtype=np.uint8)
     slide = os.path.join(root, "slide.ome.tif")
     write_slide(slide, slide_data, tiled=tiled)
+    # Block RM: a project whose run chain is correct -> fuse -> segment.
+    from block01.utils import run_store
     ws = os.path.join(root, "proj", "rois", "ws1")
-    step0 = os.path.join(ws, "step0")
-    run_dir = os.path.join(ws, "step2", "segmentation_runs", "seg_20260927_120000_test")
+    os.makedirs(ws)
+    json.dump({}, open(os.path.join(root, "proj", "project_manifest.json"), "w"))
+    step0 = os.path.join(ws, "runs", "correct_20260927_115900")
+    fuse = os.path.join(ws, "runs", "fuse_20260927_115930")
+    run_dir = os.path.join(ws, "runs", "segment_20260927_120000_test")
     os.makedirs(step0)
+    os.makedirs(fuse)
     os.makedirs(run_dir)
     json.dump({"source_ome": slide, "bbox_fullres": [0, SLIDE_SHAPE[0], 0, SLIDE_SHAPE[1]],
                "display_name": "Full WSI"}, open(os.path.join(ws, "roi_manifest.json"), "w"))
@@ -123,8 +129,9 @@ def build_project(root, *, decisions=None, n_cells=40, seed=0, rois=None, nuclei
     cfg = {"channel_decisions": decisions, "method_params": {"tophat_radius": 15,
                                                             "cucim_sigma": 50},
            "channel_params": {"CD3": {"tophat_radius": 10}}}
-    cfg_path = os.path.join(step0, "correction_config.json")
-    json.dump(cfg, open(cfg_path, "w"))
+    cfg_path = os.path.join(step0, run_store.PARAMS)
+    json.dump({"kind": "correct", "correction_config": cfg, "channel_decisions": decisions},
+              open(cfg_path, "w"))
     corrected = {k: v for k, v in decisions.items() if v in ("tophat", "cucim")}
     zpath = os.path.join(step0, "corrected_channels.zarr")
     rois = rois or [("Full WSI", ROI_BBOX)]
@@ -147,9 +154,11 @@ def build_project(root, *, decisions=None, n_cells=40, seed=0, rois=None, nuclei
                                 "channel_index": NAMES.index(ch), "source_identity": "abc",
                                 "roi_name": roi_name})
                 corrected_data[(roi_name, ch)] = arr
-    json.dump({"correction_config_path": cfg_path, "corrected_zarr_path": zpath,
-               "corrected_decisions": corrected, "raw_ome_path": slide},
-              open(os.path.join(step0, "step0_roi_result.json"), "w"))
+    run_store.write_inputs(step0, None, slide_id="s")
+    run_store.publish(step0)
+    run_store.write_params(fuse, {"kind": "fuse"})
+    run_store.write_inputs(fuse, step0)
+    run_store.publish(fuse)
     labels = {}
     nuclei_arrays = {}
     roi_records = []
@@ -190,6 +199,9 @@ def build_project(root, *, decisions=None, n_cells=40, seed=0, rois=None, nuclei
             "created_at": "2026-09-27T12:00:00", "rois": roi_records,
             "paths": {"raw_ome": slide}}
     json.dump(meta, open(os.path.join(run_dir, "segmentation_meta.json"), "w"))
+    run_store.write_params(run_dir, {"kind": "segment"})
+    run_store.write_inputs(run_dir, fuse)
+    run_store.publish(run_dir)
     return {"root": root, "slide": slide, "slide_data": slide_data, "ws": ws, "step0": step0,
             "run_dir": run_dir, "labels": labels, "corrected": corrected_data,
             "nuclei": nuclei_arrays,
@@ -329,11 +341,11 @@ def test_a_product_of_another_slide_is_refused(tmp_path):
     _refused(p, "made from")
 
 
-def test_the_handoff_and_the_config_must_agree(tmp_path):
+def test_a_chain_without_a_published_correct_run_is_refused(tmp_path):
+    # block RM (§5): Step4 reads the run's own chain; the handoff is not consulted
     p = build_project(tmp_path)
-    _edit_json(os.path.join(p["step0"], "step0_roi_result.json"),
-               lambda d: d.update(corrected_decisions={"CD3": "tophat", "CD8": "cucim"}))
-    _refused(p, "handoff lists")
+    os.remove(os.path.join(p["step0"], ".done"))
+    _refused(p, "no published Step0 result")
 
 
 def test_the_product_and_the_config_must_agree(tmp_path):

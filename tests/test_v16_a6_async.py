@@ -845,17 +845,21 @@ def test_r3_a_run_handed_over_mid_extraction_is_opened_afterwards(step4, tmp_pat
     assert page._pending_lbl.isHidden()
 
 
-def test_b9_runs_without_provenance_are_tagged_right_aligned(app):
+def test_b9_a_rows_tag_is_drawn_right_aligned_and_named_in_its_tooltip(app):
+    # Block RM (§5): the tag names the run's upstream (its fuse run); the
+    # A6 "unknown" tag is gone with the run model.
     from PyQt5.QtCore import Qt
-    from block01.ui.step3_mask_bar import PROVENANCE_UNKNOWN, TAG_ROLE, Step3MaskBar
+    from block01.ui.step3_mask_bar import TAG_ROLE, Step3MaskBar
+    import block01.ui.step3_mask_bar as mb
+    assert not hasattr(mb, "PROVENANCE_UNKNOWN")
     bar = Step3MaskBar()
     bar.set_runs([("cellpose · 2026-10-02 10:00", "/r/new\x1fFull WSI", ""),
-                  ("cellpose · 2026-09-27 12:00", "/r/old\x1fFull WSI", PROVENANCE_UNKNOWN)])
+                  ("cellpose · 2026-09-27 12:00", "/r/old\x1fFull WSI", "10-03 12:00 · fused")])
     combo = bar.run_combo
     assert combo.itemData(0, TAG_ROLE) in (None, "")
-    assert combo.itemData(1, TAG_ROLE) == PROVENANCE_UNKNOWN
+    assert combo.itemData(1, TAG_ROLE) == "10-03 12:00 · fused"
     assert combo.itemText(1) == "cellpose · 2026-09-27 12:00"     # the name is unchanged
-    assert PROVENANCE_UNKNOWN in combo.itemData(1, Qt.ToolTipRole)
+    assert "10-03 12:00 · fused" in combo.itemData(1, Qt.ToolTipRole)
     bar.set_runs([("x", "/r/x")])                                  # two-field items still work
     assert combo.itemText(0) == "x"
 

@@ -20,17 +20,33 @@ from .step3_label_binding import CELL, DEFAULT_STYLES, NUCLEUS
 
 LABELS = {CELL: "Cell mask", NUCLEUS: "Nucleus mask"}
 NO_RUNS_TEXT = "No segmentation results for this ROI"
-# Block A6 W4 (user ruling 2026-10-02): a run without provenance (made before
-# A3) says so, right-aligned at the end of its row; it may cover the right
-# end of the run's name.
-PROVENANCE_UNKNOWN = "unknown"     # user ruling 2026-10-02: short
+# Block RM (§5): a row's tag -- its upstream (the fuse run it was made
+# from) -- is drawn right-aligned at its end; it may cover the right end of
+# the run's name.
 TAG_ROLE = Qt.UserRole + 1
 
 
-#: Block DV-D: a row that can be deleted shows a × at its start (Step0's
-#: "Open a workspace" chooser; Step3's run list never sets it).
+#: A row that can be deleted shows a × at its start (block RM §9: Step3's
+#: runs of this project).
 CLOSE_ROLE = Qt.UserRole + 2
 CLOSE_WIDTH = 22
+
+
+def fit_popup(combo, max_closed=560):
+    """Make a combo's list as wide as its longest row -- text, right-aligned
+    tag and × (acceptance 2026-10-03: rows could not be told apart) -- and
+    the closed combo as wide as that, up to `max_closed` pixels."""
+    fm = combo.fontMetrics()
+    widest = 0
+    for row in range(combo.count()):
+        tag = combo.itemData(row, TAG_ROLE) or ""
+        closable = bool(combo.itemData(row, CLOSE_ROLE))
+        width = (fm.horizontalAdvance(combo.itemText(row))
+                 + (fm.horizontalAdvance(tag) + 24 if tag else 0)
+                 + (CLOSE_WIDTH if closable else 0) + 40)
+        widest = max(widest, width)
+    combo.view().setMinimumWidth(widest)
+    combo.setMinimumWidth(min(widest, max_closed))
 
 
 class _TaggedItemDelegate(QtWidgets.QStyledItemDelegate):
@@ -254,6 +270,7 @@ class Step3MaskBar(QtCore.QObject):
     """The row's four controls and their signals."""
 
     run_chosen = pyqtSignal(str)            # an entry's key (a run folder and a region)
+    delete_requested = pyqtSignal(str)      # block RM §9: the × of a run's row
     load_requested = pyqtSignal()           # `Load…` (block B3)
     style_changed = pyqtSignal(str, dict)   # kind, the fields that changed
 
@@ -265,7 +282,9 @@ class Step3MaskBar(QtCore.QObject):
             "QComboBox{color:#ddd;background:#182230;border:1px solid #354a63;"
             "border-radius:4px;padding:1px 6px;font-size:10px;}")
         self.run_combo.activated.connect(self._run_activated)
-        self.run_combo.setItemDelegate(_TaggedItemDelegate(self.run_combo))
+        delegate = _TaggedItemDelegate(self.run_combo)
+        delegate.close_clicked.connect(self._close_clicked)
+        self.run_combo.setItemDelegate(delegate)
         # Block B3: any Step2 result of the open slide, from anywhere.
         self.load_button = QtWidgets.QPushButton("Load…")
         self.load_button.setStyleSheet(MODE_BUTTON_QSS)
@@ -296,9 +315,10 @@ class Step3MaskBar(QtCore.QObject):
         return self._corner
 
     def set_runs(self, items, current_dir=None):
-        """`items` = [(label, run_dir)] or [(label, run_dir, tag)], newest
-        first; `current_dir` selected. A tag (`unknown`) is drawn
-        right-aligned at the row's end, and is the row's tooltip."""
+        """`items` = [(label, run_dir)], [(label, run_dir, tag)] or
+        [(label, run_dir, tag, deletable)], newest first; `current_dir`
+        selected. A tag (the upstream's name) is drawn right-aligned at the
+        row's end and is in the row's tooltip; a deletable row has a ×."""
         combo = self.run_combo
         combo.blockSignals(True)
         combo.clear()
@@ -310,13 +330,16 @@ class Step3MaskBar(QtCore.QObject):
                 label, run_dir = item[0], item[1]
                 tag = item[2] if len(item) > 2 else ""
                 combo.addItem(label, run_dir)
+                row = combo.count() - 1
                 if tag:
-                    row = combo.count() - 1
                     combo.setItemData(row, tag, TAG_ROLE)
-                    combo.setItemData(row, f"{label}  —  {tag}", Qt.ToolTipRole)
+                    combo.setItemData(row, f"{label}  —  from {tag}", Qt.ToolTipRole)
+                if len(item) > 3 and item[3]:
+                    combo.setItemData(row, True, CLOSE_ROLE)
             combo.setEnabled(True)
             index = combo.findData(current_dir) if current_dir else -1
             combo.setCurrentIndex(max(0, index))
+        fit_popup(combo)
         combo.blockSignals(False)
 
     def current_run_dir(self):
@@ -331,6 +354,12 @@ class Step3MaskBar(QtCore.QObject):
 
     def set_hint(self, text):
         self.hint.set_full_text(text)
+
+    def _close_clicked(self, row):
+        key = self.run_combo.itemData(row) or ""
+        if key:
+            self.run_combo.hidePopup()
+            self.delete_requested.emit(str(key).partition("\x1f")[0])
 
     def _run_activated(self, index):
         run_dir = self.run_combo.itemData(index) or ""

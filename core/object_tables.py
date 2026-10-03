@@ -137,7 +137,7 @@ def _run_dir_of(project_dir, segmentation_run_id):
     hits = []
     rois = os.path.join(project_dir, "rois")
     for ws in sorted(os.listdir(rois)) if os.path.isdir(rois) else []:
-        d = os.path.join(rois, ws, "step2", "segmentation_runs", segmentation_run_id)
+        d = os.path.join(rois, ws, "runs", segmentation_run_id)      # block RM §4
         if os.path.isdir(d):
             hits.append(d)
     if len(hits) != 1:
@@ -275,7 +275,7 @@ def build_regions(project_dir) -> Dict:
             continue
         sid, _ = describe_slide(slide, pm.get("sources"))
         slides.add(sid)
-        cpath = os.path.join(ws, "step0", "roi_config.json")
+        cpath = os.path.join(ws, "settings", "step0", "roi_config.json")   # block RM §4
         for p in (cpath, mpath):
             if os.path.isfile(p):
                 files[prov.location(project_dir, p)["path"]] = _sha(p)

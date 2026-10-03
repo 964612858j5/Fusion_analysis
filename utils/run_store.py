@@ -338,7 +338,7 @@ def update_session(roi_dir, **fields) -> Dict:
 # ── records with paths ───────────────────────────────────────────────────
 
 # Path fields whose names do not end in _path / _dir.
-_PATH_KEYS = ("ome_tiff", "background_correction_source", "hq_source_zarr")
+_PATH_KEYS = ("ome_tiff", "background_correction_source", "hq_source_zarr", "param_file")
 
 
 def _is_path_key(key) -> bool:
@@ -381,3 +381,53 @@ def from_records(obj, project_dir):
     if isinstance(obj, list):
         return [from_records(v, project_dir) for v in obj]
     return obj
+
+
+def nearest_survivor(chain_of_run: List[str], gone) -> str:
+    """The first run of `chain_of_run` (nearest first) not in `gone`, or ''."""
+    gone = {os.path.abspath(g) for g in gone}
+    return next((r for r in chain_of_run if os.path.abspath(r) not in gone), "")
+
+
+def session_pointers(roi_dir) -> Dict[str, str]:
+    """``{"viewing": abs path or '', "editing": abs path or ''}`` of the
+    workspace's session.json."""
+    sess = load_session(roi_dir)
+    project = project_dir_of(roi_dir)
+    view = str(sess.get("viewing") or "")
+    edit = str((sess.get("editing") or {}).get("correct_run") or "")
+    return {"viewing": resolve(project, view) if project and view else "",
+            "editing": resolve(project, edit) if project and edit else ""}
+
+
+def repoint_session(roi_dir, replacements: Dict[str, str]) -> Dict:
+    """Point session.json's `viewing` / `editing` away from runs that are
+    gone (application §9): `replacements` maps a gone run's absolute path to
+    its nearest surviving run ('' -> back to nothing)."""
+    project = project_dir_of(roi_dir)
+    sess = load_session(roi_dir)
+    ptr = session_pointers(roi_dir)
+    rep = {os.path.abspath(k): v for k, v in replacements.items()}
+    if ptr["viewing"] and os.path.abspath(ptr["viewing"]) in rep:
+        new = rep[os.path.abspath(ptr["viewing"])]
+        sess["viewing"] = rel(project, new) if new else None
+    if ptr["editing"] and os.path.abspath(ptr["editing"]) in rep:
+        new = rep[os.path.abspath(ptr["editing"])]
+        editing = dict(sess.get("editing") or {})
+        if new and kind_of(new) == "correct":
+            editing["correct_run"] = rel(project, new)
+            sess["editing"] = editing
+        else:
+            sess["editing"] = None
+    save_session(roi_dir, sess)
+    return sess
+
+
+def validate_session(roi_dir) -> List[str]:
+    """On Load (§9): a `viewing` / `editing` pointer to a run that is not
+    there (or not published) goes back to nothing. Returns what was reset."""
+    ptr = session_pointers(roi_dir)
+    gone = {p: "" for p in ptr.values() if p and not is_done(p)}
+    if gone:
+        repoint_session(roi_dir, gone)
+    return sorted(k for k, v in ptr.items() if v in gone)

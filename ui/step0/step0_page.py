@@ -10911,30 +10911,35 @@ class Step0Page(QWidget):
     # ── workspaces: open an existing one (block A6 W1) ────────────────
 
     def _workspace_rows(self, found):
-        """Block RM (§5): one row per workspace (ROI), newest first. Each
-        row: (workspace, None, tag) -- the tag names the correct run the
-        workspace is being edited on."""
+        """Block RM (§5, §9): one row per workspace (ROI), newest first, each
+        followed by a row per Step0 result (correct run) of it, newest first,
+        that can be deleted with its ×. Rows: (workspace, None, tag) and
+        (workspace, None, tag, correct run folder)."""
         rows = []
         for ws in found:
-            tag = ""
+            editing = ""
             published = step0_handoff.published_handoff(ws.step0_dir)
             if published is not None and published[2]:
-                run_dir = os.path.dirname(published[2])
-                if run_store.is_done(run_dir):
-                    tag = run_store.display_name(run_dir)
+                editing = os.path.dirname(published[2])
+            tag = run_store.display_name(editing) if run_store.is_done(editing) else ""
             rows.append((ws, None, tag))
+            for run in reversed(run_store.list_runs(ws.workspace_dir, "correct")):
+                same = os.path.abspath(run) == os.path.abspath(editing or ".")
+                rows.append((ws, None, "editing" if same else "", run))
         return rows
 
     @staticmethod
     def _row_text(row):
-        ws, rec, tag = row[0], row[1], row[2]
-        run = row[3] if len(row) > 3 else None
-        if run is not None:
-            when = str(run.created_at or "").replace("T", " ")[5:16]
-            return f"{ws.label()}  \u00b7  {run.method} \u00b7 {when}"
-        if rec is not None:
-            return f"{ws.label()}  \u00b7  (not segmented)"
-        return ws.label()
+        if len(row) > 3 and row[3]:
+            return f"      Step0 result  {run_store.display_name(row[3])}"
+        return row[0].label()
+
+    def _rm_rows_again(self):
+        try:
+            _sid, found = workspace_session.find_workspaces(self.output_dir, self.ome_path)
+        except Exception:                             # noqa: BLE001
+            return []
+        return self._workspace_rows(found)
 
     def _choose_workspace(self, rows):
         """Several rows (user rulings 2b, DV §3.6, DV-D): the user picks one,
@@ -10949,8 +10954,9 @@ class Step0Page(QWidget):
         lay.addWidget(QLabel(
             "This project already has workspaces of this slide.\n"
             "Save writes into the one you open; Save \u25be \u203a Save as new "
-            "workspace makes another. Each row is one workspace (region); it "
-            "opens as it was last left."))
+            "workspace makes another. Each workspace (region) opens as it was "
+            "last left; below it, its Step0 results -- \u00d7 deletes one and "
+            "every result made from it (into the project's trash for 30 days)."))
         lst = QtWidgets.QListWidget()
         delegate = TaggedItemDelegate(lst)
         lst.setItemDelegate(delegate)
@@ -10962,9 +10968,9 @@ class Step0Page(QWidget):
             for row in state["rows"]:
                 item = QtWidgets.QListWidgetItem(self._row_text(row))
                 item.setData(TAG_ROLE, row[2])
-                # Block RM-1 (§16.4): deleting from here returns with RM-2's
-                # run deletion; the DV-D × is off.
-                item.setData(CLOSE_ROLE, False)
+                # Block RM (§9, user ruling 2026-10-03): a Step0 result's row
+                # has the DV × -- it and everything made from it go.
+                item.setData(CLOSE_ROLE, len(row) > 3 and bool(row[3]))
                 item.setToolTip(f"{self._row_text(row)}  \u2014  {row[2]}")
                 lst.addItem(item)
             lst.addItem("Start a new workspace (open none)")
@@ -10974,6 +10980,14 @@ class Step0Page(QWidget):
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         box.accepted.connect(dlg.accept)
         box.rejected.connect(dlg.reject)
+        def _closed(index):
+            if not 0 <= index < len(state["rows"]) or len(state["rows"][index]) < 4:
+                return
+            delete = getattr(self, "delete_run", None)
+            if callable(delete) and delete(state["rows"][index][3], dlg):
+                state["rows"] = self._rm_rows_again()
+                _fill()
+        delegate.close_clicked.connect(_closed)
         lst.itemDoubleClicked.connect(lambda _i: dlg.accept())
         lay.addWidget(box)
         _fill()
@@ -11365,6 +11379,10 @@ class Step0Page(QWidget):
             removed = run_store.cleanup_incomplete(ws.workspace_dir)
             if removed:
                 print(f"[Workspace] removed unfinished run folders: {removed}")
+        # §9: viewing / editing pointers to runs that are gone go back to nothing.
+        reset = run_store.validate_session(ws.workspace_dir)
+        if reset:
+            print(f"[Workspace] session pointers reset (their runs are gone): {reset}")
         published = step0_handoff.published_handoff(ws.step0_dir)
         if published is None:
             raise ValueError("no committed Step0 result")
@@ -11771,8 +11789,11 @@ class Step0Page(QWidget):
             drafts = dict(sess.get("drafts") or {})
             drafts.pop("step0", None)           # what Step0 shows is now saved
             sess["drafts"] = drafts
+            new_run = run_store.rel(project, os.path.dirname(corrected))
+            if (sess.get("editing") or {}).get("correct_run") != new_run:
+                sess["viewing"] = new_run       # §3: a new Step0 result is a new chain
             sess["editing"] = {
-                "correct_run": run_store.rel(project, os.path.dirname(corrected)),
+                "correct_run": new_run,
                 "geometry_revision": int((manifest or {}).get("geometry_revision") or 0)}
             run_store.save_session(ws, sess)
         except (OSError, ValueError) as exc:

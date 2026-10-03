@@ -331,3 +331,52 @@ raw OME-TIFF ──> correct run ──┬──> preseg run      (Step1 预分�
 | 纯 DV 语义（版本号、current、draft 行、版本切换、legacy v1、版本内冻结 session） | `the_chooser_lists_one_row_per_workspace_and_version`、`a_dirty_draft_is_its_own_row_first_and_preselected`、`the_draft_row_continues_the_draft`、`choosing_the_current_version_over_a_draft_loads_the_version`、`loading_an_older_version_restores_it_and_republishes_the_handoff`、`opening_the_current_version_rewrites_nothing`、`step1_settings_saved_since_the_version_are_a_draft_too`、`once_a_draft_exists_saves_only_touch_the_draft`、`the_handoff_stays_in_the_workspaces_step0_and_registers_nothing`、`the_page_marks_a_published_product_read_only_for_the_writer`、`the_handoff_reader_maps_before_it_writes` | 被 §2/§5/§6/§12 替代，RM-3 删除 |
 | 行为仍有效，已迁移到 `test_v16_rm1_run_store.py` | `changing_one_channel_copies_…`（→ `a_correction_change_writes_a_new_run…`）、`a_save_with_no_corrected_change_…`（→ `an_intensity_only_save_keeps_the_correct_run`）、`another_roi_makes_a_fresh_draft…` / `a_new_outline_with_the_same_boxes…`（→ 同一新建 run 分支，`a_withdrawn_channel_is_a_new_run_of_the_same_pixels`）、`a_save_never_corrects_into_another_projects_product`（→ `…another_projects_run`）、`a_region_without_its_product_…`、`an_error_or_cancel_leaves_no_version…`、`a_cancel_before_the_completion…`（→ `a_region_without_its_product_publishes_nothing`、`a_cancelled_correction_leaves_no_run`、fuse 丢弃路径）、`an_opened_workspace_restores_step1_by_itself_once`（→ `an_opened_workspace_does_not_overwrite_its_step1_draft…`、`a_later_step0_save_keeps_the_step1_restore_pending`） | 已有新测试 |
 | 删除相关（DV-D） | `test_v16_dv_delete.py` 全部 22 项：行内 ×、回收站、续做、运行中拒删、先释放再移动、替换版本 | RM-2 的沿链删除重写；「运行中拒删」「先释放」「替换失败不删」三类行为在 RM-2 迁移 |
+
+---
+
+## 18. RM-2 实施记录（2026-10-03，未提交，待回归与验收）
+
+### 18.1 用户裁定（2026-10-03 晚）
+
+- 删除入口：每一步都有，放在该步已有的 Load 里，沿用 DV 的 ×。Step0：▶Load 的工作区选择框，每个工作区下列出它的 Step0 结果（correct run），行首 ×；Step1：「Load plan…」的列表，计划之下列出预分割 run，行首 ×；Step2：Input 下拉框的 fuse run 行首 ×；Step3：结果列表的 segment run 行首 ×。Step4 不设删除入口，由用户手动删。
+- provenance：批准改一行，`core/provenance.workspace_regions` 读 `settings/step0/roi_config.json`。
+
+### 18.2 改动文件
+
+| 文件 | 内容 |
+|---|---|
+| `workers/segment_merge_worker.py` | Step2 写 `runs/segment_<stamp>_<method>/`；完成时写 `params.json`（Run 时实际生效的配置）、`inputs.json`（其 fuse run），再 `.done`，之后登记 A3；输入不是已发布 fuse run 时不发布；重读参数文件时还原相对路径；HQ corrected 优先取本链 correct run |
+| `core/step3_masks.py` | 列表只扫描已发布的 `runs/segment_*`；每个 run 带显示名与上游 fuse run 的显示名（上游已删显示 `(deleted)`） |
+| `ui/step3_mask_bar.py` | 行尾标签为上游名；`unknown` 删除；本项目的 run 行首 × |
+| `core/quant_sources.py` | Step4 沿链取 correct run 的冻结决策与像素；产物须包含所需通道；DV 版本读取删除 |
+| `workers/feature_extract_worker.py` | 项目里的 segment run 一律定量进新的 `runs/quant_<stamp>/`（上游 = 该 segment run），写在已发布 run 里的输出被拒绝 |
+| `ui/step4_page.py` | 草稿保存 / 恢复；项目结果的输出框只读，显示「新 quant run」 |
+| `ui/step2_page.py` | Input 下拉框（当前查看链的 correct run 下的 fuse run，选中即带上其冻结区域）；× 删除；Browse 到列表里的 run 等同选中；Run 只接受本工作区、且为下拉框所选的 fuse run；草稿；参数文件路径还原 |
+| `utils/trash.py` | `move`：按调用方顺序（下游先）逐个原子改名，失败即停；记录 `complete` / `partial`；续做删除 |
+| `utils/run_store.py` | 会话指针校验与改指；`put_draft`；`param_file` 等路径键 |
+| `core/object_tables.py` | 运行目录与 ROI 配置读新布局 |
+| `core/provenance.py` | 一行（18.1） |
+| `ui/main_window.py` | Step2 按查看链绑定；删除流程（运行中拒绝、确认框列全、先释放、移动、指针改到幸存者、A3 删除记录）；Step0 / Step1 的删除入口接线；Step2 / Step4 草稿；分割参数文件写相对路径 |
+| `ui/step0/step0_page.py` | Load 时校验会话指针；Save 产生新 correct run 时 `viewing` 指向它；选择框列出 Step0 结果 |
+| 新 `tests/test_v16_rm2_chain.py` | 26 项 |
+| 测试迁移 | `test_quant_sources`、`test_v16_artifact_graph`、`test_step2_skip_empty_tiles`、`test_step3_masks`、`test_b3_fixes`（经共用夹具）、`test_step4_page`、`test_step4_worker`、`test_v16_object_tables`、`test_v16_a6_async`（unknown 标签改为上游标签）、`test_v16_a6_workspace`、`test_step1_method_plan` |
+
+### 18.3 codex 审核
+
+- 第 1 轮 5 条，全部属实已修：Step4 可写进已发布 quant run；查看历史链时 Step2 仍用编辑中的区域；HQ 优先用了参数文件里的 corrected；Browse 可接受别的工作区的 fuse run；Step2 草稿恢复后 Run 会被索引覆盖。
+- 第 2 轮 2 条（第 1 轮修得不彻底），已修：全图 fuse run 未清空区域；同工作区 Browse 到别的链时下拉框不跟随。发现逐轮收窄，审核停止。
+
+### 18.4 与计划书的差异（需用户知悉）
+
+- Step3 选中历史结果后，Step2 输入跟随该链；Step0、Step1 仍显示编辑中的上下文，不切换显示。
+- 项目里的结果做 Step4 时，输出文件夹不能再自选（一律新 quant run）。
+- 「当前运行」（active）暂仍从工作区索引读取，RM-4 删索引时改为 `session.viewing`。
+
+### 18.5 真机验收反馈（2026-10-03 晚）与处理
+
+通过：1、2、3、4、5、7、9、11、12、13、14。
+
+- **#6 预分割未恢复**：原因是 Use 之后不触发 Step1 草稿保存，关窗也不保存 Step1 草稿。改为 Use、预分割结束、切步、关窗时都保存；Step1 草稿新增 `preseg`（方法、勾选的 patch、run 位置、在用的结果），恢复时从磁盘读回结果面板与 montage 轮廓，在用的结果仍可用时恢复选择。
+- **#8 用户裁定 B**：Step3 选中结果后进入 Step2，Step2 换成该次运行 `params.json` 里的方法与参数（每次选择只载入一次，之前的 Step2 设置先存为草稿）；刚打开工作区时以保存的 Step2 草稿为准。
+- **#8 / #10 下拉框太窄**：Step3 结果列表与 Step2 Input 的弹出列表按最长一行（含行尾标签与 ×）加宽。
+- **#1 Save 弹窗慢**：实测 Save 处理到弹窗 < 2 ms；用户裁定不处理。

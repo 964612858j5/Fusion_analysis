@@ -94,8 +94,11 @@ def _run(rdir, run_id, method="cellpose_wholecell_fusion", *, mode="roi", roi_na
          bbox=BBOX, created_at="2026-09-26T10:00:00", nuclei=False, pyramid=True,
          shapes=SHAPES, seed=0, roi_id="roi_a", index=True, status="done",
          alias="link", rec_bbox=True):
-    """One finished Step2 run as Step2 writes it (block N's layout)."""
-    run_dir = os.path.join(rdir, "step2", "segmentation_runs", run_id)
+    """One finished Step2 run as Step2 writes it (block N's layout; block RM:
+    a segment run in the workspace's runs/, published when `status` is
+    done)."""
+    folder = run_id if run_id.startswith("segment_") else f"segment_{run_id}"
+    run_dir = os.path.join(rdir, "runs", folder)
     os.makedirs(run_dir)
     shape = (bbox[1] - bbox[0], bbox[3] - bbox[2])
     arr = _labels(shape, seed)
@@ -132,6 +135,9 @@ def _run(rdir, run_id, method="cellpose_wholecell_fusion", *, mode="roi", roi_na
                 "paths": {"mask_zarr": mask}, "label_pyramid": pyrs}
     with open(os.path.join(run_dir, "segmentation_meta.json"), "w") as f:
         json.dump(meta, f)
+    if status == "done":
+        with open(os.path.join(run_dir, ".done"), "w") as f:
+            f.write("{}")
     if index:
         _index(rdir, runs={run_id: {"run_id": run_id, "method": method,
                                     "created_at": created_at, "status": status,
@@ -165,9 +171,10 @@ def test_runs_are_deduplicated_filtered_and_sorted(tmp_path):
 
     runs = sm.list_runs(rdir)
     ids = [r.run_id for r in runs]
-    assert ids == ["seg_new", "seg_mid", "seg_old", os.path.realpath(res_dir)]
-    assert [r.active for r in runs] == [False, True, False, False]
-    assert runs[-1].method == "cellpose_nuclei_dapi"
+    # block RM (§4, §11): published segment runs under runs/ only -- not a
+    # failed one, not one naming another ROI, not the old step2/ folders
+    assert ids == ["seg_new", "seg_mid", "seg_old"]
+    assert [r.active for r in runs] == [False, True, False]
     assert all(r.run_dir == os.path.realpath(r.run_dir) for r in runs)
 
 

@@ -274,10 +274,10 @@ def ensure_raw_slide(project_dir, slide_path) -> str:
 
 def workspace_regions(workspace_dir, slide_id) -> Dict[str, Dict]:
     """``{roi_name: {"region_id", "bbox_fullres", "roi"}}`` from the
-    workspace's committed Step0 ``roi_config.json`` (or its
+    workspace's committed Step0 ``settings/step0/roi_config.json`` (or its
     ``roi_manifest.json`` for a workspace without one)."""
     from .project_identity import region_id_of_roi
-    rois = _load(os.path.join(workspace_dir, "step0", "roi_config.json"))
+    rois = _load(os.path.join(workspace_dir, "settings", "step0", "roi_config.json"))  # block RM
     if not isinstance(rois, list) or not rois:
         manifest = _load(os.path.join(workspace_dir, "roi_manifest.json")) or {}
         rois = [dict(manifest, name=manifest.get("display_name", ""))] if manifest else []

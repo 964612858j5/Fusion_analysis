@@ -10,12 +10,12 @@ after the deletion, or when the user empties the trash.
                                "deleted_at", "what", "workspace", "items": [...]}
         <path relative to the project>/...   the moved folders and files
 
-A deletion moves several folders and is not one atomic step (§6): the entry
-is written ``in_progress`` FIRST, the caller removes the records that name
-the items (so they no longer exist for the program), the items are moved,
-and the entry is marked ``complete`` LAST. An entry still ``in_progress`` when
-the project is next loaded is finished by `resume_incomplete`. Only complete
-entries are ever purged.
+Block RM (docs/v16_run_model_application.md §9): runs are deleted with
+`move` -- one rename per run, on the same disk, in the order the caller gives
+(downstream first), stopping at the first failure. Every rename is atomic, so
+whatever stays in place is a whole run whose upstream is still there; the
+entry's ``trash.json`` only records what was moved (``complete``) or how far it
+got (``partial``). Nothing is resumed later.
 
 Nothing here is discovered by the program as a workspace, a version or a run:
 those are found under ``rois/``, never under ``.trash/``.
@@ -120,16 +120,49 @@ def entries(project_dir) -> List[Dict]:
     return out
 
 
-def resume_incomplete(project_dir) -> List[str]:
-    """Move what interrupted deletions left in place (§6). Their records are
-    dropped first by `data_versions.resume_deletions`, which calls this.
-    Returns their folders."""
-    done = []
-    for entry in entries(project_dir):
-        if entry.get("status") != "complete":
-            finish(entry)
-            done.append(entry["folder"])
-    return done
+def move(project_dir, workspace_id, what, paths, details=None, now=None) -> Dict:
+    """Move `paths` (inside the project) into ONE new trash entry, in the
+    order given, each by a single rename; stop at the first that fails.
+    Returns the entry: ``items`` moved, ``not_moved`` left in place, ``error``
+    (``""`` when everything moved; status ``complete`` / ``partial``)."""
+    project_dir = os.path.abspath(project_dir)
+    now = now or datetime.now()
+    root = trash_root(project_dir)
+    os.makedirs(root, exist_ok=True)
+    base = f"{now.strftime('%Y%m%d_%H%M%S')}_{workspace_id}_{what}".replace(os.sep, "_")
+    name, n = base, 1
+    while os.path.exists(os.path.join(root, name)):
+        n += 1
+        name = f"{base}_{n}"
+    folder = os.path.join(root, name)
+    os.makedirs(folder)
+    rels = []
+    for path in paths:
+        rel = os.path.relpath(os.path.abspath(path), project_dir)
+        if rel.startswith(os.pardir):
+            raise ValueError(f"{path} is not inside the project {project_dir}")
+        rels.append(rel)
+    moved, error = [], ""
+    for rel in rels:
+        src, dst = os.path.join(project_dir, rel), os.path.join(folder, rel)
+        size_b = _size(src)
+        try:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            os.rename(src, dst)
+        except OSError as exc:
+            error = f"{rel}: {exc}"
+            break
+        moved.append({"from": rel.replace(os.sep, "/"), "to": rel.replace(os.sep, "/"),
+                      "bytes": size_b})
+    done = {m["from"] for m in moved}
+    entry = {"status": "partial" if error else "complete",
+             "deleted_at": now.isoformat(timespec="seconds"), "what": what,
+             "workspace": workspace_id, "details": dict(details or {}), "items": moved,
+             "not_moved": [r.replace(os.sep, "/") for r in rels
+                           if r.replace(os.sep, "/") not in done],
+             "error": error, "folder": folder}
+    _write(os.path.join(folder, ENTRY), entry)
+    return entry
 
 
 def purge(project_dir, now=None, keep_days=KEEP_DAYS) -> List[str]:
@@ -138,7 +171,7 @@ def purge(project_dir, now=None, keep_days=KEEP_DAYS) -> List[str]:
     now = now or datetime.now()
     removed = []
     for entry in entries(project_dir):
-        if entry.get("status") != "complete":
+        if entry.get("status") not in ("complete", "partial"):
             continue
         try:
             when = datetime.fromisoformat(str(entry.get("deleted_at")))
@@ -151,11 +184,11 @@ def purge(project_dir, now=None, keep_days=KEEP_DAYS) -> List[str]:
 
 
 def empty(project_dir) -> List[str]:
-    """Empty the trash: every COMPLETE entry is permanently removed (an
-    interrupted one is finished on the next Load, records first)."""
+    """Empty the trash: every finished entry (``complete`` or ``partial``)
+    is permanently removed."""
     removed = []
     for entry in entries(project_dir):
-        if entry.get("status") != "complete":
+        if entry.get("status") not in ("complete", "partial"):
             continue
         shutil.rmtree(entry["folder"], ignore_errors=True)
         removed.append(entry["folder"])

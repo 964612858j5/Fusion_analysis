@@ -66,7 +66,7 @@ def _corrected_product(step0_dir, roi=ROI, channels=("CD3",), token="tok-1", bbo
     return zpath
 
 
-def _handoff(project, ctx, slide, roi=ROI, decisions=None):
+def _handoff(project, ctx, slide, roi=ROI, decisions=None, corrected_path=None):
     from block01.core.step0_handoff import write_handoff
     step0 = ctx["step_dirs"]["step0"]
     decisions = {"CD3": "tophat"} if decisions is None else decisions
@@ -75,7 +75,7 @@ def _handoff(project, ctx, slide, roi=ROI, decisions=None):
               "channel_params": {"CD3": {"tophat_radius": 10}}}
     spec = {"raw_path": slide, "step0_dir": step0, "config": config,
             "rois": [dict(roi, roi_id=ctx["roi_id"], roi_dir=ctx["roi_dir"])], "patches": [],
-            "corrected_path": os.path.join(step0, "corrected_channels.zarr"),
+            "corrected_path": corrected_path or os.path.join(step0, "corrected_channels.zarr"),
             "manifest_path": os.path.join(step0, "step0_roi_result.json"),
             "analysis_region_type": roi["type"], "roi_id": ctx["roi_id"],
             "roi_dir": ctx["roi_dir"], "project_dir": project,
@@ -374,14 +374,48 @@ def _segment(ctx, fused_path):
     return w.output_dir
 
 
+def _step0_run(tmp_path, slide):
+    """Block RM: Step0 as a Save makes it -- a published correct run named
+    by the handoff."""
+    from block01.utils import run_store
+    project, ctx = _workspace(tmp_path, slide)
+    run = run_store.new_run(ctx["roi_dir"], "correct")
+    zpath = _corrected_product(run)
+    _handoff(project, ctx, slide, corrected_path=zpath)
+    run_store.write_params(run, {"kind": "correct",
+                                 "correction_config": {"channel_decisions": {"CD3": "tophat"},
+                                                       "method_params": {"tophat_radius": 15},
+                                                       "channel_params": {"CD3": {"tophat_radius": 10}}},
+                                 "channel_decisions": dict({n: "original" for n in NAMES},
+                                                           CD3="tophat")})
+    run_store.write_inputs(run, None, slide_id=pid.describe_slide(slide)[0])
+    run_store.publish(run)
+    ctx = dict(ctx, correct_run=run)
+    return project, ctx
+
+
+def _fuse_run(ctx, slide):
+    """Block RM: a Generate into a published fuse run on that correct run."""
+    from block01.utils import run_store
+    run = run_store.new_run(ctx["roi_dir"], "fuse")
+    step1 = dict(ctx, step_dirs=dict(ctx["step_dirs"], step1=run,
+                                     step0=ctx["correct_run"]))
+    fused = _fuse(step1, slide)
+    run_store.write_params(run, {"kind": "fuse", "reuse_key": {}, "regions": [
+        {"roi_name": ROI["name"], "zarr_name": os.path.basename(fused)}]})
+    run_store.write_inputs(run, ctx["correct_run"])
+    run_store.publish(run)
+    return fused
+
+
 @pytest.fixture(scope="module")
 def chain(tmp_path_factory):
     """Step0 -> fusion -> Step2 -> Step4, every step its real producer."""
     from block01.workers.feature_extract_worker import run_extraction
     root = tmp_path_factory.mktemp("chain")
     slide = _nuclei_slide(root)
-    project, ctx = _step0(root, slide)
-    fused = _fuse(ctx, slide)
+    project, ctx = _step0_run(root, slide)            # block RM: the run chain
+    fused = _fuse_run(ctx, slide)
     run_dir = _segment(ctx, fused)
     out = os.path.join(ctx["roi_dir"], "step4", "quantification_runs",
                        os.path.basename(run_dir), "Full_WSI")
@@ -445,7 +479,8 @@ def test_step4_outputs_are_unchanged_by_registration(chain, tmp_path, monkeypatc
         assert names and all(np.array_equal(fa[n][()], fb[n][()]) for n in names
                              if n != "uns/provenance_json")
     assert pd.read_csv(a["csv"]).equals(pd.read_csv(b["csv"]))
-    assert sorted(os.listdir(os.path.join(base, "a"))) == sorted(os.listdir(os.path.join(base, "b")))
+    # block RM: each is a quant run of its own; their contents are the same
+    assert sorted(os.listdir(a["output_dir"])) == sorted(os.listdir(b["output_dir"]))
 
 
 def test_a_step4_result_on_an_unregistered_run_says_so(chain, tmp_path):
@@ -475,7 +510,10 @@ def test_an_overwritten_fused_target_is_reported(chain):
     """Re-fusing writes the shared target again: the graph says the run's
     input has since been overwritten."""
     project, ctx = chain["project"], chain["ctx"]
-    _fuse(ctx, chain["slide"])
+    # block RM: a published fuse run is never written by the program; the
+    # graph must still notice if its product is (here, by hand)
+    _fuse(dict(ctx, step_dirs=dict(ctx["step_dirs"], step1=os.path.dirname(chain["fused"]),
+                                   step0=ctx["correct_run"])), chain["slide"])
     over = ag.ArtifactGraph(project).issues()["overwritten"]
     [seg] = _entries(project, "segmentation_run")
     assert len(over) == 1 and over[0]["depended_on_by"] == [seg["artifact_id"]]

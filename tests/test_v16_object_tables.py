@@ -38,9 +38,11 @@ def _adopt(p, rois=None):
     """`build_project`'s workspace, committed by Step0 and opened by new code."""
     project = os.path.dirname(os.path.dirname(p["ws"]))
     rois = rois or [("Full WSI", ROI_BBOX)]
+    step0 = os.path.join(p["ws"], "settings", "step0")       # block RM §4
+    os.makedirs(step0, exist_ok=True)
     json.dump([{"name": n, "display_name": n, "bbox_fullres": list(b), "polygon_fullres": None,
                 "type": "roi"} for n, b in rois],
-              open(os.path.join(p["step0"], "roi_config.json"), "w"))
+              open(os.path.join(step0, "roi_config.json"), "w"))
     rp.ensure_project_manifest(project, p["slide"])
     return project
 

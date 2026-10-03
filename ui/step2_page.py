@@ -152,6 +152,9 @@ class Step2Page(QWidget):
     go_back           = pyqtSignal()
     segmentation_done = pyqtSignal(str)   # emits output_dir when done
     open_qc_requested = pyqtSignal(str)   # user explicitly chose Step3/QC
+    # Block RM (§5, §9): the Input drop-down -- a fuse run chosen / its ×.
+    fuse_chosen = pyqtSignal(str)
+    fuse_delete_requested = pyqtSignal(str)
 
     # Tile status colours
     _COL_IDLE    = (80,  80,  80)
@@ -362,6 +365,21 @@ class Step2Page(QWidget):
         inp_box = QGroupBox('Input Data')
         inp_box.setStyleSheet(self._box_style('#61afef'))
         inl = QVBoxLayout(inp_box)
+
+        # Block RM (§5): the Step1 results (fuse runs) of the chain being
+        # viewed, newest first; the chosen one fills fused.zarr below.
+        fr = QHBoxLayout()
+        fr.addWidget(QLabel('Input:'))
+        from .step3_mask_bar import TaggedItemDelegate
+        self._fuse_combo = QComboBox()
+        self._fuse_combo.setStyleSheet('font-size:11px;')
+        fuse_delegate = TaggedItemDelegate(self._fuse_combo)
+        fuse_delegate.close_clicked.connect(self._on_fuse_close)
+        self._fuse_combo.setItemDelegate(fuse_delegate)
+        self._fuse_combo.activated.connect(self._on_fuse_activated)
+        self._fuse_items = []
+        fr.addWidget(self._fuse_combo, stretch=1)
+        inl.addLayout(fr)
 
         zr = QHBoxLayout()
         zr.addWidget(QLabel('fused.zarr:'))
@@ -1203,8 +1221,103 @@ class Step2Page(QWidget):
                 f"\nROIs: {names}  (will segment each independently)"
             )
 
+    # ── block RM: the Input drop-down ─────────────────────────────────
+
+    def set_fuse_runs(self, items, selected=""):
+        """`items` = [{"run": dir, "label", "tag", "tooltip", "zarr", "regions"}],
+        newest first; the one whose run is `selected` is chosen and fills
+        fused.zarr (and the region paths)."""
+        from .step3_mask_bar import TAG_ROLE, CLOSE_ROLE
+        self._fuse_items = list(items or [])
+        combo = self._fuse_combo
+        combo.blockSignals(True)
+        combo.clear()
+        if not self._fuse_items:
+            combo.addItem('No Step1 result for this Step0 result', '')
+            combo.setEnabled(False)
+        else:
+            for item in self._fuse_items:
+                combo.addItem(item["label"], item["run"])
+                row = combo.count() - 1
+                if item.get("tag"):
+                    combo.setItemData(row, item["tag"], TAG_ROLE)
+                combo.setItemData(row, item.get("tooltip") or item["label"], Qt.ToolTipRole)
+                combo.setItemData(row, True, CLOSE_ROLE)
+            combo.setEnabled(not self._run_active)
+            index = combo.findData(selected) if selected else 0
+            combo.setCurrentIndex(max(0, index))
+        from .step3_mask_bar import fit_popup
+        fit_popup(combo)
+        combo.blockSignals(False)
+        self._use_fuse_item(combo.currentIndex())
+
+    def _use_fuse_item(self, index):
+        if not (0 <= index < len(self._fuse_items)):
+            if self._zarr_edit.text().strip():
+                self._zarr_edit.setText('')
+            self._zarr_path = None
+            self.set_data_version('', {})
+            return
+        item = self._fuse_items[index]
+        # §7: the regions this fuse run froze, not the ones edited now (none:
+        # the whole image)
+        self.set_rois(item.get("rois") or [])
+        if os.path.abspath(self._zarr_edit.text().strip() or '.') != os.path.abspath(item["zarr"]):
+            self._zarr_edit.setText(item["zarr"])
+            self._load_zarr_info()
+        self.set_data_version('', item.get("regions") or {})
+
+    def selected_fuse_run(self):
+        return str(self._fuse_combo.currentData() or '')
+
+    def _on_fuse_activated(self, index):
+        self._use_fuse_item(index)
+        run = self._fuse_combo.itemData(index) or ''
+        if run:
+            self.fuse_chosen.emit(run)
+
+    def _on_fuse_close(self, row):
+        run = self._fuse_combo.itemData(row) or ''
+        if run:
+            self._fuse_combo.hidePopup()
+            self.fuse_delete_requested.emit(run)
+
+    # ── block RM §6: Step2's draft (method, parameters, their file) ──
+
+    def draft(self):
+        """What Step2 holds now, for session.json, or None."""
+        try:
+            cfg = self.get_seg_config()
+        except Exception:                                   # noqa: BLE001
+            return None
+        return {"segmentation_config": json.loads(json.dumps(cfg, default=str)),
+                "param_file": self._seg_param_file or "",
+                "parameter_source": self._parameter_source}
+
+    def apply_draft(self, draft):
+        """Put a saved Step2 draft back on screen."""
+        cfg = normalize_segmentation_config((draft or {}).get("segmentation_config") or {})
+        if not cfg:
+            return False
+        # The draft IS the configuration that was on screen: it runs as typed
+        # (source manual), so no index file is reloaded over it at Run.
+        self._set_param_source("manual")
+        self._apply_seg_config_to_ui(cfg)
+        self._seg_config = cfg
+        self._seg_param_file = ""
+        self._resolved_param_edit.setText(str((draft or {}).get("param_file") or ""))
+        print(f"[Step2] unsaved Step2 draft restored (method={cfg.get('method')})")
+        return True
+
     def _browse_zarr(self):
         path = QFileDialog.getExistingDirectory(self, 'Select fused.zarr directory')
+        run = os.path.dirname(os.path.abspath(path)) if path else ""
+        index = self._fuse_combo.findData(run) if run else -1
+        if index >= 0 and self._fuse_items:
+            # a listed Step1 result: chosen the same way as in Input
+            self._fuse_combo.setCurrentIndex(index)
+            self._on_fuse_activated(index)
+            return
         if path:
             self._zarr_edit.setText(path)
             self._sync_output_dir_from_zarr_path(path)
@@ -1453,7 +1566,10 @@ class Step2Page(QWidget):
             return False
         try:
             with open(path, 'r', encoding='utf-8') as f:
-                cfg = normalize_segmentation_config(json.load(f))
+                # Block RM (§16.3-6): its paths are project-relative on disk.
+                from ..utils import run_store
+                cfg = normalize_segmentation_config(run_store.from_records(
+                    json.load(f), run_store.project_dir_of(path)))
             # A new-format file is checked by its version, never guessed at.
             preseg_contract.validate(cfg)
             self._apply_seg_config_to_ui(cfg)
@@ -2781,6 +2897,20 @@ class Step2Page(QWidget):
         if not self._zarr_path or not os.path.exists(self._zarr_path):
             QMessageBox.warning(self, 'No data',
                                 'Please load a fused.zarr first.')
+            return
+        # Block RM (§3): inside a workspace a run's input is a Step1 result
+        # (a published fuse run) -- its one upstream.
+        from ..utils import run_store
+        run_dir = os.path.dirname(os.path.abspath(self._zarr_path))
+        if self._roi_dir and run_store.project_dir_of(self._roi_dir) and not (
+                run_store.kind_of(run_dir) == "fuse" and run_store.is_done(run_dir)
+                and os.path.realpath(run_store.roi_dir_of(run_dir))
+                == os.path.realpath(self._roi_dir)
+                and os.path.abspath(run_dir) == os.path.abspath(self.selected_fuse_run() or ".")):
+            QMessageBox.warning(self, 'Step2',
+                                'Choose a Step1 result in Input: inside a project, Step2 '
+                                'runs on the result chosen there (one Step1 published in '
+                                'this workspace).')
             return
         source = self._param_source_combo.currentData() or "manual"
         if source == "index":

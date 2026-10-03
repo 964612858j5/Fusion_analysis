@@ -27,6 +27,7 @@ from ..core import (label_ownership, label_pyramid, nuclei_pairing, preseg_contr
                     preseg_input, seam_merge)
 from ..core.io_loader import OMETIFFLoader
 from ..core.provenance import register_segmentation_run, write_json_atomic
+from ..utils import run_store
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
@@ -262,6 +263,11 @@ class SegmentMergeWorker(QThread):
         now = datetime.now()
         created_at = now.isoformat()
         safe_method = "".join(c if c.isalnum() or c in "._-" else "_" for c in str(self._name_method())).strip("._")
+        if self.roi_dir and os.path.isdir(run_store.runs_dir(self.roi_dir)):
+            # Block RM (§4): a segment run in the workspace's runs/; it exists
+            # once `_rm_publish_segment_run` writes its .done.
+            out_dir = run_store.new_run(self.roi_dir, "segment", suffix=safe_method)
+            return os.path.basename(out_dir), out_dir, created_at
         if self.roi_dir or os.path.basename(self.project_output_dir) == "step2":
             base = f"seg_{now.strftime('%Y%m%d_%H%M%S')}_{safe_method}"
             parent = os.path.join(self.project_output_dir, "segmentation_runs")
@@ -583,7 +589,9 @@ class SegmentMergeWorker(QThread):
             return {}
         try:
             with open(self.param_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                # Block RM (§16.3-6): project-relative paths on disk.
+                data = run_store.from_records(json.load(f),
+                                              run_store.project_dir_of(self.param_file))
             return data if isinstance(data, dict) else {}
         except Exception:
             return {}
@@ -949,6 +957,14 @@ class SegmentMergeWorker(QThread):
         return path
 
     def _multichannel_source_path(self):
+        # Block RM (§5): a run on a published fuse run reads the corrected
+        # product of THAT chain, whatever the parameter file names.
+        upstream = os.path.dirname(os.path.abspath(self.zarr_path or ""))
+        if run_store.kind_of(upstream) == "fuse" and run_store.is_done(upstream):
+            correct = run_store.correct_run_of(upstream)
+            zpath = os.path.join(correct, "corrected_channels.zarr") if correct else ""
+            if zpath and os.path.isdir(zpath):
+                return self._abs(zpath)
         param_cfg = self._load_param_file_config()
         explicit = [
             self.seg_config.get("hq_source_zarr"),
@@ -960,7 +976,10 @@ class SegmentMergeWorker(QThread):
         for path in explicit:
             if path:
                 return self._abs(path)
+        # Block RM (§5): the corrected product of the input's own chain.
+        correct = run_store.correct_run_of(os.path.dirname(os.path.abspath(self.zarr_path or "")))
         candidates = [
+            os.path.join(correct, "corrected_channels.zarr") if correct else "",
             os.path.join(self.roi_dir, "step0", "corrected_channels.zarr") if self.roi_dir else "",
             self.roi_manifest.get("corrected_zarr_path") or "",
             self._project_path("corrected_channels.zarr"),
@@ -1012,6 +1031,33 @@ class SegmentMergeWorker(QThread):
             if path and os.path.exists(path):
                 return self._abs(path)
         return self._abs(self.zarr_path)
+
+    def _rm_publish_segment_run(self):
+        """Block RM (§4, §5): params.json -- the configuration this run used,
+        as Step2 had it when Run was pressed -- inputs.json (its fuse run),
+        then .done. Nothing for a run outside a workspace's runs/."""
+        if run_store.kind_of(self.output_dir) != "segment":
+            return
+        upstream = os.path.dirname(os.path.abspath(self.zarr_path or ""))
+        if run_store.kind_of(upstream) != "fuse" or not run_store.is_done(upstream):
+            raise RuntimeError(f"the input {self.zarr_path} is not a published Step1 "
+                               f"result (fuse run)")
+        project = run_store.project_dir_of(self.output_dir)
+        params = {
+            "kind": "segment",
+            "created_at": self.created_at,
+            "summary": str(self._name_method()),
+            "method": self.method,
+            "segmentation_config": json.loads(json.dumps(self.seg_config, default=str)),
+            "param_file": self.param_file or "",
+            "parameter_source": self.parameter_source,
+            "tiles": {"n_rows": self.n_rows, "n_cols": self.n_cols,
+                      "overlap_px": self.overlap_px},
+            "input_zarr_path": os.path.abspath(self.zarr_path),
+        }
+        run_store.write_params(self.output_dir, run_store.to_records(params, project))
+        run_store.write_inputs(self.output_dir, upstream)
+        run_store.publish(self.output_dir)
 
     def _register_completed_result(self, summary_meta):
         config_path = os.path.join(self.output_dir, "run_segmentation_params.json")
@@ -3584,6 +3630,7 @@ class SegmentMergeWorker(QThread):
                         "status": "done",
                         "meta_path": os.path.join(rel_run_path, "segmentation_meta.json"),
                     })
+                    self._rm_publish_segment_run()
                     register_segmentation_run(self.output_dir, summary_meta)   # block A3
                     print(f"[Step2] run_id={self.result_id}")
                     print(f"[Step2] roi_id={self.roi_id}")
@@ -4314,6 +4361,7 @@ class SegmentMergeWorker(QThread):
                     "status": "done",
                     "meta_path": os.path.join(rel_run_path, "segmentation_meta.json"),
                 })
+                self._rm_publish_segment_run()
                 register_segmentation_run(self.output_dir, meta)           # block A3
                 log.info("[Step2] updated roi_index latest_by_method")
 

@@ -34,6 +34,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from ..core import quant_engine as qe
 from ..core import quant_sources as qs
 from ..core.provenance import register_step4
+from ..utils import run_store
 
 INTEGER_COLUMNS = qe.INTEGER_COLUMNS
 EMPTY_IDS_LISTED_UP_TO = 1000
@@ -46,11 +47,23 @@ def output_base(file_prefix=None):
     return f"{p}_cell_features" if p else "cell_features"
 
 
+#: the folder name that stands for "a new quant run" (block RM §5): Step4
+#: makes ``<workspace>/runs/quant_<stamp>/`` when it starts.
+NEW_QUANT_RUN = "quant_(new run)"
+
+
 def default_output_dir(job_or_run_dir, roi_name=None, workspace=None, run_id=None):
-    """`<workspace>/step4/quantification_runs/<segmentation_run_id>/<region>/`."""
+    """A segment run of a block-RM workspace: ``<workspace>/runs/quant_(new
+    run)/<region>/`` -- a new quant run, made when Step4 starts. Otherwise
+    `<workspace>/step4/quantification_runs/<segmentation_run_id>/<region>/`."""
+    run_dir = ""
     if isinstance(job_or_run_dir, qs.QuantJob):
         job = job_or_run_dir
         workspace, run_id, roi_name = job.workspace, job.run_id, job.roi_name
+        run_dir = job.run_dir
+    if run_dir and run_store.kind_of(run_dir) == "segment":
+        return os.path.join(workspace, run_store.RUNS_DIR, NEW_QUANT_RUN,
+                            qs.region_folder(roi_name))
     return os.path.join(workspace, "step4", "quantification_runs", str(run_id),
                         qs.region_folder(roi_name))
 
@@ -232,6 +245,20 @@ def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions
     if "nuclear_summary" in features and not job.has_nuclei:
         raise ValueError("this run has no nuclei beside its cells: no nuclear summary")
     base = output_base(file_prefix)
+    quant_run = ""
+    if run_store.kind_of(job.run_dir) == "segment" and run_store.is_done(job.run_dir):
+        # Block RM (§5): a segment run of a project is quantified into a new
+        # quant run (its upstream that segment run), whatever folder was
+        # typed -- results of a project stay in its chain.
+        quant_run = run_store.new_run(run_store.roi_dir_of(job.run_dir), "quant")
+        output_dir = os.path.join(quant_run, qs.region_folder(job.roi_name))
+    else:
+        cur = os.path.abspath(output_dir)
+        while cur != os.path.dirname(cur):
+            if run_store.kind_of(cur) and run_store.is_done(cur):
+                raise ValueError(f"{output_dir} lies inside a published result "
+                                 f"({os.path.basename(cur)}); choose another folder")
+            cur = os.path.dirname(cur)
     made_dir = not os.path.isdir(output_dir)
     os.makedirs(output_dir, exist_ok=True)
     sink_dir = os.path.join(output_dir, f".{base}_features.partial")
@@ -272,6 +299,21 @@ def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions
         for final, part in zip(finals, partials):
             os.replace(part, final)
             renamed.append(final)
+        if quant_run:
+            run_store.write_params(quant_run, run_store.to_records({
+                "kind": "quant",
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "summary": f"{job.roi_name} · {len(stats)} statistics"
+                           + (f" · {','.join(sorted(features))}" if features else ""),
+                "roi_name": job.roi_name, "statistics": list(stats),
+                "features": sorted(features), "regions": list(regions or []),
+                "distribution": list(distribution or []), "markers": list(markers or []),
+                "write_csv": bool(write_csv), "file_prefix": file_prefix or "",
+                "outputs": {k: v for k, v in outputs.items() if v},
+                "region_folder": os.path.basename(output_dir),
+            }, run_store.project_dir_of(quant_run)))
+            run_store.write_inputs(quant_run, job.run_dir)
+            run_store.publish(quant_run)
         ok = True
         register_step4(h5_path, job, prov)         # block A3: after the commit, never raises
     finally:
@@ -288,7 +330,10 @@ def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions
                 os.rmdir(output_dir)
             except OSError:
                 pass
+        if not ok and quant_run:
+            run_store.discard(quant_run)
     return {"h5ad": h5_path, "csv": csv_path, "provenance": prov_path, "job": job,
+            "output_dir": output_dir,
             "n_cells": int(result.ids.size), "nucleus_outside": result.nucleus_outside}
 
 
@@ -347,7 +392,8 @@ class FeatureExtractWorker(QThread):
                 should_stop=lambda: self._stop)
             self.progress.emit(1, 1, f"{self.outputs['n_cells']:,} objects → "
                                      f"{self.outputs['h5ad']}")
-            self.extraction_done.emit(self.output_dir, self.base_name)
+            self.extraction_done.emit(self.outputs.get("output_dir") or self.output_dir,
+                                      self.base_name)
         except qe.QuantStopped:
             self.error.emit("Stopped by user.")
         except (qs.QuantSourceError, qe.QuantLabelError, ValueError) as exc:

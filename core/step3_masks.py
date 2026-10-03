@@ -70,6 +70,10 @@ class Run:
     #: short label for it ("Full WSI · 2026-09-27 09:55").
     workspace: str = ""
     workspace_label: str = ""
+    #: Block RM (§5): the run's display name ("10-03 12:00 · method") and its
+    #: upstream fuse run's ("(deleted)" when that run is gone).
+    display: str = ""
+    upstream_display: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -159,63 +163,40 @@ def _created_from_name(name):
 
 
 def list_runs(roi_dir):
-    """The finished runs of the ROI workspace at `roi_dir`, newest first.
-    From `roi_index.json`'s `segmentation_runs` and the run directories under
-    `step2/segmentation_runs` and `step2/segmentation_results`; one entry per
-    `run_id` (the directory's real path when there is none). Left out: an
-    index entry whose status is not `done`, a directory without
-    `segmentation_meta.json` / `run_metadata.json`, a directory outside the
-    workspace and a run whose metadata names another ROI. `active` marks the
-    index's `active_segmentation_run` when it is one of these."""
+    """Block RM (§5): the published segment runs of the ROI workspace at
+    `roi_dir` (``runs/segment_*`` with ``.done``), newest first. A run whose
+    folder holds no ``segmentation_meta.json`` / ``run_metadata.json`` is left
+    out."""
+    from ..utils import run_store
     roi_dir = _real(roi_dir)
-    index = _load_json(os.path.join(roi_dir, "roi_index.json")) or {}
     manifest = _load_json(os.path.join(roi_dir, "roi_manifest.json")) or {}
+    label = _workspace_label(manifest)
+    # (`active`: the workspace index's active run, until block RM-4 retires
+    # the index)
+    index = _load_json(os.path.join(roi_dir, "roi_index.json")) or {}
+    active = str(index.get("active_segmentation_run") or "")
     roi_id = str(manifest.get("roi_id") or index.get("roi_id") or "")
-
-    candidates = []                           # (run_dir, index entry or None)
-    refused = set()                           # index keys not done
-    for key, entry in dict(index.get("segmentation_runs") or {}).items():
-        entry = dict(entry or {})
-        run_id = str(entry.get("run_id") or key)
-        if str(entry.get("status") or "") != "done":
-            refused.add(run_id)
-            continue
-        path = entry.get("path") or os.path.join("step2", "segmentation_runs", run_id)
-        candidates.append((path if os.path.isabs(path) else os.path.join(roi_dir, path), entry))
-    for sub in ("segmentation_runs", "segmentation_results"):
-        base = os.path.join(roi_dir, "step2", sub)
-        if not os.path.isdir(base):
-            continue
-        for name in sorted(os.listdir(base)):
-            path = os.path.join(base, name)
-            if os.path.isdir(path):
-                candidates.append((path, None))
-
-    runs: Dict[str, Run] = {}
-    for path, entry in candidates:
-        if not os.path.isdir(path) or not _inside(path, roi_dir):
-            continue
+    out = []
+    for path in run_store.list_runs(roi_dir, "segment"):
         meta, meta_path = _run_meta(path)
         if meta is None:
             continue
-        entry = entry or {}
-        run_dir = _real(path)
-        run_id = str(entry.get("run_id") or meta.get("run_id") or meta.get("result_id")
-                     or run_dir)
-        if run_id in runs or run_id in refused:
-            continue
         if roi_id and meta.get("roi_id") and str(meta.get("roi_id")) != roi_id:
-            continue
-        runs[run_id] = Run(
-            run_id=run_id,
-            method=str(meta.get("method") or entry.get("method") or ""),
-            created_at=str(meta.get("created_at") or entry.get("created_at")
+            continue                                  # its metadata names another ROI
+        run_dir = _real(path)
+        params = run_store.read_params(run_dir)
+        up = run_store.upstream_of(run_dir)
+        run_id = str(meta.get("run_id") or meta.get("result_id") or os.path.basename(run_dir))
+        out.append(Run(
+            run_id=run_id, active=(run_id == active),
+            method=str(meta.get("method") or params.get("method") or ""),
+            created_at=str(meta.get("created_at") or params.get("created_at")
                            or _created_from_name(os.path.basename(run_dir))),
-            run_dir=run_dir, meta=meta, meta_path=meta_path)
-    active = str(index.get("active_segmentation_run") or "")
-    label = _workspace_label(manifest)
-    out = [dataclasses.replace(r, active=(r.run_id == active), workspace=roi_dir,
-                               workspace_label=label) for r in runs.values()]
+            run_dir=run_dir, meta=meta, meta_path=meta_path, workspace=roi_dir,
+            workspace_label=label,
+            display=run_store.display_name(run_dir) if params else "",
+            upstream_display=(run_store.display_name(up) if up and run_store.is_done(up)
+                              else "(deleted)" if up and up != run_store.RAW else "")))
     out.sort(key=lambda r: r.created_at, reverse=True)
     return out
 
@@ -304,9 +285,15 @@ def load_run(path):
     meta, meta_path = _run_meta(path)
     if meta is None:
         return "no segmentation_meta.json / run_metadata.json in that folder"
-    # <workspace>/step2/segmentation_runs/<run>
-    ws = os.path.dirname(os.path.dirname(os.path.dirname(path)))
-    manifest = _load_json(os.path.join(ws, "roi_manifest.json")) or {}
+    # the workspace above it: the folder holding roi_manifest.json
+    ws, cur = "", os.path.dirname(path)
+    while cur and cur != os.path.dirname(cur):
+        if os.path.isfile(os.path.join(cur, "roi_manifest.json")):
+            ws = cur
+            break
+        cur = os.path.dirname(cur)
+    manifest = _load_json(os.path.join(ws, "roi_manifest.json")) if ws else None
+    manifest = manifest or {}
     if not manifest:
         ws = ""
     return Run(run_id=str(meta.get("run_id") or meta.get("result_id") or path),

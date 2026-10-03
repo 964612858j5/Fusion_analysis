@@ -220,40 +220,6 @@ def _corrected_decisions(decisions):
             if str(v).strip().lower() in CORRECTED_METHODS}
 
 
-def _run_data_version(ws, meta):
-    """The data-version record a run was made from (its
-    ``segmentation_meta.json`` names it), with its folder path; None for a
-    run made before data versions."""
-    vid = str((meta or {}).get("data_version") or "")
-    if not vid or not ws:
-        return None
-    from ..utils import data_versions
-    rec = data_versions.get_version(ws, vid)
-    if rec is None:
-        return None
-    return dict(rec, folder_path=data_versions.version_dir(ws, rec.get("folder", "")))
-
-
-def _version_referencing(ws, corrected_path):
-    """The version a run made BEFORE data versions read its corrected
-    product from: the registered earlier workspace (``legacy``) referencing
-    it. Nothing else is guessed -- a later version may share the product with
-    other correction decisions (codex reviews 2 #1, 3 #3); without it the
-    product's own recorded decisions are checked against the config below,
-    which refuses a mismatch."""
-    if not ws:
-        return None
-    from ..utils import data_versions
-    want = os.path.abspath(corrected_path)
-    found = [rec for rec in data_versions.list_versions(ws)
-             if (rec.get("corrected") or {}).get("path")
-             and os.path.abspath(rec["corrected"]["path"]) == want]
-    rec = next((r for r in found if r.get("legacy")), None)
-    if rec is None:
-        return None
-    return dict(rec, folder_path=data_versions.version_dir(ws, rec.get("folder", "")))
-
-
 def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):
     """The `QuantJob` of one region of a run, or QuantSourceError.
 
@@ -314,70 +280,30 @@ def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):
     if not (0 <= y0 < y1 <= slide_shape[0] and 0 <= x0 < x1 <= slide_shape[1]):
         raise QuantSourceError(f"region {list(bbox)} lies outside the slide {slide_shape}")
 
-    # -- Step0's decisions: the handoff, its correction config, its product
-    step0_dir = os.path.join(ws, "step0")
-    handoff_path = os.path.join(step0_dir, "step0_roi_result.json")
-    handoff = _load_json(handoff_path)
-    if handoff is None:
-        raise QuantSourceError("the workspace has no Step0 handoff (step0_roi_result.json)")
-    cfg_path = handoff.get("correction_config_path") or os.path.join(step0_dir,
-                                                                     "correction_config.json")
-    # Block DV: a run made from a data version reads THAT version's
-    # correction config and corrected product, not the workspace's current
-    # ones (a later version may have changed them).
-    version = _run_data_version(ws, run.meta)
-    # A run made before data versions records the corrected product it read;
-    # that product is kept (read-only) by the version that references it.
-    recorded_corrected = str(((run.meta or {}).get("paths") or {})
-                             .get("corrected_channels_zarr") or "")
-    if version is None and recorded_corrected:
-        version = _version_referencing(ws, recorded_corrected)
-    if version is not None:
-        vcfg = os.path.join(version["folder_path"], "correction_config.json")
-        if os.path.isfile(vcfg):
-            cfg_path = vcfg
-    cfg = _load_json(cfg_path)
-    if cfg is None:
+    # -- Step0's decisions: the run's own chain (block RM §5) -- segment run
+    # -> fuse run -> correct run; that correct run's frozen decisions and
+    # pixels, whatever Step0 holds now.
+    from ..utils import run_store
+    correct = run_store.correct_run_of(run.run_dir)
+    if not correct or not run_store.is_done(correct):
+        raise QuantSourceError("the run's chain names no published Step0 result "
+                               "(correct run)")
+    cfg_path = os.path.join(correct, run_store.PARAMS)
+    cparams = run_store.read_params(correct)
+    if not cparams:
         raise QuantSourceError(f"Step0's correction decisions are missing ({cfg_path})")
+    cfg = dict(cparams.get("correction_config") or {})
     decisions = {str(k): str(v).strip().lower()
-                 for k, v in (cfg.get("channel_decisions") or {}).items()}
+                 for k, v in (cparams.get("channel_decisions")
+                              or cfg.get("channel_decisions") or {}).items()}
     wanted = _corrected_decisions(decisions)
-    recorded = handoff.get("corrected_decisions") if version is None else None
-    if recorded is not None and _corrected_decisions(recorded) != wanted:
-        raise QuantSourceError(f"Step0's handoff lists corrected channels "
-                               f"{_corrected_decisions(recorded)}, its correction config "
-                               f"{wanted}")
-    from ..utils.data_versions import is_inside as _is_inside
-    if version is None and recorded_corrected and (
-            os.path.isdir(recorded_corrected) or _is_inside(recorded_corrected, ws)):
-        # (missing, though it was this workspace's -- deleted: refused too;
-        # codex review 5)
-        # A run made before data versions whose version is gone (codex review
-        # 4, #3): its decisions are not guessed from today's config -- the
-        # product it read must have been made with exactly these.
-        try:
-            import zarr
-            made = _corrected_decisions((zarr.open_group(recorded_corrected, mode="r").attrs
-                                         .get("correction_config") or {})
-                                        .get("channel_decisions"))
-        except Exception:                                   # noqa: BLE001
-            made = None
-        if made != wanted:
-            raise QuantSourceError(
-                f"this run read the corrected product {recorded_corrected}, made for "
-                f"{sorted(made) if made is not None else 'unknown channels'}; Step0's "
-                f"current correction config says {sorted(wanted)} -- the run's own "
-                f"correction decisions cannot be resolved")
     unknown = sorted(set(wanted) - set(names))
     if unknown:
         raise QuantSourceError(f"Step0 corrects {unknown}, which the slide does not have")
 
     zpath, root, container, offset, gshape = "", None, None, (0, 0), None
     if wanted:
-        zpath = ((version or {}).get("corrected") or {}).get("path") \
-            or (recorded_corrected if os.path.isdir(recorded_corrected) else "") \
-            or handoff.get("corrected_zarr_path") \
-            or os.path.join(step0_dir, "corrected_channels.zarr")
+        zpath = os.path.join(correct, "corrected_channels.zarr")
         try:
             import zarr
             root = zarr.open_group(zpath, mode="r")
@@ -386,9 +312,12 @@ def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):
                                    f"product {zpath} cannot be opened")
         in_product = _corrected_decisions(
             (root.attrs.get("correction_config") or {}).get("channel_decisions"))
-        if in_product != wanted:
+        # A run copied from its upstream keeps the upstream's arrays (a
+        # withdrawn channel's too): it must hold every wanted channel, made
+        # the wanted way; its own params.json says which ones count.
+        if any(in_product.get(ch) != m for ch, m in wanted.items()):
             raise QuantSourceError(f"the corrected product was made for {in_product}, "
-                                   f"Step0's correction config says {wanted}")
+                                   f"its correct run says {wanted}")
         src = root.attrs.get("source_ome")
         if not src or not step3_masks.same_slide(src, slide):
             raise QuantSourceError(f"the corrected product was made from {src or '(unrecorded)'},"
@@ -411,7 +340,7 @@ def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):
                     nucleus_path=nucleus_path, table_path=table_path, n_nuclei=n_nuclei,
                     seam_merge=store.get("seam_merge") if isinstance(store.get("seam_merge"), dict)
                     else None,
-                    step0={"handoff": os.path.realpath(handoff_path),
+                    step0={"correct_run": os.path.realpath(correct),
                            "correction_config": os.path.realpath(cfg_path),
                            "corrected_product": os.path.realpath(zpath) if zpath else None,
                            "decisions": decisions})

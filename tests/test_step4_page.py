@@ -14,6 +14,8 @@ Offscreen; synthetic projects in the test's temporary directory only.
 """
 
 import os
+
+from block01.workers.feature_extract_worker import NEW_QUANT_RUN  # noqa: E402
 import shutil
 import sys
 import types
@@ -37,6 +39,13 @@ def _page():
     return page
 
 
+def _produced(p, region="Full_WSI"):
+    """Block RM (§5): where the page's last run wrote -- the newest quant run
+    of the workspace."""
+    from block01.utils import run_store
+    return os.path.join(run_store.latest_run(p["ws"], "quant"), region)
+
+
 def test_a_handed_over_run_is_ready(tmp_path):
     p = build_project(tmp_path)
     page = _page()
@@ -46,8 +55,9 @@ def test_a_handed_over_run_is_ready(tmp_path):
     assert page._roi_combo.count() == 1 and not page._roi_combo.isEnabled()
     assert page._slide_lbl.text() == os.path.realpath(p["slide"])
     assert "3 raw, 1 from Step 0's correction" in page._source_lbl.text()
-    assert page._out_edit.text() == os.path.join(
-        p["ws"], "step4", "quantification_runs", "seg_20260927_120000_test", "Full_WSI")
+    # block RM (§5): a result of a project goes into a new quant run
+    assert page._out_edit.text() == os.path.join(p["ws"], "runs", NEW_QUANT_RUN, "Full_WSI")
+    assert page._out_edit.isReadOnly()
     assert not page._reason_lbl.isVisible()
 
 
@@ -90,24 +100,23 @@ def test_two_regions_are_listed_and_the_output_follows_the_choice(tmp_path):
     page.set_run(p["run_dir"], "ROI 2", open_slide=p["slide"])
     assert [page._roi_combo.itemText(i) for i in range(2)] == ["ROI 1", "ROI 2"]
     assert page._roi_combo.isEnabled()
-    assert page._out_edit.text().endswith(os.path.join("seg_20260927_120000_test", "ROI_2"))
+    assert page._out_edit.text().endswith(os.path.join(NEW_QUANT_RUN, "ROI_2"))
     page._roi_combo.setCurrentIndex(0)
     assert page._job.roi_name == "ROI 1"
     assert page._out_edit.text().endswith("ROI_1")
 
 
-def test_the_job_runs_from_the_page_into_the_users_folder(tmp_path):
+def test_the_job_runs_from_the_page_into_a_new_quant_run(tmp_path):
     p = build_project(tmp_path)
     page = _page()
     page.set_run(p["run_dir"], open_slide=p["slide"])
-    mine = str(tmp_path / "my_output")
-    page._out_edit.setText(mine)
     page._run()
     page._worker.wait(60000)
     for _ in range(50):
         _app.processEvents()
     assert page._errors == []
     assert page._announced
+    mine = _produced(p)
     assert sorted(os.listdir(mine)) == ["cell_features.h5ad", "cell_features_provenance.json"]
     assert page._btn_run.isEnabled()
 
@@ -211,8 +220,6 @@ def test_the_page_runs_the_chosen_scope(tmp_path):
     p = build_project(tmp_path, nuclei=True)
     page = _page()
     page.set_run(p["run_dir"], open_slide=p["slide"])
-    mine = str(tmp_path / "scope_out")
-    page._out_edit.setText(mine)
     page._output_checks["csv"].setChecked(True)
     page._region_checks["cytoplasm"].setChecked(False)
     page._run()
@@ -221,6 +228,7 @@ def test_the_page_runs_the_chosen_scope(tmp_path):
         _app.processEvents()
     assert page._errors == []
     import anndata
+    mine = _produced(p)
     ad = anndata.read_h5ad(os.path.join(mine, "cell_features.h5ad"))
     assert "nucleus_mean" in ad.layers and "cytoplasm_mean" not in ad.layers
     assert os.path.isfile(os.path.join(mine, "cell_features.csv"))
@@ -280,8 +288,6 @@ def test_the_page_runs_the_distribution_statistics(tmp_path):
     p = build_project(tmp_path, nuclei=True)
     page = _page()
     page.set_run(p["run_dir"], open_slide=p["slide"])
-    mine = str(tmp_path / "dist_out")
-    page._out_edit.setText(mine)
     page._dist_checks["p90"].setChecked(True)
     _check_markers(page, ["CD3", "PanCK"])
     page._run()
@@ -290,6 +296,7 @@ def test_the_page_runs_the_distribution_statistics(tmp_path):
         _app.processEvents()
     assert page._errors == []
     import anndata
+    mine = _produced(p)
     ad = anndata.read_h5ad(os.path.join(mine, "cell_features.h5ad"))
     assert set(ad.obsm.keys()) == {"cell_p90", "nucleus_p90", "cytoplasm_p90"}
     assert list(ad.obsm["cell_p90"].columns) == ["CD3", "PanCK"]

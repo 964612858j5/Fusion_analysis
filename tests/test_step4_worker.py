@@ -184,15 +184,18 @@ def test_the_thread_finishes(tmp_path):
     p = build_project(tmp_path)
     out = str(tmp_path / "out")
     got = _run_thread(few.FeatureExtractWorker(p["run_dir"], out))
-    assert got["error"] is None and got["done"] == (out, "cell_features")
+    out = got["done"][0]                         # block RM: the quant run it made
+    assert got["error"] is None and got["done"][1] == "cell_features"
+    assert os.path.basename(os.path.dirname(out)).startswith("quant_")
     assert sorted(os.listdir(out)) == ["cell_features.h5ad", "cell_features_provenance.json"]
 
 
 def test_the_default_output_folder(tmp_path):
     p = build_project(tmp_path)
     job = qs.resolve_quant_job(p["run_dir"])
-    assert few.default_output_dir(job) == os.path.join(
-        p["ws"], "step4", "quantification_runs", "seg_20260927_120000_test", "Full_WSI")
+    # block RM (§5): a new quant run of the result's chain
+    assert few.default_output_dir(job) == os.path.join(p["ws"], "runs", few.NEW_QUANT_RUN,
+                                                       "Full_WSI")
 
 
 
@@ -208,6 +211,7 @@ def test_one_h5ad_per_run_with_every_layer(tmp_path):
     out = str(tmp_path / "out")
     res = few.run_extraction(p["run_dir"], out, regions=["nucleus", "cytoplasm"],
                              features=["morphology", "nuclear_summary"])
+    out = res["output_dir"]                      # block RM: the quant run it made
     assert res["csv"] is None and sorted(os.listdir(out)) == [
         "cell_features.h5ad", "cell_features_provenance.json"]
     ad = _read(res["h5ad"])

@@ -381,8 +381,8 @@ def test_a_run_with_skipped_tiles_opens_in_step3_and_quantifies(app, tmp_path):
     from block01.workers.feature_extract_worker import run_extraction
     from block01.workers.segment_merge_worker import SegmentMergeWorker
     slide = tg._nuclei_slide(tmp_path)
-    _project, ctx = tg._step0(tmp_path, slide)
-    fused = tg._fuse(ctx, slide)
+    _project, ctx = tg._step0_run(tmp_path, slide)      # block RM: the run chain
+    fused = tg._fuse_run(ctx, slide)
     cfg = dict(t2._contract_config(tmp_path / "cfg", "stardist_nuclei_expansion"))
     cfg["skip_tiles"] = _plan(2, 2, t2.HALO, [3])
     w = SegmentMergeWorker(fused, seg_config=cfg, n_rows=2, n_cols=2, overlap_px=t2.HALO,

@@ -353,8 +353,10 @@ def _state(w):
 
 def _load(w, monkeypatch, restore, mode=None):
     told = []
-    monkeypatch.setattr(QtWidgets.QInputDialog, "getItem",
-                        staticmethod(lambda *a, **k: (a[3][0], True)))
+    # block RM: the plan list is the window's own chooser (it also lists the
+    # pre-segmentation runs); the test answers it with the first plan
+    monkeypatch.setattr(type(w), "_choose_preseg_plan",
+                        lambda self, entries, runs: entries[0] if entries else None)
     answers = {"Replace the methods in the plan now?": QtWidgets.QMessageBox.Yes}
     monkeypatch.setattr(
         QtWidgets.QMessageBox, "question",

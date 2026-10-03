@@ -109,7 +109,7 @@ from .shared_camera import snapshot_from
 from .step1_viewer_mount import Step1WholeSlideMount
 from .step2_page import Step2Page
 from .step3_page import Step3Page
-from .step3_mask_bar import PROVENANCE_UNKNOWN, Step3MaskBar
+from .step3_mask_bar import Step3MaskBar
 from ..core import step3_masks
 from .step4_page import Step4Page
 
@@ -788,6 +788,7 @@ class MainWindow(QMainWindow):
         # anything is running, detaches what it has open, and -- when the
         # current version went with no other loaded -- starts over empty.
         self._step0.deletion_blocker = self._dv_deletion_blocker
+        self._step0.delete_run = self._rm_delete_run         # block RM §9
         self._step0.release_paths = self._dv_release_paths
         # ...and whether the handoff it just announced was accepted: a version
         # replacing a deleted one must be loaded before anything is deleted.
@@ -1445,6 +1446,9 @@ class MainWindow(QMainWindow):
                                 title_bar=self._frame_title_bar("Step 2 — Segmentation & Merge"))
         self._step2.go_back.connect(self._go_to_step1)
         self._step2.segmentation_done.connect(self._on_step2_complete)
+        # Block RM (§5, §9): the Input drop-down
+        self._step2.fuse_chosen.connect(self._rm_note_viewing)
+        self._step2.fuse_delete_requested.connect(lambda run: self._rm_delete_run(run))
         self._step2.segmentation_done.connect(self._step3_on_segmentation_done)
         self._step2.open_qc_requested.connect(self._go_to_step3)
         self._stack.addWidget(self._step2)
@@ -1615,6 +1619,7 @@ class MainWindow(QMainWindow):
         # not inside it.
         bar = Step3MaskBar(self)
         bar.run_chosen.connect(self._step3_on_run_chosen)
+        bar.delete_requested.connect(lambda run_dir: self._rm_delete_run(run_dir))
         bar.style_changed.connect(self._step3_on_mask_style)
         bar.load_requested.connect(lambda: self._step3_load_run())
         self._step3_mask_bar = bar
@@ -1985,7 +1990,7 @@ class MainWindow(QMainWindow):
         run, the region for a run of several, the workspace for another one."""
         run = entry.run
         created = str(run.created_at or "")[:16].replace("T", " ")
-        label = f"{run.method or 'unknown method'} · {created}" if created else run.method
+        label = run.display or (f"{run.method} · {created}" if created else run.method)
         if several:
             label += f" · {entry.roi_name}"
         if run.active and run.workspace == current_ws:
@@ -1996,11 +2001,10 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _step3_run_tag(run):
-        """Block DV §3.7 (ruling 5a): the data version a run was made from,
-        right-aligned at its row's end; a run that records none is
-        `unknown`."""
-        version = (getattr(run, "meta", None) or {}).get("data_version")
-        return str(version) if version else PROVENANCE_UNKNOWN
+        """Block RM (§5): the fuse run this run was made from, by its display
+        name, right-aligned at its row's end (none for a loaded run outside
+        a workspace's runs/)."""
+        return str(getattr(run, "upstream_display", "") or "")
 
     @staticmethod
     def _step3_runs_with_provenance(runs):
@@ -2072,9 +2076,14 @@ class MainWindow(QMainWindow):
         self._step3_mask_runs = runs
         self._step3_mask_key = entry.key if entry is not None else None
         several = {r.run_dir: len(step3_masks.run_regions(r)) > 1 for r in runs}
+        project = run_store.project_dir_of(roi_dir) if roi_dir else None
         bar.set_runs([(self._step3_run_label(e, current_ws, several[e.run.run_dir]), e.key,
-                       self._step3_run_tag(e.run))
+                       self._step3_run_tag(e.run),
+                       bool(project) and run_store.kind_of(e.run.run_dir) == "segment"
+                       and run_store.project_dir_of(e.run.run_dir) == project)
                       for e in items], entry.key if entry is not None else None)
+        if entry is not None and run_store.kind_of(entry.run.run_dir) == "segment":
+            self._rm_note_viewing(entry.run.run_dir)        # §6: what is viewed
         mount = self.__dict__.get("_step3_mount")
         stack = getattr(getattr(mount, "host", None), "stack", None) if mount else None
         resolved = {"cell": None, "nucleus": None, "reasons": {}}
@@ -3024,6 +3033,9 @@ class MainWindow(QMainWindow):
         self._dv_auto_step1 = bool(accepted is True and (
             self.step0_output.get("opened_workspace")
             or self.__dict__.get("_dv_auto_step1")))
+        if accepted is True and self.step0_output.get("opened_workspace"):
+            self._rm_step2_draft_pending = True        # §6: restored on first entry
+            self._rm_step4_draft_pending = True
         # SAVE-ONLY: stay in Step0; the user enters Step1 explicitly.
         self._update_next_button()
         self._log_step1_layout("Step0 complete (save-only, no auto-jump)")
@@ -3851,6 +3863,10 @@ class MainWindow(QMainWindow):
             "active_preview_patch": self._active_preview_patch,
             "p1_diam": self._p1_diam,
             "params_source": self._params_source,
+            # block RM (§6; acceptance 2026-10-03 #6): the pre-segmentation
+            # tab -- its methods, ticked patches, the run on screen and the
+            # result in use
+            "preseg": self._rm_preseg_state(),
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -4425,9 +4441,65 @@ class MainWindow(QMainWindow):
         roi_dir = authority.get("roi_dir", "")
         step2_dir = authority.get("step2_dir", "")
         roi_id = authority.get("roi_id", "")
-        return self._apply_step1_session_fields(
+        ok = self._apply_step1_session_fields(
             sess, out_dir, raw_ome, roi_dir, step2_dir, roi_id=roi_id,
         )
+        if ok:
+            self._rm_restore_preseg(sess.get("preseg"))
+        return ok
+
+    def _rm_preseg_state(self):
+        """What the pre-segmentation tab holds, for the Step1 draft."""
+        methods = self.__dict__.get("_preseg_methods")
+        patches = self.__dict__.get("_preseg_patches")
+        run = self.__dict__.get("_preseg_run")
+        sel = self.__dict__.get("_preseg_selected")
+        run_dir = ""
+        if run is not None:
+            path = preseg_run.run_dir(self._preseg_runs_root(), run["run_id"])
+            run_dir = path if run_store.is_done(path) else ""
+        return {"methods": methods.methods() if methods is not None else [],
+                "selected_ids": list(patches.selected_ids()) if patches is not None else [],
+                "run_dir": run_dir,
+                "used_combo": (sel or {}).get("combo_id") if sel and run is not None
+                and sel["run"].get("run_id") == run.get("run_id") else ""}
+
+    def _rm_restore_preseg(self, state):
+        """Put the pre-segmentation tab back: methods, ticks, the finished
+        run's results from disk, and the result in use when it still can be
+        (nothing is computed; nothing is asked)."""
+        state = state or {}
+        try:
+            if state.get("methods"):
+                self._preseg_methods.set_methods(state["methods"])
+            if state.get("selected_ids"):
+                self._preseg_patches.set_selected_ids(state["selected_ids"])
+            rdir = str(state.get("run_dir") or "")
+            if not rdir or not run_store.is_done(rdir):
+                return False
+            run = preseg_run.read_run(rdir)
+            self._preseg_run = run
+            self._preseg_records = dict(preseg_run.load_records(rdir))
+            self._start_results_for_run(run["combos"])
+            self._preseg_methods.set_progress(
+                "Restored: " + summary_line(self._preseg_records, len(run.get("tasks") or [])))
+            used = str(state.get("used_combo") or "")
+            if used and self._params_source == PRESEG_SOURCE:
+                key, fhash = self._preseg_current()
+                ok, _why = preseg_run.selectable(run, self._preseg_records, used, key, fhash)
+                if ok:
+                    self._preseg_selected = {"run": run, "combo_id": used}
+            self._refresh_preseg_results()
+            self._check_save_unlock()
+            # every patch's result on the montage, as after a run
+            self._show_montage_patches()
+            QTimer.singleShot(0, self._montage_sync_outlines)
+            print(f"[Step1] pre-segmentation restored: {os.path.basename(rdir)}"
+                  + (f", in use: {used}" if self.__dict__.get("_preseg_selected") else ""))
+            return True
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Step1] pre-segmentation not restored ({type(exc).__name__}: {exc})")
+            return False
 
     def _fusion_config_from_flat_weights(self, sess):
         weights = dict(sess.get("channel_weights") or {})
@@ -4790,44 +4862,103 @@ class MainWindow(QMainWindow):
                     step2_dir=step2_dir or "",
                 )
         self._rm_bind_step2()
+        self._rm_restore_page_draft("step2", self.__dict__.get("_step2"))
         self._stack.setCurrentIndex(2)
         self._set_step_active(2)
 
     def _rm_bind_step2(self):
-        """Entering Step2 (block RM-1, §16.4): its input is the newest fuse run
-        on the correct run being edited, or none. No dirty-draft gate: an edit that was
-        not Generated does not stop a run on an existing fuse run (§5). The
-        input drop-down comes with RM-2."""
+        """Entering Step2 (block RM §3, §5): its Input lists the fuse runs on
+        the correct run of the chain being viewed (`session.viewing`; the one
+        being edited when nothing is viewed), newest first; the viewed chain's
+        fuse run is chosen, else the newest. No dirty-draft gate: an edit that
+        was not Generated does not stop a run on an existing fuse run."""
         step2 = self.__dict__.get("_step2")
         roi = self._rm_roi_dir()
         if step2 is None or not roi or step2._run_active:
             return
         if hasattr(step2, "set_dirty_draft"):
             step2.set_dirty_draft("")
-        upstream = self._rm_current_correct_run()
-        runs = run_store.list_runs(roi, "fuse", upstream) if upstream else []
-        run_dir = runs[-1] if runs else ""
-        params = run_store.read_params(run_dir) if run_dir else {}
-        paths = {r["roi_name"]: os.path.join(run_dir, r["zarr_name"])
-                 for r in params.get("regions") or [] if r.get("zarr_name")}
-        first = next((p for p in paths.values() if os.path.isdir(p)), "")
-        if not first:
-            # No fuse run on the correct run being edited: no input -- never
-            # the fuse run of another Step0 result.
-            if step2._zarr_edit.text().strip():
-                print("[Step2] no fuse run on the current Step0 result: input cleared")
+        viewing = run_store.session_pointers(roi).get("viewing") or ""
+        chain = run_store.chain(viewing) if viewing and run_store.is_done(viewing) else []
+        upstream = next((r for r in chain if run_store.kind_of(r) == "correct"), "") \
+            or self._rm_current_correct_run()
+        runs = list(reversed(run_store.list_runs(roi, "fuse", upstream))) if upstream else []
+        items = [self._rm_fuse_item(r) for r in runs]
+        items = [i for i in items if i is not None]
+        chosen = next((r for r in chain if run_store.kind_of(r) == "fuse"), "")
+        if hasattr(step2, "set_fuse_runs"):
+            step2.set_fuse_runs(items, chosen if chosen in runs else (runs[0] if runs else ""))
+        else:                                          # (a stub page in tests)
+            self._rm_fill_step2_input(step2, items[0] if items else None)
+        print(f"[Step2] input: {len(items)} Step1 result(s) on "
+              f"{os.path.basename(upstream) or 'no Step0 result'}")
+        self._rm_step2_from_viewed(viewing, step2)
+
+    def _rm_step2_from_viewed(self, viewing, step2):
+        """User ruling 2026-10-03 (acceptance #8, option B): a segmentation
+        result chosen in Step3 brings its own method and parameters into
+        Step2 (its params.json) -- once per choice, so later edits stay. What
+        Step2 held is kept as its draft first. On first entry into an opened
+        workspace its saved Step2 draft wins."""
+        if run_store.kind_of(viewing) != "segment" or not run_store.is_done(viewing):
+            return False
+        if os.path.abspath(viewing) == os.path.abspath(
+                self.__dict__.get("_rm_step2_applied_from") or "."):
+            return False
+        self._rm_step2_applied_from = viewing
+        if self.__dict__.get("_rm_step2_draft_pending") or not hasattr(step2, "apply_draft"):
+            return False
+        cfg = run_store.read_params(viewing).get("segmentation_config")
+        if not isinstance(cfg, dict) or not cfg:
+            return False
+        self._rm_save_page_drafts()
+        roi = self._rm_roi_dir()
+        cfg = run_store.from_records(cfg, run_store.project_dir_of(roi)) if roi else cfg
+        ok = step2.apply_draft({"segmentation_config": cfg})
+        print(f"[Step2] the settings of {os.path.basename(viewing)} were loaded "
+              f"(chosen in Step3)")
+        return ok
+
+    @staticmethod
+    def _rm_fill_step2_input(step2, item):
+        if item is None:
             step2._zarr_edit.setText("")
             step2._zarr_path = None
-            if hasattr(step2, "set_data_version"):
-                step2.set_data_version("", {})
+            step2.set_data_version("", {})
             return
-        if os.path.abspath(step2._zarr_edit.text().strip() or "") != first:
-            step2._zarr_edit.setText(first)
+        if os.path.abspath(step2._zarr_edit.text().strip() or ".") != item["zarr"]:
+            step2._zarr_edit.setText(item["zarr"])
             step2._load_zarr_info()
-        if hasattr(step2, "set_data_version"):
-            step2.set_data_version("", paths)
-        print(f"[Step2] input: {os.path.basename(run_dir)} "
-              f"({run_store.display_name(run_dir)})")
+        step2.set_data_version("", item["regions"])
+
+    @staticmethod
+    def _rm_fuse_item(run_dir):
+        """One Input row: the run's name, its pre-segmentation source as the
+        tag ("deleted" when that run is gone, §9), its products."""
+        params = run_store.read_params(run_dir)
+        regions = {r["roi_name"]: os.path.join(run_dir, r["zarr_name"])
+                   for r in params.get("regions") or [] if r.get("zarr_name")}
+        first = next((p for p in regions.values() if os.path.isdir(p)), "")
+        if not first:
+            return None
+        tag, source = "", ""
+        preseg = str(params.get("preseg_run") or "")
+        if preseg:
+            project = run_store.project_dir_of(run_dir)
+            path = run_store.resolve(project, preseg) if project else ""
+            if path and run_store.is_done(path):
+                source = f"parameters from pre-segmentation {run_store.display_name(path)}"
+                tag = "pre-seg"
+            else:
+                source = "parameters from a pre-segmentation run that was deleted"
+                tag = "pre-seg deleted"
+        label = run_store.display_name(run_dir)
+        rois = [{"name": r.get("roi_name"), "bbox_fullres": r.get("bbox_fullres"),
+                 "polygon_fullres": r.get("polygon_fullres")}
+                for r in (params.get("geometry") or {}).get("regions") or []
+                if r.get("roi_name") and r.get("roi_name") != "full"]
+        return {"run": run_dir, "label": label, "tag": tag, "zarr": first, "regions": regions,
+                "rois": rois, "tooltip": label + (f"\n{source}" if source else "")}
 
     def _dv_step2_state(self):
         """Block DV (§3.13): (current version record, dirty-draft reason).
@@ -5073,6 +5204,7 @@ class MainWindow(QMainWindow):
         run_dir, roi_name = self._step4_choice(output_dir)
         if run_dir:
             self._step4.set_run(run_dir, roi_name, open_slide=self._step3_slide_path())
+        self._rm_restore_page_draft("step4", self.__dict__.get("_step4"))
         self._stack.setCurrentIndex(4)
         self._set_step_active(4)
 
@@ -5744,6 +5876,7 @@ class MainWindow(QMainWindow):
         self._preseg_methods.set_progress(
             "Finished: " + summary_line(self._preseg_records, len(run["tasks"])))
         self._refresh_preseg_results()
+        self._schedule_step1_session_save()     # block RM §6: the finished run
 
     # ── the montage (plan block D) ───────────────────────────────────
     def _montage_patches(self):
@@ -6195,6 +6328,9 @@ class MainWindow(QMainWindow):
         self._preseg_selected = {"run": run, "combo_id": combo_id}
         self._check_save_unlock()
         self._refresh_preseg_results()
+        save = getattr(self, "_schedule_step1_session_save", None)
+        if callable(save):
+            save()                              # block RM §6: the result in use
         print(f"[Step1] pre-segmentation result chosen: {combo['method']} {combo_id}")
         return True
 
@@ -6238,21 +6374,75 @@ class MainWindow(QMainWindow):
         clicked = box.clickedButton()
         return "replace" if clicked is replace else "both" if clicked is both else None
 
+    def _choose_preseg_plan(self, entries, runs):
+        """`Load plan…`'s list (user ruling 2026-10-03): the saved plans, then
+        this workspace's pre-segmentation runs, each with the DV × that
+        deletes it (block RM §9). Returns the chosen plan entry or None. A
+        seam: tests answer directly."""
+        from .step3_mask_bar import TAG_ROLE, CLOSE_ROLE, TaggedItemDelegate
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Load plan")
+        lay = QtWidgets.QVBoxLayout(dlg)
+        lay.addWidget(QtWidgets.QLabel(
+            "Choose a saved plan to load. Below them, this workspace's "
+            "pre-segmentation runs: \u00d7 deletes one (into the project's trash "
+            "for 30 days)."))
+        lst = QtWidgets.QListWidget()
+        delegate = TaggedItemDelegate(lst)
+        lst.setItemDelegate(delegate)
+        lay.addWidget(lst)
+        state = {"runs": list(runs)}
+
+        def _fill():
+            lst.clear()
+            for e in entries:
+                lst.addItem(f"{e.get('created_at', '')}  \u2014  {e.get('n_methods', 0)} "
+                            f"method(s), {e.get('n_patches', 0)} patch(es)")
+            for run in state["runs"]:
+                item = QtWidgets.QListWidgetItem(
+                    f"      pre-segmentation run  {run_store.display_name(run)}")
+                item.setData(TAG_ROLE, "run")
+                item.setData(CLOSE_ROLE, True)
+                item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
+                lst.addItem(item)
+            if entries:
+                lst.setCurrentRow(0)
+
+        def _closed(index):
+            k = index - len(entries)
+            if 0 <= k < len(state["runs"]) and self._rm_delete_run(state["runs"][k], dlg):
+                roi = self._rm_roi_dir()
+                state["runs"] = list(reversed(run_store.list_runs(roi, "preseg"))) if roi else []
+                _fill()
+        delegate.close_clicked.connect(_closed)
+        box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        box.accepted.connect(dlg.accept)
+        box.rejected.connect(dlg.reject)
+        box.button(QtWidgets.QDialogButtonBox.Ok).setEnabled(bool(entries))
+        lst.itemDoubleClicked.connect(lambda _i: dlg.accept())
+        lay.addWidget(box)
+        _fill()
+        dlg.resize(620, 340)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return None
+        row = lst.currentRow()
+        return entries[row] if 0 <= row < len(entries) else None
+
     def _on_load_preseg_plan(self):
         """`Load plan…`: pick a saved plan; its methods replace the current
         ones; its patches come back if the user wants them (replacing the
         current ones or beside them); its ticks are applied. No computation."""
         step1_dir = self._preseg_step1_dir()
         entries = plan_store.list_plans(step1_dir)
-        if not entries:
+        roi = self._rm_roi_dir()
+        runs = list(reversed(run_store.list_runs(roi, "preseg"))) if roi else []
+        if not entries and not runs:
             QMessageBox.information(self, "Load plan", "No plan has been saved for this project yet.")
             return False
-        labels = [f"{e.get('created_at', '')}  —  {e.get('n_methods', 0)} method(s), "
-                  f"{e.get('n_patches', 0)} patch(es)" for e in entries]
-        label, ok = QtWidgets.QInputDialog.getItem(self, "Load plan", "Plan:", labels, 0, False)
-        if not ok:
+        entry = self._choose_preseg_plan(entries, runs)
+        if entry is None:
             return False
-        entry = entries[labels.index(label)]
         if self._preseg_methods.blocks():
             answer = QMessageBox.question(
                 self, "Load plan", "Replace the methods in the plan now?",
@@ -7022,12 +7212,18 @@ class MainWindow(QMainWindow):
         self._patch_loaders = survivors
 
     def _rm_save_view(self, step):
-        """Block RM (§6): on a step change and on close, the Step0 draft and
-        the step being shown go into the workspace's session.json."""
+        """Block RM (§6): on a step change and on close, the Step0, Step2 and
+        Step4 drafts and the step being shown go into the workspace's
+        session.json."""
         page = self.__dict__.get("_step0")
         try:
             if page is not None and hasattr(page, "rm_save_draft"):
                 page.rm_save_draft()
+            # Step1's draft too, at once: its autosave timer does not outlive
+            # a close (acceptance 2026-10-03 #6)
+            if self.loader is not None and self._rm_roi_dir():
+                self._save_step1_session()
+            self._rm_save_page_drafts()
             roi = self._rm_roi_dir() or ((getattr(page, "_roi_context", None) or {})
                                          .get("roi_dir") or "")
             if roi and os.path.isfile(os.path.join(roi, "roi_manifest.json")):
@@ -7037,6 +7233,49 @@ class MainWindow(QMainWindow):
                 run_store.update_session(roi, view=view)
         except Exception as exc:                            # noqa: BLE001
             print(f"[Session] not saved ({type(exc).__name__}: {exc})")
+
+    def _rm_save_page_drafts(self):
+        """drafts.step2 / drafts.step4 -- not while an opened workspace's
+        saved ones wait to be restored (they would be overwritten)."""
+        roi = self._rm_roi_dir()
+        if not roi or not run_store.project_dir_of(roi):
+            return
+        sess = run_store.load_session(roi)
+        project = run_store.project_dir_of(roi)
+        changed = False
+        for step, attr, pending in (("step2", "_step2", "_rm_step2_draft_pending"),
+                                    ("step4", "_step4", "_rm_step4_draft_pending")):
+            if self.__dict__.get(pending):
+                continue
+            page = self.__dict__.get(attr)
+            draft = page.draft() if page is not None and hasattr(page, "draft") else None
+            if draft is None:
+                continue
+            sess = run_store.put_draft(sess, step, dict(
+                run_store.to_records(draft, project), edited_against=sess.get("editing")))
+            changed = True
+        if changed:
+            run_store.save_session(roi, sess)
+
+    def _rm_restore_page_draft(self, step, page):
+        """Once, on first entering Step2 / Step4 of an opened workspace: its
+        saved draft, when edited against the correct run being edited (§6)."""
+        pending = f"_rm_{step}_draft_pending"
+        if not self.__dict__.get(pending):
+            return False
+        setattr(self, pending, False)
+        roi = self._rm_roi_dir()
+        if not roi or page is None or not hasattr(page, "apply_draft"):
+            return False
+        sess = run_store.load_session(roi)
+        draft = (sess.get("drafts") or {}).get(step)
+        if not isinstance(draft, dict):
+            return False
+        if draft.get("edited_against") != sess.get("editing"):
+            print(f"[Session] the {step} draft was edited against another Step0 result: "
+                  f"kept, not restored")
+            return False
+        return page.apply_draft(run_store.from_records(draft, run_store.project_dir_of(roi)))
 
     def closeEvent(self, event):
         self._rm_save_view(self.__dict__.get("_current_step"))
@@ -10099,7 +10338,10 @@ class MainWindow(QMainWindow):
             print(f"[Step1] HQ roi_id={roi_id} roi_name={roi_name}")
             print(f"[Step1] HQ selected channels={hq_meta['hq_channels']}")
             print(f"[Step1] HQ available at save={available_at_save}")
-        fp_method, _ = save_segmentation_params(OUTPUT_DIR, cpcfg)
+        # Block RM (§16.3-6): the file names the corrected product by a
+        # project-relative path (Step2 resolves it when it loads the file).
+        fp_method, _ = save_segmentation_params(
+            OUTPUT_DIR, run_store.to_records(cpcfg, run_store.project_dir_of(OUTPUT_DIR)))
         print(f"[Save] fusion settings of this Save -> {self._step1_session_path(OUTPUT_DIR)} (last_save)")
         print(f"[Save] {fp_method}")
         print(f"[Step1] saved active segmentation params={fp_method}")
@@ -10353,13 +10595,118 @@ class MainWindow(QMainWindow):
     def _rm_note_viewing(self, run_dir):
         """session.json `viewing` (§6): the most downstream run being viewed."""
         roi = self._rm_roi_dir()
-        if not roi or not run_store.is_done(run_dir) or not run_store.project_dir_of(roi):
+        if (not roi or not run_store.is_done(run_dir) or not run_store.project_dir_of(roi)
+                or os.path.realpath(run_store.roi_dir_of(run_dir)) != os.path.realpath(roi)):
             return
         try:
             run_store.update_session(
                 roi, viewing=run_store.rel(run_store.project_dir_of(roi), run_dir))
         except (OSError, ValueError) as exc:
             print(f"[Step1] session.json not updated ({exc})")
+
+    # ── block RM §9: deleting a run and everything made from it ─────────
+
+    def _rm_release_paths(self, paths):
+        """Before `paths` move to the trash: Step1, Step2, Step3 and Step4
+        let go of a result inside them."""
+        roots = [os.path.realpath(p) for p in paths]
+
+        def _inside(path):
+            if not path:
+                return False
+            real = os.path.realpath(path)
+            return any(real == r or real.startswith(r + os.sep) for r in roots)
+        runs = {r.run_dir for r in self.__dict__.get("_step3_mask_runs") or []}
+        key = str(self.__dict__.get("_step3_mask_key") or "").partition("\x1f")[0]
+        if _inside(key) or any(_inside(r) for r in runs):
+            self._step3_clear_masks()
+        step4 = self.__dict__.get("_step4")
+        if step4 is not None and _inside(getattr(getattr(step4, "_job", None), "run_dir", "")):
+            step4.set_run("")
+        step2 = self.__dict__.get("_step2")
+        if step2 is not None and _inside(step2._zarr_edit.text().strip()):
+            step2._zarr_edit.setText("")
+            step2._zarr_path = None
+            if hasattr(step2, "set_data_version"):
+                step2.set_data_version("", {})
+        if _inside(self.__dict__.get("_fused_zarr_path") or ""):
+            self._fused_zarr_path = ""
+            self.step1_output = {}
+            self.step1_done = False
+            self._update_next_button()
+
+    def _rm_delete_run(self, run_dir, parent=None):
+        """The × of a run: it and every run made from it go into the
+        project's trash, downstream first, after one confirmation listing all
+        of them; refused while anything runs. A move that fails stops the
+        deletion there: what moved is said, what stays is whole (§9)."""
+        from ..utils import trash
+        run_dir = os.path.abspath(run_dir)
+        if not run_store.is_done(run_dir):
+            return False
+        why = self._dv_deletion_blocker()
+        if why:
+            QMessageBox.information(parent or self, "Delete",
+                                    f"Nothing can be deleted while {why}.")
+            return False
+        victims = run_store.downstream_of(run_dir) + [run_dir]
+        listed = "\n".join(f"  {run_store.kind_of(r):8s} {run_store.display_name(r)}"
+                           for r in victims)
+        more = ("\n\nEach result below the first was made from it, so they go "
+                "together." if len(victims) > 1 else "")
+        if run_store.kind_of(run_dir) == "correct" and os.path.abspath(run_dir) == \
+                os.path.abspath(run_store.session_pointers(
+                    run_store.roi_dir_of(run_dir)).get("editing") or "."):
+            more += ("\n\nThis is the Step0 result being edited: Step1 and Step2 cannot "
+                     "be used until Step0 is saved again.")
+        answer = QMessageBox.question(
+            parent or self, "Delete",
+            f"Move into the project's trash (kept 30 days):\n\n{listed}{more}",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return False
+        roi = run_store.roi_dir_of(run_dir)
+        project = run_store.project_dir_of(roi)
+        ptr = run_store.session_pointers(roi)
+        chains = {p: run_store.chain(p) for p in ptr.values() if p}
+        self._rm_release_paths(victims)
+        entry = trash.move(project, os.path.basename(roi), "runs", victims,
+                           details={"run": run_store.rel(project, run_dir)})
+        moved = [os.path.join(project, *i["from"].split("/")) for i in entry["items"]]
+        replacements = {p: run_store.nearest_survivor(c, moved)
+                        for p, c in chains.items() if os.path.abspath(p) in
+                        {os.path.abspath(m) for m in moved}}
+        if replacements:
+            run_store.repoint_session(roi, replacements)
+        self._rm_register_deletion(project, entry)
+        print(f"[Delete] moved to the trash: {[i['from'] for i in entry['items']]}")
+        if entry["error"]:
+            print(f"[Delete] STOPPED: {entry['error']}; still in place: {entry['not_moved']}")
+            QMessageBox.warning(
+                parent or self, "Delete stopped",
+                f"The deletion stopped: {entry['error']}\n\n"
+                f"Moved to the trash: {len(entry['items'])}\n"
+                f"Still in place: {', '.join(entry['not_moved'])}")
+        self._step3_refresh_masks()
+        self._rm_bind_step2()
+        return True
+
+    @staticmethod
+    def _rm_register_deletion(project, entry):
+        """The A3 `deletion` entry of a trash entry (auxiliary: logged)."""
+        from ..core import provenance as prov
+        try:
+            prov.register(project, "deletion", prov.location(project, entry["folder"]),
+                          os.path.basename(entry["folder"]),
+                          workspace_id=str(entry.get("workspace") or ""),
+                          parameters={"what": entry.get("what"),
+                                      "run": (entry.get("details") or {}).get("run", ""),
+                                      "status": entry.get("status"),
+                                      "moved": [{"from": i["from"], "to": i["to"]}
+                                                for i in entry["items"]],
+                                      "not_moved": list(entry.get("not_moved") or [])})
+        except Exception as exc:               # noqa: BLE001 -- auxiliary record
+            print(f"[Provenance] deletion not recorded ({type(exc).__name__}: {exc})")
 
     def _dv_workspace(self):
         """The workspace folder Generate versions into, or "" outside one:

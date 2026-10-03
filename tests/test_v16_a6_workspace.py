@@ -275,10 +275,11 @@ def test_several_workspaces_ask_which_one(page, tmp_path, slides, monkeypatch):
     offered = []
 
     def _choose(self, rows):
-        # Block RM: one row per workspace (workspace, None, tag)
-        offered.append([r[0].workspace_id for r in rows])
+        # Block RM: one row per workspace (workspace, None, tag), each followed
+        # by its Step0 results' rows (a fourth field)
+        offered.append([r[0].workspace_id for r in rows if len(r) == 3])
         assert all(r[1] is None for r in rows)
-        return rows[-1]                                # the oldest
+        return [r for r in rows if len(r) == 3][-1]     # the oldest workspace
     monkeypatch.setattr(Step0Page, "_choose_workspace", _choose)
     opened = page._open_existing_workspace()
     assert len(offered) == 1 and len(offered[0]) == 3

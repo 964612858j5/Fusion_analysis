@@ -109,7 +109,14 @@ class Step4Page(QWidget):
             self._set_job(None, str(exc))
             return
         self._set_job(job, "")
-        if set_output:
+        # Block RM (§5): a result of a project is quantified into a new quant
+        # run of its chain; the folder is not the user's to choose then.
+        from ..utils import run_store
+        in_chain = run_store.kind_of(job.run_dir) == "segment"
+        self._out_edit.setReadOnly(in_chain)
+        self._out_edit.setToolTip("A new quant run of this result's chain"
+                                  if in_chain else "")
+        if set_output or in_chain:
             self._out_edit.setText(default_output_dir(job))
 
     def _set_job(self, job, reason):
@@ -178,6 +185,38 @@ class Step4Page(QWidget):
         features = [k for k in ('morphology', 'nuclear_summary')
                     if self._feature_checks[k].isEnabled() and self._feature_checks[k].isChecked()]
         return stats, regions, features, self._output_checks['csv'].isChecked()
+
+    # ── block RM §6: Step4's draft (what to compute, how to write it) ──
+
+    def draft(self):
+        stats, regions, features, csv = self.scope()
+        dist, markers = self.distribution_scope()
+        return {"statistics": stats, "regions": regions, "features": features,
+                "csv": bool(csv), "distribution": dist, "markers": markers,
+                "prefix": self._prefix_edit.text().strip()}
+
+    def apply_draft(self, draft):
+        """Put a saved Step4 draft back (checks that are not available for
+        the chosen result stay as they are)."""
+        d = dict(draft or {})
+        for key, cb in self._stat_checks.items():
+            cb.setChecked(key in (d.get("statistics") or []))
+        for key in ("nucleus", "cytoplasm"):
+            if self._region_checks[key].isEnabled():
+                self._region_checks[key].setChecked(key in (d.get("regions") or []))
+        for key in ("morphology", "nuclear_summary"):
+            if self._feature_checks[key].isEnabled():
+                self._feature_checks[key].setChecked(key in (d.get("features") or []))
+        self._output_checks['csv'].setChecked(bool(d.get("csv")))
+        for key, cb in self._dist_checks.items():
+            cb.setChecked(key in (d.get("distribution") or []))
+        wanted = set(d.get("markers") or [])
+        for i in range(self._marker_list.count()):
+            item = self._marker_list.item(i)
+            item.setCheckState(Qt.Checked if item.text() in wanted else Qt.Unchecked)
+        self._prefix_edit.setText(str(d.get("prefix") or ""))
+        self._update_scope()
+        return True
 
     def distribution_scope(self):
         """(distribution statistics, markers in slide order) as checked."""

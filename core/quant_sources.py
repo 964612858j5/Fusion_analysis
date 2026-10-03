@@ -347,7 +347,11 @@ def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):
         raise QuantSourceError(f"Step0's handoff lists corrected channels "
                                f"{_corrected_decisions(recorded)}, its correction config "
                                f"{wanted}")
-    if version is None and recorded_corrected and os.path.isdir(recorded_corrected):
+    from ..utils.data_versions import is_inside as _is_inside
+    if version is None and recorded_corrected and (
+            os.path.isdir(recorded_corrected) or _is_inside(recorded_corrected, ws)):
+        # (missing, though it was this workspace's -- deleted: refused too;
+        # codex review 5)
         # A run made before data versions whose version is gone (codex review
         # 4, #3): its decisions are not guessed from today's config -- the
         # product it read must have been made with exactly these.

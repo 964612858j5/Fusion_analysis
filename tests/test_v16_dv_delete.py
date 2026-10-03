@@ -947,3 +947,22 @@ def test_an_earlier_run_without_its_version_is_refused_not_guessed(tmp_path):
                lambda d: d.pop("corrected_decisions", None))
     with pytest.raises(qs.QuantSourceError, match="cannot be resolved"):
         qs.resolve_quant_job(p["run_dir"], open_slide=p["slide"])
+
+
+def test_an_earlier_run_whose_product_was_deleted_is_refused(tmp_path):
+    """codex review 5: the product the run read was this workspace's and is
+    gone -> refused, not quantified with today's (raw) config."""
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_quant_sources import build_project, _edit_json
+    from block01.core import quant_sources as qs
+    p = build_project(tmp_path)
+    gone = os.path.join(p["ws"], "step0", "deleted_corrected.zarr")
+    _edit_json(os.path.join(p["run_dir"], "segmentation_meta.json"),
+               lambda d: d.setdefault("paths", {}).update(corrected_channels_zarr=gone))
+    _edit_json(p["cfg"], lambda d: d.update(channel_decisions={
+        k: "original" for k in d.get("channel_decisions") or {}}))
+    _edit_json(os.path.join(p["ws"], "step0", "step0_roi_result.json"),
+               lambda d: d.pop("corrected_decisions", None))
+    with pytest.raises(qs.QuantSourceError, match="cannot be resolved"):
+        qs.resolve_quant_job(p["run_dir"], open_slide=p["slide"])

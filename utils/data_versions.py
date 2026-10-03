@@ -196,12 +196,17 @@ def cleanup_incomplete(workspace_dir) -> List[str]:
         return []
     listed = {e.get("folder") for e in load_index(workspace_dir)["versions"]
               if read_record(workspace_dir, e) is not None}
+    # A deleted version whose move to the trash was interrupted is not
+    # listed either: it is the trash's, never removed here (codex review 2, #2).
+    project = os.path.dirname(os.path.dirname(os.path.abspath(workspace_dir)))
+    pending = pending_trash_sources(project)
     removed = []
     for name in sorted(os.listdir(root)):
         path = os.path.join(root, name)
         if name in (INDEX, CORRECTED_DIR) or name.startswith(".") or not os.path.isdir(path):
             continue
-        if name not in listed:
+        if name not in listed and not any(is_inside(path, p) or is_inside(p, path)
+                                          for p in pending):
             shutil.rmtree(path, ignore_errors=True)
             removed.append(name)
     return removed
@@ -376,6 +381,8 @@ def plan_delete(workspace_dir, *, run_dir=None, version_id=None, draft=False,
         quant = os.path.join(ws, "step4", "quantification_runs", os.path.basename(run_dir))
         if os.path.isdir(quant):
             paths.append(quant)
+        paths.extend(p for p in _recorded_outputs(ws, run_dir) if not any(
+            is_inside(p, q) for q in paths))
         plan["run_dir"] = run_dir
         what.append(os.path.basename(run_dir))
     handoff = handoff_corrected(ws)
@@ -409,6 +416,43 @@ def plan_delete(workspace_dir, *, run_dir=None, version_id=None, draft=False,
             seen.add(p)
             unique.append(p)
     return dict(plan, paths=unique, what="_".join(what) or "nothing")
+
+
+def _recorded_outputs(ws, run_dir) -> List[str]:
+    """Files A3 records as made from this run wherever the user put them
+    inside the project: Step4 results in another Output dir (the h5ad, its
+    csv and provenance file) and the object tables (codex review 2, #7).
+    Only files -- a folder may hold other runs' results."""
+    from ..core import provenance as prov
+    project = os.path.dirname(os.path.dirname(ws))
+    meta = _load(os.path.join(run_dir, "segmentation_meta.json")) or {}
+    run_id = str(meta.get("run_id") or os.path.basename(run_dir))
+    try:
+        entries = prov.load_entries(project)
+    except Exception:                       # noqa: BLE001 -- no records, nothing extra
+        return []
+    out = []
+    for e in entries:
+        params = e.get("parameters") or {}
+        if e.get("kind") not in ("step4_h5ad", "cells_parquet", "regions_parquet") \
+                or str(params.get("segmentation_run_id") or "") != run_id \
+                or (e.get("workspace_id") and e["workspace_id"] != os.path.basename(ws)):
+            continue
+        try:
+            main = prov.resolve_location(project, e.get("location") or {})
+        except Exception:                   # noqa: BLE001
+            continue
+        files = [main]
+        if e.get("kind") == "step4_h5ad":
+            for name in (params.get("files") or {}).values():
+                if name:
+                    files.append(name if os.path.isabs(name)
+                                 else os.path.join(os.path.dirname(main), name))
+        for f in files:
+            f = os.path.abspath(f)
+            if os.path.isfile(f) and is_inside(f, project) and f not in out:
+                out.append(f)
+    return out
 
 
 def _drop_run_records(ws, run_dir):
@@ -477,7 +521,19 @@ def resume_deletions(project_dir) -> List[str]:
             continue
         ws = os.path.join(project, "rois", str(entry.get("workspace") or ""))
         _drop_records(project, ws, entry.get("details") or {})
-    return trash.resume_incomplete(project)
+    done = trash.resume_incomplete(project)
+    for entry in trash.entries(project):
+        if entry["folder"] in done:
+            _register_deletion(project, entry)
+    return done
+
+
+def pending_trash_sources(project_dir) -> List[str]:
+    """What interrupted deletions have not moved yet."""
+    from . import trash
+    return [i["from"] for e in trash.entries(project_dir)
+            if e.get("status") != "complete" for i in e.get("items") or []
+            if os.path.lexists(i["from"])]
 
 
 def execute_delete(plan, now=None) -> Dict:
@@ -493,17 +549,26 @@ def execute_delete(plan, now=None) -> Dict:
     entry = trash.begin(project, ws_id, plan["what"], plan["paths"], details, now=now)
     _drop_records(project, ws, details)
     entry = trash.finish(entry)
+    _register_deletion(project, entry)
+    print(f"[Trash] moved {len(entry['items'])} item(s) to {entry['folder']}")
+    return entry
+
+
+def _register_deletion(project, entry):
+    """The A3 `deletion` entry of a finished trash entry. Idempotent: A3 finds
+    an existing (kind, location, token) and returns it."""
+    from ..core import provenance as prov
+    details = entry.get("details") or {}
     try:
-        loc = prov.location(project, entry["folder"])
-        prov.register(project, "deletion", loc, os.path.basename(entry["folder"]),
-                      workspace_id=ws_id,
-                      parameters={"what": plan["what"], "run_dir": plan["run_dir"],
-                                  "data_version": plan["version"],
-                                  "draft": plan["draft"],
-                                  "workspace": plan["delete_workspace"],
+        prov.register(project, "deletion", prov.location(project, entry["folder"]),
+                      os.path.basename(entry["folder"]),
+                      workspace_id=str(entry.get("workspace") or ""),
+                      parameters={"what": entry.get("what"),
+                                  "run_dir": details.get("run_dir", ""),
+                                  "data_version": details.get("version", ""),
+                                  "draft": bool(details.get("draft")),
+                                  "workspace": bool(details.get("delete_workspace")),
                                   "moved": [{"from": i["from"], "to": i["to"]}
                                             for i in entry["items"]]})
     except Exception as exc:               # noqa: BLE001 -- auxiliary record
         print(f"[Provenance] deletion not recorded ({type(exc).__name__}: {exc})")
-    print(f"[Trash] moved {len(entry['items'])} item(s) to {entry['folder']}")
-    return entry

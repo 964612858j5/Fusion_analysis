@@ -10940,7 +10940,9 @@ class Step0Page(QWidget):
             # User ruling 2026-10-03 (codex finding 3, option a): Step0 or
             # Step1 saved since the current version, no Generate yet -- the
             # dirty draft is its own row, `draft`, first and preselected.
-            if current is not None and self._dv_has_draft(ws, current):
+            # (no current version: what Step0 holds is no version -- a draft)
+            if (current is None and step0_handoff.published_handoff(ws.step0_dir)) \
+                    or (current is not None and self._dv_has_draft(ws, current)):
                 rows.append((ws, None, DRAFT_TAG))
             # Block DV-D: one row per data version + segmentation run (the
             # unit a × deletes); a version without runs is one row of its own.
@@ -11137,6 +11139,11 @@ class Step0Page(QWidget):
             if not ok:
                 return None
             current = data_versions.current_version(wsd)
+            if current is None:
+                # nothing to go back to: only the draft's own product goes
+                self._dv_release(plan["paths"])
+                data_versions.execute_delete(plan)
+                return ("deleted",)
             self._dv_after_load = plan
             return ("load", (ws, current, current["version"] + "  (current)"))
 
@@ -11193,8 +11200,12 @@ class Step0Page(QWidget):
         if whole:
             plan = data_versions.plan_delete(wsd, workspace=True)
         else:
+            # The handoff is released only when it describes this version
+            # itself; a draft built on its corrected product keeps it
+            # (codex review 2, #4).
+            draft = is_current and self._dv_has_draft(ws, rec)
             plan = data_versions.plan_delete(wsd, run_dir=run_dir, version_id=vid,
-                                             release_handoff=is_current)
+                                             release_handoff=is_current and not draft)
         if is_current and others:
             target = self._dv_ask_load_other(parent, list(reversed(others)))
             if target is False:
@@ -11239,13 +11250,28 @@ class Step0Page(QWidget):
         from ...utils import trash
         project = self.output_dir
         if not project or not os.path.isdir(os.path.join(project, trash.TRASH_DIR)):
-            return
+            return True
+        pending = data_versions.pending_trash_sources(project)
+        if pending:
+            # Finished like any deletion: never while something runs on it,
+            # and what the window has open lets go first (codex review 2, #3).
+            blocker = getattr(self, "deletion_blocker", None)
+            why = blocker() if callable(blocker) else None
+            if why:
+                print(f"[Trash] an interrupted deletion waits ({why}); no workspace "
+                      f"is opened until it is finished")
+                return False
+            self._dv_release(pending)
         try:
             done = data_versions.resume_deletions(project)
             if done:
                 print(f"[Trash] finished interrupted deletion(s): {done}")
         except Exception as exc:                      # noqa: BLE001
-            print(f"[Trash] interrupted deletions not finished: {exc}")
+            # Not finished: opening a workspace now could clean up a folder
+            # that belongs to the trash (codex review 2, #2).
+            print(f"[Trash] interrupted deletions not finished ({exc}); no workspace "
+                  f"is opened until they are")
+            return False
 
         def _purge():
             try:
@@ -11256,6 +11282,7 @@ class Step0Page(QWidget):
                 print(f"[Trash] purge failed: {exc}")
         import threading
         threading.Thread(target=_purge, name="trash-purge", daemon=True).start()
+        return True
 
     def _open_existing_workspace(self):
         """Find this slide's workspaces in the output directory's project
@@ -11265,7 +11292,9 @@ class Step0Page(QWidget):
         self._workspace_handoff_pending = None
         self._dv_after_load = None
         self._dv_open_run = ""
-        self._dv_tidy_trash()
+        self._dv_delete_after_announce = None
+        if not self._dv_tidy_trash():
+            return None
         try:
             _sid, found = workspace_session.find_workspaces(self.output_dir, self.ome_path)
         except Exception as exc:                      # noqa: BLE001 -- never blocks a Load
@@ -11284,10 +11313,9 @@ class Step0Page(QWidget):
         after, self._dv_after_load = self._dv_after_load, None
         try:
             self._restore_workspace(ws, version)
-            if after is not None:
-                # DV-D §3.4: the other version is loaded -- now the deletion.
-                self._dv_release(after["paths"])
-                data_versions.execute_delete(after)
+            # DV-D §3.4: the deletion waits until the window has accepted the
+            # other version's handoff (codex review 2, #5).
+            self._dv_delete_after_announce = after
             self._dv_open_run = run.run_dir if run is not None else ""
         except Exception as exc:                      # noqa: BLE001
             # A workspace that cannot be read back is not half-opened.
@@ -11319,6 +11347,16 @@ class Step0Page(QWidget):
         # Block DV-D: the row was a version + segmentation run: Step3 shows it.
         payload["step3_run_dir"] = getattr(self, "_dv_open_run", "") or ""
         self.step0_complete.emit(payload)
+        after, self._dv_delete_after_announce = (
+            getattr(self, "_dv_delete_after_announce", None), None)
+        if after is not None:
+            accepted = getattr(self, "handoff_accepted", None)
+            if callable(accepted) and not accepted():
+                print("[Workspace] the other version's handoff was not accepted: "
+                      "nothing was deleted")
+            else:
+                self._dv_release(after["paths"])
+                data_versions.execute_delete(after)
         print(f"[Workspace] announced the committed handoff of "
               f"{manifest.get('roi_id', '')} (nothing rewritten)")
         return True

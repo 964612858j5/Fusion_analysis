@@ -783,6 +783,9 @@ class MainWindow(QMainWindow):
         # current version went with no other loaded -- starts over empty.
         self._step0.deletion_blocker = self._dv_deletion_blocker
         self._step0.release_paths = self._dv_release_paths
+        # ...and whether the handoff it just announced was accepted: a version
+        # replacing a deleted one must be loaded before anything is deleted.
+        self._step0.handoff_accepted = lambda: bool(self.__dict__.get("step0_done"))
         self._step0.unload_requested.connect(self._dv_restart_empty)
         # ROI/patch edits made anywhere are published by Step0's writer; Step1
         # re-reads them from that commit instead of keeping its own copy.

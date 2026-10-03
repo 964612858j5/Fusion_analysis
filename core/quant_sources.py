@@ -235,16 +235,21 @@ def _run_data_version(ws, meta):
 
 
 def _version_referencing(ws, corrected_path):
-    """The newest data version whose corrected product is `corrected_path`."""
+    """The version a run made BEFORE data versions read its corrected
+    product from: the registered earlier workspace (``legacy``) referencing
+    it, else the OLDEST version referencing it -- a later version may share
+    the product with other correction decisions (codex review 2, #1)."""
     if not ws:
         return None
     from ..utils import data_versions
     want = os.path.abspath(corrected_path)
-    for rec in reversed(data_versions.list_versions(ws)):
-        path = (rec.get("corrected") or {}).get("path")
-        if path and os.path.abspath(path) == want:
-            return dict(rec, folder_path=data_versions.version_dir(ws, rec.get("folder", "")))
-    return None
+    found = [rec for rec in data_versions.list_versions(ws)
+             if (rec.get("corrected") or {}).get("path")
+             and os.path.abspath(rec["corrected"]["path"]) == want]
+    if not found:
+        return None
+    rec = next((r for r in found if r.get("legacy")), found[0])
+    return dict(rec, folder_path=data_versions.version_dir(ws, rec.get("folder", "")))
 
 
 def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):

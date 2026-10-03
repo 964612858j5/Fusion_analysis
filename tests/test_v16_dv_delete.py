@@ -429,6 +429,9 @@ def test_the_current_version_with_another_loaded_first(page, two, slides, monkey
     page._open_existing_workspace()
     assert ("load other", ["v001"]) in asked
     assert wrote == [v1["corrected"]["path"]]                         # v001 loaded ...
+    assert dv.get_version(ctx["roi_dir"], "v002") is not None         # ... not accepted yet
+    page.handoff_accepted = lambda: True
+    page._announce_opened_workspace()
     assert dv.get_version(ctx["roi_dir"], "v002") is None             # ... then v002 deleted
     assert dv.current_version(ctx["roi_dir"])["version"] == "v001"
     assert not os.path.exists(v2["corrected"]["path"])
@@ -514,6 +517,8 @@ def test_x_on_the_draft_loads_the_current_version_then_discards(page, two, slide
                         lambda self, rows: self._dv_delete_row(
                             next(r for r in rows if r[2] == DRAFT_TAG))[1])
     page._open_existing_workspace()
+    assert os.path.exists(draft)                         # the current version first
+    page._announce_opened_workspace()
     assert not os.path.exists(draft)
     assert dv.get_version(ctx["roi_dir"], "v002") is not None
 
@@ -655,3 +660,136 @@ def test_the_opened_run_is_the_one_step3_shows(app, tmp_path, monkeypatch):
         assert w._dv_step3_run == "/r/seg_c"
     finally:
         w.close()
+
+
+# ── codex review 2 (astra low): findings 1-5, 7, 8 ─────────────────────────
+
+def test_a_replacement_the_window_refuses_deletes_nothing(page, two, slides, monkeypatch):
+    """#5: Step0 restored the other version, the window did not accept it."""
+    from block01.ui.step0.step0_page import Step0Page
+    proj, ctx, v1, v2 = two
+    _answers(monkeypatch, also=True, load_other=lambda others: others[-1])
+    monkeypatch.setattr(Step0Page, "_write_step0_handoff",
+                        lambda self, config, zarr_path, remap_config_path=None: (config, [], [], {}))
+    monkeypatch.setattr(Step0Page, "_choose_workspace",
+                        lambda self, rows: self._dv_delete_row(
+                            _row(rows, "v002", "seg_20261003_120000_c"))[1])
+    page.handoff_accepted = lambda: False
+    page._open_existing_workspace()
+    page._announce_opened_workspace()
+    assert dv.get_version(ctx["roi_dir"], "v002") is not None
+    assert os.path.isdir(v2["corrected"]["path"])
+
+
+def test_a_draft_on_the_current_versions_product_keeps_it(page, two, slides, monkeypatch):
+    """#4: an Intensity-only draft references the current version's
+    corrected product; deleting the version with None keeps the product."""
+    proj, ctx, v1, v2 = two
+    with open(os.path.join(ctx["step_dirs"]["step0"], "step0_channel_remap.json"), "w") as f:
+        json.dump({"version_marker": "intensity changed"}, f)          # the draft
+    _answers(monkeypatch, also=True, load_other=None)
+    assert page._dv_delete_row(_row(_rows(page, proj, slides["a"]), "v002",
+                                    "seg_20261003_120000_c")) == ("unload",)
+    assert dv.get_version(ctx["roi_dir"], "v002") is None
+    assert os.path.isdir(v2["corrected"]["path"])
+    # no current version: what the workspace holds is offered as the draft
+    from block01.ui.step0.step0_page import DRAFT_TAG
+    assert _rows(page, proj, slides["a"])[0][2] == DRAFT_TAG
+
+
+def test_an_unfinished_deletion_is_never_cleaned_up_as_a_failed_generate(tmp_path):
+    """#2: records dropped, the move failed: the version folder is the
+    trash's and survives the incomplete-Generate cleanup."""
+    proj, ws = _project(tmp_path)
+    v1 = _version(ws)
+    v2 = _version(ws)
+    _handoff(ws, v2["corrected"]["path"])
+    plan = dv.plan_delete(ws, version_id="v001")
+    trash.begin(proj, "ws1", plan["what"], plan["paths"],
+                {k: plan[k] for k in ("run_dir", "version", "draft", "delete_workspace")})
+    dv._drop_version_record(ws, "v001")                       # ... then the move failed
+    assert dv.cleanup_incomplete(ws) == []
+    assert os.path.isdir(dv.version_dir(ws, v1["folder"]))
+
+
+def test_no_workspace_opens_while_an_unfinished_deletion_cannot_finish(page, two, slides,
+                                                                      monkeypatch):
+    """#2, #3: busy (or failing) -> the deletion waits and nothing opens."""
+    proj, ctx, v1, v2 = two
+    plan = dv.plan_delete(ctx["roi_dir"], version_id="v001")
+    trash.begin(proj, ctx["roi_id"], plan["what"], plan["paths"],
+                {k: plan[k] for k in ("run_dir", "version", "draft", "delete_workspace")})
+    page.deletion_blocker = lambda: "a Step4 extraction is running"
+    assert page._open_existing_workspace() is None
+    assert dv.get_version(ctx["roi_dir"], "v001") is not None          # untouched
+    page.deletion_blocker = lambda: None
+    released = []
+    page.release_paths = lambda paths: released.append(list(paths))
+    monkeypatch.setattr(dv, "resume_deletions",
+                        lambda project: (_ for _ in ()).throw(OSError("disk")))
+    assert page._open_existing_workspace() is None
+    assert released and set(released[0]) == set(plan["paths"])
+
+
+def test_a_recovered_deletion_gets_its_a3_record(tmp_path):
+    """#8."""
+    from block01.core import provenance as prov
+    proj, ws = _project(tmp_path)
+    _version(ws)
+    v2 = _version(ws)
+    _handoff(ws, v2["corrected"]["path"])
+    plan = dv.plan_delete(ws, version_id="v001")
+    trash.begin(proj, "ws1", plan["what"], plan["paths"],
+                {k: plan[k] for k in ("run_dir", "version", "draft", "delete_workspace")})
+    dv.resume_deletions(proj)
+    recs = [e for e in prov.load_entries(proj) if e["kind"] == "deletion"]
+    assert len(recs) == 1 and recs[0]["parameters"]["data_version"] == "v001"
+    dv.resume_deletions(proj)                                  # nothing twice
+    assert len([e for e in prov.load_entries(proj) if e["kind"] == "deletion"]) == 1
+
+
+def test_step4_results_in_another_folder_go_with_their_run(tmp_path):
+    """#7: Step4 written to a custom Output dir inside the project, and the
+    object tables; another run's results in the same folder stay."""
+    from block01.core import provenance as prov
+    proj, ws = _project(tmp_path)
+    _version(ws)
+    a = _run(ws, "v001", "seg_a")
+    custom = os.path.join(ws, "step4", "customA")
+    os.makedirs(custom)
+    mine = {n: os.path.join(custom, n) for n in ("a.h5ad", "a.csv", "a_provenance.json")}
+    theirs = os.path.join(custom, "b.h5ad")
+    for p in list(mine.values()) + [theirs]:
+        open(p, "w").write("x")
+    cells = os.path.join(proj, "objects", "seg_a", "cells.parquet")
+    os.makedirs(os.path.dirname(cells))
+    open(cells, "w").write("x")
+    prov.register(proj, "step4_h5ad", prov.location(proj, mine["a.h5ad"]), "t1",
+                  workspace_id="ws1",
+                  parameters={"segmentation_run_id": "seg_a",
+                              "files": {"h5ad": "a.h5ad", "csv": "a.csv",
+                                        "provenance": "a_provenance.json"}})
+    prov.register(proj, "step4_h5ad", prov.location(proj, theirs), "t2", workspace_id="ws1",
+                  parameters={"segmentation_run_id": "seg_b", "files": {}})
+    prov.register(proj, "cells_parquet", prov.location(proj, cells), "t3", workspace_id="ws1",
+                  parameters={"segmentation_run_id": "seg_a"})
+    dv.execute_delete(dv.plan_delete(ws, run_dir=os.path.realpath(a)))
+    assert all(not os.path.exists(p) for p in mine.values())
+    assert not os.path.exists(cells)
+    assert os.path.exists(theirs)
+
+
+def test_an_earlier_run_reads_the_legacy_versions_decisions(tmp_path):
+    """#1: v1 (legacy) and v2 share the corrected product with other
+    decisions; the earlier run is quantified with v1's."""
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    from block01.core import quant_sources as qs
+    proj, ws = _project(tmp_path)
+    shared = os.path.join(ws, "step0", "corrected_channels.zarr")
+    os.makedirs(shared)
+    for legacy in (True, False):
+        alloc = dv.new_version_folder(ws)
+        dv.commit_version(ws, alloc, {"corrected": {"path": shared}, "legacy": legacy,
+                                      "regions": []})
+    assert qs._version_referencing(ws, shared)["version"] == "v001"

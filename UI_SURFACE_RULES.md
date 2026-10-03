@@ -453,7 +453,20 @@ row, and the duplicate Tissue Preview button in the step bar.
   and makes it current; entering Step1 then restores its fusion settings and
   session once, by itself. A workspace made before data versions is
   registered as `v1` the first time it is opened (its products referenced
-  where they are). Its region, patches, channel decisions, parameters and Intensity
+  where they are). Block DV-D (user rulings 2026-10-03): each row is a
+  workspace + data version + ONE segmentation run made from it
+  (`<workspace>  ·  <method> · <MM-DD HH:MM>`; a version without runs is
+  one row `(not segmented)`; a dirty draft is a first row tagged `draft`,
+  preselected). Opening a run's row shows that run in Step3. Every row
+  starts with a red `×`: it deletes that row into `<project>/.trash/`
+  (removed 30 days after the deletion, or by `Empty trash… (<size>)` at
+  the dialog's bottom) after a confirmation that lists what moves; the
+  last run of a version asks, in the same box, whether its version goes
+  too (unchecked: kept); the current version asks `Load another
+  version?` (`None` default: delete, then a new empty window); the last
+  version asks whether the whole workspace goes too (default No). Nothing
+  is deleted while a Step0 Save, a Generate, a Step2 run or a Step4
+  extraction runs. Its region, patches, channel decisions, parameters and Intensity
   come back, so an unchanged Save says `No changes`. `Save` writes the open
   workspace; the `▾` joined to its right holds one item, `Save as new
   workspace`. A Save whose analysis region differs from the open workspace's

@@ -138,6 +138,14 @@ Read in the raw big image, **circle the region you actually care about (ROI)**, 
 - In Step 3's run list each run ends with the data version it used; older runs without one show `unknown`.
 - A workspace made before data versions is registered as `v1` the first time it is opened (its files stay where they are).
 
+**Deleting (into the trash):** in the chooser at Load each row is a workspace + data version + one segmentation (a version without one shows *(not segmented)*; unsaved-to-version changes show `draft`). Opening a row shows that segmentation in Step 3. The red **×** at a row's start deletes that row:
+- a confirmation lists what moves first. It deletes that segmentation and its Step 4 results; other segmentations of the same version stay.
+- for a version's last segmentation the box has a checkbox *Also delete data version …*; unchecked keeps the version so you can segment it again.
+- deleting the current version asks whether to load another version first; *None* deletes it and the window starts over empty — load data again yourself.
+- deleting a workspace's last version asks whether the whole workspace goes too (default: keep).
+- deleted things move to `<output>/.trash/` and are removed after 30 days; *Empty trash…* at the bottom removes them now. There is no Restore: moving a folder back by hand does not bring its version record back.
+- nothing can be deleted while a Step 0 Save, a Generate, Step 2 or Step 4 is running.
+
 <!-- image placeholder: images/03_step0_overview_and_roi.png — the overview in Step 0 with an ROI box already drawn -->
 <!-- image placeholder: images/04_step0_channel_groups.png — the Channels / Nucleus Channel grouping and weights panel -->
 <!-- image placeholder: images/05_step0_bg_correction_compare.png — the Original | TopHat | cucim three-way comparison preview -->

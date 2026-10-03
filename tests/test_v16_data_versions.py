@@ -1242,27 +1242,36 @@ def test_step2_takes_the_versions_parameters_once_per_version(app, tmp_path, mon
 
 # ── codex review 7 (astra low) ─────────────────────────────────────────────
 
-def test_the_windows_step_folders_are_the_workspaces_own(app, tmp_path, monkeypatch):
-    """#1: the handoff names another project's step folders -> Step1/Step2
-    write into this workspace's."""
-    w, ws = _dv_window(app, tmp_path)
-    try:
-        manifest = os.path.join(ws, "step0", "step0_roi_result.json")
-        open(manifest, "w").write("{}")
-        other = str(tmp_path / "other" / "rois" / "ws1")
-        w.step0_output = dict(w.step0_output, step0_manifest_path=manifest, roi_dir=other,
-                              step0_dir=other + "/step0", step1_dir=other + "/step1",
-                              step2_dir=other + "/step2")
-        w._corrected_zarr_path = other + "/step0/corrected_channels.zarr"
-        w._dv_rebase_to_workspace()
-        s0 = w.step0_output
-        assert s0["step1_dir"] == os.path.join(ws, "step1")
-        assert s0["step2_dir"] == os.path.join(ws, "step2")
-        assert s0["roi_dir"] == ws
-        assert w._fusion_settings_path() == os.path.join(ws, "step1", "step1_fusion_settings.json")
-        assert not w._corrected_zarr_path.startswith(other)
-    finally:
-        w.close()
+def test_the_windows_step_folders_are_the_workspaces_own(app, tmp_path):
+    """codex reviews 7-8: the handoff names another project's step folders ->
+    the common handoff reader maps them into this workspace (both the Save
+    signal and Step1's Load Step0 ROI Result use it)."""
+    from block01.ui.main_window import MainWindow
+    ws = _ws(tmp_path)
+    manifest = os.path.join(ws, "step0", "step0_roi_result.json")
+    os.makedirs(os.path.dirname(manifest))
+    other = str(tmp_path / "other" / "rois" / "ws1")
+    os.makedirs(other + "/step0/corrected_channels.zarr")
+    os.makedirs(os.path.join(ws, "step0", "corrected_channels.zarr"))
+    got = MainWindow._dv_localize_dirs(manifest, {
+        "roi_dir": other, "step0_dir": other + "/step0", "step1_dir": other + "/step1",
+        "step2_dir": other + "/step2", "out_dir": other + "/step1",
+        "corrected": other + "/step0/corrected_channels.zarr"})
+    assert got["roi_dir"] == ws
+    assert got["step1_dir"] == os.path.join(ws, "step1")
+    assert got["step2_dir"] == os.path.join(ws, "step2")
+    assert got["out_dir"] == os.path.join(ws, "step1")
+    assert got["corrected"] == os.path.join(ws, "step0", "corrected_channels.zarr")
+    same = MainWindow._dv_localize_dirs(manifest, {"step1_dir": os.path.join(ws, "step1")})
+    assert same == {"step1_dir": os.path.join(ws, "step1")}
+
+
+def test_the_handoff_reader_maps_before_it_writes(app, tmp_path, monkeypatch):
+    """The reader calls the mapping before it creates any folder."""
+    import inspect
+    from block01.ui.main_window import MainWindow
+    src = inspect.getsource(MainWindow._load_step0_roi_result)
+    assert src.index("_dv_localize_dirs(") < src.index("os.makedirs(step1_dir")
 
 
 def test_a_copied_versions_products_are_still_read_only(tmp_path):

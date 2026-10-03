@@ -3012,8 +3012,6 @@ class MainWindow(QMainWindow):
         self._step2._out_edit.setText(self.step0_output.get("step2_dir") or OUTPUT_DIR)
         # Block DV (§3.6, §3.9): a loaded data version brings its own Step1
         # files back; an opened workspace restores Step1 on entry, once.
-        if accepted is True:
-            self._dv_rebase_to_workspace()
         # Block DV-D: the chooser row was a version + segmentation run.
         self._dv_step3_run = str(self.step0_output.get("step3_run_dir") or "")
         if accepted is True and self.step0_output.get("opened_workspace"):
@@ -3449,6 +3447,16 @@ class MainWindow(QMainWindow):
         if not roi_dir:
             roi_dir = (ctx or {}).get("roi_dir", "")
         project_dir = manifest.get("project_output_dir") or (ctx or {}).get("project_dir", "")
+        # Block DV (codex reviews 7-8): every folder this handoff makes Step1
+        # and Step2 write into is the workspace's own -- the one the manifest
+        # file lives in -- before anything is created, bound or autosaved.
+        local = self._dv_localize_dirs(manifest_path, {
+            "roi_dir": roi_dir, "step0_dir": step0_dir, "step1_dir": step1_dir,
+            "step2_dir": step2_dir, "out_dir": out_dir, "corrected": corr_path})
+        roi_dir, step0_dir, step1_dir = local["roi_dir"], local["step0_dir"], local["step1_dir"]
+        step2_dir, out_dir, corr_path = local["step2_dir"], local["out_dir"], local["corrected"]
+        if corr_path != self._corrected_zarr_path and local.get("_moved"):
+            self._corrected_zarr_path = corr_path if corr_path and os.path.exists(corr_path) else ""
         if step1_dir:
             os.makedirs(step1_dir, exist_ok=True)
             OUTPUT_DIR = step1_dir
@@ -10318,38 +10326,35 @@ class MainWindow(QMainWindow):
         QtCore.QTimer.singleShot(0, self.close)
         return fresh
 
-    def _dv_rebase_to_workspace(self):
-        """Every folder Step1/Step2 write into is the workspace's own
-        (codex review 7, #1): a handoff copied with its absolute paths names
-        another project's step folders; they are mapped into the workspace
-        the handoff file lives in."""
-        global OUTPUT_DIR
+    @staticmethod
+    def _dv_localize_dirs(manifest_path, dirs):
+        """`dirs` (name -> path) mapped into the workspace the Step0 manifest
+        file lives in (acceptance finding 2026-10-03; codex reviews 7, 8): a
+        handoff copied with its absolute paths names another project's
+        folders, and nothing may be written there. Paths already inside are
+        kept; `_moved` lists what was mapped."""
         from ..utils import data_versions
-        ws = self._dv_workspace()
-        s0 = self.step0_output
-        if not ws or not s0:
-            return
+        out = dict(dirs)
+        if not manifest_path:
+            return out
+        ws = os.path.dirname(os.path.dirname(os.path.abspath(manifest_path)))
+        if not os.path.isfile(os.path.join(ws, "roi_manifest.json")):
+            return out
+        own = {"roi_dir": ws, "step0_dir": os.path.join(ws, "step0"),
+               "step1_dir": os.path.join(ws, "step1"), "step2_dir": os.path.join(ws, "step2")}
         moved = {}
-        for key, own in (("roi_dir", ws), ("step0_dir", os.path.join(ws, "step0")),
-                         ("step1_dir", os.path.join(ws, "step1")),
-                         ("step2_dir", os.path.join(ws, "step2")),
-                         ("output_dir", None)):
-            value = str(s0.get(key) or "")
+        for key, value in dirs.items():
             if not value or data_versions.is_inside(value, ws):
                 continue
-            here = data_versions.localize(ws, value, must_exist=False) or own
-            if here:
-                s0[key] = here
-                moved[key] = (value, here)
-        corrected = str(self.__dict__.get("_corrected_zarr_path") or "")
-        if corrected and not data_versions.is_inside(corrected, ws):
-            self._corrected_zarr_path = data_versions.localize(ws, corrected)
-            moved["corrected"] = (corrected, self._corrected_zarr_path)
+            here = data_versions.localize(ws, value, must_exist=(key == "corrected")) \
+                or own.get(key, "")
+            out[key] = here
+            moved[key] = (value, here)
         if moved:
-            OUTPUT_DIR = s0.get("step1_dir") or s0.get("output_dir") or OUTPUT_DIR
-            self._step2._out_edit.setText(s0.get("step2_dir") or OUTPUT_DIR)
+            out["_moved"] = moved
             print(f"[Workspace] the handoff named folders of another project; "
                   f"this workspace's own are used: {moved}")
+        return out
 
     @staticmethod
     def _dv_freeze_seg_params(step1_dir, version_folder):

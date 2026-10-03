@@ -1,9 +1,11 @@
 """One pre-segmentation run on disk: its frozen snapshot, tasks and records.
 
-No Qt, no engines. Layout (plan 7.3):
+No Qt, no engines. Layout (plan 7.3; block RM §4):
 
-    <step1_dir>/presegmentation_runs/<run_id>/
-        run.json                                  frozen at Run (plan 7.4)
+    <workspace>/runs/preseg_<stamp>/              the run's folder (`run_dir`)
+        params.json                               frozen at Run (plan 7.4)
+        inputs.json                               its pixel upstream: the correct run
+        .done                                     written when the job ends
         records/<combo_id>__<y0_y1_x0_x1>.json    one per task, published last
         masks/<combo_id>__<y0_y1_x0_x1>.cell.npy  uint32, the patch itself
         masks/<combo_id>__<y0_y1_x0_x1>.nucleus.npy
@@ -20,6 +22,7 @@ from datetime import datetime
 from . import config_hash
 from ..seg_runner import protocol
 from ..utils import segmentation_param_schema as ps
+from ..utils import run_store
 
 RUNS_DIRNAME = "presegmentation_runs"
 RECORD_SCHEMA = 1
@@ -116,21 +119,36 @@ def build_tasks(run_id, methods, patches):
 
 
 # ── the run directory ───────────────────────────────────────────────────────
+PARAMS = "params.json"
+
+
 def runs_dir(step1_dir):
+    """Where runs went outside a workspace (block RM keeps runs under
+    ``<workspace>/runs/``; this is for a Step1 folder with no workspace)."""
     return os.path.join(step1_dir, RUNS_DIRNAME)
 
 
-def run_dir(step1_dir, run_id):
-    return os.path.join(runs_dir(step1_dir), run_id)
+def run_dir(runs_root, run_id):
+    """The run's folder: `run_id` inside `runs_root` (a workspace's
+    ``runs/``)."""
+    return os.path.join(runs_root, run_id)
 
 
-def write_run(step1_dir, run):
-    """Create the run directory and publish run.json (the frozen snapshot)."""
-    d = run_dir(step1_dir, run["run_id"])
+def write_run(runs_root, run):
+    """Create the run directory and publish params.json (the frozen snapshot)."""
+    d = run_dir(runs_root, run["run_id"])
     for sub in ("records", "masks"):
         os.makedirs(os.path.join(d, sub), exist_ok=True)
-    protocol.publish_json(os.path.join(d, "run.json"), run)
+    # Block RM (§2.5): project-relative paths on disk (`read_run` resolves).
+    protocol.publish_json(os.path.join(d, PARAMS),
+                          run_store.to_records(run, run_store.project_dir_of(d)))
     return d
+
+
+def read_run(rdir):
+    """The frozen snapshot of the run in `rdir`, paths absolute."""
+    with open(os.path.join(rdir, PARAMS), encoding="utf-8") as f:
+        return run_store.from_records(json.load(f), run_store.project_dir_of(rdir))
 
 
 def record_path(rdir, task_id):

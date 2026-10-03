@@ -11,7 +11,8 @@ for a workspace made before A3 registered anything, the ``slide_id`` of the
 slide file its manifest names. A workspace whose slide cannot be identified
 is not offered.
 
-Only a workspace with a committed Step0 result (``step0/step0_roi_result.json``)
+Only a workspace with a committed Step0 result
+(``settings/step0/step0_roi_result.json``, block RM)
 is offered: one that was created by a Save that never finished has nothing to
 open.
 
@@ -47,7 +48,7 @@ class Workspace:
 
     @property
     def step0_dir(self) -> str:
-        return os.path.join(self.workspace_dir, "step0")
+        return roi_project.step_dirs(self.workspace_dir)["step0"]
 
     def label(self) -> str:
         """One line for the chooser: name, id, when, how far it got."""
@@ -121,7 +122,8 @@ def find_workspaces(project_dir, slide_path) -> Tuple[Optional[str], List[Worksp
         if not ws_id:
             continue
         wdir = roi_project.roi_dir(project_dir, ws_id)
-        if not os.path.isfile(os.path.join(wdir, "step0", STEP0_RESULT)):
+        if not os.path.isfile(os.path.join(roi_project.step_dirs(wdir)["step0"],
+                                           STEP0_RESULT)):
             continue
         ws_manifest = _load(roi_project.roi_manifest_path(wdir)) or {}
         ws_sid = recorded.get(ws_id)
@@ -144,6 +146,18 @@ def find_workspaces(project_dir, slide_path) -> Tuple[Optional[str], List[Worksp
             steps=steps, active=(ws_id == active_id)))
     found.sort(key=lambda w: (w.created_at, w.workspace_id), reverse=True)
     return sid, found
+
+
+def old_layout_workspaces(project_dir) -> List[str]:
+    """Workspaces of `project_dir` written before block RM. This version
+    does not open them (docs/v16_run_model_application.md §11)."""
+    root = os.path.join(project_dir, "rois")
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+    return [n for n in names
+            if roi_project.is_old_layout_workspace(os.path.join(root, n))]
 
 
 def workspace_regions(ws: Workspace) -> List[dict]:

@@ -49,7 +49,7 @@ def _chosen_and_saved(app, tmp_path, monkeypatch, method):
     monkeypatch.setattr(mw, "save_segmentation_params", save_then_stop)
     w._fusion_settings_dirty = lambda: False
     w._params_match_committed_settings = lambda: True
-    run, rdir = tpc._run_on_disk(w._preseg_step1_dir(), method, tpc.COMBOS[method])
+    run, rdir = tpc._run_on_disk(w._preseg_runs_root(), method, tpc.COMBOS[method])  # block RM
     w._preseg_run = run
     w._preseg_records = preseg_run.load_records(rdir)
     w._preseg_current = lambda: ("px1", "fh1")

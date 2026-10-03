@@ -172,7 +172,7 @@ def test_the_handoff_registers_each_corrected_channel(tmp_path):
     assert sorted(e["location"]["member"] for e in corr) == ["Full_WSI/CD3", "Full_WSI/CD8"]
     for e in corr:
         assert e["depends_on"] == [sid] and e["operates_on"] == [rid] and e["flags"] == []
-        assert e["location"]["path"] == f"rois/{ctx['roi_id']}/step0/corrected_channels.zarr"
+        assert e["location"]["path"] == os.path.relpath(zpath, project).replace(os.sep, "/")
         assert e["parameters"]["valid_bounds"] == list(ROI_BBOX)
         assert e["token"] == "tok-1-" + e["location"]["member"].split("/")[1]
         assert e["workspace_id"] == ctx["roi_id"]
@@ -322,7 +322,8 @@ def test_fusion_registers_its_inputs(tmp_path):
     sid = pid.describe_slide(slide)[0]
     corr = _entries(project, "corrected_channel")[0]["artifact_id"]
     [e] = _entries(project, "fused")
-    assert e["location"]["path"] == f"rois/{ctx['roi_id']}/step1/fused_Full WSI.zarr"
+    # block RM: wherever Step1's folder is now (settings/), the record names it
+    assert e["location"]["path"] == os.path.relpath(fused, project).replace(os.sep, "/")
     assert sorted(e["depends_on"]) == sorted([sid, corr])
     assert e["operates_on"] == [pid.region_id_of_roi(sid, ROI)] and e["unresolved_inputs"] == []
     assert e["token"] == prov.fused_token(dict(zarr.open(fused, mode="r").attrs))

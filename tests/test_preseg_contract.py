@@ -66,7 +66,7 @@ def app():
 def _run_on_disk(step1_dir, method, params, n_patches=2, identity=None, run_engine=None,
                  halo=200):
     """A finished run of one combination, published the way run_job does:
-    run.json (with the engine that started) and one record + mask per patch."""
+    params.json (with the engine that started) and one record + mask per patch."""
     import numpy as np
     engine = preseg_run.ps_engine(method)
     ident = identity if identity is not None else IDENT[engine]
@@ -86,7 +86,7 @@ def _run_on_disk(step1_dir, method, params, n_patches=2, identity=None, run_engi
         lab[2:5, 2:5] = 1
         rec = preseg_run.publish_result(rdir, run, task, preseg_run.OK,
                                         masks={"cell": lab, "nucleus": lab})
-        # What the engine said at hello, per patch (run.json may disagree).
+        # What the engine said at hello, per patch (params.json may disagree).
         rec["engine_identity"] = ident[i] if isinstance(ident, list) else ident
         with open(preseg_run.record_path(rdir, task["task_id"]), "w") as f:
             json.dump(rec, f)
@@ -104,7 +104,8 @@ def _use_and_save(tmp_path, method, params, **kw):
     w = types.SimpleNamespace(
         _preseg_run=run, _preseg_records=preseg_run.load_records(rdir),
         _preseg_current=lambda: ("px1", "fh1"), _check_save_unlock=lambda: None,
-        _refresh_preseg_results=lambda: None, _preseg_step1_dir=lambda: step1)
+        _refresh_preseg_results=lambda: None, _preseg_step1_dir=lambda: step1,
+        _preseg_runs_root=lambda: step1)          # block RM: runs sit in a runs root
     assert MainWindow._on_preseg_use(w, run["combos"][0]["combo_id"]) is True
     cfg = MainWindow._preseg_segmentation_config(w)
     out = str(tmp_path / "out")
@@ -286,6 +287,7 @@ def test_a_refused_save_writes_nothing(app, tmp_path, monkeypatch):
         _preseg_selected={"run": run, "combo_id": run["combos"][0]["combo_id"]},
         _preseg_selection_valid=lambda: (True, ""),
         _preseg_step1_dir=lambda: str(tmp_path / "step1"),
+        _preseg_runs_root=lambda: str(tmp_path / "step1"),     # block RM
         search=types.SimpleNamespace(_method_combo=types.SimpleNamespace(currentData=lambda: None)))
     w._preseg_segmentation_config = lambda: mw.MainWindow._preseg_segmentation_config(w)
     w._save_allowed = lambda: mw.MainWindow._save_allowed(w)

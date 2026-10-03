@@ -3,7 +3,7 @@
 No Qt: a plain thread, so it can be driven and tested without a window; the
 page turns its callbacks into signals. One run:
 
-  1. publish run.json -- the frozen snapshot the caller built at Run: patch
+  1. publish params.json -- the frozen snapshot the caller built at Run: patch
      boxes, combinations and tasks, the committed fusion snapshot, the source
      (pixel key), the HALO and the analysis region (plan 7.4);
   2. per engine, in a fixed order and one engine process at a time (plan
@@ -26,6 +26,7 @@ import numpy as np
 from ...core import label_ownership, preseg_input, preseg_run
 from ...seg_runner import engines as seg_engines
 from ...seg_runner.client import EngineProcess, EngineStartError
+from ...utils import run_store
 
 ENGINE_ORDER = ("cellpose", "stardist", "mesmer")
 
@@ -42,16 +43,17 @@ def open_loader(spec):
 
 
 class PresegRunJob:
-    def __init__(self, step1_dir, run, loader_factory, python=None,
+    def __init__(self, runs_root, run, loader_factory, python=None,
                  on_record=None, on_progress=None, on_finished=None):
-        self.step1_dir = step1_dir
+        # Block RM (§4): the folder runs go in (a workspace's runs/).
+        self.step1_dir = runs_root
         self.run = run
         self.loader_factory = loader_factory
         self.python = python
         self.on_record = on_record
         self.on_progress = on_progress
         self.on_finished = on_finished
-        self.rdir = preseg_run.run_dir(step1_dir, run["run_id"])
+        self.rdir = preseg_run.run_dir(runs_root, run["run_id"])
         self.records = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -118,6 +120,14 @@ class PresegRunJob:
             self._engine = None
             for sub in ("inputs", "raw"):
                 shutil.rmtree(os.path.join(self.rdir, sub), ignore_errors=True)
+            # Block RM (§16.3-4): the run ends -- finished, stopped or failed
+            # -- and its records are complete: .done. It does not say every
+            # task succeeded; Use still goes by each record.
+            if os.path.isdir(self.rdir):
+                try:
+                    run_store.publish(self.rdir)
+                except OSError as exc:
+                    print(f"[Preseg] .done not written ({exc})")
             if self.on_finished is not None:
                 self.on_finished(dict(self.records))
 
@@ -179,7 +189,7 @@ class PresegRunJob:
         self.run.setdefault("engines", {})[engine] = hello.get("identity")
         self.run.setdefault("devices", {})[engine] = hello.get("device")
         self.run.setdefault("engine_provenance", {})[engine] = hello.get("provenance")
-        preseg_run.write_run(self.step1_dir, self.run)          # run.json gains the engine
+        preseg_run.write_run(self.step1_dir, self.run)          # params.json gains the engine
 
         by_id = {rt["task_id"]: rt for rt in runner_tasks}
 

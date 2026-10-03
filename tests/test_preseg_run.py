@@ -295,9 +295,10 @@ def test_the_job_equals_the_steps_done_by_hand(tmp_path):
         assert rec["paired"] is True and rec["patch_label"] == p["name"]
         assert rec["engine_identity"]["engine"] == "stardist" and rec["device"]
     rdir = preseg_run.run_dir(str(tmp_path), run["run_id"])
-    saved = json.load(open(os.path.join(rdir, "run.json")))
+    saved = preseg_run.read_run(rdir)              # block RM: params.json, then .done
     assert saved["tasks"] == run["tasks"] and saved["fusion"]["hash"] == "fh1"
-    assert sorted(os.listdir(rdir)) == ["engine_stardist.log", "masks", "records", "run.json"]
+    assert sorted(os.listdir(rdir)) == [".done", "engine_stardist.log", "masks",
+                                        "params.json", "records"]
 
 
 def test_stop_cancels_what_is_left_and_no_engine_remains(tmp_path):

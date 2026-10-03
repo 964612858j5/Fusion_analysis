@@ -42,20 +42,22 @@ def fused_region(fused_zarr_path) -> Tuple[Tuple[int, int, int, int], str, Optio
     bbox = tuple(int(v) for v in bbox)
     if (bbox[1] - bbox[0], bbox[3] - bbox[2]) != tuple(int(v) for v in z.shape[:2]):
         raise TissueUnavailable(f"the fused input is {tuple(z.shape[:2])}, its bbox {list(bbox)}")
-    # Block DV: the fused product may sit in <ws>/step1/ or in a data
-    # version's folder <ws>/versions/<v>/; the workspace is the folder that
-    # holds roi_manifest.json, found by walking up (as provenance does).
+    # Block RM (§4): the fused product sits in a fuse run <ws>/runs/fuse_*/;
+    # the workspace is the folder that holds roi_manifest.json, found by
+    # walking up (as provenance does).
     ws = _workspace_of(path)
     manifest = _load(os.path.join(ws, "roi_manifest.json")) if ws else None
     slide = (manifest or {}).get("source_ome")
     if not slide or not os.path.isfile(slide):
         raise TissueUnavailable("the workspace records no readable slide")
-    # The settings that made THIS product: its version's copy, else Step1's.
-    settings = (_load(os.path.join(os.path.dirname(path), "step1_fusion_settings.json"))
-                or _load(os.path.join(ws, "step1", "step1_fusion_settings.json")) or {})
+    # The settings that made THIS product: its fuse run's frozen copy, else
+    # the workspace's saved settings.
+    run_params = _load(os.path.join(os.path.dirname(path), "params.json")) or {}
+    settings = (run_params.get("fusion_settings")
+                or _load(os.path.join(ws, "settings", "step1_fusion_settings.json")) or {})
     channel = ((settings.get("fusion_config") or {}).get("nucleus") or {}).get("channel")
     if not channel:
-        handoff = _load(os.path.join(ws, "step0", "step0_roi_result.json")) or {}
+        handoff = _load(os.path.join(ws, "settings", "step0", "step0_roi_result.json")) or {}
         channel = handoff.get("nucleus_channel") or handoff.get("panel_nucleus")
     if not channel:
         raise TissueUnavailable("no nucleus channel is recorded for this workspace")

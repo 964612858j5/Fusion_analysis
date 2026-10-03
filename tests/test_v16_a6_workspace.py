@@ -53,13 +53,19 @@ def _commit_step0(ctx, decisions=None, rois=None, patches=None):
                    # a real Save writes every marker channel's decision
                    "channel_decisions": decisions or {"CD3": "original", "CD8": "original"},
                    "channel_params": {}}, f)
-    os.makedirs(os.path.join(step0, "corrected_channels.zarr"), exist_ok=True)
+    # Block RM (§4): the corrected product is a published correct run.
+    from block01.utils import run_store
+    run = run_store.new_run(ctx["roi_dir"], "correct")
+    os.makedirs(os.path.join(run, "corrected_channels.zarr"), exist_ok=True)
+    run_store.write_params(run, {"kind": "correct", "corrected": {}})
+    run_store.write_inputs(run, None, slide_id="")
+    run_store.publish(run)
     with open(os.path.join(step0, "step0_roi_result.json"), "w") as f:
         json.dump({"roi_id": ctx["roi_id"],
                    "analysis_region_type": "full_wsi" if full else "roi",
                    "roi_config_path": os.path.join(step0, "roi_config.json"),
                    "patch_config_path": os.path.join(step0, "patch_config.json"),
-                   "corrected_zarr_path": os.path.join(step0, "corrected_channels.zarr")}, f)
+                   "corrected_zarr_path": os.path.join(run, "corrected_channels.zarr")}, f)
     return ctx
 
 
@@ -269,9 +275,9 @@ def test_several_workspaces_ask_which_one(page, tmp_path, slides, monkeypatch):
     offered = []
 
     def _choose(self, rows):
-        # Block DV: rows are (workspace, version, tag); none has versions here
+        # Block RM: one row per workspace (workspace, None, tag)
         offered.append([r[0].workspace_id for r in rows])
-        assert all(r[1] is None and r[2] == "unknown" for r in rows)
+        assert all(r[1] is None for r in rows)
         return rows[-1]                                # the oldest
     monkeypatch.setattr(Step0Page, "_choose_workspace", _choose)
     opened = page._open_existing_workspace()
@@ -367,7 +373,9 @@ def test_an_opened_workspace_announces_its_committed_handoff_unchanged(page, tmp
     step0 = made[0]["step_dirs"]["step0"]
     assert sent[0]["step0_manifest_path"] == os.path.join(step0, "step0_roi_result.json")
     assert sent[0]["roi_id"] == made[0]["roi_id"]
-    assert sent[0]["corrected_zarr_path"] == os.path.join(step0, "corrected_channels.zarr")
+    with open(os.path.join(step0, "step0_roi_result.json")) as f:   # block RM: the correct run
+        assert sent[0]["corrected_zarr_path"] == json.load(f)["corrected_zarr_path"]
+    assert "/runs/correct_" in sent[0]["corrected_zarr_path"]
     assert _tree(made[0]["roi_dir"]) == before         # nothing rewritten
     assert page._announce_opened_workspace() is False  # once
 

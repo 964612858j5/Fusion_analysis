@@ -69,6 +69,33 @@ def roi_step_dir(project_dir, roi_id, step_name):
     return os.path.join(roi_dir(project_dir, roi_id), step_name)
 
 
+# Block RM (docs/v16_run_model_application.md §4, §16.3-2): saved settings
+# live under settings/ -- Step0's handoff, correction and remap files in
+# settings/step0/, Step1's fusion settings and segmentation params directly
+# in settings/ -- and every product in runs/<kind>_<stamp>/ (utils/run_store).
+# step2/ and step3/ stay until block RM-2 moves segmentation into runs/.
+def step_dirs(roi_dir_path):
+    settings = os.path.join(roi_dir_path, "settings")
+    return {
+        "step0": os.path.join(settings, "step0"),
+        "step1": settings,
+        "step2": os.path.join(roi_dir_path, "step2"),
+        "step3": os.path.join(roi_dir_path, "step3"),
+    }
+
+
+def _make_layout(rdir):
+    for d in list(step_dirs(rdir).values()) + [os.path.join(rdir, "runs")]:
+        os.makedirs(d, exist_ok=True)
+
+
+def is_old_layout_workspace(roi_dir_path):
+    """A workspace written before block RM (step0/ handoff, no settings/):
+    not opened by this version (§11)."""
+    return (os.path.isfile(os.path.join(roi_dir_path, "step0", "step0_roi_result.json"))
+            and not os.path.isdir(os.path.join(roi_dir_path, "settings")))
+
+
 def roi_manifest_path(roi_dir_path):
     return os.path.join(roi_dir_path, ROI_MANIFEST)
 
@@ -142,8 +169,8 @@ def _default_roi_index(roi_id):
         "roi_id": roi_id,
         "active_step": "step0",
         "steps": {
-            "step0": {"status": "pending", "path": "step0/"},
-            "step1": {"status": "pending", "path": "step1/"},
+            "step0": {"status": "pending", "path": "settings/step0/"},
+            "step1": {"status": "pending", "path": "settings/"},
             "step2": {"status": "pending", "path": "step2/"},
             "step3": {"status": "pending", "path": "step3/"},
         },
@@ -197,8 +224,7 @@ def create_roi_context(project_dir, roi, source_ome=None, display_name=None):
     }
     rdir = roi_dir(project_dir, roi_id)
     os.makedirs(rdir, exist_ok=True)
-    for step in ("step0", "step1", "step2", "step3", "future"):
-        os.makedirs(os.path.join(rdir, step), exist_ok=True)
+    _make_layout(rdir)
     save_json(roi_manifest_path(rdir), manifest)
     save_json(roi_index_path(rdir), _default_roi_index(roi_id))
     update_project_roi_index(project_dir, manifest)
@@ -230,8 +256,7 @@ def create_full_wsi_context(project_dir, image_shape, source_ome=None):
     }
     rdir = roi_dir(project_dir, roi_id)
     os.makedirs(rdir, exist_ok=True)
-    for step in ("step0", "step1", "step2", "step3", "future"):
-        os.makedirs(os.path.join(rdir, step), exist_ok=True)
+    _make_layout(rdir)
     save_json(roi_manifest_path(rdir), manifest)
     save_json(roi_index_path(rdir), _default_roi_index(roi_id))
     update_project_roi_index(project_dir, manifest)
@@ -251,10 +276,8 @@ def build_roi_context(project_dir, roi_id):
         "roi_dir": rdir,
         "manifest_path": roi_manifest_path(rdir),
         "index_path": roi_index_path(rdir),
-        "step_dirs": {
-            step: os.path.join(rdir, step)
-            for step in ("step0", "step1", "step2", "step3", "future")
-        },
+        "step_dirs": step_dirs(rdir),
+        "runs_dir": os.path.join(rdir, "runs"),
     }
 
 
@@ -321,8 +344,8 @@ def resolve_roi_context(path, default_project_dir=None):
         path = os.path.dirname(path)
 
     cur = path
-    if os.path.basename(cur) == "step0":
-        roi_dir_path = os.path.dirname(cur)
+    if os.path.basename(cur) == "step0" and os.path.basename(os.path.dirname(cur)) == "settings":
+        roi_dir_path = os.path.dirname(os.path.dirname(cur))
         manifest = load_json(roi_manifest_path(roi_dir_path), {}) or {}
         roi_id = manifest.get("roi_id") or os.path.basename(roi_dir_path)
         project_dir = os.path.dirname(os.path.dirname(roi_dir_path))

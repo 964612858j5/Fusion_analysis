@@ -47,6 +47,7 @@ from .bg_correction import (
 )
 from ..config import CUCIM_SIGMA_DEFAULT, TOPHAT_RADIUS_DEFAULT
 from ..utils.channel_remap_config import channel_remap_config_hash
+from ..utils import run_store
 from ..utils.roi_project import mark_roi_step
 from .provenance import register_corrected_channels
 from ..utils import perf_trace
@@ -70,6 +71,64 @@ def _write_json_staged(path, payload, tag):
     return tmp
 
 
+# Block RM (docs/v16_run_model_application.md §2.5): the manifest on disk
+# names files by project-relative paths, so a project folder can be copied or
+# renamed as a whole. A path outside the project (the raw slide, a panel CSV
+# kept elsewhere) stays absolute. In memory every path is absolute again:
+# `published_handoff` and `read_manifest` resolve them on read.
+MANIFEST_PATH_FIELDS = (
+    "project_output_dir", "roi_dir", "step0_dir", "step1_dir", "step2_dir",
+    "output_dir", "panel_csv_path", "channel_remap_config_path",
+    "corrected_zarr_path", "correction_config_path", "roi_config_path",
+    "patch_config_path", "step0_roi_result_path",
+)
+
+
+def _record_path(project_dir, path):
+    if not path:
+        return ""
+    if project_dir:
+        try:
+            return run_store.rel(project_dir, path)
+        except ValueError:
+            pass
+    return os.path.abspath(path)
+
+
+def manifest_records(manifest, manifest_path):
+    """`manifest` as it is written to disk: project-relative paths."""
+    project = run_store.project_dir_of(manifest_path)
+    out = dict(manifest)
+    for key in MANIFEST_PATH_FIELDS:
+        if out.get(key):
+            out[key] = _record_path(project, out[key])
+    return out
+
+
+def resolve_manifest(manifest, manifest_path):
+    """`manifest` as read from `manifest_path`, every path absolute."""
+    if not isinstance(manifest, dict):
+        return manifest
+    project = (run_store.project_dir_of(manifest_path)
+               or os.path.dirname(os.path.abspath(manifest_path)))
+    out = dict(manifest)
+    for key in MANIFEST_PATH_FIELDS:
+        value = out.get(key)
+        if value and isinstance(value, str) and not os.path.isabs(value):
+            out[key] = run_store.resolve(project, value)
+    return out
+
+
+def read_manifest(manifest_path):
+    """The manifest at `manifest_path` with absolute paths, or None."""
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return resolve_manifest(manifest, manifest_path) if isinstance(manifest, dict) else None
+
+
 def ensure_empty_corrected_zarr(zarr_path, rois, *, source_ome,
                                 analysis_region_type, roi_id="", roi_dir="",
                                 out_dir=""):
@@ -82,10 +141,8 @@ def ensure_empty_corrected_zarr(zarr_path, rois, *, source_ome,
     root.attrs["mode"] = "roi_only"
     root.attrs["analysis_region_type"] = analysis_region_type
     root.attrs["source_ome"] = os.path.abspath(source_ome) if source_ome else ""
-    root.attrs["output_dir"] = os.path.abspath(out_dir)
-    if roi_id or roi_dir:
+    if roi_id:
         root.attrs["roi_id"] = roi_id
-        root.attrs["roi_dir"] = os.path.abspath(roi_dir) if roi_dir else ""
     root.attrs["roi_names"] = [r.get("name", f"ROI_{i}")
                                for i, r in enumerate(rois, start=1)]
     root.attrs["created_by"] = "Step0"
@@ -169,12 +226,10 @@ def write_handoff(spec, *, superseded=None, tag="0", publication_lock=None):
                 root.attrs["mode"] = "roi_only"
                 root.attrs["analysis_region_type"] = analysis_region_type
                 root.attrs["source_ome"] = raw_path
-                root.attrs["output_dir"] = os.path.abspath(step0_dir)
-                root.attrs["project_output_dir"] = (
-                    os.path.abspath(project_dir) if project_dir else "")
+                # Block RM (§2.5): no absolute workspace paths in a product.
+                for key in ("output_dir", "project_output_dir", "roi_dir"):
+                    root.attrs.pop(key, None)
                 root.attrs["roi_id"] = roi_id
-                root.attrs["roi_dir"] = (os.path.abspath(roi_dir)
-                                         if roi_dir else "")
                 root.attrs["roi_names"] = [
                     r.get("name", f"ROI_{i}")
                     for i, r in enumerate(rois, start=1)]
@@ -208,6 +263,11 @@ def write_handoff(spec, *, superseded=None, tag="0", publication_lock=None):
                 raise RuntimeError(
                     "failed to commit corrected zarr handoff metadata") from e
         _check("zarr_attrs")
+        # Block RM (§5): a Save that made a new correct run publishes it
+        # (params.json, inputs.json, then .done) only now, with its pixels and
+        # attributes final, and before the manifest that will name it.
+        if spec.get("publish_run") is not None:
+            spec["publish_run"]()
 
         # v14.4: validate the corrected output (a directory existing is NOT
         # proof of a valid corrected zarr) and report it honestly to the UI +
@@ -306,7 +366,8 @@ def write_handoff(spec, *, superseded=None, tag="0", publication_lock=None):
         manifest_tmp = f"{manifest_path}.tmp.{tag}"
         with open(manifest_tmp, "w", encoding="utf-8") as f, \
                 perf_trace.span("handoff.manifest_write"):
-            json.dump(manifest, f, indent=2, ensure_ascii=False)
+            json.dump(manifest_records(manifest, manifest_path), f, indent=2,
+                      ensure_ascii=False)
             f.flush()
             with perf_trace.span("handoff.fsync"):
                 os.fsync(f.fileno())
@@ -378,6 +439,7 @@ def published_handoff(step0_dir):
         return None
     if not isinstance(manifest, dict) or not isinstance(config, dict):
         return None
+    manifest = resolve_manifest(manifest, manifest_path)
     zarr_path = str(manifest.get("corrected_zarr_path")
                     or os.path.join(step0_dir, "corrected_channels.zarr"))
     return step0_dir, manifest_path, zarr_path, config, manifest
@@ -645,7 +707,8 @@ def commit_geometry_only(task, *, superseded=None, publication_lock=None):
         manifest_tmp = f"{manifest_path}.tmp.rev{revision}"
         with open(manifest_tmp, "w", encoding="utf-8") as f, \
                 perf_trace.span("handoff.manifest_write"):
-            json.dump(new_manifest, f, indent=2, ensure_ascii=False)
+            json.dump(manifest_records(new_manifest, manifest_path), f, indent=2,
+                      ensure_ascii=False)
             f.flush()
             with perf_trace.span("handoff.fsync"):
                 os.fsync(f.fileno())

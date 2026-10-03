@@ -10,6 +10,7 @@ import shutil
 import time
 import traceback
 import weakref
+from datetime import datetime
 import multiprocessing as mp
 from collections import OrderedDict
 from functools import partial
@@ -79,6 +80,7 @@ from ...utils.roi_project import (
 )
 from ...utils import workspace_session
 from ...utils import data_versions
+from ...utils import run_store
 # Step0 keeps the shared ChannelWorkbench as an internal lifecycle/config owner.
 # Its Intensity inspector is exposed from Background Correction; the former
 # user-facing Channel Remap tab is gone. GUI-only -- these are the same UI-local
@@ -4760,32 +4762,15 @@ class Step0Page(QWidget):
         """The handoff Step0 has already published, or None.
 
         Returns (step0_dir, manifest_path, corrected_zarr_path, correction
-        config, manifest).  Before the first Save there is nothing to update
-        and edits stay staged for that Save, exactly as they always have.
+        config, manifest), every path absolute (`step0_handoff` resolves the
+        project-relative records). Before the first Save there is nothing to
+        update and edits stay staged for that Save, exactly as they always have.
         """
         ctx = getattr(self, "_roi_context", None)
         if not ctx:
             return None
         step0_dir = (ctx.get("step_dirs") or {}).get("step0") or ""
-        if not step0_dir:
-            return None
-        manifest_path = os.path.join(step0_dir, "step0_roi_result.json")
-        corr_path = os.path.join(step0_dir, "correction_config.json")
-        if not (os.path.exists(manifest_path) and os.path.exists(corr_path)):
-            return None
-        try:
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
-            with open(corr_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-        except Exception as exc:
-            print(f"[Step0] cannot read the published handoff: {exc}")
-            return None
-        if not isinstance(manifest, dict) or not isinstance(config, dict):
-            return None
-        zarr_path = str(manifest.get("corrected_zarr_path")
-                        or os.path.join(step0_dir, "corrected_channels.zarr"))
-        return step0_dir, manifest_path, zarr_path, config, manifest
+        return step0_handoff.published_handoff(step0_dir) if step0_dir else None
 
     @staticmethod
     def _geometry_bboxes(items):
@@ -10926,33 +10911,18 @@ class Step0Page(QWidget):
     # ── workspaces: open an existing one (block A6 W1) ────────────────
 
     def _workspace_rows(self, found):
-        """Block DV (§3.6): one row per workspace AND data version, newest
-        workspace first; a workspace without versions is one row tagged
-        `unknown`. Each row: (workspace, version record or None, tag)."""
+        """Block RM (§5): one row per workspace (ROI), newest first. Each
+        row: (workspace, None, tag) -- the tag names the correct run the
+        workspace is being edited on."""
         rows = []
         for ws in found:
-            versions = data_versions.list_versions(ws.workspace_dir)
-            if not versions:
-                rows.append((ws, None, "unknown"))
-                continue
-            current = data_versions.current_version(ws.workspace_dir)
-            cur = (current or {}).get("version")
-            # User ruling 2026-10-03 (codex finding 3, option a): Step0 or
-            # Step1 saved since the current version, no Generate yet -- the
-            # dirty draft is its own row, `draft`, first and preselected.
-            # (no current version: what Step0 holds is no version -- a draft)
-            if (current is None and step0_handoff.published_handoff(ws.step0_dir)) \
-                    or (current is not None and self._dv_has_draft(ws, current)):
-                rows.append((ws, None, DRAFT_TAG))
-            # Block DV-D: one row per data version + segmentation run (the
-            # unit a × deletes); a version without runs is one row of its own.
-            for rec in reversed(versions):
-                tag = rec["version"] + ("  (current)" if rec["version"] == cur else "")
-                runs = data_versions.runs_of_version(ws.workspace_dir, rec["version"])
-                for run in runs:
-                    rows.append((ws, rec, tag, run))
-                if not runs:
-                    rows.append((ws, rec, tag))
+            tag = ""
+            published = step0_handoff.published_handoff(ws.step0_dir)
+            if published is not None and published[2]:
+                run_dir = os.path.dirname(published[2])
+                if run_store.is_done(run_dir):
+                    tag = run_store.display_name(run_dir)
+            rows.append((ws, None, tag))
         return rows
 
     @staticmethod
@@ -10979,9 +10949,8 @@ class Step0Page(QWidget):
         lay.addWidget(QLabel(
             "This project already has workspaces of this slide.\n"
             "Save writes into the one you open; Save \u25be \u203a Save as new "
-            "workspace makes another. Each row is a workspace, one of its data "
-            "versions and one segmentation made from it; \u00d7 deletes the row "
-            "(into the project's trash for 30 days)."))
+            "workspace makes another. Each row is one workspace (region); it "
+            "opens as it was last left."))
         lst = QtWidgets.QListWidget()
         delegate = TaggedItemDelegate(lst)
         lst.setItemDelegate(delegate)
@@ -10993,36 +10962,16 @@ class Step0Page(QWidget):
             for row in state["rows"]:
                 item = QtWidgets.QListWidgetItem(self._row_text(row))
                 item.setData(TAG_ROLE, row[2])
-                item.setData(CLOSE_ROLE, True)
+                # Block RM-1 (§16.4): deleting from here returns with RM-2's
+                # run deletion; the DV-D × is off.
+                item.setData(CLOSE_ROLE, False)
                 item.setToolTip(f"{self._row_text(row)}  \u2014  {row[2]}")
                 lst.addItem(item)
             lst.addItem("Start a new workspace (open none)")
             lst.setCurrentRow(self._default_row_index(state["rows"]))
-            trash_btn.setText(f"Empty trash\u2026 ({self._fmt_bytes(self._dv_trash_size())})")
 
-        def _closed(index):
-            if not 0 <= index < len(state["rows"]):
-                return
-            outcome = self._dv_delete_row(state["rows"][index], dlg)
-            if outcome is None:
-                return
-            if outcome[0] == "load":                 # load another, then delete
-                state["chosen"] = outcome[1]
-                dlg.accept()
-                return
-            if outcome[0] == "unload":
-                state["chosen"] = None
-                dlg.reject()
-                return
-            state["rows"] = self._dv_rows_again()
-            _fill()
-
-        delegate.close_clicked.connect(_closed)
-        trash_btn = QtWidgets.QPushButton("Empty trash\u2026")
-        trash_btn.clicked.connect(lambda: (self._dv_empty_trash(dlg), _fill()))
         box = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        box.addButton(trash_btn, QtWidgets.QDialogButtonBox.ResetRole)
         box.accepted.connect(dlg.accept)
         box.rejected.connect(dlg.reject)
         lst.itemDoubleClicked.connect(lambda _i: dlg.accept())
@@ -11306,6 +11255,42 @@ class Step0Page(QWidget):
         threading.Thread(target=_purge, name="trash-purge", daemon=True).start()
         return True
 
+    def _rm_old_project_refused(self, parent=None):
+        """Block RM (§11): a project written before block RM is not opened
+        and not written; the user is asked to choose another output folder.
+        Its files are left as they are."""
+        old = workspace_session.old_layout_workspaces(self.output_dir) \
+            if self.output_dir else []
+        if not old:
+            return False
+        print(f"[Workspace] {self.output_dir} was written by an earlier version "
+              f"({len(old)} workspace(s)); not opened, not written")
+        QMessageBox.warning(
+            parent or self, "Not a project of this version",
+            "The output folder holds a project written by an earlier version "
+            "of this program, which this version does not open.\n\n"
+            f"{self.output_dir}\n\n"
+            "Choose another output folder. Nothing in this one was changed.")
+        return True
+
+    def _rm_purge_trash(self):
+        """Trash entries deleted more than 30 days ago are removed in the
+        background (block DV-D §6, kept)."""
+        from ...utils import trash
+        project = self.output_dir
+        if not project or not os.path.isdir(os.path.join(project, trash.TRASH_DIR)):
+            return
+
+        def _purge():
+            try:
+                removed = trash.purge(project)
+                if removed:
+                    print(f"[Trash] removed after 30 days: {removed}")
+            except Exception as exc:                  # noqa: BLE001
+                print(f"[Trash] purge failed: {exc}")
+        import threading
+        threading.Thread(target=_purge, name="trash-purge", daemon=True).start()
+
     def _open_existing_workspace(self):
         """Find this slide's workspaces in the output directory's project
         and open one: its region, patches, channel decisions, parameters and
@@ -11316,8 +11301,9 @@ class Step0Page(QWidget):
         self._dv_open_run = ""
         self._dv_delete_after_announce = None
         self._dv_loaded_record = None
-        if not self._dv_tidy_trash():
+        if self._rm_old_project_refused():
             return None
+        self._rm_purge_trash()
         try:
             _sid, found = workspace_session.find_workspaces(self.output_dir, self.ome_path)
         except Exception as exc:                      # noqa: BLE001 -- never blocks a Load
@@ -11326,24 +11312,16 @@ class Step0Page(QWidget):
         if not found:
             return None
         rows = self._workspace_rows(found)
-        # User ruling 2026-10-03 (DV-D, codex review 2 #6, option a): the
-        # chooser is shown even for one row, so its × and Empty trash can be
-        # reached; the row is preselected -- Enter opens it.
+        # User ruling 2026-10-03 (option a): the chooser is shown even for one
+        # row; the row is preselected -- Enter opens it.
         chosen = self._choose_workspace(rows)
         if chosen is None:
             print("[Workspace] no workspace opened; the first Save makes a new one")
             return None
-        # (a test may answer with the workspace alone: its current version)
-        ws, version = (chosen[0], chosen[1]) if isinstance(chosen, tuple) else (chosen, None)
-        run = chosen[3] if isinstance(chosen, tuple) and len(chosen) > 3 else None
-        after, self._dv_after_load = self._dv_after_load, None
+        # (a test may answer with the workspace alone)
+        ws = chosen[0] if isinstance(chosen, tuple) else chosen
         try:
-            self._restore_workspace(ws, version)
-            self._dv_loaded_record = version
-            # DV-D §3.4: the deletion waits until the window has accepted the
-            # other version's handoff (codex review 2, #5).
-            self._dv_delete_after_announce = after
-            self._dv_open_run = run.run_dir if run is not None else ""
+            self._restore_workspace(ws)
         except Exception as exc:                      # noqa: BLE001
             # A workspace that cannot be read back is not half-opened.
             print(f"[Workspace] {ws.workspace_id} could not be opened "
@@ -11367,87 +11345,35 @@ class Step0Page(QWidget):
             return False
         config, rois, decisions, manifest, zarr_path, loaded = pending
         payload = self._handoff_payload(config, rois, decisions, manifest, zarr_path)
-        # Block DV: the window restores Step1 automatically (§3.9), with the
-        # loaded version's Step1 files when a version was switched to.
+        # The window restores Step1 automatically from the workspace's
+        # session.json (block RM §6).
         payload["opened_workspace"] = True
-        payload["data_version_loaded"] = loaded
-        # Block DV-D: the row was a version + segmentation run: Step3 shows it.
-        payload["step3_run_dir"] = getattr(self, "_dv_open_run", "") or ""
         self.step0_complete.emit(payload)
-        after, self._dv_delete_after_announce = (
-            getattr(self, "_dv_delete_after_announce", None), None)
-        if after is not None:
-            accepted = getattr(self, "handoff_accepted", None)
-            loaded = getattr(self, "_dv_loaded_record", None) or {}
-            missing = [r.get("roi_name") for r in loaded.get("regions") or []
-                       if not self._dv_fused_readable(r.get("fused_zarr_path") or "")]
-            if callable(accepted) and not accepted():
-                print("[Workspace] the other version's handoff was not accepted: "
-                      "nothing was deleted")
-            elif missing:
-                # codex review 3, #2: Step1 could not restore it either.
-                print(f"[Workspace] the other version has no fused product for "
-                      f"{missing}: nothing was deleted")
-            else:
-                self._dv_release(after["paths"])
-                data_versions.execute_delete(after)
         print(f"[Workspace] announced the committed handoff of "
               f"{manifest.get('roi_id', '')} (nothing rewritten)")
         return True
 
-    def _restore_workspace(self, ws, version=None):
-        # Block DV (§3.12): a Generate that was cancelled, failed or killed
-        # left a version folder that is not a version: it goes now.
-        removed = data_versions.cleanup_incomplete(ws.workspace_dir)
-        if removed:
-            print(f"[Workspace] removed unfinished data-version folders: {removed}")
+    def _restore_workspace(self, ws):
+        # Block RM (§4): a run folder without .done never finished (a Save or
+        # Generate that was cancelled, failed or killed): it goes now -- but
+        # not while a job of this program may be writing one.
+        blocker = getattr(self, "deletion_blocker", None)
+        busy = blocker() if callable(blocker) else None
+        if busy:
+            print(f"[Workspace] unfinished run folders are left for now ({busy})")
+        else:
+            removed = run_store.cleanup_incomplete(ws.workspace_dir)
+            if removed:
+                print(f"[Workspace] removed unfinished run folders: {removed}")
         published = step0_handoff.published_handoff(ws.step0_dir)
         if published is None:
             raise ValueError("no committed Step0 result")
         _dir, _manifest_path, zarr_path, config, manifest = published
-        zarr_path = self._dv_inside_workspace(ws.workspace_dir, zarr_path) or os.path.join(
-            ws.step0_dir, "corrected_channels.zarr")
         roi_path, patch_path = step0_handoff.manifest_geometry_paths(manifest, ws.step0_dir)
         saved_rois = workspace_session._load(roi_path) or []
         saved_patches = workspace_session._load(patch_path) or []
         full = (manifest.get("analysis_region_type") == "full_wsi"
                 or ws.region_type == "full_wsi")
-        # Block DV (§3.6, §3.11): loading a version that is not the current
-        # one -- its own parameters, its own frozen region geometry and its
-        # own corrected product; Step0's handoff is republished for it below.
-        # Choosing a version -- the current one too -- while the workspace
-        # holds a dirty draft loads that version: reloading a version ends the
-        # dirty draft (§3.13). The `draft` row continues the draft instead.
-        switch, step1_differs = None, False
-        if version is not None:
-            cur = data_versions.current_version(ws.workspace_dir)
-            if cur is None or cur.get("version") != version.get("version") \
-                    or self._dv_step0_differs(ws, version, config, zarr_path):
-                switch = version
-            step1_differs = self._dv_step1_differs(ws, version)
-        if switch is not None:
-            vdir = data_versions.version_dir(ws.workspace_dir, switch.get("folder", ""))
-            vcfg = workspace_session._load(os.path.join(vdir, "correction_config.json"))
-            if isinstance(vcfg, dict):
-                config = vcfg
-            zarr_path = (switch.get("corrected") or {}).get("path") or zarr_path
-            vremap = os.path.join(vdir, "step0_channel_remap.json")
-            if os.path.isfile(vremap):
-                shutil.copy2(vremap, self._step0_conditioning_config_path_for(ws))
-            regions = switch.get("regions") or []
-            h, w = (int(v) for v in self.loader.shape[:2])
-            full = (len(regions) == 1 and not regions[0].get("polygon_fullres")
-                    and [int(v) for v in regions[0].get("bbox_fullres") or []] == [0, h, 0, w])
-            def _outline(r):
-                # a region frozen as a box only is drawn as that box
-                if r.get("polygon_fullres"):
-                    return r["polygon_fullres"]
-                y0, y1, x0, x1 = (int(v) for v in r.get("bbox_fullres") or [0, 0, 0, 0])
-                return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
-            saved_rois = [{"name": r.get("roi_name"), "roi_id": r.get("roi_id"),
-                           "bbox_fullres": r.get("bbox_fullres"),
-                           "polygon_fullres": _outline(r),
-                           "type": "roi"} for r in regions]
 
         # The region and the patches, on every overview and in the model --
         # never through the edit path, which would write them back.
@@ -11469,7 +11395,46 @@ class Step0Page(QWidget):
             self.overview.get_rois() if self.overview else self.rois)
         self._roi_context_sig = self._roi_context_signature(cur)
 
-        # Decisions and parameters (user ruling 2026-10-02).
+        # Decisions and parameters (user ruling 2026-10-02); block RM §6: the
+        # workspace's Step0 draft, when it was edited against this correct
+        # run, is shown instead of the saved configuration (which stays what
+        # the handoff and Save compare against).
+        draft = self._rm_step0_draft(ws)
+        shown = (draft or {}).get("correction_config") or config
+        self._apply_correction_config_to_ui(shown)
+
+        # What the workspace already holds corrected counts as computed.
+        sigs, _bboxes = read_corrected_zarr_state(zarr_path)
+        self._workspace_saved_sigs = dict(sigs)
+        # The SAVED decisions say which channels the run holds corrected (a
+        # restored draft may say otherwise until it is saved).
+        corrected = {ch: step0_handoff.migrate_correction_decision(m)
+                     for ch, m in ((config or {}).get("channel_decisions") or {}).items()
+                     if step0_handoff.migrate_correction_decision(m) in ("tophat", "cucim")
+                     and ch in self._channel_order and ch != self.nucleus_channel}
+        if corrected and os.path.isdir(zarr_path):
+            self._apply_corrected_store(zarr_path, corrected)
+
+        # Intensity: applied when the workbench is (lazily) engaged.
+        try:
+            from ...utils.channel_remap_config import load_channel_remap_config
+            remap = load_channel_remap_config(self._step0_conditioning_config_path())
+            self._workspace_intensity = dict(remap.get("channels") or {})
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"[Workspace] no saved Intensity restored ({exc})")
+            self._workspace_intensity = None
+        if (draft or {}).get("intensity"):
+            merged = dict(self._workspace_intensity or {})
+            merged.update(draft["intensity"])
+            self._workspace_intensity = merged
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is not None and wb.has_channel_data():
+            self._apply_workspace_intensity()
+        self._rm_after_restore(ws, config, manifest, saved_rois, _manifest_path,
+                               zarr_path, corrected)
+
+    def _apply_correction_config_to_ui(self, config):
+        """Sliders, per-channel parameters and decisions from `config`."""
         mp = (config or {}).get("method_params") or {}
         for slider, key, default in ((self._tophat_slider, "tophat_radius",
                                       TOPHAT_RADIUS_DEFAULT),
@@ -11493,26 +11458,8 @@ class Step0Page(QWidget):
         self._update_decision_ui()
         self._refresh_all_channel_states()
 
-        # What the workspace already holds corrected counts as computed.
-        sigs, _bboxes = read_corrected_zarr_state(zarr_path)
-        self._workspace_saved_sigs = dict(sigs)
-        corrected = {ch: m for ch, m in self._channel_decisions.items()
-                     if m in ("tophat", "cucim")}
-        if corrected and os.path.isdir(zarr_path):
-            self._apply_corrected_store(zarr_path, corrected)
-
-        # Intensity: applied when the workbench is (lazily) engaged.
-        try:
-            from ...utils.channel_remap_config import load_channel_remap_config
-            remap = load_channel_remap_config(self._step0_conditioning_config_path())
-            self._workspace_intensity = dict(remap.get("channels") or {})
-        except (FileNotFoundError, ValueError) as exc:
-            print(f"[Workspace] no saved Intensity restored ({exc})")
-            self._workspace_intensity = None
-        wb = getattr(self, "_cond_workbench", None)
-        if wb is not None and wb.has_channel_data():
-            self._apply_workspace_intensity()
-
+    def _rm_after_restore(self, ws, config, manifest, saved_rois, _manifest_path,
+                          zarr_path, corrected):
         workspace_session.mark_active(ws)
         self._load_status.setText(self._project_status_text())
         # Announced at the END of the load, after `dataset_committed` (whose
@@ -11520,17 +11467,7 @@ class Step0Page(QWidget):
         # committed handoff, unchanged, so Step1 can be entered without a
         # Save that would change nothing.
         decisions = dict(manifest.get("corrected_decisions") or corrected)
-        if switch is not None:
-            # Step0's handoff now describes the loaded version; it becomes
-            # the current one (§3.6). Nothing of any version is written.
-            _cfg, rois_out, _patches, manifest = self._write_step0_handoff(
-                config, zarr_path)
-            _manifest_path = manifest.get("step0_roi_result_path") or _manifest_path
-            saved_rois = rois_out
-            data_versions.set_current(ws.workspace_dir, switch["version"])
-            print(f"[Workspace] data version {switch['version']} loaded: Step0's "
-                  f"handoff now describes it")
-        loaded = version["version"] if (switch is not None or step1_differs) else ""
+        loaded = ""
         self._workspace_handoff_pending = (config, list(saved_rois), decisions,
                                            dict(manifest, step0_roi_result_path=_manifest_path),
                                            zarr_path, loaded)
@@ -11670,72 +11607,176 @@ class Step0Page(QWidget):
             return "overwrite"
         return "cancel"
 
-    # ── data versions: the corrected draft (block DV §3.15) ─────────────
+    # ── runs: the correct run a Save writes (block RM §5) ───────────────
 
-    def _dv_base_corrected_path(self, step0_dir):
-        """The corrected product this Save starts from: the one the handoff
-        references (a published, read-only product or the dirty draft), or a
-        new draft folder when there is none."""
+    def _rm_base_corrected_path(self):
+        """The corrected zarr of the correct run being edited -- the one the
+        published handoff names -- or "" when this workspace has none yet."""
+        published = self._published_handoff()
         ws = (self._roi_context or {}).get("roi_dir")
         if not ws:
+            # Outside a workspace (no runs/): the step0 folder's product, in
+            # place, as before data versions.
+            step0_dir = ((self._roi_context or {}).get("step_dirs") or {}).get("step0") \
+                or self.output_dir
             return os.path.join(step0_dir, "corrected_channels.zarr")
-        published = self._published_handoff()
-        if published is not None and published[2]:
-            mine = self._dv_inside_workspace(ws, published[2])
-            if mine and os.path.isdir(mine):
-                return mine
-        return data_versions.new_corrected_folder(ws)
+        if published is None or not published[2]:
+            return ""
+        run_dir = os.path.dirname(published[2])
+        if (run_store.kind_of(run_dir) != "correct" or not run_store.is_done(run_dir)
+                or os.path.abspath(run_store.roi_dir_of(run_dir)) != os.path.abspath(ws)):
+            return ""
+        return published[2]
 
     @staticmethod
-    def _dv_inside_workspace(ws, path):
-        """`path` when it lies inside the workspace; for a path into another
-        folder (a project copied with its absolute paths -- acceptance
-        finding 2026-10-03) the same place inside THIS workspace, or "".
-        Nothing is ever written outside the workspace that is open."""
-        here = data_versions.localize(ws, path)
-        if path and here != os.path.abspath(path):
-            print(f"[Workspace] {path} lies outside the open workspace; "
-                  + (f"{here} is used instead" if here else "not used"))
-        return here
+    def _rm_sigs(sigs):
+        """Per-channel save signatures as JSON keeps them (tuples -> lists)."""
+        return json.loads(json.dumps(dict(sigs or {}), default=str))
 
-    def _dv_draft_for_geometry(self, base_path, copy):
-        """A Save that changes the region geometry without recomputing any
-        channel: a published product stays as it is; the geometry goes into a
-        draft (a copy of it when `copy`, else a new empty one)."""
-        ws = (self._roi_context or {}).get("roi_dir")
-        if not ws or not data_versions.is_published_product(ws, base_path):
-            return base_path
-        if copy:
-            return self._dv_prepare_draft(base_path, True)[0]
-        draft = data_versions.new_corrected_folder(ws)
-        print(f"[Step0] corrected draft: new at {draft} for the changed region")
-        return draft
+    def _rm_base_sigs(self, base_path):
+        """What the base correct run froze: {channel: signature}."""
+        if not base_path:
+            return {}
+        return self._rm_sigs(run_store.read_params(os.path.dirname(base_path))
+                             .get("corrected") or {})
 
-    def _dv_prepare_draft(self, base_path, incremental):
-        """The draft to correct into, and whether to correct incrementally.
-
-        * the base is the dirty draft (no version references it): correct it
-          in place, as today;
-        * the base is published (read-only) and the ROI and source are the
-          same (`incremental`): copy it once, with its coarse sidecar, into a
-          new corrected folder and correct only the changed channels;
-        * another ROI: a new, empty corrected folder; every channel recomputed."""
+    def _rm_new_correct_run(self, base_path="", copy=False):
+        """A new, unpublished correct run; returns the corrected zarr path in
+        it. `copy`: start from the base run's pixels (and coarse sidecar), so
+        only the changed channels are recomputed. A published run is never
+        written."""
         ws = (self._roi_context or {}).get("roi_dir")
         if not ws:
-            return base_path, incremental
-        if not data_versions.is_published_product(ws, base_path):
-            return base_path, incremental
-        draft = data_versions.new_corrected_folder(ws)
-        if incremental and os.path.isdir(base_path):
-            shutil.copytree(base_path, draft)
-            sidecar = os.path.join(os.path.dirname(base_path), "corrected_coarse.zarr")
-            if os.path.isdir(sidecar):
-                shutil.copytree(sidecar, os.path.join(os.path.dirname(draft),
-                                                      "corrected_coarse.zarr"))
-            print(f"[Step0] corrected draft: copied {base_path} (read-only) to {draft}")
-            return draft, True
-        print(f"[Step0] corrected draft: new at {draft}; every channel recomputed")
-        return draft, False
+            return base_path or self._rm_base_corrected_path()   # in place, no runs
+        self._rm_discard_pending("superseded by a new Save")
+        run_dir = run_store.new_run(ws, "correct")
+        self._rm_pending_run = run_dir
+        zarr_path = os.path.join(run_dir, "corrected_channels.zarr")
+        if copy and base_path and os.path.isdir(base_path):
+            try:
+                shutil.copytree(base_path, zarr_path)
+                sidecar = os.path.join(os.path.dirname(base_path), "corrected_coarse.zarr")
+                if os.path.isdir(sidecar):
+                    shutil.copytree(sidecar, os.path.join(run_dir, "corrected_coarse.zarr"))
+            except Exception:
+                self._rm_discard_pending("copying the pixels failed")
+                raise
+            print(f"[Step0] new correct run {os.path.basename(run_dir)}: copied the "
+                  f"pixels of {os.path.basename(os.path.dirname(base_path))}")
+        else:
+            print(f"[Step0] new correct run {os.path.basename(run_dir)}")
+        return zarr_path
+
+    def _rm_discard_pending(self, reason):
+        """Remove the correct run this Save started and did not publish."""
+        run_dir = self.__dict__.get("_rm_pending_run")
+        self._rm_pending_run = None
+        if run_dir and not run_store.is_done(run_dir):
+            run_store.discard(run_dir)
+            print(f"[Step0] correct run {os.path.basename(run_dir)} discarded ({reason})")
+
+    def _rm_publish_correct_run(self, run_dir, spec):
+        """params.json, inputs.json, then .done (application §4): the run's
+        correction parameters, per-channel decisions and frozen geometry."""
+        from ...core.bg_correction import BG_CORRECTION_ALGO_VERSION
+        sigs = self._rm_sigs(self.__dict__.get("_rm_save_sigs", {}) or {})
+        config = spec["config"]
+        decisions = {str(ch): str(m).strip().lower()
+                     for ch, m in (config.get("channel_decisions") or {}).items()}
+        summary = ", ".join(f"{ch} {sig[0]} {sig[1]}" for ch, sig in sorted(sigs.items())) \
+            or "no correction"
+        params = {
+            "kind": "correct",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "summary": summary,
+            "correction_config": config,
+            "channel_decisions": decisions,
+            "corrected": sigs,
+            "geometry": {
+                "analysis_region_type": spec["analysis_region_type"],
+                "rois": spec["rois"],
+                "patches": spec["patches"],
+                "geometry_revision": int(spec.get("geometry_revision") or 0),
+            },
+            "algorithm": {"bg_correction_algo_version": BG_CORRECTION_ALGO_VERSION},
+        }
+        slide_id = ""
+        try:
+            project = (self._roi_context or {}).get("project_dir") or ""
+            manifest = workspace_session._load(
+                os.path.join(project, "project_manifest.json")) or {}
+            slide_id = workspace_session.slide_id_of(spec["raw_path"],
+                                                     manifest.get("sources")) or ""
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Step0] slide id not recorded ({type(exc).__name__}: {exc})")
+        run_store.write_params(run_dir, params)
+        run_store.write_inputs(run_dir, None, slide_id=slide_id)
+        run_store.publish(run_dir)
+        self._rm_pending_run = None
+        print(f"[Step0] correct run published: {os.path.basename(run_dir)} ({summary})")
+
+    def _rm_step0_draft(self, ws):
+        """The workspace's Step0 draft (session.json drafts.step0) when it was
+        edited against the correct run being edited, else None -- another
+        one is kept, not restored, and said in the terminal (§6)."""
+        sess = run_store.load_session(ws.workspace_dir)
+        draft = (sess.get("drafts") or {}).get("step0")
+        if not isinstance(draft, dict):
+            return None
+        if draft.get("edited_against") != sess.get("editing"):
+            print(f"[Workspace] the Step0 draft was edited against "
+                  f"{draft.get('edited_against')}, not {sess.get('editing')}: kept, "
+                  f"not restored")
+            return None
+        print("[Workspace] the unsaved Step0 draft is restored")
+        return draft
+
+    def rm_save_draft(self):
+        """Write what Step0 shows -- decisions, parameters, Intensity -- as
+        the workspace's Step0 draft (block RM §6). Called when the window
+        changes step or closes; a Save clears it."""
+        ws = (self._roi_context or {}).get("roi_dir")
+        if not ws or not os.path.isfile(os.path.join(ws, "roi_manifest.json")):
+            return False
+        try:
+            config = self._clean_correction_config(self._build_config())
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Step0] draft not saved ({exc})")
+            return False
+        intensity = None
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is not None and wb.has_channel_data():
+            intensity = {str(ch): {k: p[k] for k in self._INTENSITY_KEYS if k in p}
+                         for ch, p in (getattr(wb, "_params", {}) or {}).items()
+                         if isinstance(p, dict)}
+        sess = run_store.load_session(ws)
+        sess = run_store.put_draft(sess, "step0", {
+            "correction_config": config, "intensity": intensity,
+            "edited_against": sess.get("editing")})
+        run_store.save_session(ws, sess)
+        return True
+
+    def _rm_note_editing(self, manifest):
+        """session.json `editing` (application §6): the correct run the
+        handoff now names and its geometry revision."""
+        ws = (self._roi_context or {}).get("roi_dir")
+        corrected = (manifest or {}).get("corrected_zarr_path") or ""
+        run_dir = os.path.dirname(corrected) if corrected else ""
+        project = run_store.project_dir_of(ws) if ws else None
+        if (not project or run_store.kind_of(run_dir) != "correct"
+                or not run_store.is_done(run_dir)):
+            return
+        try:
+            sess = run_store.load_session(ws)
+            drafts = dict(sess.get("drafts") or {})
+            drafts.pop("step0", None)           # what Step0 shows is now saved
+            sess["drafts"] = drafts
+            sess["editing"] = {
+                "correct_run": run_store.rel(project, os.path.dirname(corrected)),
+                "geometry_revision": int((manifest or {}).get("geometry_revision") or 0)}
+            run_store.save_session(ws, sess)
+        except (OSError, ValueError) as exc:
+            print(f"[Step0] session.json not updated ({exc})")
 
     def _confirm_raw_channels(self):
         """Name the channels Save will write as RAW, once, and ask.
@@ -11768,6 +11809,8 @@ class Step0Page(QWidget):
     def _save_and_continue(self):
         if self.loader is None:
             QMessageBox.warning(self, "Validation", "Please load an OME-TIFF first.")
+            return
+        if self._rm_old_project_refused():
             return
 
         # Preview patches are navigation/preview bookmarks, not the analysis
@@ -11871,7 +11914,12 @@ class Step0Page(QWidget):
         # Block DV (§3.15): the corrected product this Save starts from -- the
         # draft if there is one, else the one the handoff references (a
         # published version's: read-only), else a new draft.
-        zarr_path = self._dv_base_corrected_path(step0_dir)
+        # Block RM (§5): the correct run being edited. It is published and
+        # read-only; a Save that changes pixels writes a new correct run.
+        base_path = self._rm_base_corrected_path()
+        base_sigs = self._rm_base_sigs(base_path)
+        zarr_path = base_path
+        self._rm_save_sigs = {}
 
         if not corrected:
             # No channel assigned TopHat/cuCIM -> nothing to background-correct.
@@ -11887,10 +11935,11 @@ class Step0Page(QWidget):
             if not _confirm_actual_save():
                 return
             _write_current_correction_config()
-            if region_rewritten:
-                # Block DV (§3.15): another geometry is never recorded in a
-                # published product -- a new draft records it.
-                zarr_path = self._dv_draft_for_geometry(zarr_path, copy=False)
+            # Block RM (§16.3-3): the first Save makes a correct run even
+            # without corrected channels; later it is reused unless pixels
+            # change (a channel withdrawn, or another region).
+            if not base_path or base_sigs or region_rewritten:
+                zarr_path = self._rm_new_correct_run()
             if not os.path.exists(zarr_path):
                 self._ensure_empty_corrected_zarr(zarr_path, rois)
             # Reconciles the cache: previously corrected channels revert to raw.
@@ -11935,10 +11984,12 @@ class Step0Page(QWidget):
             if not _confirm_actual_save():
                 return
             _write_current_correction_config()
-            if region_rewritten:
-                # Block DV (§3.15): same boxes, another outline -- the pixels
-                # are reused from a copy that records the new geometry.
-                zarr_path = self._dv_draft_for_geometry(zarr_path, copy=True)
+            self._rm_save_sigs = current_sigs
+            # Block RM (§5): only Intensity changed -> the same correct run.
+            # A withdrawn channel or another outline -> a new run made of
+            # the same pixels.
+            if region_rewritten or self._rm_sigs(current_sigs) != base_sigs:
+                zarr_path = self._rm_new_correct_run(base_path, copy=True)
             self._apply_corrected_store(zarr_path, corrected)
             completed = self._emit_complete(config, zarr_path, corrected)
             if completed and intensity_changed and not correction_changed:
@@ -11953,10 +12004,11 @@ class Step0Page(QWidget):
         if not _confirm_actual_save():
             return
         _write_current_correction_config()
-        # Block DV (§3.15): never write a published product. Same ROI and
-        # source -> copy it once into the draft and correct only what changed;
-        # another ROI -> a fresh draft, every channel recomputed.
-        zarr_path, rois_match = self._dv_prepare_draft(zarr_path, rois_match)
+        self._rm_save_sigs = current_sigs
+        # Block RM (§5): never write a published run. Same ROI and source ->
+        # a new run starting from its pixels, only changed channels
+        # recomputed; another ROI -> a new empty run, every channel computed.
+        zarr_path = self._rm_new_correct_run(base_path, copy=rois_match)
         if not rois_match:
             to_process = dict(corrected)
         self._incremental_processed = set(to_process)
@@ -12073,6 +12125,7 @@ class Step0Page(QWidget):
     def _on_wsi_canceled(self, zarr_path):
         if os.path.exists(zarr_path):
             shutil.rmtree(zarr_path, ignore_errors=True)
+        self._rm_discard_pending("background correction canceled")
         if self._wsi_dialog is not None:
             self._wsi_dialog.allow_close()
             self._wsi_dialog.reject()
@@ -12084,6 +12137,7 @@ class Step0Page(QWidget):
             "written has been removed; nothing partial was kept.")
 
     def _on_wsi_error(self, msg):
+        self._rm_discard_pending("background correction failed")
         if self._wsi_dialog is not None:
             self._wsi_dialog.allow_close()
             self._wsi_dialog.reject()
@@ -12265,14 +12319,13 @@ class Step0Page(QWidget):
             # numbered over a file the manifest still names.
             "geometry_revision": int(self._geometry_revision),
             "next_patch_id": int(self._roi_model.next_patch_id),
-            # Block DV (§3.12): corrected provenance is registered when a
-            # version is committed, never for the draft.
+            # Block RM (§10): corrected provenance is registered when a
+            # correct run is published (`_write_step0_handoff` sets this).
             "register_corrected": False,
-            # Block DV (§3.14): a published product's attributes are not
-            # rewritten by any handoff write.
+            # Block RM (§2): a published run's attributes are never rewritten.
             "corrected_read_only": bool(
-                ctx.get("roi_dir") and zarr_path and data_versions.is_published_product(
-                    ctx["roi_dir"], zarr_path)),
+                zarr_path and run_store.is_done(os.path.dirname(zarr_path))),
+            "publish_run": None,
         }
 
     def _apply_handoff_result(self, result):
@@ -12296,6 +12349,14 @@ class Step0Page(QWidget):
         cannot describe the handoff differently.
         """
         spec = self._handoff_spec(config, zarr_path, remap_config_path)
+        # Block RM (§5): the correct run this Save wrote is published inside
+        # the handoff write -- pixels and attributes final, before the
+        # manifest that names it -- and its channels are registered (A3).
+        pending = self.__dict__.get("_rm_pending_run")
+        if (pending and zarr_path and os.path.abspath(os.path.dirname(zarr_path))
+                == os.path.abspath(pending)):
+            spec["publish_run"] = lambda: self._rm_publish_correct_run(pending, spec)
+            spec["register_corrected"] = True
         print("[Step0] writing ROI-specific outputs")
         print(f"[Step0] roi_id={spec['roi_id']}")
         print(f"[Step0] step0_dir={spec['step0_dir']}")
@@ -12338,6 +12399,7 @@ class Step0Page(QWidget):
         try:
             remap_accepted = self._persist_step0_remap_config()
         except Exception as e:
+            self._rm_discard_pending("the channel remap failed")
             print(f"[Step0] remap handoff failed; step0_complete not emitted: {e}")
             traceback.print_exc()
             QMessageBox.warning(
@@ -12347,10 +12409,12 @@ class Step0Page(QWidget):
             return False
         if remap_accepted is not True:
             print("[Step0] handoff stopped: channel remap was not saved")
+            self._rm_discard_pending("the channel remap was not saved")
             return False
         try:
             config, rois, patches, manifest = self._write_step0_handoff(config, zarr_path)
         except Exception as e:
+            self._rm_discard_pending("the handoff was not written")
             print(f"[Step0] handoff failed; step0_complete not emitted: {e}")
             traceback.print_exc()
             QMessageBox.warning(
@@ -12358,6 +12422,7 @@ class Step0Page(QWidget):
                 "Step0 outputs could not be committed, so Step1 was not notified.\n\n"
                 f"Details: {e}")
             return False
+        self._rm_note_editing(manifest)
         self.step0_complete.emit(
             self._handoff_payload(config, rois, decisions, manifest, zarr_path))
         return True

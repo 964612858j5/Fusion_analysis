@@ -171,6 +171,9 @@ def make_run(tmp_path, remap=False):
         remap_hash = channel_remap_config_hash(remap_cfg)
     manifest = {
         "handoff_schema_version": 2,
+        # block RM (§11): a real handoff names its workspace; the folder is
+        # no longer inferred from an old-layout step0/ parent.
+        "roi_dir": str(base),
         "step0_dir": str(step0), "step1_dir": str(step1), "step2_dir": str(step2),
         "raw_ome_path": str(raw),
         "source_identity": {"dataset_path": str(raw),

@@ -69,6 +69,8 @@ from ..utils.roi_project import (
     resolve_roi_context,
     mark_roi_step,
 )
+from ..utils import roi_project, run_store
+from ..core import step0_handoff
 from ..workers.cellpose_worker import PreviewLoaderThread, run_cellpose_process
 from ..workers.preview_compose_worker import PreviewComposeWorker
 from ..workers.mesmer_worker import run_mesmer_patch_preview
@@ -617,6 +619,10 @@ class MainWindow(QMainWindow):
         # Block DV (§3.12): the data version a running Generate will publish
         # {"workspace", "alloc", "record", "worker"}; None otherwise.
         self._dv_pending = None
+        # Block RM (§5): the fuse run a running Generate will publish
+        # {"run", "upstream", "worker", "params"}; None otherwise.
+        self._rm_pending_fuse = None
+        self._rm_fuse_mode = False
 
         self._preload_debounce = QTimer()
         self._preload_debounce.setSingleShot(True)
@@ -1637,7 +1643,7 @@ class MainWindow(QMainWindow):
         start_dir = out_dir if out_dir and os.path.exists(out_dir) else os.getcwd()
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             parent, "Load Weights from a Step1 Session", start_dir,
-            "Step1 Session (step1_session.json);;JSON (*.json)")
+            "Step1 Session (session.json step1_session.json);;JSON (*.json)")
         if not path:
             return False
         ok, message = self.load_weights_from_step1_session(path)
@@ -3010,16 +3016,14 @@ class MainWindow(QMainWindow):
 
         self.step1_done = False
         self._step2._out_edit.setText(self.step0_output.get("step2_dir") or OUTPUT_DIR)
-        # Block DV (§3.6, §3.9): a loaded data version brings its own Step1
-        # files back; an opened workspace restores Step1 on entry, once.
-        # Block DV-D: the chooser row was a version + segmentation run.
-        self._dv_step3_run = str(self.step0_output.get("step3_run_dir") or "")
-        if accepted is True and self.step0_output.get("opened_workspace"):
-            self._dv_register_legacy()
-        if accepted is True and self.step0_output.get("data_version_loaded"):
-            self._dv_install_step1_files(self.step0_output["data_version_loaded"])
-        self._dv_auto_step1 = bool(accepted is True
-                                   and self.step0_output.get("opened_workspace"))
+        # An opened workspace restores Step1 on entry, once, from its
+        # session.json (block RM §6; the DV version entry points are off,
+        # §16.4).
+        # (still pending after a later Step0 Save: the draft is restored, or
+        # kept, only when Step1 is entered -- codex RM-1 review 2)
+        self._dv_auto_step1 = bool(accepted is True and (
+            self.step0_output.get("opened_workspace")
+            or self.__dict__.get("_dv_auto_step1")))
         # SAVE-ONLY: stay in Step0; the user enters Step1 explicitly.
         self._update_next_button()
         self._log_step1_layout("Step0 complete (save-only, no auto-jump)")
@@ -3094,16 +3098,16 @@ class MainWindow(QMainWindow):
                     raise ValueError("manifest root must be an object")
                 # Schema-v2 manifest paths are authoritative; do not let an
                 # active-ROI resolver redirect this load to a sibling session.
+                # Block RM (§2.5): the records are project-relative.
+                manifest = step0_handoff.resolve_manifest(manifest, manifest_path)
                 manifest_base = os.path.dirname(manifest_path)
                 step0_dir = _path(manifest.get("step0_dir") or manifest.get("output_dir"), manifest_base) or step0_dir
+                ws_dirs = (roi_project.step_dirs(_path(manifest["roi_dir"], manifest_base))
+                           if manifest.get("roi_dir") else {})
                 step1_dir = _path(manifest.get("step1_dir"), manifest_base) or (
-                    os.path.join(_path(manifest["roi_dir"], manifest_base), "step1")
-                    if manifest.get("roi_dir") else step1_dir
-                )
+                    ws_dirs.get("step1") or step1_dir)
                 step2_dir = _path(manifest.get("step2_dir"), manifest_base) or (
-                    os.path.join(_path(manifest["roi_dir"], manifest_base), "step2")
-                    if manifest.get("roi_dir") else step2_dir
-                )
+                    ws_dirs.get("step2") or step2_dir)
                 out_dir = step0_dir
             except Exception as e:
                 print(f"[Step1] failed to load step0_roi_result.json: {e}")
@@ -3441,22 +3445,16 @@ class MainWindow(QMainWindow):
         # handoff away from the manifest's own step0 directory.
         roi_dir = manifest.get("roi_dir") or ""
         if not roi_dir and handoff_schema >= 2:
-            step0_parent = os.path.dirname(os.path.abspath(step0_dir))
-            if os.path.basename(os.path.abspath(step0_dir)) == "step0":
-                roi_dir = step0_parent
+            settings_dir = os.path.dirname(os.path.abspath(step0_dir))
+            if (os.path.basename(os.path.abspath(step0_dir)) == "step0"
+                    and os.path.basename(settings_dir) == run_store.SETTINGS_DIR):
+                roi_dir = os.path.dirname(settings_dir)
         if not roi_dir:
             roi_dir = (ctx or {}).get("roi_dir", "")
         project_dir = manifest.get("project_output_dir") or (ctx or {}).get("project_dir", "")
-        # Block DV (codex reviews 7-8): every folder this handoff makes Step1
-        # and Step2 write into is the workspace's own -- the one the manifest
-        # file lives in -- before anything is created, bound or autosaved.
-        local = self._dv_localize_dirs(manifest_path, {
-            "roi_dir": roi_dir, "step0_dir": step0_dir, "step1_dir": step1_dir,
-            "step2_dir": step2_dir, "out_dir": out_dir, "corrected": corr_path})
-        roi_dir, step0_dir, step1_dir = local["roi_dir"], local["step0_dir"], local["step1_dir"]
-        step2_dir, out_dir, corr_path = local["step2_dir"], local["out_dir"], local["corrected"]
-        if corr_path != self._corrected_zarr_path and local.get("_moved"):
-            self._corrected_zarr_path = corr_path if corr_path and os.path.exists(corr_path) else ""
+        # Block RM (§2.5): the manifest's records are project-relative and
+        # were resolved against the project the manifest file lives in, so
+        # every folder below is this workspace's own.
         if step1_dir:
             os.makedirs(step1_dir, exist_ok=True)
             OUTPUT_DIR = step1_dir
@@ -3590,17 +3588,12 @@ class MainWindow(QMainWindow):
         manifest_exists = os.path.exists(manifest_path)
         if manifest_exists:
             try:
-                with open(manifest_path, "r", encoding="utf-8") as f:
-                    manifest = json.load(f)
+                manifest = step0_handoff.read_manifest(manifest_path) or {}
+                ws_dirs = (roi_project.step_dirs(manifest["roi_dir"])
+                           if manifest.get("roi_dir") else {})
                 step0_dir = manifest.get("step0_dir") or manifest.get("output_dir") or step0_dir
-                step1_dir = manifest.get("step1_dir") or (
-                    os.path.join(manifest["roi_dir"], "step1")
-                    if manifest.get("roi_dir") else step1_dir
-                )
-                step2_dir = manifest.get("step2_dir") or (
-                    os.path.join(manifest["roi_dir"], "step2")
-                    if manifest.get("roi_dir") else step2_dir
-                )
+                step1_dir = manifest.get("step1_dir") or ws_dirs.get("step1") or step1_dir
+                step2_dir = manifest.get("step2_dir") or ws_dirs.get("step2") or step2_dir
                 # The selected/context-resolved file is the manifest being
                 # read.  A self-reported path is metadata, never a redirect
                 # into another ROI/session.
@@ -3688,8 +3681,39 @@ class MainWindow(QMainWindow):
         return True
 
     def _step1_session_path(self, output_dir=None):
+        # Block RM (§6): a workspace keeps its Step1 draft in its own
+        # session.json (drafts.step1).
+        roi = self._rm_roi_dir()
+        if roi:
+            return run_store.session_path(roi)
         base = output_dir or (self.step0_output or {}).get("output_dir") or OUTPUT_DIR
         return os.path.join(base, "step1_session.json")
+
+    def _rm_roi_dir(self):
+        """The open workspace folder (holding roi_manifest.json), or ""."""
+        roi = (self.step0_output or {}).get("roi_dir") or ""
+        return roi if roi and os.path.isfile(os.path.join(roi, "roi_manifest.json")) else ""
+
+    @staticmethod
+    def _rm_read_step1_draft(path):
+        """(Step1 session dict or None, why not) from `path`.
+
+        A workspace ``session.json`` (block RM §6) gives its ``drafts.step1``
+        with the project-relative paths resolved -- only when the draft was
+        edited against the correct run being edited now; another draft is
+        neither restored nor removed. A ``step1_session.json`` file is
+        returned as it is."""
+        with open(path, "r", encoding="utf-8") as f:
+            sess = json.load(f)
+        if not isinstance(sess, dict) or os.path.basename(path) != run_store.SESSION:
+            return sess, ""
+        step1 = (sess.get("drafts") or {}).get("step1")
+        if not isinstance(step1, dict):
+            return None, "the workspace has no Step1 draft"
+        if step1.get("edited_against") != sess.get("editing"):
+            return None, ("its Step1 draft was edited against another Step0 result "
+                          f"({step1.get('edited_against')}); it is kept, not restored")
+        return run_store.from_records(step1, run_store.project_dir_of(path)), ""
 
     def _find_step1_session(self):
         """Find only the session belonging to the current Step0 handoff.
@@ -3702,14 +3726,15 @@ class MainWindow(QMainWindow):
         step1_dir = handoff.get("step1_dir")
         if not step1_dir:
             return ""
-        candidate = os.path.join(os.path.abspath(step1_dir), "step1_session.json")
+        candidate = self._step1_session_path(step1_dir)
         if not os.path.exists(candidate):
             return ""
         try:
-            with open(candidate, "r", encoding="utf-8") as f:
-                sess = json.load(f)
+            sess, why = self._rm_read_step1_draft(candidate)
         except (OSError, ValueError, TypeError):
             return ""
+        if why:
+            print(f"[Step1] session not restored: {why}")
         if not isinstance(sess, dict):
             return ""
         expected_manifest_raw = handoff.get("step0_manifest_path") or ""
@@ -3955,8 +3980,24 @@ class MainWindow(QMainWindow):
     def _save_step1_session(self):
         if self._step1_restore_active:
             return
+        if self.__dict__.get("_dv_auto_step1"):
+            # Block RM (§6): an opened workspace's Step1 draft is restored on
+            # entering Step1; until then nothing may overwrite it.
+            return
         payload = self._step1_session_payload()
         if not payload:
+            return
+        roi = self._rm_roi_dir()
+        if roi:
+            try:
+                sess = run_store.load_session(roi)
+                sess = run_store.put_draft(sess, "step1", dict(
+                    run_store.to_records(payload, run_store.project_dir_of(roi)),
+                    edited_against=sess.get("editing")))
+                run_store.save_session(roi, sess)
+                print("[Step1] session autosaved")
+            except Exception:
+                print(f"[Step1] failed to autosave session:\n{traceback.format_exc()}")
             return
         out_dir = payload.get("output_dir") or OUTPUT_DIR
         try:
@@ -4129,10 +4170,11 @@ class MainWindow(QMainWindow):
         patches, paths and segmentation fields are left alone. Anything else
         is refused and nothing changes. Returns (ok, message)."""
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                sess = json.load(f)
+            sess, why = self._rm_read_step1_draft(path)
         except Exception as exc:  # noqa: BLE001 -- told to the user
             return False, f"Not a readable JSON file:\n{exc}"
+        if why:
+            return False, f"Not loaded: {why}."
         if not isinstance(sess, dict) or not any(k in sess for k in self._STEP1_SESSION_KEYS):
             return False, ("This is not a Step1 session. Load weights reads "
                            "step1_session.json only.")
@@ -4424,7 +4466,7 @@ class MainWindow(QMainWindow):
             start = os.getcwd()
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Load Previous Step1 Session", start,
-            "Step1 Session (step1_session.json);;JSON (*.json)")
+            "Step1 Session (session.json step1_session.json);;JSON (*.json)")
         if not path:
             return False
         self._session_refusal = None
@@ -4444,7 +4486,7 @@ class MainWindow(QMainWindow):
                 self,
                 "Load Previous Step1 Session",
                 OUTPUT_DIR,
-                "Step1 Session (step1_session.json);;JSON (*.json)",
+                "Step1 Session (session.json step1_session.json);;JSON (*.json)",
             )
         print(f"[Step1] session found={bool(session_path and os.path.exists(session_path))}")
         if not session_path or not os.path.exists(session_path):
@@ -4455,8 +4497,10 @@ class MainWindow(QMainWindow):
         self._step1_restore_active = True
         try:
             print(f"[Step1] loading session={session_path}")
-            with open(session_path, "r", encoding="utf-8") as f:
-                sess = json.load(f)
+            sess, why = self._rm_read_step1_draft(session_path)
+            if why:
+                self._refuse_session(f"The workspace's Step1 draft was not loaded: {why}.")
+                return False
             if not isinstance(sess, dict):
                 raise ValueError("session root must be an object")
 
@@ -4514,6 +4558,10 @@ class MainWindow(QMainWindow):
             expected_step1_dir = current_handoff.get("step1_dir") or ""
             if expected_step1_dir:
                 expected_session_dir = os.path.abspath(expected_step1_dir)
+                if os.path.basename(session_path) == run_store.SESSION:
+                    # block RM §6: session.json sits in the workspace folder
+                    expected_session_dir = os.path.abspath(
+                        current_handoff.get("roi_dir") or expected_session_dir)
                 if os.path.dirname(os.path.abspath(session_path)) != expected_session_dir:
                     self._refuse_session('This session belongs to another ROI or project. Opening another project is not supported yet; this session was not loaded.')
                     return False
@@ -4715,8 +4763,12 @@ class MainWindow(QMainWindow):
             step2_dir = self.step1_output.get("step2_dir") or (self.step0_output or {}).get("step2_dir")
             if step2_dir:
                 os.makedirs(step2_dir, exist_ok=True)
+            # Block RM (§16.3-8): Step2's output folder is never the
+            # settings folder Step1's OUTPUT_DIR names.
+            roi = self._rm_roi_dir()
             self._step2._out_edit.setText(
-                step2_dir or self.step1_output.get("output_dir", OUTPUT_DIR)
+                step2_dir or (roi_project.step_dirs(roi)["step2"] if roi
+                              else self.step1_output.get("output_dir", OUTPUT_DIR))
             )
             zarr_path = self.step1_output.get("zarr_path")
             if zarr_path and not self._step2._zarr_edit.text().strip():
@@ -4737,9 +4789,45 @@ class MainWindow(QMainWindow):
                     roi_dir=self.step1_output.get("roi_dir") or (self.step0_output or {}).get("roi_dir", ""),
                     step2_dir=step2_dir or "",
                 )
-        self._dv_bind_step2()
+        self._rm_bind_step2()
         self._stack.setCurrentIndex(2)
         self._set_step_active(2)
+
+    def _rm_bind_step2(self):
+        """Entering Step2 (block RM-1, §16.4): its input is the newest fuse run
+        on the correct run being edited, or none. No dirty-draft gate: an edit that was
+        not Generated does not stop a run on an existing fuse run (§5). The
+        input drop-down comes with RM-2."""
+        step2 = self.__dict__.get("_step2")
+        roi = self._rm_roi_dir()
+        if step2 is None or not roi or step2._run_active:
+            return
+        if hasattr(step2, "set_dirty_draft"):
+            step2.set_dirty_draft("")
+        upstream = self._rm_current_correct_run()
+        runs = run_store.list_runs(roi, "fuse", upstream) if upstream else []
+        run_dir = runs[-1] if runs else ""
+        params = run_store.read_params(run_dir) if run_dir else {}
+        paths = {r["roi_name"]: os.path.join(run_dir, r["zarr_name"])
+                 for r in params.get("regions") or [] if r.get("zarr_name")}
+        first = next((p for p in paths.values() if os.path.isdir(p)), "")
+        if not first:
+            # No fuse run on the correct run being edited: no input -- never
+            # the fuse run of another Step0 result.
+            if step2._zarr_edit.text().strip():
+                print("[Step2] no fuse run on the current Step0 result: input cleared")
+            step2._zarr_edit.setText("")
+            step2._zarr_path = None
+            if hasattr(step2, "set_data_version"):
+                step2.set_data_version("", {})
+            return
+        if os.path.abspath(step2._zarr_edit.text().strip() or "") != first:
+            step2._zarr_edit.setText(first)
+            step2._load_zarr_info()
+        if hasattr(step2, "set_data_version"):
+            step2.set_data_version("", paths)
+        print(f"[Step2] input: {os.path.basename(run_dir)} "
+              f"({run_store.display_name(run_dir)})")
 
     def _dv_step2_state(self):
         """Block DV (§3.13): (current version record, dirty-draft reason).
@@ -5337,6 +5425,7 @@ class MainWindow(QMainWindow):
         previous = getattr(self, "_current_step", None)
         if previous is not None and previous != active:
             self._capture_camera_of(previous)
+            self._rm_save_view(active)
         self._current_step = active
         # FIRST, so everything below reads this step's own answers. Silent:
         # it writes no owner field and starts no save -- see
@@ -5485,6 +5574,22 @@ class MainWindow(QMainWindow):
     def _preseg_step1_dir(self):
         return (self.step0_output or {}).get("step1_dir") or OUTPUT_DIR
 
+    def _preseg_runs_root(self):
+        """Where pre-segmentation runs go: the workspace's runs/ (block RM
+        §4), or the Step1 folder's presegmentation_runs/ without one."""
+        roi = self._rm_roi_dir()
+        if roi:
+            return run_store.runs_dir(roi)
+        return preseg_run.runs_dir(self._preseg_step1_dir())
+
+    def _rm_current_correct_run(self):
+        """The published correct run Step1 reads (the handoff's corrected
+        product), or ""."""
+        run_dir = os.path.dirname(self._corrected_zarr_path or "")
+        if run_dir and run_store.kind_of(run_dir) == "correct" and run_store.is_done(run_dir):
+            return run_dir
+        return ""
+
     # ── the pre-segmentation run (plan block C, step 4) ─────────────────
     def _preseg_region(self, manifest):
         """(roi record or None, bounds): the analysis ROI and the region a
@@ -5548,7 +5653,11 @@ class MainWindow(QMainWindow):
         if key is None or self.loader is None:
             QMessageBox.warning(self, "Run", "There is no Step0 result to run on.")
             return False
-        run_id = preseg_run.new_run_id()
+        # Block RM (§3, §5): a preseg run in the workspace's runs/, its pixel
+        # upstream the correct run Step1 reads.
+        roi_dir = self._rm_roi_dir()
+        new_dir = run_store.new_run(roi_dir, "preseg") if roi_dir else ""
+        run_id = os.path.basename(new_dir) if new_dir else preseg_run.new_run_id()
         combos, tasks = preseg_run.build_tasks(run_id, methods, patches)
         if len(tasks) > PRESEG_CONFIRM_TASKS:
             answer = QMessageBox.question(
@@ -5556,6 +5665,8 @@ class MainWindow(QMainWindow):
                 f"({len(patches)} patches × {len(combos)} combinations) and may take a while. "
                 "Run it?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if answer != QMessageBox.Yes:
+                if new_dir:
+                    run_store.discard(new_dir)
                 return False
         roi, bounds = self._preseg_region(manifest)
         run = {
@@ -5570,8 +5681,15 @@ class MainWindow(QMainWindow):
                 "correction_config": self.loader.correction_config,
                 "corrected_zarr_path": self._corrected_zarr_path,
                 "corrected_decisions": dict(self._corrected_decisions or {})}
+        if new_dir:
+            upstream = self._rm_current_correct_run()
+            if upstream:
+                run_store.write_inputs(new_dir, upstream)
+            else:
+                print("[Step1] pre-segmentation: the Step0 result is not a published "
+                      "correct run; inputs.json not written")
         sig = self._preseg_sig
-        job = PresegRunJob(self._preseg_step1_dir(), run, lambda: open_loader(spec),
+        job = PresegRunJob(self._preseg_runs_root(), run, lambda: open_loader(spec),
                            on_record=sig.record.emit,
                            # Block A6 G5: the answer names its run.
                            on_finished=lambda recs, rid=run_id: sig.finished.emit((rid, recs)))
@@ -6008,7 +6126,7 @@ class MainWindow(QMainWindow):
         if sel is None:
             return False, "nothing is chosen"
         run = sel["run"]
-        records = preseg_run.load_records(preseg_run.run_dir(self._preseg_step1_dir(),
+        records = preseg_run.load_records(preseg_run.run_dir(self._preseg_runs_root(),
                                                             run["run_id"]))
         key, fhash = self._preseg_current()
         ok, why = preseg_run.selectable(run, records, sel["combo_id"], key, fhash)
@@ -6019,10 +6137,9 @@ class MainWindow(QMainWindow):
         parameters (no Cellpose defaults, no fixed min size) plus the contract
         block Step2 checks (Step2 hook-up, step 2). Raises ContractError."""
         sel = self._preseg_selected
-        rdir = preseg_run.run_dir(self._preseg_step1_dir(), sel["run"]["run_id"])
-        # run.json on disk: the frozen snapshot plus the engines it started.
-        with open(os.path.join(rdir, "run.json"), encoding="utf-8") as f:
-            run = json.load(f)
+        rdir = preseg_run.run_dir(self._preseg_runs_root(), sel["run"]["run_id"])
+        # params.json on disk: the frozen snapshot plus the engines it started.
+        run = preseg_run.read_run(rdir)
         block = preseg_contract.build(run, sel["combo_id"], preseg_run.load_records(rdir))
         chosen = self._p2_params or {}
         if chosen.get("method") != block["method"]:
@@ -6904,7 +7021,25 @@ class MainWindow(QMainWindow):
                 print(f"[Preview] loader {self._patch_label(idx)} still running after stop request; keeping reference")
         self._patch_loaders = survivors
 
+    def _rm_save_view(self, step):
+        """Block RM (§6): on a step change and on close, the Step0 draft and
+        the step being shown go into the workspace's session.json."""
+        page = self.__dict__.get("_step0")
+        try:
+            if page is not None and hasattr(page, "rm_save_draft"):
+                page.rm_save_draft()
+            roi = self._rm_roi_dir() or ((getattr(page, "_roi_context", None) or {})
+                                         .get("roi_dir") or "")
+            if roi and os.path.isfile(os.path.join(roi, "roi_manifest.json")):
+                sess = run_store.load_session(roi)
+                view = dict(sess.get("view") or {})
+                view["current_step"] = step
+                run_store.update_session(roi, view=view)
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Session] not saved ({type(exc).__name__}: {exc})")
+
     def closeEvent(self, event):
+        self._rm_save_view(self.__dict__.get("_current_step"))
         if self._perf_heartbeat is not None:
             self._perf_heartbeat.stop()
             self._perf_heartbeat = None
@@ -8546,7 +8681,8 @@ class MainWindow(QMainWindow):
             return None
         try:
             with open(path, "r", encoding="utf-8") as f:
-                snapshot = json.load(f) or {}
+                snapshot = run_store.from_records(json.load(f) or {},
+                                                  run_store.project_dir_of(path))
         except Exception as exc:                            # noqa: BLE001
             print(f"[Step1] saved fusion settings unreadable: {exc}")
             self._update_fusion_settings_state()
@@ -8675,7 +8811,9 @@ class MainWindow(QMainWindow):
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(snapshot, f, indent=2, ensure_ascii=False)
+                # Block RM (§2.5): project-relative paths on disk.
+                json.dump(run_store.to_records(snapshot, run_store.project_dir_of(path)),
+                          f, indent=2, ensure_ascii=False)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, path)
@@ -8817,28 +8955,27 @@ class MainWindow(QMainWindow):
             d.setLabelText(msg)
 
     def _on_fusion_done(self, zarr_path):
-        if self._dv_pending is not None and self._fusion_stopping:
-            # Block DV (§3.12): Cancel was pressed; the job finished anyway.
-            # Cancelled means no version: the current one stays.
-            print("[Step1] fusion finished after Cancel: no data version made")
-            self._fusion_lbl.setText("Fusion cancelled — no data version was made")
+        pending = self.__dict__.get("_rm_pending_fuse")
+        if pending is not None and self._fusion_stopping:
+            # Block RM (§5): Cancel was pressed; the job finished anyway.
+            # Cancelled means no new fuse run: the existing ones are unchanged.
+            print("[Step1] fusion finished after Cancel: no fuse run published")
+            self._fusion_lbl.setText("Fusion cancelled — no new result was made")
 
             def _release():
-                self._dv_discard_pending("cancelled")
+                self._rm_discard_fuse("cancelled")
                 self._close_fusion_dialog()
                 self._unlock_ui()
             self._after_fusion_thread_exit(_release)
             return
-        if self._dv_pending is not None:
+        if pending is not None:
             try:
-                committed = self._dv_commit_pending()
-                zarr_path = (committed.get("regions") or [{}])[0].get("fused_zarr_path") \
-                    or zarr_path
+                zarr_path = self._rm_commit_fuse() or zarr_path
             except Exception as exc:                        # noqa: BLE001
-                print(f"[Step1] data version not published: {exc}\n{traceback.format_exc()}")
-                self._dv_discard_pending(f"publishing failed: {exc}")
-                self._on_fusion_error(f"The fused products were written but the data "
-                                      f"version could not be published: {exc}")
+                print(f"[Step1] fuse run not published: {exc}\n{traceback.format_exc()}")
+                self._rm_discard_fuse(f"publishing failed: {exc}")
+                self._on_fusion_error(f"The fused products were written but the run "
+                                      f"could not be published: {exc}")
                 return
         self._fusion_pbar.setValue(100)
         method = CELLPOSE_WHOLECELL_FUSION
@@ -8866,18 +9003,23 @@ class MainWindow(QMainWindow):
                 print(f"[Step1] failed to update ROI step1 status:\n{traceback.format_exc()}")
         self.step1_done = True
         self._update_next_button()
+        # Block RM: a fuse run carries its identity in its own params.json;
+        # these settings-folder files are for Step1 outside a workspace.
+        rm_mode = bool(self.__dict__.get("_rm_fuse_mode"))
         if (
-            not is_wholecell
+            not rm_mode and not is_wholecell
             and getattr(self, "_pending_dapi_input_meta", None)
             and not getattr(self, "_reused_dapi_input_meta", False)
         ):
             self._write_dapi_input_meta(self._pending_dapi_input_meta)
         if (
-            is_wholecell
+            not rm_mode and is_wholecell
             and getattr(self, "_pending_fused_zarr_meta", None)
             and not getattr(self, "_reused_fused_zarr_meta", False)
         ):
             self._write_fused_zarr_meta(self._pending_fused_zarr_meta, zarr_path)
+        if rm_mode:
+            self._rm_note_viewing(os.path.dirname(os.path.abspath(zarr_path)))
         self._save_step1_session()
         # Count per-ROI zarrs from meta (a data version keeps its own, beside
         # its fused products -- block DV)
@@ -8909,8 +9051,8 @@ class MainWindow(QMainWindow):
         print(f"[Fusion Error]\n{msg}")
 
         def _release():
-            # Block DV: the thread has ended -- its unfinished version goes.
-            self._dv_discard_pending("the Generate did not complete")
+            # Block RM: the thread has ended -- its unpublished run goes.
+            self._rm_discard_fuse("the Generate did not complete")
             self._close_fusion_dialog()
             self._unlock_ui()
             QMessageBox.critical(self, "Fusion Error", msg)
@@ -9421,6 +9563,22 @@ class MainWindow(QMainWindow):
         attrs = self._fused_zarr_body_identity(path)
         if attrs is None:
             print(f"[Step1] session fused zarr is not marked complete: {path}")
+            return ""
+        # Block RM (§2, §6): a published fuse run on the correct run being
+        # edited is a finished product of its own parameters -- restored
+        # whatever the fusion settings say now, if it holds this ROI's region.
+        run_dir = os.path.dirname(os.path.abspath(path))
+        if run_store.kind_of(run_dir) == "fuse":
+            upstream = self._rm_current_correct_run()
+            region = str((self._active_roi or {}).get("name") or "full")
+            names = {r.get("roi_name"): r.get("zarr_name")
+                     for r in run_store.read_params(run_dir).get("regions") or []}
+            if (run_store.is_done(run_dir) and upstream
+                    and run_store.upstream_of(run_dir) == upstream
+                    and names.get(region) == os.path.basename(os.path.normpath(path))):
+                return path
+            print(f"[Step1] {os.path.basename(run_dir)} is not a published result of "
+                  f"this Step0 result and region; not restoring {path}")
             return ""
         # And it has to be THIS configuration's result, not merely a result of
         # the current formula: the weights, the display mapping, the ROI and the
@@ -9972,12 +10130,24 @@ class MainWindow(QMainWindow):
         # Block DV (§3.3, §3.12): inside a workspace, a Generate either
         # returns to an existing version with the same content (its fused
         # products are reused) or makes a new one in its own folder.
-        dv_ws = self._dv_workspace()
-        dv_record = None
-        if dv_ws:
-            dv_record = self._dv_candidate_record(selected_method)
-            reused = self._dv_reuse_same(dv_ws, dv_record)
-            if reused:
+        # Block RM (§5, §8): inside a workspace the product is a fuse run on
+        # the correct run Step1 reads; the same upstream with the same
+        # reuse_key is reused, compared field by field.
+        rm_roi = self._rm_roi_dir()
+        rm_upstream = self._rm_current_correct_run() if rm_roi else ""
+        self._rm_fuse_mode = bool(rm_roi)
+        rm_key = None
+        if rm_roi and not rm_upstream:
+            QMessageBox.warning(
+                self, "Generate",
+                "Step0's result is not a saved correct run of this workspace. "
+                "Save in Step0 first.")
+            return
+        if rm_roi:
+            rm_key = self._rm_fuse_reuse_key(
+                self._pending_fused_zarr_meta if is_wholecell else self._pending_dapi_input_meta)
+            same = run_store.find_same(rm_roi, "fuse", rm_upstream, rm_key)
+            if same and self._rm_reuse_fuse_run(same):
                 return
         elif not is_wholecell:
             if self._try_reuse_dapi_input_zarr(expected_dapi_meta):
@@ -10022,12 +10192,11 @@ class MainWindow(QMainWindow):
         n_rows, n_cols = sel
 
         # ── Start FullFusionWorker ────────────────────────────────────
-        dv_alloc = None
-        if dv_ws:
-            from ..utils import data_versions
-            dv_alloc = data_versions.new_version_folder(dv_ws)
-            worker_fcfg["output_dir"] = dv_alloc["path"]
-            print(f"[Step1] Generate into data version {dv_alloc['version']} "
+        rm_run = ""
+        if rm_roi:
+            rm_run = run_store.new_run(rm_roi, "fuse")
+            worker_fcfg["output_dir"] = rm_run
+            print(f"[Step1] Generate into {os.path.basename(rm_run)} "
                   f"(published only when every region succeeds)")
         worker = FullFusionWorker(
             loader     = self.loader,
@@ -10041,18 +10210,156 @@ class MainWindow(QMainWindow):
             corrected_decisions = dict(self._corrected_decisions),
             use_pixel_sources   = True,
         )
-        if dv_alloc is not None:
+        if rm_run:
+            # registered when the run is published (§10), not per region
             worker.register_provenance = False
-            self._dv_pending = {"workspace": dv_ws, "alloc": dv_alloc,
-                                "record": dv_record, "worker": worker}
+            self._rm_pending_fuse = {
+                "run": rm_run, "upstream": rm_upstream, "worker": worker,
+                "params": self._rm_fuse_params(
+                    rm_key, selected_method, is_wholecell, snapshot, remap_params,
+                    cpcfg, fp_method)}
         started = self._start_fusion_worker(
             worker,
             job_name="fusion" if is_wholecell else "DAPI input zarr",
             n_rows=n_rows, n_cols=n_cols)
-        if started is None and dv_alloc is not None:
-            self._dv_discard_pending("the fusion job was not started")
+        if started is None and rm_run:
+            self._rm_discard_fuse("the fusion job was not started")
 
     # ── data versions (block DV) ──────────────────────────────────────
+
+    # ── block RM: fuse runs (docs/v16_run_model_application.md §5, §8) ──
+
+    _RM_KEY_DROP = ("config_hash", "source_path", "raw_ome_path",
+                    "background_correction_source", "hq_source_zarr", "created_at",
+                    "last_used")
+    _RM_FCFG_DROP = ("saved_at", "output_dir", "ome_tiff", "config_hash", "artifact_kind")
+
+    def _rm_fuse_reuse_key(self, expected_meta):
+        """The fields that change a Generate's pixels (§8, §16.3-5): the
+        product kind and the input transforms it applies -- fusion config,
+        Intensity mapping, formula version, regions. Paths and times are
+        left out (the upstream run is compared separately). No hash."""
+        meta = json.loads(json.dumps(expected_meta or {}, default=str))
+        key = {k: v for k, v in meta.items() if k not in self._RM_KEY_DROP}
+        fcfg = dict(key.get("fusion_config") or {})
+        for k in self._RM_FCFG_DROP:
+            fcfg.pop(k, None)
+        key["fusion_config"] = fcfg
+        return key
+
+    def _rm_regions(self):
+        """The analysis regions this Generate fuses, frozen (§7)."""
+        if self._rois:
+            return [{"roi_name": str(r.get("name") or ""),
+                     "bbox_fullres": [int(v) for v in r.get("bbox_fullres") or []],
+                     "polygon_fullres": r.get("polygon_fullres") or None}
+                    for r in self._rois]
+        h, w = (int(v) for v in self.loader.shape[:2])
+        return [{"roi_name": "full", "bbox_fullres": [0, h, 0, w], "polygon_fullres": None}]
+
+    def _rm_fuse_params(self, key, method, is_wholecell, snapshot, remap_params, cpcfg,
+                        seg_param_path):
+        """params.json of the fuse run this Generate makes (§4, §5)."""
+        sel = self.__dict__.get("_preseg_selected")
+        preseg = ""
+        if sel is not None and self._params_source == PRESEG_SOURCE:
+            path = preseg_run.run_dir(self._preseg_runs_root(), sel["run"]["run_id"])
+            project = run_store.project_dir_of(path)
+            try:
+                preseg = run_store.rel(project, path) if project else ""
+            except ValueError:
+                preseg = ""
+        weights = {}
+        for g in ((snapshot or {}).get("fusion_config") or {}).get("groups", {}).values():
+            weights.update({str(c): w for c, w in (g.get("channels") or {}).items()})
+        shown = ", ".join(f"{c} {w:g}" for c, w in sorted(weights.items())
+                          if isinstance(w, (int, float)) and w)
+        kind = "fused" if is_wholecell else "DAPI input"
+        return json.loads(json.dumps({
+            "kind": "fuse",
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "summary": f"{kind} · {method}" + (f" · {shown}" if shown else ""),
+            "artifact_kind": key.get("artifact_kind"),
+            "method": method,
+            "reuse_key": key,
+            "fusion_settings": snapshot,
+            "intensity": remap_params,
+            "geometry": {"regions": self._rm_regions()},
+            "preseg_run": preseg,
+            "segmentation_params": {"file": os.path.basename(seg_param_path or ""),
+                                    "content": cpcfg},
+        }, default=str))
+
+    def _rm_reuse_fuse_run(self, run_dir):
+        """Generate with nothing changed: that fuse run is used (§8)."""
+        params = run_store.read_params(run_dir)
+        fused = [os.path.join(run_dir, r["zarr_name"]) for r in params.get("regions") or []
+                 if r.get("zarr_name")]
+        if not fused or not all(os.path.isdir(p) for p in fused):
+            return False
+        print(f"[Step1] nothing changed since {os.path.basename(run_dir)}: its products "
+              f"are reused")
+        self._on_fusion_done(fused[0])
+        return True
+
+    def _rm_commit_fuse(self):
+        """Every region succeeded: params.json (with the regions' products),
+        inputs.json, then .done; then A3 provenance (§10). Returns the first
+        region's product."""
+        pending = self._rm_pending_fuse
+        run_dir, worker = pending["run"], pending["worker"]
+        try:
+            with open(os.path.join(run_dir, "fusion_meta.json"), encoding="utf-8") as f:
+                meta_regions = (json.load(f) or {}).get("regions") or []
+        except (OSError, ValueError):
+            meta_regions = []
+        by_name = {str(r.get("roi_name")): r.get("zarr_path") for r in meta_regions}
+        regions = []
+        for reg in pending["params"]["geometry"]["regions"]:
+            name = os.path.basename(os.path.normpath(by_name.get(reg["roi_name"]) or ""))
+            if not name or not os.path.isdir(os.path.join(run_dir, name)):
+                raise RuntimeError(f"region {reg['roi_name']!r} has no fused product")
+            regions.append({"roi_name": reg["roi_name"], "zarr_name": name})
+        project = run_store.project_dir_of(run_dir)
+        for meta_name in ("fusion_meta.json",):          # the worker's record: relative
+            mpath = os.path.join(run_dir, meta_name)
+            if os.path.isfile(mpath):
+                with open(mpath, encoding="utf-8") as f:
+                    run_store.write_json_atomic(mpath, run_store.to_records(json.load(f), project))
+        params = dict(pending["params"], regions=regions)
+        identity = (self._pending_fused_zarr_meta or self._pending_dapi_input_meta or {})
+        params["identity"] = json.loads(json.dumps(identity, default=str))
+        key = params.pop("reuse_key")
+        params = run_store.to_records(params, project)       # §2.5
+        params["reuse_key"] = key                            # compared as computed
+        run_store.write_params(run_dir, params)
+        run_store.write_inputs(run_dir, pending["upstream"])
+        run_store.publish(run_dir)
+        self._rm_pending_fuse = None        # published: nothing left to discard
+        for job in getattr(worker, "provenance_jobs", []) or []:
+            worker._register_fused(*job)
+        print(f"[Step1] fuse run published: {os.path.basename(run_dir)} "
+              f"({len(regions)} region(s))")
+        return os.path.join(run_dir, regions[0]["zarr_name"])
+
+    def _rm_discard_fuse(self, reason):
+        """Cancel / error / not started: no fuse run; its folder goes."""
+        pending, self._rm_pending_fuse = self.__dict__.get("_rm_pending_fuse"), None
+        if pending is None:
+            return
+        run_store.discard(pending["run"])
+        print(f"[Step1] no fuse run: {reason}; {os.path.basename(pending['run'])} removed")
+
+    def _rm_note_viewing(self, run_dir):
+        """session.json `viewing` (§6): the most downstream run being viewed."""
+        roi = self._rm_roi_dir()
+        if not roi or not run_store.is_done(run_dir) or not run_store.project_dir_of(roi):
+            return
+        try:
+            run_store.update_session(
+                roi, viewing=run_store.rel(run_store.project_dir_of(roi), run_dir))
+        except (OSError, ValueError) as exc:
+            print(f"[Step1] session.json not updated ({exc})")
 
     def _dv_workspace(self):
         """The workspace folder Generate versions into, or "" outside one:
@@ -10282,6 +10589,9 @@ class MainWindow(QMainWindow):
             return "a Step2 segmentation is running"
         if _running(getattr(self.__dict__.get("_step4"), "_worker", None)):
             return "a Step4 extraction is running"
+        job = self.__dict__.get("_preseg_job")
+        if job is not None and job.is_running():
+            return "a pre-segmentation run is running"
         return None
 
     def _dv_release_paths(self, paths):
@@ -10551,6 +10861,8 @@ class MainWindow(QMainWindow):
         # Block DV: a retired job publishes nothing; its folder is cleaned
         # when the workspace is opened next (cleanup_incomplete).
         self._dv_pending = None
+        # Block RM: likewise its unpublished fuse run (cleanup_incomplete).
+        self._rm_pending_fuse = None
         self._fusion_exit_actions = []
         self._fusion_stopping = False
         self._close_fusion_dialog()

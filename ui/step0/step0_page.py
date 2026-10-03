@@ -11405,6 +11405,8 @@ class Step0Page(QWidget):
         if published is None:
             raise ValueError("no committed Step0 result")
         _dir, _manifest_path, zarr_path, config, manifest = published
+        zarr_path = self._dv_inside_workspace(ws.workspace_dir, zarr_path) or os.path.join(
+            ws.step0_dir, "corrected_channels.zarr")
         roi_path, patch_path = step0_handoff.manifest_geometry_paths(manifest, ws.step0_dir)
         saved_rois = workspace_session._load(roi_path) or []
         saved_patches = workspace_session._load(patch_path) or []
@@ -11678,9 +11680,32 @@ class Step0Page(QWidget):
         if not ws:
             return os.path.join(step0_dir, "corrected_channels.zarr")
         published = self._published_handoff()
-        if published is not None and published[2] and os.path.isdir(published[2]):
-            return published[2]
+        if published is not None and published[2]:
+            mine = self._dv_inside_workspace(ws, published[2])
+            if mine and os.path.isdir(mine):
+                return mine
         return data_versions.new_corrected_folder(ws)
+
+    @staticmethod
+    def _dv_inside_workspace(ws, path):
+        """`path` when it lies inside the workspace; for a path into another
+        folder (a project copied with its absolute paths -- acceptance
+        finding 2026-10-03) the same place inside THIS workspace, or "".
+        Nothing is ever written outside the workspace that is open."""
+        if not path:
+            return ""
+        if data_versions.is_inside(path, ws):
+            return os.path.abspath(path)
+        name = os.path.basename(os.path.normpath(ws))
+        parts = os.path.abspath(path).split(os.sep)
+        if name in parts:
+            here = os.path.join(ws, *parts[len(parts) - parts[::-1].index(name):])
+            if os.path.exists(here):
+                print(f"[Workspace] {path} lies outside the open workspace; "
+                      f"{here} is used instead")
+                return here
+        print(f"[Workspace] {path} lies outside the open workspace; not used")
+        return ""
 
     def _dv_draft_for_geometry(self, base_path, copy):
         """A Save that changes the region geometry without recomputing any

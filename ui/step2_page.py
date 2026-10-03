@@ -375,7 +375,13 @@ class Step2Page(QWidget):
         zr.addWidget(btn_browse)
         inl.addLayout(zr)
 
-        pr = QHBoxLayout()
+        # User ruling 2026-10-03 (option a): Input Data shows only the
+        # fused.zarr. The parameters come with the data version (shown under
+        # Segmentation Parameters); the index row is kept for the code that
+        # reads it, never shown.
+        self._seg_params_row = QtWidgets.QWidget()
+        pr = QHBoxLayout(self._seg_params_row)
+        pr.setContentsMargins(0, 0, 0, 0)
         pr.addWidget(QLabel('Index:'))       # was 'Segmentation Index:' (block L2)
         self._seg_params_edit = QtWidgets.QLineEdit()
         self._seg_params_edit.setPlaceholderText('segmentation_params/ or segmentation_params_index.json')
@@ -385,7 +391,8 @@ class Step2Page(QWidget):
         btn_params.setFixedWidth(64)
         btn_params.clicked.connect(self._browse_seg_params)
         pr.addWidget(btn_params)
-        inl.addLayout(pr)
+        inl.addWidget(self._seg_params_row)
+        self._seg_params_row.setVisible(False)
 
         btn_load = QPushButton('Load zarr info & overview')
         btn_load.setStyleSheet(
@@ -2723,6 +2730,28 @@ class Step2Page(QWidget):
             return False, None
         return True, {"differences": cmp["differences"],
                       "confirmed_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+
+    def use_version_params(self, params_dir, version_id):
+        """User ruling 2026-10-03: the segmentation method and parameters of
+        data version `version_id` (its frozen ``segmentation_params``) become
+        Step2's, replacing whatever was set before; the source reads `From
+        data version vNNN`. Returns True when they were loaded. Coming back
+        to Step2 on the same version keeps what the user changed since."""
+        key = (os.path.abspath(params_dir or ""), str(version_id or ""))
+        if key == getattr(self, "_version_params_key", None):
+            return True
+        self._version_params_key = key
+        self._seg_params_index = {}
+        self._seg_params_edit.setText("")
+        idx = self._param_source_combo.findData("index")
+        if idx >= 0:
+            self._param_source_combo.setItemText(idx, f"From data version {version_id}")
+        if self.load_step1_active_params(params_dir):
+            return True
+        print(f"[Step2] data version {version_id} has no segmentation parameters; "
+              f"manual default")
+        self._set_param_source("manual")
+        return False
 
     def set_data_version(self, version_id, region_fused_paths=None):
         """Block DV: the data version the next run belongs to."""

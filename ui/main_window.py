@@ -4770,6 +4770,17 @@ class MainWindow(QMainWindow):
             step2._zarr_edit.setText(first)
             step2._load_zarr_info()
         step2.set_data_version(cur["version"], paths)
+        # User ruling 2026-10-03: Step2 follows the version -- its fused AND
+        # the segmentation method/parameters Step1 had chosen for it; what
+        # was typed by hand before is replaced (and can be changed again).
+        ws = self._dv_workspace()
+        from ..utils import data_versions
+        params = os.path.join(data_versions.version_dir(ws, cur.get("folder", "")),
+                              "segmentation_params")
+        if not os.path.isdir(params):
+            params = os.path.join(ws, "step1")                # a version made before
+        if hasattr(step2, "use_version_params"):
+            step2.use_version_params(params, cur["version"])
 
     def _go_to_step1(self):
         # Step1 reads the handoff from DISK. While a patch edit is still being
@@ -10037,8 +10048,17 @@ class MainWindow(QMainWindow):
     # ── data versions (block DV) ──────────────────────────────────────
 
     def _dv_workspace(self):
-        """The workspace folder Generate versions into, or "" outside one."""
-        roi_dir = str((self.step0_output or {}).get("roi_dir") or "")
+        """The workspace folder Generate versions into, or "" outside one:
+        the workspace the Step0 handoff file actually lives in -- not the
+        folder it names, which in a project copied with its absolute paths is
+        another project's (acceptance finding 2026-10-03)."""
+        s0 = self.step0_output or {}
+        manifest = str(s0.get("step0_manifest_path") or "")
+        if manifest:
+            here = os.path.dirname(os.path.dirname(os.path.abspath(manifest)))
+            if os.path.isfile(os.path.join(here, "roi_manifest.json")):
+                return here
+        roi_dir = str(s0.get("roi_dir") or "")
         if roi_dir and os.path.isfile(os.path.join(roi_dir, "roi_manifest.json")):
             return roi_dir
         return ""
@@ -10144,6 +10164,7 @@ class MainWindow(QMainWindow):
         for src, name in copies:
             if src and os.path.isfile(src):
                 shutil.copy2(src, os.path.join(alloc["path"], name))
+        self._dv_freeze_seg_params(os.path.dirname(settings_path), alloc["path"])
         # The session was saved before this Generate's fused path reached the
         # window: the frozen copy names the version's own products.
         frozen = os.path.join(alloc["path"], "step1_session.json")
@@ -10178,8 +10199,9 @@ class MainWindow(QMainWindow):
         if not ws or data_versions.load_index(ws)["versions"] or \
                 data_versions.list_versions(ws):
             return None
-        step1_dir = str((self.step0_output or {}).get("step1_dir") or "")
-        if not step1_dir:
+        # the workspace's own folders, never the ones a copied handoff names
+        step1_dir = os.path.join(ws, "step1")
+        if not os.path.isdir(step1_dir):
             return None
         meta_paths = {}
         try:
@@ -10189,17 +10211,25 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError):
             return None
         record = self._dv_candidate_record("")
+        corrected = (record.get("corrected") or {}).get("path") or ""
+        if corrected and not data_versions.is_inside(corrected, ws):
+            own = os.path.join(ws, "step0", "corrected_channels.zarr")
+            if not os.path.isdir(own):
+                print(f"[Step1] earlier workspace not registered as v1: its corrected "
+                      f"product {corrected} lies outside the workspace")
+                return None
+            record["corrected"] = dict(record["corrected"], path=own)
         regions = []
         for reg in record["regions"]:
             here = os.path.join(step1_dir, f"fused_{reg['roi_name']}.zarr")
             path = here if os.path.isdir(here) else meta_paths.get(reg["roi_name"], "")
-            if not path or not os.path.isdir(path):
+            if not path or not os.path.isdir(path) or not data_versions.is_inside(path, ws):
                 print(f"[Step1] earlier workspace not registered as v1: region "
                       f"{reg['roi_name']!r} has no fused product")
                 return None
             regions.append(dict(reg, fused_zarr_path=os.path.abspath(path)))
         record["regions"] = regions
-        settings_path = self._fusion_settings_path()
+        settings_path = os.path.join(step1_dir, "step1_fusion_settings.json")
         try:
             with open(settings_path, encoding="utf-8") as f:
                 record["fusion_settings_hash"] = str((json.load(f) or {}).get("hash") or "")
@@ -10209,15 +10239,15 @@ class MainWindow(QMainWindow):
         record["legacy"] = True
         alloc = data_versions.new_version_folder(ws)
         try:
-            s0 = self.step0_output or {}
-            step0_dir = str(s0.get("step0_dir") or "")
+            step0_dir = os.path.join(ws, "step0")
             for src, name in (
                     (os.path.join(step0_dir, "correction_config.json"), "correction_config.json"),
-                    (str(s0.get("channel_remap_config_path") or ""), "step0_channel_remap.json"),
+                    (os.path.join(step0_dir, "step0_channel_remap.json"), "step0_channel_remap.json"),
                     (settings_path, "step1_fusion_settings.json"),
                     (os.path.join(step1_dir, "step1_session.json"), "step1_session.json")):
                 if src and os.path.isfile(src):
                     shutil.copy2(src, os.path.join(alloc["path"], name))
+            self._dv_freeze_seg_params(step1_dir, alloc["path"])
             committed = data_versions.commit_version(ws, alloc, record)
         except Exception as exc:                            # noqa: BLE001
             shutil.rmtree(alloc["path"], ignore_errors=True)
@@ -10288,6 +10318,35 @@ class MainWindow(QMainWindow):
               "starts over empty")
         QtCore.QTimer.singleShot(0, self.close)
         return fresh
+
+    @staticmethod
+    def _dv_freeze_seg_params(step1_dir, version_folder):
+        """User ruling 2026-10-03: a version keeps the segmentation method and
+        parameters Step1 had chosen when it was made -- the active parameter
+        file of ``step1/segmentation_params`` and an index naming only it --
+        so Step2 runs it with exactly these. Returns the method or ""."""
+        from ..utils.segmentation_params import PARAM_INDEX
+        src_dir = os.path.join(step1_dir, "segmentation_params")
+        try:
+            with open(os.path.join(src_dir, PARAM_INDEX), encoding="utf-8") as f:
+                index = json.load(f) or {}
+        except (OSError, ValueError):
+            return ""
+        method = str(index.get("active_method") or "")
+        name = str(index.get("active_param_file") or
+                   ((index.get("methods") or {}).get(method) or {}).get("latest") or "")
+        src = name if os.path.isabs(name) else os.path.join(src_dir, name)
+        if not method or not name or not os.path.isfile(src):
+            return ""
+        dest = os.path.join(version_folder, "segmentation_params")
+        os.makedirs(dest, exist_ok=True)
+        shutil.copy2(src, os.path.join(dest, os.path.basename(src)))
+        from ..core.provenance import write_json_atomic
+        write_json_atomic(os.path.join(dest, PARAM_INDEX), {
+            "active_method": method, "active_param_file": os.path.basename(src),
+            "methods": {method: {"latest": os.path.basename(src),
+                                 "history": [os.path.basename(src)]}}})
+        return method
 
     def _dv_install_step1_files(self, version_id):
         """A version was loaded in Step0 (§3.6): its Step1 session and fusion

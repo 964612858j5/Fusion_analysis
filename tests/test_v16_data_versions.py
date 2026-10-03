@@ -1112,3 +1112,128 @@ def test_step1_settings_saved_since_the_version_are_a_draft_too(page, tmp_path, 
     page.step0_complete.connect(sent.append)
     page._announce_opened_workspace()
     assert sent[0]["data_version_loaded"] == "v002"            # Step1 comes back
+
+
+# ── acceptance findings 2026-10-03: a copied project, Step2 follows the version ──
+
+def _foreign_handoff(ctx, tmp_path):
+    """The handoff names a product in ANOTHER project (a project copied with
+    its absolute paths)."""
+    other = tmp_path / "elsewhere" / "rois" / os.path.basename(ctx["roi_dir"]) / "step0"
+    os.makedirs(other / "corrected_channels.zarr")
+    mpath = os.path.join(ctx["step_dirs"]["step0"], "step0_roi_result.json")
+    m = json.load(open(mpath))
+    m["corrected_zarr_path"] = str(other / "corrected_channels.zarr")
+    json.dump(m, open(mpath, "w"))
+    return str(other / "corrected_channels.zarr")
+
+
+def test_a_save_never_corrects_into_another_projects_product(dv_page, tmp_path, slides):
+    proj, made = _project(tmp_path, slides["a"], commit=False)
+    ctx = made[0]
+    _commit_step0(ctx)
+    foreign = _foreign_handoff(ctx, tmp_path)
+    dv_page._open_existing_workspace()
+    base = dv_page._dv_base_corrected_path(ctx["step_dirs"]["step0"])
+    assert base == os.path.join(ctx["step_dirs"]["step0"], "corrected_channels.zarr")
+    assert dv.is_inside(base, ctx["roi_dir"]) and base != foreign
+    # no counterpart in the workspace either: a new draft inside it
+    shutil.rmtree(base)
+    base = dv_page._dv_base_corrected_path(ctx["step_dirs"]["step0"])
+    assert dv.is_inside(base, dv.corrected_root(ctx["roi_dir"]))
+
+
+def test_the_window_versions_into_the_workspace_the_handoff_lives_in(app, tmp_path):
+    w, ws = _dv_window(app, tmp_path)
+    try:
+        manifest = os.path.join(ws, "step0", "step0_roi_result.json")
+        open(manifest, "w").write("{}")
+        w.step0_output = dict(w.step0_output, step0_manifest_path=manifest,
+                              roi_dir=str(tmp_path / "another" / "project" / "ws1"))
+        assert w._dv_workspace() == ws
+    finally:
+        w.close()
+
+
+def test_an_earlier_workspace_with_a_foreign_product_uses_its_own(app, tmp_path, monkeypatch):
+    w, ws = _dv_window(app, tmp_path)
+    try:
+        step1, corrected = _legacy(w, ws, ["R1"])
+        rec = dict(_record(), corrected={"path": str(tmp_path / "other" / "c.zarr")},
+                   regions=[{"roi_name": "R1", "roi_id": "r1", "bbox_fullres": [0, 5, 0, 5],
+                             "polygon_fullres": None}])
+        monkeypatch.setattr(w, "_dv_candidate_record", lambda method: dict(rec))
+        v1 = w._dv_register_legacy()
+        assert v1["corrected"]["path"] == corrected                       # its own step0/
+    finally:
+        w.close()
+
+
+def _params(step1_dir, method="stardist_nuclei_expansion", name="p_1.json"):
+    d = os.path.join(step1_dir, "segmentation_params")
+    os.makedirs(d, exist_ok=True)
+    json.dump({"method": method}, open(os.path.join(d, name), "w"))
+    json.dump({"active_method": method, "active_param_file": name,
+               "methods": {method: {"latest": name, "history": ["p_0.json", name]}}},
+              open(os.path.join(d, "segmentation_params_index.json"), "w"))
+
+
+def test_a_version_keeps_step1s_segmentation_parameters(app, tmp_path, monkeypatch):
+    from block01.core import provenance as prov
+    w, ws = _dv_window(app, tmp_path)
+    try:
+        step1 = os.path.join(ws, "step1")
+        os.makedirs(step1)
+        _params(step1)
+        w.step0_output = dict(w.step0_output, step1_dir=step1)
+        monkeypatch.setattr(prov, "register_corrected_channels", lambda *a, **k: None)
+        monkeypatch.setattr(w, "_save_step1_session", lambda: None)
+        alloc, _worker = _pending(w, ws, ["R1"], ["R1"])
+        w._dv_commit_pending()
+        frozen = os.path.join(alloc["path"], "segmentation_params")
+        index = json.load(open(os.path.join(frozen, "segmentation_params_index.json")))
+        assert index["active_method"] == "stardist_nuclei_expansion"
+        assert index["methods"]["stardist_nuclei_expansion"]["history"] == ["p_1.json"]
+        assert json.load(open(os.path.join(frozen, "p_1.json"))) == {
+            "method": "stardist_nuclei_expansion"}
+    finally:
+        w.close()
+
+
+def test_entering_step2_loads_the_versions_parameters(app, tmp_path, monkeypatch):
+    w, ws = _dv_window(app, tmp_path)
+    try:
+        alloc = dv.new_version_folder(ws)
+        os.makedirs(os.path.join(alloc["path"], "segmentation_params"))
+        dv.commit_version(ws, alloc, _record())
+        monkeypatch.setattr(w, "_dv_candidate_record", lambda method: _record())
+        used = []
+        monkeypatch.setattr(w._step2, "use_version_params",
+                            lambda path, vid: used.append((path, vid)))
+        w._dv_bind_step2()
+        assert used == [(os.path.join(alloc["path"], "segmentation_params"), "v001")]
+    finally:
+        w.close()
+
+
+def test_step2_takes_the_versions_parameters_once_per_version(app, tmp_path, monkeypatch):
+    from block01.ui import step2_page as s2
+    p = s2.Step2Page()
+    loaded = []
+    monkeypatch.setattr(p, "load_step1_active_params",
+                        lambda d: loaded.append(d) or True)
+    try:
+        p._set_param_source("manual")
+        p._seg_params_edit.setText("/typed/by/hand")
+        assert p.use_version_params("/v/v002/segmentation_params", "v002") is True
+        assert loaded == ["/v/v002/segmentation_params"]
+        assert p._seg_params_edit.text() == ""                          # replaced
+        combo = p._param_source_combo
+        assert combo.itemText(combo.findData("index")) == "From data version v002"
+        p.use_version_params("/v/v002/segmentation_params", "v002")    # same version
+        assert loaded == ["/v/v002/segmentation_params"]                # user's edits kept
+        p.use_version_params("/v/v003/segmentation_params", "v003")
+        assert loaded[-1] == "/v/v003/segmentation_params"
+        assert p._seg_params_row.isHidden()                             # ruling (a)
+    finally:
+        p.deleteLater()

@@ -191,3 +191,11 @@ DV 的全量回归还没跑。建议：本申请批准后先做完，再和 DV �
 ### 13.4 codex 第五轮审核（2026-10-03）
 
 原文：`codex_review5.txt`。第四轮的两处修正确认正确；只剩 1 条：旧运行记录的 corrected 产品**已经不在**时，程序仍会退回用今天的配置。已改：这个产品原本在本工作区里、现在找不到（例如被删进了垃圾桶）→ 拒绝定量；产品路径在本工作区以外（例如整个项目被复制到别处、旧记录指向原位置）时保持原来的做法。新增测试 1 条，旧代码上失败、新代码上通过。范围：所有改动的文件都已获批准。
+
+### 13.5 全量回归（DV + DV-D 一起，2026-10-03）
+
+新 = `1f286d0`，旧 = `905079f`，脚本 `~/fusionflux/bench_dv/reg/run.sh`（A6 那套，每个模块 10 分钟超时），11:43–13:50。
+- 新代码上所有失败 / 超时 / 崩溃的模块，在旧代码上逐条对比失败的测试名：除下面 3 条外完全相同，都是以前就有的问题。
+- 只在新代码上失败的 3 条（`test_step2_engine_unified::test_a_manual_run_equals_the_runner[stardist_nuclei_expansion-full]`、`test_step2_runner_path::test_a_hand_over_equals_the_runner_with_shared_ownership[stardist_nuclei_dapi-full / stardist_nuclei_expansion-roi]`）：单独重跑，新代码 2 次都通过，旧代码 1 次通过、1 次失败 2 条 → StarDist 结果比对的偶发问题，与本块无关。
+- `test_seg_runner_engines` 在新代码这边运行时 C 盘一度只剩 11 GB，被脚本停掉；之后单独补跑（最低 25 GB）：3 条失败，与旧代码完全相同。
+- **结论：没有新增失败。**

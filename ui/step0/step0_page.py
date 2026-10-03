@@ -11692,20 +11692,11 @@ class Step0Page(QWidget):
         folder (a project copied with its absolute paths -- acceptance
         finding 2026-10-03) the same place inside THIS workspace, or "".
         Nothing is ever written outside the workspace that is open."""
-        if not path:
-            return ""
-        if data_versions.is_inside(path, ws):
-            return os.path.abspath(path)
-        name = os.path.basename(os.path.normpath(ws))
-        parts = os.path.abspath(path).split(os.sep)
-        if name in parts:
-            here = os.path.join(ws, *parts[len(parts) - parts[::-1].index(name):])
-            if os.path.exists(here):
-                print(f"[Workspace] {path} lies outside the open workspace; "
-                      f"{here} is used instead")
-                return here
-        print(f"[Workspace] {path} lies outside the open workspace; not used")
-        return ""
+        here = data_versions.localize(ws, path)
+        if path and here != os.path.abspath(path):
+            print(f"[Workspace] {path} lies outside the open workspace; "
+                  + (f"{here} is used instead" if here else "not used"))
+        return here
 
     def _dv_draft_for_geometry(self, base_path, copy):
         """A Save that changes the region geometry without recomputing any

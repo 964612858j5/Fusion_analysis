@@ -1200,18 +1200,18 @@ def test_a_version_keeps_step1s_segmentation_parameters(app, tmp_path, monkeypat
         w.close()
 
 
-def test_entering_step2_loads_the_versions_parameters(app, tmp_path, monkeypatch):
+def test_entering_step2_loads_step1s_latest_parameters(app, tmp_path, monkeypatch):
+    """User ruling: Step2 uses the method/parameters Step1 used LAST."""
     w, ws = _dv_window(app, tmp_path)
     try:
         alloc = dv.new_version_folder(ws)
-        os.makedirs(os.path.join(alloc["path"], "segmentation_params"))
         dv.commit_version(ws, alloc, _record())
         monkeypatch.setattr(w, "_dv_candidate_record", lambda method: _record())
         used = []
         monkeypatch.setattr(w._step2, "use_version_params",
                             lambda path, vid: used.append((path, vid)))
         w._dv_bind_step2()
-        assert used == [(os.path.join(alloc["path"], "segmentation_params"), "v001")]
+        assert used == [(os.path.join(ws, "step1"), "v001")]
     finally:
         w.close()
 
@@ -1229,7 +1229,7 @@ def test_step2_takes_the_versions_parameters_once_per_version(app, tmp_path, mon
         assert loaded == ["/v/v002/segmentation_params"]
         assert p._seg_params_edit.text() == ""                          # replaced
         combo = p._param_source_combo
-        assert combo.itemText(combo.findData("index")) == "From data version v002"
+        assert combo.itemText(combo.findData("index")) == "From Step1 (data version v002)"
         p.use_version_params("/v/v002/segmentation_params", "v002")    # same version
         assert loaded == ["/v/v002/segmentation_params"]                # user's edits kept
         p.use_version_params("/v/v003/segmentation_params", "v003")
@@ -1237,3 +1237,47 @@ def test_step2_takes_the_versions_parameters_once_per_version(app, tmp_path, mon
         assert p._seg_params_row.isHidden()                             # ruling (a)
     finally:
         p.deleteLater()
+
+
+
+# ── codex review 7 (astra low) ─────────────────────────────────────────────
+
+def test_the_windows_step_folders_are_the_workspaces_own(app, tmp_path, monkeypatch):
+    """#1: the handoff names another project's step folders -> Step1/Step2
+    write into this workspace's."""
+    w, ws = _dv_window(app, tmp_path)
+    try:
+        manifest = os.path.join(ws, "step0", "step0_roi_result.json")
+        open(manifest, "w").write("{}")
+        other = str(tmp_path / "other" / "rois" / "ws1")
+        w.step0_output = dict(w.step0_output, step0_manifest_path=manifest, roi_dir=other,
+                              step0_dir=other + "/step0", step1_dir=other + "/step1",
+                              step2_dir=other + "/step2")
+        w._corrected_zarr_path = other + "/step0/corrected_channels.zarr"
+        w._dv_rebase_to_workspace()
+        s0 = w.step0_output
+        assert s0["step1_dir"] == os.path.join(ws, "step1")
+        assert s0["step2_dir"] == os.path.join(ws, "step2")
+        assert s0["roi_dir"] == ws
+        assert w._fusion_settings_path() == os.path.join(ws, "step1", "step1_fusion_settings.json")
+        assert not w._corrected_zarr_path.startswith(other)
+    finally:
+        w.close()
+
+
+def test_a_copied_versions_products_are_still_read_only(tmp_path):
+    """#2: version records still name the original project's paths; the
+    workspace's own copies of those products are published (read-only), and a
+    deletion never moves the original's."""
+    ws = _ws(tmp_path)
+    own = os.path.join(ws, "versions", "corrected", "c001", "corrected_channels.zarr")
+    os.makedirs(own)
+    orig_ws = tmp_path / "orig" / "rois" / "ws1"
+    orig = str(orig_ws / "versions" / "corrected" / "c001" / "corrected_channels.zarr")
+    os.makedirs(orig)
+    alloc = dv.new_version_folder(ws)
+    dv.commit_version(ws, alloc, dict(_record(), corrected={"path": orig}))
+    assert dv.is_published_product(ws, own)
+    plan = dv.plan_delete(ws, version_id="v001", release_handoff=True)
+    assert all(dv.is_inside(p, ws) for p in plan["paths"])
+    assert os.path.dirname(own) in plan["paths"]

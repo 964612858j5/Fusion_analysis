@@ -2732,12 +2732,18 @@ class Step2Page(QWidget):
                       "confirmed_at": time.strftime("%Y-%m-%d %H:%M:%S")}
 
     def use_version_params(self, params_dir, version_id):
-        """User ruling 2026-10-03: the segmentation method and parameters of
-        data version `version_id` (its frozen ``segmentation_params``) become
-        Step2's, replacing whatever was set before; the source reads `From
-        data version vNNN`. Returns True when they were loaded. Coming back
-        to Step2 on the same version keeps what the user changed since."""
-        key = (os.path.abspath(params_dir or ""), str(version_id or ""))
+        """User ruling 2026-10-03: the segmentation method and parameters
+        Step1 used last (``params_dir``'s segmentation_params index) become
+        Step2's for data version `version_id`, replacing whatever was set
+        before; the source reads `From Step1 (data version vNNN)`. Returns
+        True when they were loaded. Coming back to Step2 with the same version
+        and the same Step1 parameters keeps what the user changed since."""
+        index = self._resolve_seg_params_index_path(params_dir)
+        try:
+            stamp = os.path.getmtime(index) if index else 0.0
+        except OSError:
+            stamp = 0.0
+        key = (os.path.abspath(params_dir or ""), str(version_id or ""), stamp)
         if key == getattr(self, "_version_params_key", None):
             return True
         self._version_params_key = key
@@ -2745,7 +2751,8 @@ class Step2Page(QWidget):
         self._seg_params_edit.setText("")
         idx = self._param_source_combo.findData("index")
         if idx >= 0:
-            self._param_source_combo.setItemText(idx, f"From data version {version_id}")
+            self._param_source_combo.setItemText(
+                idx, f"From Step1 (data version {version_id})")
         if self.load_step1_active_params(params_dir):
             return True
         print(f"[Step2] data version {version_id} has no segmentation parameters; "

@@ -307,6 +307,27 @@ def is_inside(path, folder) -> bool:
         return False
 
 
+def localize(workspace_dir, path, must_exist=True) -> str:
+    """`path` inside THIS workspace (acceptance finding 2026-10-03): a path
+    already inside it is returned as it is; one into another folder -- a
+    project copied with its absolute paths -- is mapped to the same place
+    under this workspace (the part after the workspace's own folder name),
+    when that exists (or `must_exist` is False). "" when there is none.
+    What DV writes, moves or protects is always the workspace's own."""
+    if not path:
+        return ""
+    ws = os.path.abspath(workspace_dir)
+    if is_inside(path, ws):
+        return os.path.abspath(path)
+    name = os.path.basename(os.path.normpath(ws))
+    parts = os.path.abspath(path).split(os.sep)
+    if name in parts:
+        here = os.path.join(ws, *parts[len(parts) - parts[::-1].index(name):])
+        if os.path.exists(here) or not must_exist:
+            return here
+    return ""
+
+
 def is_published_product(workspace_dir, path) -> bool:
     """True when `path` belongs to a published version (read-only, §3.14):
     inside a version folder, or a legacy product a version references."""
@@ -317,7 +338,10 @@ def is_published_product(workspace_dir, path) -> bool:
             return True
         refs = [(rec.get("corrected") or {}).get("path")] + \
             [r.get("fused_zarr_path") for r in rec.get("regions") or []]
-        if any(p and os.path.abspath(p) == os.path.abspath(path) for p in refs):
+        want = {os.path.abspath(path), localize(workspace_dir, path, must_exist=False)}
+        if any(p and (os.path.abspath(p) in want
+                      or localize(workspace_dir, p, must_exist=False) in want)
+               for p in refs):
             return True
     return False
 
@@ -334,18 +358,18 @@ def runs_of_version(workspace_dir, version_id) -> List:
 
 def handoff_corrected(workspace_dir) -> str:
     manifest = _load(os.path.join(workspace_dir, "step0", "step0_roi_result.json")) or {}
-    path = manifest.get("corrected_zarr_path") or ""
-    return os.path.abspath(path) if path else ""
+    return localize(workspace_dir, manifest.get("corrected_zarr_path") or "",
+                    must_exist=False)
 
 
 def corrected_users(workspace_dir, path, excluding=()) -> List[str]:
     """The versions (ids) other than `excluding` that reference the
     corrected product at `path`."""
-    want = os.path.abspath(path)
+    want = localize(workspace_dir, path, must_exist=False) or os.path.abspath(path)
     return [rec["version"] for rec in list_versions(workspace_dir)
             if rec.get("version") not in excluding
             and (rec.get("corrected") or {}).get("path")
-            and os.path.abspath(rec["corrected"]["path"]) == want]
+            and localize(workspace_dir, rec["corrected"]["path"], must_exist=False) == want]
 
 
 def _corrected_folder(path):
@@ -391,14 +415,16 @@ def plan_delete(workspace_dir, *, run_dir=None, version_id=None, draft=False,
         if rec is None:
             raise ValueError(f"no data version {version_id!r} in {ws}")
         paths.append(version_dir(ws, rec["folder"]))
-        corrected = (rec.get("corrected") or {}).get("path") or ""
+        # only this workspace's own products ever move (a copied project's
+        # records may still name the original's)
+        corrected = localize(ws, (rec.get("corrected") or {}).get("path") or "")
         if corrected and os.path.exists(corrected) \
                 and not corrected_users(ws, corrected, excluding=(version_id,)) \
                 and (release_handoff or os.path.abspath(corrected) != handoff) \
                 and not is_inside(corrected, version_dir(ws, rec["folder"])):
             paths.append(_corrected_folder(corrected))
         for region in rec.get("regions") or []:        # a legacy v1's fused, in place
-            fused = region.get("fused_zarr_path") or ""
+            fused = localize(ws, region.get("fused_zarr_path") or "")
             if fused and os.path.exists(fused) \
                     and not is_inside(fused, version_dir(ws, rec["folder"])):
                 paths.append(os.path.abspath(fused))

@@ -3012,6 +3012,8 @@ class MainWindow(QMainWindow):
         self._step2._out_edit.setText(self.step0_output.get("step2_dir") or OUTPUT_DIR)
         # Block DV (§3.6, §3.9): a loaded data version brings its own Step1
         # files back; an opened workspace restores Step1 on entry, once.
+        if accepted is True:
+            self._dv_rebase_to_workspace()
         # Block DV-D: the chooser row was a version + segmentation run.
         self._dv_step3_run = str(self.step0_output.get("step3_run_dir") or "")
         if accepted is True and self.step0_output.get("opened_workspace"):
@@ -4764,23 +4766,20 @@ class MainWindow(QMainWindow):
         if cur is None or reason:
             step2.set_data_version("", {})
             return
-        paths = {r.get("roi_name"): r.get("fused_zarr_path") for r in cur.get("regions") or []}
+        from ..utils import data_versions
+        ws = self._dv_workspace()
+        paths = {r.get("roi_name"): data_versions.localize(ws, r.get("fused_zarr_path") or "")
+                 for r in cur.get("regions") or []}
         first = next((p for p in paths.values() if p and os.path.isdir(p)), "")
         if first and os.path.abspath(step2._zarr_edit.text().strip() or "") != first:
             step2._zarr_edit.setText(first)
             step2._load_zarr_info()
         step2.set_data_version(cur["version"], paths)
-        # User ruling 2026-10-03: Step2 follows the version -- its fused AND
-        # the segmentation method/parameters Step1 had chosen for it; what
-        # was typed by hand before is replaced (and can be changed again).
-        ws = self._dv_workspace()
-        from ..utils import data_versions
-        params = os.path.join(data_versions.version_dir(ws, cur.get("folder", "")),
-                              "segmentation_params")
-        if not os.path.isdir(params):
-            params = os.path.join(ws, "step1")                # a version made before
+        # User ruling 2026-10-03: Step2 follows Step1 -- the version's fused
+        # and the segmentation method/parameters Step1 used LAST; what was set
+        # by hand before is replaced (and can be changed again).
         if hasattr(step2, "use_version_params"):
-            step2.use_version_params(params, cur["version"])
+            step2.use_version_params(os.path.join(ws, "step1"), cur["version"])
 
     def _go_to_step1(self):
         # Step1 reads the handoff from DISK. While a patch edit is still being
@@ -10319,12 +10318,46 @@ class MainWindow(QMainWindow):
         QtCore.QTimer.singleShot(0, self.close)
         return fresh
 
+    def _dv_rebase_to_workspace(self):
+        """Every folder Step1/Step2 write into is the workspace's own
+        (codex review 7, #1): a handoff copied with its absolute paths names
+        another project's step folders; they are mapped into the workspace
+        the handoff file lives in."""
+        global OUTPUT_DIR
+        from ..utils import data_versions
+        ws = self._dv_workspace()
+        s0 = self.step0_output
+        if not ws or not s0:
+            return
+        moved = {}
+        for key, own in (("roi_dir", ws), ("step0_dir", os.path.join(ws, "step0")),
+                         ("step1_dir", os.path.join(ws, "step1")),
+                         ("step2_dir", os.path.join(ws, "step2")),
+                         ("output_dir", None)):
+            value = str(s0.get(key) or "")
+            if not value or data_versions.is_inside(value, ws):
+                continue
+            here = data_versions.localize(ws, value, must_exist=False) or own
+            if here:
+                s0[key] = here
+                moved[key] = (value, here)
+        corrected = str(self.__dict__.get("_corrected_zarr_path") or "")
+        if corrected and not data_versions.is_inside(corrected, ws):
+            self._corrected_zarr_path = data_versions.localize(ws, corrected)
+            moved["corrected"] = (corrected, self._corrected_zarr_path)
+        if moved:
+            OUTPUT_DIR = s0.get("step1_dir") or s0.get("output_dir") or OUTPUT_DIR
+            self._step2._out_edit.setText(s0.get("step2_dir") or OUTPUT_DIR)
+            print(f"[Workspace] the handoff named folders of another project; "
+                  f"this workspace's own are used: {moved}")
+
     @staticmethod
     def _dv_freeze_seg_params(step1_dir, version_folder):
-        """User ruling 2026-10-03: a version keeps the segmentation method and
+        """A version keeps, as a RECORD, the segmentation method and
         parameters Step1 had chosen when it was made -- the active parameter
-        file of ``step1/segmentation_params`` and an index naming only it --
-        so Step2 runs it with exactly these. Returns the method or ""."""
+        file of ``step1/segmentation_params`` and an index naming only it.
+        Step2 itself takes Step1's latest ones (user ruling 2026-10-03).
+        Returns the method or ""."""
         from ..utils.segmentation_params import PARAM_INDEX
         src_dir = os.path.join(step1_dir, "segmentation_params")
         try:

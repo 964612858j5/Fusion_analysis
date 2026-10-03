@@ -444,10 +444,15 @@ def _recorded_outputs(ws, run_dir) -> List[str]:
             continue
         files = [main]
         if e.get("kind") == "step4_h5ad":
-            for name in (params.get("files") or {}).values():
-                if name:
-                    files.append(name if os.path.isabs(name)
-                                 else os.path.join(os.path.dirname(main), name))
+            named = {k: (v if os.path.isabs(v) else os.path.join(os.path.dirname(main), v))
+                     for k, v in (params.get("files") or {}).items() if v}
+            # The files may since have been replaced by another run's result
+            # of the same name (codex review 3, #1): they go only while their
+            # own provenance file still names THIS run.
+            side = _load(named.get("provenance", "")) or {}
+            if str((side.get("segmentation_run") or {}).get("run_id") or "") != run_id:
+                continue
+            files.extend(named.values())
         for f in files:
             f = os.path.abspath(f)
             if os.path.isfile(f) and is_inside(f, project) and f not in out:
@@ -521,10 +526,14 @@ def resume_deletions(project_dir) -> List[str]:
             continue
         ws = os.path.join(project, "rois", str(entry.get("workspace") or ""))
         _drop_records(project, ws, entry.get("details") or {})
-    done = trash.resume_incomplete(project)
-    for entry in trash.entries(project):
-        if entry["folder"] in done:
-            _register_deletion(project, entry)
+    try:
+        done = trash.resume_incomplete(project)
+    finally:
+        # Every complete entry has its A3 record -- also one finished just
+        # before a later entry failed (codex review 3, #5). Idempotent.
+        for entry in trash.entries(project):
+            if entry.get("status") == "complete":
+                _register_deletion(project, entry)
     return done
 
 

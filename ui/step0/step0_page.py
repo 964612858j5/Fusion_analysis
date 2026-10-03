@@ -11145,10 +11145,15 @@ class Step0Page(QWidget):
                 return None
             current = data_versions.current_version(wsd)
             if current is None:
-                # nothing to go back to: only the draft's own product goes
-                self._dv_release(plan["paths"])
-                data_versions.execute_delete(plan)
-                return ("deleted",)
+                # No current version to go back to (codex review 3, #4): the
+                # workspace goes back to one of its versions -- chosen here;
+                # None keeps the draft.
+                others = list(reversed(data_versions.list_versions(wsd)))
+                target = self._dv_ask_load_other(parent, others) if others else None
+                if not target:
+                    return None
+                self._dv_after_load = plan
+                return ("load", (ws, target, target["version"]))
             self._dv_after_load = plan
             return ("load", (ws, current, current["version"] + "  (current)"))
 
@@ -11298,6 +11303,7 @@ class Step0Page(QWidget):
         self._dv_after_load = None
         self._dv_open_run = ""
         self._dv_delete_after_announce = None
+        self._dv_loaded_record = None
         if not self._dv_tidy_trash():
             return None
         try:
@@ -11321,6 +11327,7 @@ class Step0Page(QWidget):
         after, self._dv_after_load = self._dv_after_load, None
         try:
             self._restore_workspace(ws, version)
+            self._dv_loaded_record = version
             # DV-D §3.4: the deletion waits until the window has accepted the
             # other version's handoff (codex review 2, #5).
             self._dv_delete_after_announce = after
@@ -11359,9 +11366,16 @@ class Step0Page(QWidget):
             getattr(self, "_dv_delete_after_announce", None), None)
         if after is not None:
             accepted = getattr(self, "handoff_accepted", None)
+            loaded = getattr(self, "_dv_loaded_record", None) or {}
+            missing = [r.get("roi_name") for r in loaded.get("regions") or []
+                       if not os.path.isdir(r.get("fused_zarr_path") or "")]
             if callable(accepted) and not accepted():
                 print("[Workspace] the other version's handoff was not accepted: "
                       "nothing was deleted")
+            elif missing:
+                # codex review 3, #2: Step1 could not restore it either.
+                print(f"[Workspace] the other version has no fused product for "
+                      f"{missing}: nothing was deleted")
             else:
                 self._dv_release(after["paths"])
                 data_versions.execute_delete(after)

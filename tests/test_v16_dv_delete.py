@@ -761,6 +761,8 @@ def test_step4_results_in_another_folder_go_with_their_run(tmp_path):
     theirs = os.path.join(custom, "b.h5ad")
     for p in list(mine.values()) + [theirs]:
         open(p, "w").write("x")
+    with open(mine["a_provenance.json"], "w") as f:
+        json.dump({"segmentation_run": {"run_id": "seg_a"}}, f)
     cells = os.path.join(proj, "objects", "seg_a", "cells.parquet")
     os.makedirs(os.path.dirname(cells))
     open(cells, "w").write("x")
@@ -809,3 +811,100 @@ def test_one_row_still_shows_the_chooser_with_it_preselected(page, tmp_path, sli
     monkeypatch.setattr(Step0Page, "_choose_workspace", _choose)
     opened = page._open_existing_workspace()
     assert shown == [1] and opened.workspace_id == made[0]["roi_id"]
+
+
+# ── codex review 3 (astra low): findings 1-5 ───────────────────────────────
+
+def test_results_since_replaced_by_another_run_stay(tmp_path):
+    """#1: A3 still names run A's files, but run B's result has replaced them
+    (same name): its own provenance file says B, so nothing moves."""
+    from block01.core import provenance as prov
+    proj, ws = _project(tmp_path)
+    _version(ws)
+    a = _run(ws, "v001", "seg_a")
+    custom = os.path.join(ws, "step4", "shared")
+    os.makedirs(custom)
+    h5 = os.path.join(custom, "x.h5ad")
+    open(h5, "w").write("B")
+    with open(os.path.join(custom, "x_provenance.json"), "w") as f:
+        json.dump({"segmentation_run": {"run_id": "seg_b"}}, f)
+    prov.register(proj, "step4_h5ad", prov.location(proj, h5), "tA", workspace_id="ws1",
+                  parameters={"segmentation_run_id": "seg_a",
+                              "files": {"h5ad": "x.h5ad", "provenance": "x_provenance.json"}})
+    dv.execute_delete(dv.plan_delete(ws, run_dir=os.path.realpath(a)))
+    assert open(h5).read() == "B"
+
+
+def test_the_replacement_needs_its_fused_products(page, two, slides, monkeypatch):
+    """#2: the other version's fused product is gone -> nothing deleted."""
+    from block01.ui.step0.step0_page import Step0Page
+    proj, ctx, v1, v2 = two
+    _answers(monkeypatch, also=True, load_other=lambda others: others[-1])
+    monkeypatch.setattr(Step0Page, "_write_step0_handoff",
+                        lambda self, config, zarr_path, remap_config_path=None: (config, [], [], {}))
+    monkeypatch.setattr(Step0Page, "_choose_workspace",
+                        lambda self, rows: self._dv_delete_row(
+                            _row(rows, "v002", "seg_20261003_120000_c"))[1])
+    page.handoff_accepted = lambda: True
+    rec = dv.get_version(ctx["roi_dir"], "v001")
+    missing = os.path.join(ctx["roi_dir"], "gone.zarr")
+    path = os.path.join(dv.version_dir(ctx["roi_dir"], rec["folder"]), "version.json")
+    data = json.load(open(path))
+    data["regions"][0]["fused_zarr_path"] = missing
+    json.dump(data, open(path, "w"))
+    page._open_existing_workspace()
+    page._announce_opened_workspace()
+    assert dv.get_version(ctx["roi_dir"], "v002") is not None
+
+
+def test_an_earlier_run_never_borrows_a_later_versions_decisions(tmp_path):
+    """#3: the legacy version was deleted; v2 shares the product -- nothing
+    is inferred from it."""
+    from block01.core import quant_sources as qs
+    proj, ws = _project(tmp_path)
+    shared = os.path.join(ws, "step0", "corrected_channels.zarr")
+    os.makedirs(shared)
+    alloc = dv.new_version_folder(ws)
+    dv.commit_version(ws, alloc, {"corrected": {"path": shared}, "regions": []})
+    assert qs._version_referencing(ws, shared) is None
+
+
+def test_discarding_a_draft_without_a_current_version_loads_a_version(page, two, slides,
+                                                                       monkeypatch):
+    """#4: delete current v002 with None, then × on the resulting draft row:
+    the workspace goes back to the version chosen (here v001)."""
+    from block01.ui.step0.step0_page import Step0Page, DRAFT_TAG
+    proj, ctx, v1, v2 = two
+    _answers(monkeypatch, also=True, load_other=None)
+    page._dv_delete_row(_row(_rows(page, proj, slides["a"]), "v002", "seg_20261003_120000_c"))
+    rows = _rows(page, proj, slides["a"])
+    assert rows[0][2] == DRAFT_TAG
+    asked = _answers(monkeypatch, load_other=None)
+    assert page._dv_delete_row(rows[0]) is None                     # None keeps the draft
+    _answers(monkeypatch, load_other=lambda others: others[0])
+    out = page._dv_delete_row(rows[0])
+    assert out[0] == "load" and out[1][1]["version"] == "v001"
+
+
+def test_a_recovery_that_stops_half_way_still_records_what_it_finished(tmp_path,
+                                                                       monkeypatch):
+    """#5."""
+    from block01.core import provenance as prov
+    proj, ws = _project(tmp_path)
+    for name in ("a", "b"):
+        os.makedirs(os.path.join(ws, name))
+    trash.begin(proj, "ws1", "a", [os.path.join(ws, "a")])
+    trash.begin(proj, "ws1", "b", [os.path.join(ws, "b")])
+    real = trash.finish
+    calls = []
+
+    def _finish(entry):
+        calls.append(entry["what"])
+        if entry["what"] == "b":
+            raise OSError("disk")
+        return real(entry)
+    monkeypatch.setattr(trash, "finish", _finish)
+    with pytest.raises(OSError):
+        dv.resume_deletions(proj)
+    recs = [e for e in prov.load_entries(proj) if e["kind"] == "deletion"]
+    assert [r["parameters"]["what"] for r in recs] == ["a"]

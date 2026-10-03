@@ -145,6 +145,7 @@ Read in the raw big image, **circle the region you actually care about (ROI)**, 
 - deleting a workspace's last version asks whether the whole workspace goes too (default: keep).
 - deleted things move to `<output>/.trash/` and are removed after 30 days; *Empty trash…* at the bottom removes them now. There is no Restore: moving a folder back by hand does not bring its version record back.
 - nothing can be deleted while a Step 0 Save, a Generate, Step 2 or Step 4 is running.
+- deleting a segmentation moves its Step 4 results inside the workspace and those A3 records as its own; files you put outside the workspace that the program has no record of are left alone.
 
 <!-- image placeholder: images/03_step0_overview_and_roi.png — the overview in Step 0 with an ROI box already drawn -->
 <!-- image placeholder: images/04_step0_channel_groups.png — the Channels / Nucleus Channel grouping and weights panel -->

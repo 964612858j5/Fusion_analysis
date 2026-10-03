@@ -237,8 +237,10 @@ def _run_data_version(ws, meta):
 def _version_referencing(ws, corrected_path):
     """The version a run made BEFORE data versions read its corrected
     product from: the registered earlier workspace (``legacy``) referencing
-    it, else the OLDEST version referencing it -- a later version may share
-    the product with other correction decisions (codex review 2, #1)."""
+    it. Nothing else is guessed -- a later version may share the product with
+    other correction decisions (codex reviews 2 #1, 3 #3); without it the
+    product's own recorded decisions are checked against the config below,
+    which refuses a mismatch."""
     if not ws:
         return None
     from ..utils import data_versions
@@ -246,9 +248,9 @@ def _version_referencing(ws, corrected_path):
     found = [rec for rec in data_versions.list_versions(ws)
              if (rec.get("corrected") or {}).get("path")
              and os.path.abspath(rec["corrected"]["path"]) == want]
-    if not found:
+    rec = next((r for r in found if r.get("legacy")), None)
+    if rec is None:
         return None
-    rec = next((r for r in found if r.get("legacy")), found[0])
     return dict(rec, folder_path=data_versions.version_dir(ws, rec.get("folder", "")))
 
 

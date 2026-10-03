@@ -318,3 +318,14 @@ Cancel、报错或程序中断时：
 1. **(a) 写时复制**，规则按 §3.15 的表：只改 Intensity / 权重时不复制；ROI 和 source 相同、只改部分通道的校正时，复制一次后增量；ROI 几何或 source 改了，就新建并全部重算；draft 存在后，只改 draft。
 2. **有条件同意**：不需要 `.pending` 加改名，采用「最终目录写入 → `complete` 最后发布 → index / 当前版本最后切换」。附加条件：**未提交的 draft 不登记永久的 A3；corrected 和 fused 的 A3 登记，全部推迟到版本正式提交之后**，以冻结的 `regions[]` 为准（§3.12 第 6 步）。
 3. 顺带改正两处文字残留：§3.6（浏览旧版本时 Save 只更新 dirty draft）、§4 `search_ctrl.py` 那一行（不再写逐通道存放）。
+
+## 15. 批准实施与白名单扩展（2026-10-03，用户「授权批准执行」）
+
+- 用户批准按 v2.1 实施；完成后跑回归（每段只跑相关模块，全部完成后跑一次全量）。
+- 实施前的只读核对（路径盘点）发现，白名单之外还有 2 个文件必须改，已获用户批准加入，**只限于改「产品路径从哪里来」**：
+  - **`core/quant_sources.py`**：Step4 定量一次分割运行时，corrected 产品改为从这次运行自己的 `segmentation_meta.json`（`paths.corrected_channels_zarr`）读；没有这个字段时，才退回读工作区当前的 Step0 交接。场景：分割 A 属于 v1，当前版本是 v2，定量 A 时必须读 v1 的 corrected。
+  - **`core/tile_tissue.py`**：Step2「跳过空 tile」不再用「fused 路径往上两层」去猜工作区，改为向上查找 `roi_manifest.json`（与 `provenance.find_workspace` 同样的做法），并读取对应版本的设置文件。
+- 不改、只记录：
+  - `viewer/step1_source.py`：coarse sidecar 本来就和 corrected 产品放在同一个文件夹，二者一起搬进版本文件夹后，读写两端自动一致，用测试确认；
+  - `utils/segmentation_registry.py` 的 `register_legacy_result`：遗留代码，写死了路径，实际几乎不会命中。
+- 白名单内的高风险点：`step0_page._handoff_spec` 用 corrected 产品路径反推「step0 文件夹」。改为从工作区上下文取，否则参数文件和交接会被写进版本文件夹。

@@ -158,3 +158,159 @@ def test_a_versions_own_folder_size_excludes_what_it_references(tmp_path):
     with open(os.path.join(dv.version_dir(ws, rec["folder"]), "blob"), "wb") as f:
         f.write(b"0" * 1000)
     assert dv.version_size(ws, rec) >= 1000
+
+
+# ── part 2: Step0's corrected draft and copy-on-write (§3.15) ─────────────
+
+pytest.importorskip("PyQt5")
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from test_v16_a6_workspace import (  # noqa: E402,F401  (fixtures)
+    app, slides, page, _project, _commit_step0, _tree)
+
+
+from PyQt5 import QtCore  # noqa: E402
+
+
+class _FakeWsi(QtCore.QThread):
+    """WsiCorrectionWorker's contract (a QThread whose business `finished`
+    shadows the base one); records what it was asked to do, runs nothing."""
+    progress = QtCore.pyqtSignal(int, int, int, int, str, str, int)
+    finished = QtCore.pyqtSignal(str, dict)
+    canceled = QtCore.pyqtSignal(str)
+    error = QtCore.pyqtSignal(str)
+    made = []
+
+    def __init__(self, loader, output_dir, config, rois=None, parent=None,
+                 process_channels=None, incremental=False):
+        super().__init__()
+        self.output_dir, self.process_channels = output_dir, set(process_channels or ())
+        self.incremental = incremental
+        _FakeWsi.made.append(self)
+
+    def stop_after_current_channel(self):
+        pass
+
+    def start(self):
+        pass
+
+
+def _published_with_tophat(tmp_path, slides):
+    """A workspace whose published handoff references a corrected product
+    that holds CD3 and CD8 (TopHat r=25) -- the product a version owns."""
+    proj, made = _project(tmp_path, slides["a"], commit=False)
+    ctx = made[0]
+    _commit_step0(ctx, decisions={"CD3": "tophat", "CD8": "tophat"})
+    z = os.path.join(ctx["step_dirs"]["step0"], "corrected_channels.zarr")
+    with open(os.path.join(z, "marker.bin"), "wb") as f:
+        f.write(b"published pixels")
+    sidecar = os.path.join(ctx["step_dirs"]["step0"], "corrected_coarse.zarr")
+    os.makedirs(sidecar)
+    return proj, ctx, z
+
+
+@pytest.fixture
+def dv_page(page, monkeypatch, tmp_path, slides):
+    import block01.ui.step0.step0_page as sp
+    _FakeWsi.made = []
+    monkeypatch.setattr(sp, "WsiCorrectionWorker", _FakeWsi)
+    monkeypatch.setattr(sp, "_WsiCorrectionProgressDialog",
+                        lambda parent: type("D", (), {"cancel_requested": type(
+                            "S", (), {"connect": lambda *a, **k: None})(),
+                            "show": lambda self: None, "exec_": lambda self: 0})())
+    return page
+
+
+def _sigs(page, config_mp, decisions):
+    cfg = {"method_params": config_mp, "channel_params": {}}
+    return {ch: page._save_signature(cfg, ch, m) for ch, m in decisions.items()}
+
+
+def test_changing_one_channel_copies_the_published_product_once_and_corrects_only_it(
+        dv_page, tmp_path, slides, monkeypatch):
+    import block01.ui.step0.step0_page as sp
+    proj, ctx, published = _published_with_tophat(tmp_path, slides)
+    dv_page._open_existing_workspace()
+    held = _sigs(dv_page, {"tophat_radius": 25, "cucim_sigma": 30},
+                 {"CD3": "tophat", "CD8": "tophat"})
+    monkeypatch.setattr(sp, "read_corrected_zarr_state",
+                        lambda path: (dict(held), [(0, 1001, 0, 999)]))
+    before = _tree(published)
+    dv_page._channel_params = {"CD8": {"tophat_radius": 40}}     # CD8 25 -> 40
+    dv_page._save_and_continue()
+    w = _FakeWsi.made[-1]
+    draft = dv.draft_corrected_path(ctx["roi_dir"])
+    assert w.output_dir == os.path.dirname(draft)                 # written into the draft
+    assert w.incremental is True and w.process_channels == {"CD8"}
+    assert os.path.isfile(os.path.join(draft, "marker.bin"))     # copied once
+    assert os.path.isdir(os.path.join(dv.draft_dir(ctx["roi_dir"]), "corrected_coarse.zarr"))
+    assert _tree(published) == before                             # read-only
+
+
+def test_a_save_with_no_corrected_change_references_the_published_product(
+        dv_page, tmp_path, slides, monkeypatch):
+    import block01.ui.step0.step0_page as sp
+    proj, ctx, published = _published_with_tophat(tmp_path, slides)
+    dv_page._open_existing_workspace()
+    held = _sigs(dv_page, {"tophat_radius": 25, "cucim_sigma": 30},
+                 {"CD3": "tophat", "CD8": "tophat"})
+    monkeypatch.setattr(sp, "read_corrected_zarr_state",
+                        lambda path: (dict(held), [(0, 1001, 0, 999)]))
+    dv_page._save_and_continue()
+    assert _FakeWsi.made == []                                    # nothing recomputed
+    assert not os.path.exists(dv.draft_dir(ctx["roi_dir"]))       # nothing copied
+
+
+def test_another_roi_makes_a_fresh_draft_and_recomputes_every_channel(
+        dv_page, tmp_path, slides, monkeypatch):
+    import block01.ui.step0.step0_page as sp
+    from block01.ui.step0.step0_page import Step0Page
+    proj, ctx, published = _published_with_tophat(tmp_path, slides)
+    dv_page._open_existing_workspace()
+    held = _sigs(dv_page, {"tophat_radius": 25, "cucim_sigma": 30},
+                 {"CD3": "tophat", "CD8": "tophat"})
+    monkeypatch.setattr(sp, "read_corrected_zarr_state",
+                        lambda path: (dict(held), [(0, 1001, 0, 999)]))
+    monkeypatch.setattr(Step0Page, "_ask_region_changed", lambda self: "overwrite")
+    roi = {"name": "R1", "bbox_fullres": [100, 400, 200, 600], "type": "roi",
+           "polygon_fullres": [[200, 100], [600, 100], [600, 400]]}
+    monkeypatch.setattr(type(dv_page.overview), "get_rois", lambda self: [dict(roi)])
+    monkeypatch.setattr(Step0Page, "_roi_count", lambda self: 1)
+    before = _tree(published)
+    dv_page._save_and_continue()
+    w = _FakeWsi.made[-1]
+    draft = dv.draft_corrected_path(ctx["roi_dir"])
+    assert w.output_dir == os.path.dirname(draft)
+    assert w.incremental is False and w.process_channels == {"CD3", "CD8"}
+    assert not os.path.exists(os.path.join(draft, "marker.bin"))  # not copied
+    assert _tree(published) == before
+
+
+def test_once_a_draft_exists_saves_only_touch_the_draft(dv_page, tmp_path, slides,
+                                                         monkeypatch):
+    import block01.ui.step0.step0_page as sp
+    proj, ctx, published = _published_with_tophat(tmp_path, slides)
+    dv_page._open_existing_workspace()
+    draft = dv.draft_corrected_path(ctx["roi_dir"])
+    os.makedirs(draft)
+    held = _sigs(dv_page, {"tophat_radius": 25, "cucim_sigma": 30},
+                 {"CD3": "tophat", "CD8": "tophat"})
+    monkeypatch.setattr(sp, "read_corrected_zarr_state",
+                        lambda path: (dict(held), [(0, 1001, 0, 999)]))
+    before = _tree(published)
+    dv_page._channel_params = {"CD3": {"tophat_radius": 30}}
+    dv_page._save_and_continue()
+    w = _FakeWsi.made[-1]
+    assert w.output_dir == os.path.dirname(draft) and w.process_channels == {"CD3"}
+    assert _tree(published) == before
+
+
+def test_the_handoff_stays_in_the_workspaces_step0_and_registers_nothing(
+        dv_page, tmp_path, slides):
+    proj, ctx, published = _published_with_tophat(tmp_path, slides)
+    dv_page._open_existing_workspace()
+    spec = dv_page._handoff_spec({}, dv.draft_corrected_path(ctx["roi_dir"]))
+    assert spec["step0_dir"] == ctx["step_dirs"]["step0"]
+    assert spec["manifest_path"] == os.path.join(ctx["step_dirs"]["step0"],
+                                                 "step0_roi_result.json")
+    assert spec["register_corrected"] is False

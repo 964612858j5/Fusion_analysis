@@ -78,6 +78,7 @@ from ...utils.roi_project import (
     roi_shape_from_bbox,
 )
 from ...utils import workspace_session
+from ...utils import data_versions
 # Step0 keeps the shared ChannelWorkbench as an internal lifecycle/config owner.
 # Its Intensity inspector is exposed from Background Correction; the former
 # user-facing Channel Remap tab is gone. GUI-only -- these are the same UI-local
@@ -11147,6 +11148,49 @@ class Step0Page(QWidget):
             return "overwrite"
         return "cancel"
 
+    # ── data versions: the corrected draft (block DV §3.15) ─────────────
+
+    def _dv_base_corrected_path(self, step0_dir):
+        """The corrected product this Save starts from."""
+        ws = (self._roi_context or {}).get("roi_dir")
+        if not ws:
+            return os.path.join(step0_dir, "corrected_channels.zarr")
+        draft = data_versions.draft_corrected_path(ws)
+        if os.path.isdir(draft):
+            return draft
+        published = self._published_handoff()
+        if published is not None and published[2] and os.path.isdir(published[2]):
+            return published[2]
+        return draft
+
+    def _dv_prepare_draft(self, base_path, incremental):
+        """The draft to correct into, and whether to correct incrementally.
+
+        * the base is the draft already: correct it (as today);
+        * same ROI and source (`incremental`): copy the base -- a published,
+          read-only product -- into the draft once, with its coarse sidecar,
+          and correct only the changed channels;
+        * another ROI: a fresh, empty draft; every channel recomputed."""
+        ws = (self._roi_context or {}).get("roi_dir")
+        if not ws:
+            return base_path, incremental
+        draft = data_versions.draft_corrected_path(ws)
+        if os.path.abspath(base_path) == os.path.abspath(draft):
+            return draft, incremental
+        ddir = data_versions.draft_dir(ws)
+        if os.path.isdir(ddir):
+            shutil.rmtree(ddir, ignore_errors=True)
+        os.makedirs(ddir, exist_ok=True)
+        if incremental and os.path.isdir(base_path):
+            shutil.copytree(base_path, draft)
+            sidecar = os.path.join(os.path.dirname(base_path), "corrected_coarse.zarr")
+            if os.path.isdir(sidecar):
+                shutil.copytree(sidecar, os.path.join(ddir, "corrected_coarse.zarr"))
+            print(f"[Step0] corrected draft: copied {base_path} (read-only) to {draft}")
+            return draft, True
+        print(f"[Step0] corrected draft: new at {draft}; every channel recomputed")
+        return draft, False
+
     def _confirm_raw_channels(self):
         """Name the channels Save will write as RAW, once, and ask.
 
@@ -11278,7 +11322,10 @@ class Step0Page(QWidget):
             for ch, method in (config.get("channel_decisions") or {}).items()
             if method in {"tophat", "cucim"}
         }
-        zarr_path = os.path.join(step0_dir, "corrected_channels.zarr")
+        # Block DV (§3.15): the corrected product this Save starts from -- the
+        # draft if there is one, else the one the handoff references (a
+        # published version's: read-only), else a new draft.
+        zarr_path = self._dv_base_corrected_path(step0_dir)
 
         if not corrected:
             # No channel assigned TopHat/cuCIM -> nothing to background-correct.
@@ -11352,12 +11399,18 @@ class Step0Page(QWidget):
         if not _confirm_actual_save():
             return
         _write_current_correction_config()
+        # Block DV (§3.15): never write a published product. Same ROI and
+        # source -> copy it once into the draft and correct only what changed;
+        # another ROI -> a fresh draft, every channel recomputed.
+        zarr_path, rois_match = self._dv_prepare_draft(zarr_path, rois_match)
+        if not rois_match:
+            to_process = dict(corrected)
         self._incremental_processed = set(to_process)
         self._set_save_enabled(False)
         self._btn_load.setEnabled(False)
         self._wsi_dialog = _WsiCorrectionProgressDialog(self)
         self._wsi_worker = WsiCorrectionWorker(
-            self.loader, step0_dir, config, rois=rois, parent=self,
+            self.loader, os.path.dirname(zarr_path), config, rois=rois, parent=self,
             process_channels=set(to_process), incremental=rois_match,
         )
         self._wsi_worker.progress.connect(self._gen_slot(self._on_wsi_progress))
@@ -11617,9 +11670,13 @@ class Step0Page(QWidget):
         raw_path = os.path.abspath(self.ome_path) if self.ome_path else ""
         if not raw_path:
             raise RuntimeError("raw OME-TIFF path is empty")
-        step0_dir = os.path.dirname(zarr_path) if zarr_path else (
-            self._roi_context["step_dirs"]["step0"] if self._roi_context else self.output_dir
-        )
+        # Block DV: the step0 folder is the WORKSPACE's, not the corrected
+        # product's -- the product may live in a version folder or the draft,
+        # and the handoff and parameter files must not follow it there.
+        if self._roi_context:
+            step0_dir = self._roi_context["step_dirs"]["step0"]
+        else:
+            step0_dir = os.path.dirname(zarr_path) if zarr_path else self.output_dir
         rois = self._standard_rois()
         patches = self._standard_patches(rois)
         ctx = self._roi_context or {}
@@ -11654,6 +11711,9 @@ class Step0Page(QWidget):
             # numbered over a file the manifest still names.
             "geometry_revision": int(self._geometry_revision),
             "next_patch_id": int(self._roi_model.next_patch_id),
+            # Block DV (§3.12): corrected provenance is registered when a
+            # version is committed, never for the draft.
+            "register_corrected": False,
         }
 
     def _apply_handoff_result(self, result):

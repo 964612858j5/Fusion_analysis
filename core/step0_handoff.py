@@ -342,7 +342,10 @@ def write_handoff(spec, *, superseded=None, tag="0", publication_lock=None):
             # a durable handoff into a reported save failure.
         # Block A3: the committed corrected channels' provenance entries --
         # auxiliary in the same way (logged, never raised).
-        if os.path.exists(corrected_path) and roi_dir:
+        # Block DV (§3.12): a Step0 Save writes the dirty draft or references
+        # a published version, so it registers nothing; a version's corrected
+        # channels are registered when the version is committed.
+        if spec.get("register_corrected", True) and os.path.exists(corrected_path) and roi_dir:
             register_corrected_channels(project_dir, roi_dir, corrected_path, raw_path)
     return {"config": config, "rois": rois, "patches": patches,
             "manifest": manifest, "corrected_report": corrected_report,

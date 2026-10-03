@@ -27,11 +27,35 @@ PROVENANCE_UNKNOWN = "unknown"     # user ruling 2026-10-02: short
 TAG_ROLE = Qt.UserRole + 1
 
 
+#: Block DV-D: a row that can be deleted shows a × at its start (Step0's
+#: "Open a workspace" chooser; Step3's run list never sets it).
+CLOSE_ROLE = Qt.UserRole + 2
+CLOSE_WIDTH = 22
+
+
 class _TaggedItemDelegate(QtWidgets.QStyledItemDelegate):
-    """A row with its tag (TAG_ROLE) drawn right-aligned over its end."""
+    """A row with its tag (TAG_ROLE) drawn right-aligned over its end, and --
+    when CLOSE_ROLE is set -- a × at its start; clicking the × emits
+    `close_clicked(row)` and does not select the row."""
+
+    close_clicked = pyqtSignal(int)
+
+    @staticmethod
+    def close_rect(option_rect):
+        return QtCore.QRect(option_rect.left(), option_rect.top(),
+                            CLOSE_WIDTH, option_rect.height())
 
     def paint(self, painter, option, index):
-        super().paint(painter, option, index)
+        if index.data(CLOSE_ROLE):
+            shifted = QtWidgets.QStyleOptionViewItem(option)
+            shifted.rect = option.rect.adjusted(CLOSE_WIDTH, 0, 0, 0)
+            super().paint(painter, shifted, index)
+            painter.save()
+            painter.setPen(QtGui.QColor("#e06c75"))
+            painter.drawText(self.close_rect(option.rect), Qt.AlignCenter, "\u00d7")
+            painter.restore()
+        else:
+            super().paint(painter, option, index)
         tag = index.data(TAG_ROLE)
         if not tag:
             return
@@ -46,6 +70,16 @@ class _TaggedItemDelegate(QtWidgets.QStyledItemDelegate):
         painter.setPen(QtGui.QColor("#e5c07b"))
         painter.drawText(rect.adjusted(0, 0, -6, 0), Qt.AlignRight | Qt.AlignVCenter, tag)
         painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        if index.data(CLOSE_ROLE) and event.type() in (
+                QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease,
+                QtCore.QEvent.MouseButtonDblClick) \
+                and self.close_rect(option.rect).contains(event.pos()):
+            if event.type() == QtCore.QEvent.MouseButtonRelease:
+                self.close_clicked.emit(index.row())
+            return True                     # the × is not a click on the row
+        return super().editorEvent(event, model, option, index)
 FILL_NOTE = "Fill uses one colour per cell"
 #: The preset swatches, RGB 0..1: green, cyan, yellow, magenta, orange, red, white.
 PRESET_COLOURS = ((0.0, 1.0, 0.0), (0.0, 0.8, 1.0), (1.0, 1.0, 0.0), (1.0, 0.0, 1.0),

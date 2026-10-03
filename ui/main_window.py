@@ -778,6 +778,12 @@ class MainWindow(QMainWindow):
         # derived from the previous dataset.  This is a different event from
         # step0_complete (Save/handoff) and must not be folded into it.
         self._step0.dataset_committed.connect(self._on_step0_dataset_committed)
+        # Block DV-D: deleting from Step0's chooser asks the window whether
+        # anything is running, detaches what it has open, and -- when the
+        # current version went with no other loaded -- starts over empty.
+        self._step0.deletion_blocker = self._dv_deletion_blocker
+        self._step0.release_paths = self._dv_release_paths
+        self._step0.unload_requested.connect(self._dv_restart_empty)
         # ROI/patch edits made anywhere are published by Step0's writer; Step1
         # re-reads them from that commit instead of keeping its own copy.
         self._step0.geometry_committed.connect(self._on_step0_geometry_committed)
@@ -2023,6 +2029,9 @@ class MainWindow(QMainWindow):
         return str(getattr(getattr(self, "loader", None), "filepath", "") or "")
 
     def _step3_refresh_masks(self, requested_dir=None):
+        if requested_dir is None and self.__dict__.get("_dv_step3_run"):
+            # Block DV-D: the run whose chooser row was opened, once.
+            requested_dir, self._dv_step3_run = self._dv_step3_run, ""
         """Step3 as a general result viewer (block B3): the runs of EVERY ROI
         workspace of the project made on the open slide, plus the ones loaded
         with `Load…`; each shown on its own region. Choose one, resolve its
@@ -3000,6 +3009,8 @@ class MainWindow(QMainWindow):
         self._step2._out_edit.setText(self.step0_output.get("step2_dir") or OUTPUT_DIR)
         # Block DV (§3.6, §3.9): a loaded data version brings its own Step1
         # files back; an opened workspace restores Step1 on entry, once.
+        # Block DV-D: the chooser row was a version + segmentation run.
+        self._dv_step3_run = str(self.step0_output.get("step3_run_dir") or "")
         if accepted is True and self.step0_output.get("opened_workspace"):
             self._dv_register_legacy()
         if accepted is True and self.step0_output.get("data_version_loaded"):
@@ -10212,6 +10223,68 @@ class MainWindow(QMainWindow):
         print(f"[Step1] earlier workspace registered as data version "
               f"{committed['version']} (its products are referenced in place)")
         return committed
+
+    # ── Block DV-D: deleting ───────────────────────────────────────────────
+
+    def _dv_deletion_blocker(self):
+        """Why nothing may be deleted now ('' / None when it may): a Step0
+        Save, a Generate, a Step2 run or a Step4 extraction is running
+        (§4: deleting waits until it has finished)."""
+        def _running(worker):
+            return worker is not None and hasattr(worker, "isRunning") and worker.isRunning()
+        if _running(self.__dict__.get("_fusion_worker")) or any(
+                _running(w) for w in self.__dict__.get("_retired_fusion_workers") or []):
+            return "a Generate (fusion) is running"
+        step0 = self.__dict__.get("_step0")
+        if _running(getattr(step0, "_wsi_worker", None)):
+            return "a Step0 Save is running"
+        if _running(getattr(self.__dict__.get("_step2"), "_worker", None)):
+            return "a Step2 segmentation is running"
+        if _running(getattr(self.__dict__.get("_step4"), "_worker", None)):
+            return "a Step4 extraction is running"
+        return None
+
+    def _dv_release_paths(self, paths):
+        """Before `paths` move to the trash: Step3 and Step4 let go of a
+        run inside them (§4)."""
+        from ..utils import data_versions
+
+        def _inside(path):
+            return bool(path) and any(data_versions.is_inside(path, p) for p in paths)
+        runs = {r.run_dir for r in self.__dict__.get("_step3_mask_runs") or []}
+        key = str(self.__dict__.get("_step3_mask_key") or "").partition("\x1f")[0]
+        if _inside(key) or any(_inside(r) for r in runs):
+            self._step3_clear_masks()
+        step4 = self.__dict__.get("_step4")
+        job = getattr(step4, "_job", None)
+        if step4 is not None and _inside(getattr(job, "run_dir", "")):
+            step4.set_run("")
+
+    #: Windows made by `_dv_restart_empty`, kept alive here (main.py holds
+    #: only the first one).
+    _live_windows = []
+
+    def _dv_restart_empty(self):
+        """DV-D §3.4, §8 ("None"): the window goes back to how it starts --
+        no slide, no channels, no image. A NEW window is made the way main.py
+        makes one and this one closes (its closeEvent stops every job, as on
+        quitting), so nothing of the deleted data can come back."""
+        global OME_TIFF_FILE, OUTPUT_DIR
+        from .. import config as _config
+        OME_TIFF_FILE, OUTPUT_DIR = _config.OME_TIFF_FILE, _config.OUTPUT_DIR
+        fresh = type(self)()
+        fresh.setGeometry(self.geometry())
+        MainWindow._live_windows.append(fresh)
+        if self in MainWindow._live_windows:
+            MainWindow._live_windows.remove(self)
+        if self.isMaximized():
+            fresh.showMaximized()
+        elif self.isVisible():
+            fresh.show()
+        print("[Workspace] the current data version was deleted: the window "
+              "starts over empty")
+        QtCore.QTimer.singleShot(0, self.close)
+        return fresh
 
     def _dv_install_step1_files(self, version_id):
         """A version was loaded in Step0 (§3.6): its Step1 session and fusion

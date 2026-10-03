@@ -273,6 +273,9 @@ class Step0Page(QWidget):
     # deliberately NOT `step0_complete`: "the dataset changed" and "Step0 Save
     # published a handoff" are different events with different consumers.
     dataset_committed = pyqtSignal(dict)
+    #: Block DV-D: the current data version was deleted and no other was
+    #: loaded -- the window goes back to its initial, empty state.
+    unload_requested = pyqtSignal()
     # A geometry-only update of the ALREADY published handoff: ROI/patch edits
     # made anywhere (this page, the navigator popup, Step1) have been written
     # through the one Step0 writer and a new manifest has been published.
@@ -6250,6 +6253,16 @@ class Step0Page(QWidget):
         # Block A6 W1: an opened workspace's committed handoff, after the
         # switch has been announced.
         self._announce_opened_workspace()
+        self._dv_unload_if_requested()
+
+    def _dv_unload_if_requested(self):
+        """Block DV-D §3.4: the current version was deleted with "None" --
+        at the end of the load, the window is asked to start over empty."""
+        if getattr(self, "_dv_unload_after_commit", False):
+            self._dv_unload_after_commit = False
+            self.unload_requested.emit()
+            return True
+        return False
 
     def _roi_count(self):
         """ROIs drawn on the overview the user draws on (the navigator's when
@@ -10929,51 +10942,320 @@ class Step0Page(QWidget):
             # dirty draft is its own row, `draft`, first and preselected.
             if current is not None and self._dv_has_draft(ws, current):
                 rows.append((ws, None, DRAFT_TAG))
+            # Block DV-D: one row per data version + segmentation run (the
+            # unit a × deletes); a version without runs is one row of its own.
             for rec in reversed(versions):
                 tag = rec["version"] + ("  (current)" if rec["version"] == cur else "")
-                rows.append((ws, rec, tag))
+                runs = data_versions.runs_of_version(ws.workspace_dir, rec["version"])
+                for run in runs:
+                    rows.append((ws, rec, tag, run))
+                if not runs:
+                    rows.append((ws, rec, tag))
         return rows
 
+    @staticmethod
+    def _row_text(row):
+        ws, rec, tag = row[0], row[1], row[2]
+        run = row[3] if len(row) > 3 else None
+        if run is not None:
+            when = str(run.created_at or "").replace("T", " ")[5:16]
+            return f"{ws.label()}  \u00b7  {run.method} \u00b7 {when}"
+        if rec is not None:
+            return f"{ws.label()}  \u00b7  (not segmented)"
+        return ws.label()
+
     def _choose_workspace(self, rows):
-        """Several (workspace, version) rows (user rulings 2b, DV §3.6): the
-        user picks one, or starts a new workspace. Each row's version is
-        right-aligned at its end, in the style of Step3's run list. A seam:
+        """Several rows (user rulings 2b, DV §3.6, DV-D): the user picks one,
+        or starts a new workspace. Each row is a workspace + data version +
+        segmentation run, the version right-aligned at its end in the style
+        of Step3's run list, a × at its start that deletes it (DV-D). A seam:
         tests answer directly. Returns a row or None."""
-        from ..step3_mask_bar import TAG_ROLE, TaggedItemDelegate
+        from ..step3_mask_bar import TAG_ROLE, CLOSE_ROLE, TaggedItemDelegate
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle("Open a workspace")
         lay = QVBoxLayout(dlg)
         lay.addWidget(QLabel(
             "This project already has workspaces of this slide.\n"
             "Save writes into the one you open; Save \u25be \u203a Save as new "
-            "workspace makes another. Each row is a workspace and one of its "
-            "data versions."))
+            "workspace makes another. Each row is a workspace, one of its data "
+            "versions and one segmentation made from it; \u00d7 deletes the row "
+            "(into the project's trash for 30 days)."))
         lst = QtWidgets.QListWidget()
-        lst.setItemDelegate(TaggedItemDelegate(lst))
-        for ws, rec, tag in rows:
-            item = QtWidgets.QListWidgetItem(ws.label())
-            item.setData(TAG_ROLE, tag)
-            item.setToolTip(f"{ws.label()}  \u2014  {tag}")
-            lst.addItem(item)
-        lst.addItem("Start a new workspace (open none)")
-        current = next((i for i, (_w, rec, tag) in enumerate(rows)
-                        if tag == DRAFT_TAG), None)
-        if current is None:
-            current = next((i for i, (_w, rec, tag) in enumerate(rows)
-                            if "(current)" in tag), 0)
-        lst.setCurrentRow(current)
+        delegate = TaggedItemDelegate(lst)
+        lst.setItemDelegate(delegate)
         lay.addWidget(lst)
+        state = {"rows": list(rows)}
+
+        def _fill():
+            lst.clear()
+            for row in state["rows"]:
+                item = QtWidgets.QListWidgetItem(self._row_text(row))
+                item.setData(TAG_ROLE, row[2])
+                item.setData(CLOSE_ROLE, True)
+                item.setToolTip(f"{self._row_text(row)}  \u2014  {row[2]}")
+                lst.addItem(item)
+            lst.addItem("Start a new workspace (open none)")
+            first = next((i for i, r in enumerate(state["rows"]) if r[2] == DRAFT_TAG), None)
+            if first is None:
+                first = next((i for i, r in enumerate(state["rows"])
+                              if "(current)" in r[2]), 0)
+            lst.setCurrentRow(first)
+            trash_btn.setText(f"Empty trash\u2026 ({self._fmt_bytes(self._dv_trash_size())})")
+
+        def _closed(index):
+            if not 0 <= index < len(state["rows"]):
+                return
+            outcome = self._dv_delete_row(state["rows"][index], dlg)
+            if outcome is None:
+                return
+            if outcome[0] == "load":                 # load another, then delete
+                state["chosen"] = outcome[1]
+                dlg.accept()
+                return
+            if outcome[0] == "unload":
+                state["chosen"] = None
+                dlg.reject()
+                return
+            state["rows"] = self._dv_rows_again()
+            _fill()
+
+        delegate.close_clicked.connect(_closed)
+        trash_btn = QtWidgets.QPushButton("Empty trash\u2026")
+        trash_btn.clicked.connect(lambda: (self._dv_empty_trash(dlg), _fill()))
         box = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        box.addButton(trash_btn, QtWidgets.QDialogButtonBox.ResetRole)
         box.accepted.connect(dlg.accept)
         box.rejected.connect(dlg.reject)
         lst.itemDoubleClicked.connect(lambda _i: dlg.accept())
         lay.addWidget(box)
-        dlg.resize(720, 360)
-        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+        _fill()
+        dlg.resize(760, 380)
+        accepted = dlg.exec_() == QtWidgets.QDialog.Accepted
+        if "chosen" in state:
+            return state["chosen"]
+        if not accepted:
             return None
         row = lst.currentRow()
-        return rows[row] if 0 <= row < len(rows) else None
+        return state["rows"][row] if 0 <= row < len(state["rows"]) else None
+
+    # ── Block DV-D: deleting from the chooser ──────────────────────────────
+
+    @staticmethod
+    def _fmt_bytes(n):
+        n = float(n or 0)
+        for unit in ("B", "KB", "MB", "GB"):
+            if n < 1024 or unit == "GB":
+                return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+            n /= 1024.0
+
+    def _dv_trash_size(self):
+        from ...utils import trash
+        try:
+            return trash.size(self.output_dir) if self.output_dir else 0
+        except OSError:
+            return 0
+
+    def _dv_rows_again(self):
+        try:
+            _sid, found = workspace_session.find_workspaces(self.output_dir, self.ome_path)
+        except Exception:                             # noqa: BLE001
+            return []
+        return self._workspace_rows(found)
+
+    def _dv_confirm(self, parent, title, text, checkbox=None):
+        """A seam: (confirmed, checkbox checked)."""
+        box = QMessageBox(parent or self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(title)
+        box.setText(text)
+        cb = None
+        if checkbox:
+            cb = QtWidgets.QCheckBox(checkbox)
+            box.setCheckBox(cb)
+        delete = box.addButton("Delete", QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(QMessageBox.Cancel)
+        box.exec_()
+        return box.clickedButton() is delete, bool(cb and cb.isChecked())
+
+    def _dv_ask_keep_workspace(self, parent, ws):
+        """A seam: True when the user also deletes the whole workspace."""
+        answer = QMessageBox.question(
+            parent or self, "Delete the workspace too?",
+            f"{ws.label()} has no data version left.\n\nDelete the whole "
+            f"workspace too (into the trash)? Keep it to open it again later.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return answer == QMessageBox.Yes
+
+    def _dv_ask_load_other(self, parent, others):
+        """A seam: the version record to load instead, or None ("None")."""
+        dlg = QtWidgets.QDialog(parent or self)
+        dlg.setWindowTitle("Load another version?")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(
+            "This is the current data version. Load another version of this "
+            "workspace before it is deleted?\nNone: delete it and start from an "
+            "empty window (load data again yourself)."))
+        combo = QtWidgets.QComboBox()
+        combo.addItem("None", None)
+        for rec in others:
+            combo.addItem(rec["version"], rec)
+        lay.addWidget(combo)
+        box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        box.accepted.connect(dlg.accept)
+        box.rejected.connect(dlg.reject)
+        lay.addWidget(box)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return False                               # cancelled: nothing is deleted
+        return combo.currentData()
+
+    def _dv_delete_row(self, row, parent=None):
+        """The × of one chooser row (DV-D §3). Returns None (nothing done or
+        refused), ("deleted",), ("load", row) -- load that row, THEN delete
+        (§3.4: a failed load deletes nothing) -- or ("unload",)."""
+        ws, rec, tag = row[0], row[1], row[2]
+        run = row[3] if len(row) > 3 else None
+        blocker = getattr(self, "deletion_blocker", None)
+        why = blocker() if callable(blocker) else None
+        if why:
+            QMessageBox.information(parent or self, "Not deleted",
+                                    f"Nothing was deleted: {why}.\nDelete it when that "
+                                    f"has finished.")
+            return None
+        wsd = ws.workspace_dir
+        size = lambda paths: self._fmt_bytes(sum(data_versions.folder_size(p) for p in paths))
+
+        if tag == DRAFT_TAG:
+            plan = data_versions.plan_delete(wsd, draft=True)
+            ok, _ = self._dv_confirm(
+                parent, "Discard the draft",
+                f"Discard what was saved in {ws.label()} since its current version "
+                f"(not generated yet)?\nThe workspace goes back to its current version."
+                + (f"\nMoved to the trash: {size(plan['paths'])}." if plan["paths"] else ""))
+            if not ok:
+                return None
+            current = data_versions.current_version(wsd)
+            self._dv_after_load = plan
+            return ("load", (ws, current, current["version"] + "  (current)"))
+
+        if rec is None:                                # a workspace without versions
+            plan = data_versions.plan_delete(wsd, workspace=True)
+            ok, _ = self._dv_confirm(
+                parent, "Delete the workspace",
+                f"Delete the whole workspace {ws.label()} ({size(plan['paths'])})?\n"
+                f"It is moved to the project's trash and removed after 30 days.")
+            if not ok:
+                return None
+            self._dv_release(plan["paths"])
+            data_versions.execute_delete(plan)
+            return ("deleted",)
+
+        vid = rec["version"]
+        runs = data_versions.runs_of_version(wsd, vid)
+        delete_version = run is None
+        if run is not None:
+            scope = data_versions.plan_delete(wsd, run_dir=run.run_dir)
+            last = len(runs) == 1
+            ok, also = self._dv_confirm(
+                parent, "Delete the segmentation",
+                f"Delete the segmentation {os.path.basename(run.run_dir)} of {vid} "
+                f"({ws.label()}) with its Step4 results ({size(scope['paths'])})?"
+                + ("" if last else f"\n{vid} stays: {len(runs) - 1} other "
+                   f"segmentation(s) use it."),
+                checkbox=(f"Also delete data version {vid} (its fused products; to use "
+                          f"these settings again you must Generate)") if last else None)
+            if not ok:
+                return None
+            delete_version = last and also
+        else:
+            vplan = data_versions.plan_delete(wsd, version_id=vid)
+            ok, _ = self._dv_confirm(
+                parent, "Delete the data version",
+                f"Delete data version {vid} of {ws.label()} ({size(vplan['paths'])})?\n"
+                f"To use its settings again you must Generate.")
+            if not ok:
+                return None
+        run_dir = run.run_dir if run is not None else None
+        if not delete_version:
+            plan = data_versions.plan_delete(wsd, run_dir=run_dir)
+            self._dv_release(plan["paths"])
+            data_versions.execute_delete(plan)
+            return ("deleted",)
+
+        current = data_versions.current_version(wsd)
+        is_current = current is not None and current.get("version") == vid
+        others = [r for r in data_versions.list_versions(wsd) if r["version"] != vid]
+        whole = False
+        if not others:
+            whole = self._dv_ask_keep_workspace(parent, ws)
+        if whole:
+            plan = data_versions.plan_delete(wsd, workspace=True)
+        else:
+            plan = data_versions.plan_delete(wsd, run_dir=run_dir, version_id=vid,
+                                             release_handoff=is_current)
+        if is_current and others:
+            target = self._dv_ask_load_other(parent, list(reversed(others)))
+            if target is False:
+                return None
+            if target is not None:
+                self._dv_after_load = plan
+                return ("load", (ws, target, target["version"]))
+        self._dv_release(plan["paths"])
+        data_versions.execute_delete(plan)
+        if is_current:
+            self._dv_unload_after_commit = True
+            return ("unload",)
+        return ("deleted",)
+
+    def _dv_release(self, paths):
+        """Detach what the window has open from `paths` before they move."""
+        release = getattr(self, "release_paths", None)
+        if callable(release):
+            release(list(paths))
+
+    def _dv_empty_trash(self, parent=None):
+        from ...utils import trash
+        total = self._dv_trash_size()
+        if not total:
+            QMessageBox.information(parent or self, "Empty trash", "The trash is empty.")
+            return False
+        answer = QMessageBox.question(
+            parent or self, "Empty trash",
+            f"Permanently delete everything in this project's trash "
+            f"({self._fmt_bytes(total)})? This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return False
+        removed = trash.empty(self.output_dir)
+        print(f"[Trash] emptied: {len(removed)} entr(y/ies) removed")
+        return True
+
+    def _dv_tidy_trash(self):
+        """On Load (§5, §6): interrupted deletions are finished (records
+        first); entries deleted more than 30 days ago are removed in the
+        background."""
+        from ...utils import trash
+        project = self.output_dir
+        if not project or not os.path.isdir(os.path.join(project, trash.TRASH_DIR)):
+            return
+        try:
+            done = data_versions.resume_deletions(project)
+            if done:
+                print(f"[Trash] finished interrupted deletion(s): {done}")
+        except Exception as exc:                      # noqa: BLE001
+            print(f"[Trash] interrupted deletions not finished: {exc}")
+
+        def _purge():
+            try:
+                removed = trash.purge(project)
+                if removed:
+                    print(f"[Trash] removed after 30 days: {removed}")
+            except Exception as exc:                  # noqa: BLE001
+                print(f"[Trash] purge failed: {exc}")
+        import threading
+        threading.Thread(target=_purge, name="trash-purge", daemon=True).start()
 
     def _open_existing_workspace(self):
         """Find this slide's workspaces in the output directory's project
@@ -10981,6 +11263,9 @@ class Step0Page(QWidget):
         Intensity come back, so an unchanged Save says "No changes"."""
         self._workspace_intensity = None
         self._workspace_handoff_pending = None
+        self._dv_after_load = None
+        self._dv_open_run = ""
+        self._dv_tidy_trash()
         try:
             _sid, found = workspace_session.find_workspaces(self.output_dir, self.ome_path)
         except Exception as exc:                      # noqa: BLE001 -- never blocks a Load
@@ -10995,8 +11280,15 @@ class Step0Page(QWidget):
             return None
         # (a test may answer with the workspace alone: its current version)
         ws, version = (chosen[0], chosen[1]) if isinstance(chosen, tuple) else (chosen, None)
+        run = chosen[3] if isinstance(chosen, tuple) and len(chosen) > 3 else None
+        after, self._dv_after_load = self._dv_after_load, None
         try:
             self._restore_workspace(ws, version)
+            if after is not None:
+                # DV-D §3.4: the other version is loaded -- now the deletion.
+                self._dv_release(after["paths"])
+                data_versions.execute_delete(after)
+            self._dv_open_run = run.run_dir if run is not None else ""
         except Exception as exc:                      # noqa: BLE001
             # A workspace that cannot be read back is not half-opened.
             print(f"[Workspace] {ws.workspace_id} could not be opened "
@@ -11024,6 +11316,8 @@ class Step0Page(QWidget):
         # loaded version's Step1 files when a version was switched to.
         payload["opened_workspace"] = True
         payload["data_version_loaded"] = loaded
+        # Block DV-D: the row was a version + segmentation run: Step3 shows it.
+        payload["step3_run_dir"] = getattr(self, "_dv_open_run", "") or ""
         self.step0_complete.emit(payload)
         print(f"[Workspace] announced the committed handoff of "
               f"{manifest.get('roi_id', '')} (nothing rewritten)")

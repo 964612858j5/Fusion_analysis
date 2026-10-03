@@ -265,3 +265,393 @@ def test_a_deletion_appends_an_a3_record(tmp_path):
     rec = [e for e in entries if e["kind"] == "deletion"][-1]
     assert rec["parameters"]["data_version"] == ""          # a run only: no version deleted
     assert rec["parameters"]["run_dir"].endswith("seg_a")
+
+
+# ── part 2: the chooser's × (Step0) ──────────────────────────────────────
+
+pytest.importorskip("PyQt5")
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from test_v16_a6_workspace import (  # noqa: E402,F401  (fixtures)
+    app, slides, page, _project as _a6_project)
+from test_v16_data_versions import _two_versions, _workspace_as  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_modal_dialogs(monkeypatch):
+    def _refuse(dlg, *a, **k):
+        raise AssertionError(f"unexpected modal dialog: {dlg.windowTitle()!r}")
+    monkeypatch.setattr(QtWidgets.QDialog, "exec_", _refuse)
+
+
+def _answers(monkeypatch, confirm=True, also=False, load_other=None, whole=False):
+    from block01.ui.step0.step0_page import Step0Page
+    asked = []
+    monkeypatch.setattr(Step0Page, "_dv_confirm",
+                        lambda self, parent, title, text, checkbox=None: (
+                            asked.append((title, text, checkbox)) or (confirm, also)))
+    monkeypatch.setattr(Step0Page, "_dv_ask_load_other",
+                        lambda self, parent, others: (
+                            asked.append(("load other", [r["version"] for r in others]))
+                            or load_other(others) if callable(load_other) else load_other))
+    monkeypatch.setattr(Step0Page, "_dv_ask_keep_workspace",
+                        lambda self, parent, ws: asked.append(("whole", ws.workspace_id)) or whole)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information",
+                        lambda *a, **k: asked.append(("info", a[2] if len(a) > 2 else "")))
+    return asked
+
+
+def _seg(ctx, version, name):
+    return _run(ctx["roi_dir"], version, name)
+
+
+def _rows(page, proj, slide):
+    from block01.utils import workspace_session as wsess
+    return page._workspace_rows(wsess.find_workspaces(proj, slide)[1])
+
+
+def _row(rows, version, run_name=None):
+    for r in rows:
+        if r[1] is not None and r[1]["version"] == version:
+            run = r[3] if len(r) > 3 else None
+            if (run_name is None and run is None) or \
+                    (run is not None and os.path.basename(run.run_dir) == run_name):
+                return r
+    raise AssertionError(f"no row {version} {run_name}")
+
+
+@pytest.fixture
+def two(page, tmp_path, slides):
+    """v001 (2 runs) and v002 (current, 1 run); the workspace is v002."""
+    proj, made = _a6_project(tmp_path, slides["a"])
+    ctx = made[0]
+    v1, v2 = _two_versions(ctx)
+    _workspace_as(ctx, v2)
+    _seg(ctx, "v001", "seg_20261003_100000_a")
+    _seg(ctx, "v001", "seg_20261003_110000_b")
+    _seg(ctx, "v002", "seg_20261003_120000_c")
+    return proj, ctx, v1, v2
+
+
+def test_the_delegate_draws_a_close_box_only_where_asked(app):
+    from block01.ui.step3_mask_bar import (CLOSE_ROLE, TaggedItemDelegate, Step3MaskBar)
+    lst = QtWidgets.QListWidget()
+    delegate = TaggedItemDelegate(lst)
+    lst.setItemDelegate(delegate)
+    lst.addItem("row")
+    lst.item(0).setData(CLOSE_ROLE, True)
+    lst.resize(300, 100)
+    lst.show()
+    clicked = []
+    delegate.close_clicked.connect(clicked.append)
+    rect = lst.visualItemRect(lst.item(0))
+    from PyQt5.QtTest import QTest
+    QTest.mouseClick(lst.viewport(), QtCore.Qt.LeftButton, pos=QtCore.QPoint(
+        rect.left() + 5, rect.center().y()))
+    assert clicked == [0]
+    QTest.mouseClick(lst.viewport(), QtCore.Qt.LeftButton, pos=QtCore.QPoint(
+        rect.left() + 150, rect.center().y()))
+    assert clicked == [0]                                   # the row itself: no ×
+    bar = Step3MaskBar()
+    bar.set_runs([("a", "/r/a", "v001")])
+    assert not bar.run_combo.itemData(0, CLOSE_ROLE)        # Step3: never a ×
+    lst.close()
+
+
+def test_rows_are_one_per_version_and_segmentation(page, two, slides):
+    proj, ctx, v1, v2 = two
+    alloc = dv.new_version_folder(ctx["roi_dir"])                       # v003, no runs
+    dv.commit_version(ctx["roi_dir"], alloc, dict(v2, version="v003", folder=alloc["folder"]),
+                      make_current=False)
+    rows = _rows(page, proj, slides["a"])
+    got = [(r[2], os.path.basename(r[3].run_dir) if len(r) > 3 else None) for r in rows]
+    assert got == [("v003", None),
+                   ("v002  (current)", "seg_20261003_120000_c"),
+                   ("v001", "seg_20261003_110000_b"), ("v001", "seg_20261003_100000_a")]
+    assert "stardist" in page._row_text(rows[1]) and "(not segmented)" in page._row_text(rows[0])
+
+
+def test_x_on_a_run_with_siblings_deletes_only_that_run(page, two, slides, monkeypatch):
+    proj, ctx, v1, v2 = two
+    asked = _answers(monkeypatch)
+    row = _row(_rows(page, proj, slides["a"]), "v001", "seg_20261003_100000_a")
+    assert page._dv_delete_row(row) == ("deleted",)
+    assert asked[0][2] is None                                  # not the last: no question
+    assert not os.path.exists(row[3].run_dir)
+    assert dv.get_version(ctx["roi_dir"], "v001") is not None
+    assert [os.path.basename(r.run_dir) for r in dv.runs_of_version(ctx["roi_dir"], "v001")] \
+        == ["seg_20261003_110000_b"]
+
+
+def test_the_last_run_asks_about_its_version_and_keeps_it_by_default(page, two, slides,
+                                                                     monkeypatch):
+    proj, ctx, v1, v2 = two
+    rows = _rows(page, proj, slides["a"])
+    _answers(monkeypatch)
+    page._dv_delete_row(_row(rows, "v001", "seg_20261003_100000_a"))
+    asked = _answers(monkeypatch, also=False)
+    rows = _rows(page, proj, slides["a"])
+    assert page._dv_delete_row(_row(rows, "v001", "seg_20261003_110000_b")) == ("deleted",)
+    assert "Also delete data version v001" in asked[0][2]
+    assert dv.get_version(ctx["roi_dir"], "v001") is not None          # kept
+    assert ("v001", None) in [(r[2], None) for r in _rows(page, proj, slides["a"])
+                              if len(r) == 3 and r[1] is not None]
+
+
+def test_the_last_run_with_its_version_when_not_current(page, two, slides, monkeypatch):
+    proj, ctx, v1, v2 = two
+    _answers(monkeypatch)
+    page._dv_delete_row(_row(_rows(page, proj, slides["a"]), "v001", "seg_20261003_100000_a"))
+    _answers(monkeypatch, also=True)
+    assert page._dv_delete_row(
+        _row(_rows(page, proj, slides["a"]), "v001", "seg_20261003_110000_b")) == ("deleted",)
+    assert dv.get_version(ctx["roi_dir"], "v001") is None
+    assert not os.path.exists(v1["corrected"]["path"])
+    assert dv.current_version(ctx["roi_dir"])["version"] == "v002"
+
+
+def test_the_current_version_with_another_loaded_first(page, two, slides, monkeypatch):
+    from block01.ui.step0.step0_page import Step0Page
+    proj, ctx, v1, v2 = two
+    asked = _answers(monkeypatch, also=True, load_other=lambda others: others[-1])
+    wrote = []
+    monkeypatch.setattr(Step0Page, "_write_step0_handoff",
+                        lambda self, config, zarr_path, remap_config_path=None: (
+                            wrote.append(zarr_path) or (config, [], [], {})))
+
+    def _choose(self, rows):
+        out = self._dv_delete_row(_row(rows, "v002", "seg_20261003_120000_c"))
+        assert out[0] == "load" and out[1][1]["version"] == "v001"
+        assert dv.get_version(ctx["roi_dir"], "v002") is not None    # not before the load
+        return out[1]
+    monkeypatch.setattr(Step0Page, "_choose_workspace", _choose)
+    page._open_existing_workspace()
+    assert ("load other", ["v001"]) in asked
+    assert wrote == [v1["corrected"]["path"]]                         # v001 loaded ...
+    assert dv.get_version(ctx["roi_dir"], "v002") is None             # ... then v002 deleted
+    assert dv.current_version(ctx["roi_dir"])["version"] == "v001"
+    assert not os.path.exists(v2["corrected"]["path"])
+
+
+def test_a_failed_load_deletes_nothing(page, two, slides, monkeypatch):
+    from block01.ui.step0.step0_page import Step0Page
+    proj, ctx, v1, v2 = two
+    _answers(monkeypatch, also=True, load_other=lambda others: others[-1])
+    monkeypatch.setattr(Step0Page, "_write_step0_handoff",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk full")))
+    monkeypatch.setattr(Step0Page, "_choose_workspace",
+                        lambda self, rows: self._dv_delete_row(
+                            _row(rows, "v002", "seg_20261003_120000_c"))[1])
+    page._open_existing_workspace()
+    assert dv.get_version(ctx["roi_dir"], "v002") is not None
+    assert os.path.isdir(v2["corrected"]["path"])
+
+
+def test_the_current_version_with_none_deletes_and_starts_over_empty(page, two, slides,
+                                                                     monkeypatch):
+    proj, ctx, v1, v2 = two
+    _answers(monkeypatch, also=True, load_other=None)
+    out = page._dv_delete_row(_row(_rows(page, proj, slides["a"]), "v002",
+                                   "seg_20261003_120000_c"))
+    assert out == ("unload",)
+    assert dv.get_version(ctx["roi_dir"], "v002") is None
+    assert dv.load_index(ctx["roi_dir"])["current"] == ""
+    assert not os.path.exists(v2["corrected"]["path"])               # handoff released
+    sent = []
+    page.unload_requested.connect(lambda: sent.append(1))
+    assert page._dv_unload_if_requested() is True and sent == [1]
+    assert page._dv_unload_if_requested() is False                   # once
+
+
+def test_cancelling_the_load_other_question_deletes_nothing(page, two, slides, monkeypatch):
+    proj, ctx, v1, v2 = two
+    _answers(monkeypatch, also=True, load_other=False)
+    before = _tree(ctx["roi_dir"])
+    assert page._dv_delete_row(_row(_rows(page, proj, slides["a"]), "v002",
+                                    "seg_20261003_120000_c")) is None
+    assert _tree(ctx["roi_dir"]) == before
+
+
+def test_the_last_version_asks_about_the_workspace(page, tmp_path, slides, monkeypatch):
+    proj, made = _a6_project(tmp_path, slides["a"], n=2)
+    for ctx, whole in ((made[0], True), (made[1], False)):
+        alloc = dv.new_version_folder(ctx["roi_dir"])
+        dv.commit_version(ctx["roi_dir"], alloc, {"version": "v001", "regions": [],
+                                                  "corrected": {"path": ""}})
+        asked = _answers(monkeypatch, whole=whole, load_other=None)
+        row = next(r for r in _rows(page, proj, slides["a"])
+                   if r[0].workspace_id == ctx["roi_id"] and r[1] is not None)
+        assert page._dv_delete_row(row) == ("unload",)
+        assert ("whole", ctx["roi_id"]) in asked
+        assert os.path.isdir(ctx["roi_dir"]) is (not whole)
+    assert dv.list_versions(made[1]["roi_dir"]) == []
+    assert [r[2] for r in _rows(page, proj, slides["a"])] == ["unknown"]
+
+
+def test_x_on_a_workspace_without_versions_deletes_it(page, tmp_path, slides, monkeypatch):
+    proj, made = _a6_project(tmp_path, slides["a"], n=2)
+    _answers(monkeypatch)
+    rows = _rows(page, proj, slides["a"])
+    assert page._dv_delete_row(rows[0]) == ("deleted",)
+    assert len(_rows(page, proj, slides["a"])) == 1
+
+
+def test_x_on_the_draft_loads_the_current_version_then_discards(page, two, slides,
+                                                               monkeypatch):
+    from block01.ui.step0.step0_page import Step0Page, DRAFT_TAG
+    proj, ctx, v1, v2 = two
+    draft = dv.new_corrected_folder(ctx["roi_dir"])
+    os.makedirs(draft)
+    mpath = os.path.join(ctx["step_dirs"]["step0"], "step0_roi_result.json")
+    m = json.load(open(mpath))
+    m["corrected_zarr_path"] = draft
+    json.dump(m, open(mpath, "w"))
+    _answers(monkeypatch)
+    monkeypatch.setattr(Step0Page, "_write_step0_handoff",
+                        lambda self, config, zarr_path, remap_config_path=None: (config, [], [], {}))
+    monkeypatch.setattr(Step0Page, "_choose_workspace",
+                        lambda self, rows: self._dv_delete_row(
+                            next(r for r in rows if r[2] == DRAFT_TAG))[1])
+    page._open_existing_workspace()
+    assert not os.path.exists(draft)
+    assert dv.get_version(ctx["roi_dir"], "v002") is not None
+
+
+def test_nothing_is_deleted_while_something_runs(page, two, slides, monkeypatch):
+    proj, ctx, v1, v2 = two
+    asked = _answers(monkeypatch)
+    page.deletion_blocker = lambda: "a Step2 segmentation is running"
+    before = _tree(ctx["roi_dir"])
+    assert page._dv_delete_row(_row(_rows(page, proj, slides["a"]), "v001",
+                                    "seg_20261003_100000_a")) is None
+    assert _tree(ctx["roi_dir"]) == before
+    assert asked and asked[0][0] == "info" and "Step2" in asked[0][1]
+
+
+def test_what_moves_is_released_first(page, two, slides, monkeypatch):
+    proj, ctx, v1, v2 = two
+    _answers(monkeypatch)
+    released = []
+    page.release_paths = lambda paths: released.append(
+        [os.path.exists(p) for p in paths])
+    page._dv_delete_row(_row(_rows(page, proj, slides["a"]), "v001", "seg_20261003_100000_a"))
+    assert released and all(released[0])                   # still in place when released
+
+
+def test_a_combination_row_opens_its_run_in_step3(page, two, slides, monkeypatch):
+    from block01.ui.step0.step0_page import Step0Page
+    proj, ctx, v1, v2 = two
+    monkeypatch.setattr(Step0Page, "_choose_workspace",
+                        lambda self, rows: _row(rows, "v002", "seg_20261003_120000_c"))
+    page._open_existing_workspace()
+    sent = []
+    page.step0_complete.connect(sent.append)
+    page._announce_opened_workspace()
+    assert sent[0]["step3_run_dir"].endswith("seg_20261003_120000_c")
+
+
+def test_empty_trash_asks_then_empties(page, two, slides, monkeypatch):
+    proj, ctx, v1, v2 = two
+    _answers(monkeypatch)
+    page._dv_delete_row(_row(_rows(page, proj, slides["a"]), "v001", "seg_20261003_100000_a"))
+    assert page._dv_trash_size() > 0
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        lambda *a, **k: QtWidgets.QMessageBox.No)
+    assert page._dv_empty_trash() is False and page._dv_trash_size() > 0
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        lambda *a, **k: QtWidgets.QMessageBox.Yes)
+    assert page._dv_empty_trash() is True and page._dv_trash_size() == 0
+
+
+def test_opening_the_project_finishes_an_interrupted_deletion(page, two, slides, monkeypatch):
+    from block01.ui.step0.step0_page import Step0Page
+    proj, ctx, v1, v2 = two
+    plan = dv.plan_delete(ctx["roi_dir"], version_id="v001")
+    trash.begin(proj, ctx["roi_id"], plan["what"], plan["paths"],
+                {k: plan[k] for k in ("run_dir", "version", "draft", "delete_workspace")})
+    monkeypatch.setattr(Step0Page, "_choose_workspace", lambda self, rows: (
+        rows if not any(r[1] and r[1]["version"] == "v001" for r in rows) else
+        pytest.fail("v001 is listed")) and None)
+    page._open_existing_workspace()
+    assert dv.get_version(ctx["roi_dir"], "v001") is None
+    assert trash.entries(proj)[0]["status"] == "complete"
+
+
+# ── part 3: the window ───────────────────────────────────────────────────
+
+import test_step1_fusion_isolation as iso    # noqa: E402
+
+
+def test_the_window_says_what_blocks_a_deletion(app, tmp_path):
+    w = iso._window(app, tmp_path)
+    try:
+        assert not w._dv_deletion_blocker()
+
+        class _Busy:
+            def isRunning(self):
+                return True
+        w._step2._worker = _Busy()
+        assert "Step2" in w._dv_deletion_blocker()
+        w._step2._worker = None
+        w._fusion_worker = _Busy()
+        assert "Generate" in w._dv_deletion_blocker()
+        w._fusion_worker = None
+    finally:
+        w.close()
+
+
+def test_the_window_lets_go_of_a_run_before_it_moves(app, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    w = iso._window(app, tmp_path)
+    try:
+        cleared, step4 = [], []
+        monkeypatch.setattr(w, "_step3_clear_masks", lambda: cleared.append(1))
+        w._step3_mask_key = "/p/rois/ws1/step2/segmentation_runs/seg_a\x1fFull WSI"
+        w._step3_mask_runs = []
+        w._step4._job = SimpleNamespace(run_dir="/p/rois/ws1/step2/segmentation_runs/seg_a")
+        monkeypatch.setattr(w._step4, "set_run", lambda run_dir, *a, **k: step4.append(run_dir))
+        w._dv_release_paths(["/p/rois/ws1/step2/segmentation_runs/seg_b"])
+        assert cleared == [] and step4 == []
+        w._dv_release_paths(["/p/rois/ws1/step2/segmentation_runs/seg_a"])
+        assert cleared == [1] and step4 == [""]
+    finally:
+        w._step4._job = None
+        w.close()
+
+
+def test_none_starts_a_new_empty_window(app, tmp_path, monkeypatch):
+    from block01.ui.main_window import MainWindow
+    w = iso._window(app, tmp_path)
+    made = []
+    real_init = MainWindow.__init__
+
+    def _init(self, *a, **k):
+        real_init(self, *a, **k)
+        made.append(self)
+    monkeypatch.setattr(MainWindow, "__init__", _init)
+    try:
+        w.show()
+        fresh = w._dv_restart_empty()
+        assert made == [fresh] and fresh.isVisible()
+        assert fresh._step0.loader is None
+        for _ in range(20):
+            QtWidgets.QApplication.processEvents()
+        assert not w.isVisible()                              # the old one closed
+    finally:
+        for win in made:
+            win.close()
+        MainWindow._live_windows.clear()
+        w.close()
+
+
+def test_the_opened_run_is_the_one_step3_shows(app, tmp_path, monkeypatch):
+    w = iso._window(app, tmp_path)
+    try:
+        monkeypatch.setattr(w, "_load_step0_roi_result", lambda *a, **k: True)
+        monkeypatch.setattr(w, "_dv_register_legacy", lambda: None)
+        w._on_step0_complete(dict(w.step0_output, opened_workspace=True,
+                                  step3_run_dir="/r/seg_c"))
+        assert w._dv_step3_run == "/r/seg_c"
+    finally:
+        w.close()

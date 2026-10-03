@@ -220,6 +220,20 @@ def _corrected_decisions(decisions):
             if str(v).strip().lower() in CORRECTED_METHODS}
 
 
+def _run_data_version(ws, meta):
+    """The data-version record a run was made from (its
+    ``segmentation_meta.json`` names it), with its folder path; None for a
+    run made before data versions."""
+    vid = str((meta or {}).get("data_version") or "")
+    if not vid or not ws:
+        return None
+    from ..utils import data_versions
+    rec = data_versions.get_version(ws, vid)
+    if rec is None:
+        return None
+    return dict(rec, folder_path=data_versions.version_dir(ws, rec.get("folder", "")))
+
+
 def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):
     """The `QuantJob` of one region of a run, or QuantSourceError.
 
@@ -288,13 +302,21 @@ def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):
         raise QuantSourceError("the workspace has no Step0 handoff (step0_roi_result.json)")
     cfg_path = handoff.get("correction_config_path") or os.path.join(step0_dir,
                                                                      "correction_config.json")
+    # Block DV: a run made from a data version reads THAT version's
+    # correction config and corrected product, not the workspace's current
+    # ones (a later version may have changed them).
+    version = _run_data_version(ws, run.meta)
+    if version is not None:
+        vcfg = os.path.join(version["folder_path"], "correction_config.json")
+        if os.path.isfile(vcfg):
+            cfg_path = vcfg
     cfg = _load_json(cfg_path)
     if cfg is None:
         raise QuantSourceError(f"Step0's correction decisions are missing ({cfg_path})")
     decisions = {str(k): str(v).strip().lower()
                  for k, v in (cfg.get("channel_decisions") or {}).items()}
     wanted = _corrected_decisions(decisions)
-    recorded = handoff.get("corrected_decisions")
+    recorded = handoff.get("corrected_decisions") if version is None else None
     if recorded is not None and _corrected_decisions(recorded) != wanted:
         raise QuantSourceError(f"Step0's handoff lists corrected channels "
                                f"{_corrected_decisions(recorded)}, its correction config "
@@ -305,8 +327,9 @@ def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):
 
     zpath, root, container, offset, gshape = "", None, None, (0, 0), None
     if wanted:
-        zpath = handoff.get("corrected_zarr_path") or os.path.join(step0_dir,
-                                                                    "corrected_channels.zarr")
+        zpath = ((version or {}).get("corrected") or {}).get("path") \
+            or handoff.get("corrected_zarr_path") \
+            or os.path.join(step0_dir, "corrected_channels.zarr")
         try:
             import zarr
             root = zarr.open_group(zpath, mode="r")

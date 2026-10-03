@@ -42,12 +42,17 @@ def fused_region(fused_zarr_path) -> Tuple[Tuple[int, int, int, int], str, Optio
     bbox = tuple(int(v) for v in bbox)
     if (bbox[1] - bbox[0], bbox[3] - bbox[2]) != tuple(int(v) for v in z.shape[:2]):
         raise TissueUnavailable(f"the fused input is {tuple(z.shape[:2])}, its bbox {list(bbox)}")
-    ws = os.path.dirname(os.path.dirname(path))              # <ws>/step1/<fused>.zarr
-    manifest = _load(os.path.join(ws, "roi_manifest.json"))
+    # Block DV: the fused product may sit in <ws>/step1/ or in a data
+    # version's folder <ws>/versions/<v>/; the workspace is the folder that
+    # holds roi_manifest.json, found by walking up (as provenance does).
+    ws = _workspace_of(path)
+    manifest = _load(os.path.join(ws, "roi_manifest.json")) if ws else None
     slide = (manifest or {}).get("source_ome")
     if not slide or not os.path.isfile(slide):
         raise TissueUnavailable("the workspace records no readable slide")
-    settings = _load(os.path.join(ws, "step1", "step1_fusion_settings.json")) or {}
+    # The settings that made THIS product: its version's copy, else Step1's.
+    settings = (_load(os.path.join(os.path.dirname(path), "step1_fusion_settings.json"))
+                or _load(os.path.join(ws, "step1", "step1_fusion_settings.json")) or {})
     channel = ((settings.get("fusion_config") or {}).get("nucleus") or {}).get("channel")
     if not channel:
         handoff = _load(os.path.join(ws, "step0", "step0_roi_result.json")) or {}
@@ -55,6 +60,18 @@ def fused_region(fused_zarr_path) -> Tuple[Tuple[int, int, int, int], str, Optio
     if not channel:
         raise TissueUnavailable("no nucleus channel is recorded for this workspace")
     return bbox, slide, str(channel)
+
+
+def _workspace_of(path):
+    """The workspace folder (holding roi_manifest.json) above `path`."""
+    cur = os.path.dirname(os.path.abspath(path))
+    while True:
+        if os.path.isfile(os.path.join(cur, "roi_manifest.json")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return ""
+        cur = parent
 
 
 def _load(path):

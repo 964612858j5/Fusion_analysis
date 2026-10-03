@@ -990,6 +990,15 @@ class SegmentMergeWorker(QThread):
         return ""
 
     def _fusion_source_path(self, roi_name=None):
+        # Block DV (§3.5): a run of a data version reads each region's fused
+        # product from that version's `regions[]`, handed over explicitly --
+        # never a fixed <ws>/step1 path that another version may have made.
+        explicit = (self.seg_config.get("region_fused_paths") or {}).get(str(roi_name or ""))
+        if explicit and os.path.exists(explicit):
+            return self._abs(explicit)
+        if self.seg_config.get("data_version") and self.zarr_path \
+                and os.path.exists(self.zarr_path) and not roi_name:
+            return self._abs(self.zarr_path)
         candidates = [
             os.path.join(self.roi_dir, "step1", "fused.zarr") if self.roi_dir else "",
             os.path.join(self.roi_dir, "step1", f"fused_{roi_name}.zarr") if self.roi_dir and roi_name else "",
@@ -3341,6 +3350,7 @@ class SegmentMergeWorker(QThread):
             }
             meta["roi_bbox_fullres"] = list(bbox) if bbox else self.roi_manifest.get("bbox_fullres")
             meta["roi_shape"] = meta.get("image_shape")
+        meta["data_version"] = self.seg_config.get("data_version") or None   # block DV
         meta_path = os.path.join(self.output_dir, f'segmentation_meta_{out_prefix}.json')
         with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(meta_path)):
             write_json_atomic(meta_path, meta)          # block A6 G2
@@ -3559,6 +3569,7 @@ class SegmentMergeWorker(QThread):
                 runtime_meta = self._finish_runtime_monitor()
                 summary_meta["runtime"] = runtime_meta
                 summary_meta["seg_engine"] = self._engine_meta
+                summary_meta["data_version"] = self.seg_config.get("data_version") or None
                 summary_meta_path = os.path.join(self.output_dir, "segmentation_meta.json")
                 with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(summary_meta_path)):
                     write_json_atomic(summary_meta_path, summary_meta)   # block A6 G2
@@ -4288,6 +4299,7 @@ class SegmentMergeWorker(QThread):
             runtime_meta = self._finish_runtime_monitor()
             meta["runtime"] = runtime_meta
             meta["seg_engine"] = self._engine_meta
+            meta["data_version"] = self.seg_config.get("data_version") or None   # block DV
             meta_path = os.path.join(self.output_dir, 'segmentation_meta.json')
             with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(meta_path)):
                 write_json_atomic(meta_path, meta)              # block A6 G2

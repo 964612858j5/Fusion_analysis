@@ -473,3 +473,110 @@ def test_the_worker_keeps_the_a3_entries_for_later(tmp_path, monkeypatch):
     wk.run()
     assert called == []
     assert len(wk.provenance_jobs) == 1 and wk.provenance_jobs[0][2] == "full"
+
+
+# ── part 4: Step2 / Step4 read the run's own data version ─────────────────
+
+import shutil  # noqa: E402
+
+
+def test_a_dirty_draft_refuses_a_new_step2_run_and_says_why(app, tmp_path, monkeypatch):
+    from block01.ui import step2_page as s2
+    p = s2.Step2Page()
+    said = []
+    monkeypatch.setattr(s2.QMessageBox, "warning", lambda *a, **k: said.append(a[2]))
+    started = []
+    monkeypatch.setattr(s2, "SegmentMergeWorker", lambda **kw: started.append(kw))
+    try:
+        p.set_dirty_draft("settings changed since v001 (dirty draft)")
+        assert not p._btn_run.isEnabled() and not p._dirty_lbl.isHidden()
+        p._run()
+        assert started == [] and "dirty draft" in said[-1]
+        p.set_dirty_draft("")
+        assert p._btn_run.isEnabled() and p._dirty_lbl.isHidden()
+    finally:
+        p.deleteLater()
+
+
+def test_a_run_carries_its_data_version_and_region_inputs(app, tmp_path, monkeypatch):
+    import test_v16_a6_async as a6m
+    from block01.ui import step2_page as s2
+    import numpy as np
+    zarr = pytest.importorskip("zarr")
+    monkeypatch.setattr(s2, "SegmentMergeWorker", a6m._FakeStep2Run)
+    p = s2.Step2Page()
+    monkeypatch.setattr(p, "_promote_step0_remap", lambda cfg: None)
+    zp = str(tmp_path / "fused_R1.zarr")
+    z = zarr.open(zp, mode="w", shape=(64, 64, 2), chunks=(64, 64, 2), dtype=np.uint16)
+    z[...] = 1
+    p._zarr_edit.setText(zp)
+    p._load_zarr_info()
+    p._set_param_source("manual")
+    try:
+        p.set_data_version("v003", {"R1": zp})
+        p._run()
+        cfg = p._worker.kw["seg_config"]
+        assert cfg["data_version"] == "v003" and cfg["region_fused_paths"] == {"R1": zp}
+    finally:
+        p.deleteLater()
+
+
+def test_the_window_marks_a_dirty_draft_against_the_current_version(app, tmp_path, monkeypatch):
+    w, ws = _dv_window(app, tmp_path)
+    try:
+        cur, why = w._dv_step2_state()
+        assert cur is None and "No data version" in why
+        dv.commit_version(ws, dv.new_version_folder(ws), _record())
+        monkeypatch.setattr(w, "_dv_candidate_record", lambda method: _record())
+        cur, why = w._dv_step2_state()
+        assert cur["version"] == "v001" and why == ""
+        monkeypatch.setattr(w, "_dv_candidate_record", lambda method: _record(fusion="f9"))
+        cur, why = w._dv_step2_state()
+        assert "dirty draft" in why and "v001" in why
+    finally:
+        w.close()
+
+
+def test_the_worker_reads_each_regions_fused_from_its_version(tmp_path):
+    from block01.workers.segment_merge_worker import SegmentMergeWorker
+    ws = tmp_path / "proj" / "rois" / "ws1"
+    (ws / "step1" / "fused_R1.zarr").mkdir(parents=True)        # another version's fixed path
+    (ws / "step2").mkdir()
+    (ws / "roi_manifest.json").write_text("{}")
+    vfused = ws / "versions" / "v002_x" / "fused_R1.zarr"
+    vfused.mkdir(parents=True)
+    wk = SegmentMergeWorker(str(vfused), seg_config={
+        "method": "cellpose_wholecell_fusion", "data_version": "v002",
+        "region_fused_paths": {"R1": str(vfused)}}, output_dir=str(ws / "step2"))
+    assert wk._fusion_source_path("R1") == os.path.abspath(vfused)
+
+
+def test_step4_quantifies_a_run_with_its_own_versions_corrected_product(tmp_path):
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_quant_sources import build_project, _edit_json
+    from block01.core import quant_sources as qs
+    p = build_project(tmp_path)
+    ws = p["ws"]
+    # v001 owns a copy of the corrected product and its correction config
+    alloc = dv.new_version_folder(ws)
+    vz = os.path.join(alloc["path"], "corrected_channels.zarr")
+    shutil.copytree(p["zarr"], vz)
+    shutil.copy2(p["cfg"], os.path.join(alloc["path"], "correction_config.json"))
+    dv.commit_version(ws, alloc, dict(_record(), corrected={"path": vz}))
+    _edit_json(os.path.join(p["run_dir"], "segmentation_meta.json"),
+               lambda d: d.update(data_version="v001"))
+    # a later Step0 Save replaced the workspace's product
+    shutil.rmtree(p["zarr"])
+    job = qs.resolve_quant_job(p["run_dir"], open_slide=p["slide"])
+    cd3 = next(c for c in job.channels if c.name == "CD3")
+    assert cd3.kind == "corrected" and os.path.abspath(cd3.path) == os.path.abspath(vz)
+
+
+def test_skip_empty_tiles_finds_the_workspace_of_a_versioned_fused_product(tmp_path):
+    from block01.core import tile_tissue
+    ws = tmp_path / "proj" / "rois" / "ws1"
+    v = ws / "versions" / "v001_x"
+    v.mkdir(parents=True)
+    (ws / "roi_manifest.json").write_text("{}")
+    assert tile_tissue._workspace_of(str(v / "fused_R1.zarr")) == str(ws)

@@ -200,6 +200,11 @@ class Step2Page(QWidget):
         # User ruling 2026-10-03: a workspace handed over while a run is
         # going (Step0 Save as) waits here; Step2 switches when the run ends.
         self._pending_context = None
+        # Block DV: the data version Step2 runs on and each region's fused
+        # product in it; a non-empty reason = dirty draft, Run refused (§3.13).
+        self._data_version = ""
+        self._region_fused_paths = {}
+        self._dirty_reason = ""
         self._last_remap_status = ""     # v14.5d: last Step0-remap applied/not-applied msg
         self._source_aware_attached = False       # a runtime descriptor was attached
         self._source_aware_summary = ""           # "N marker(s), <mixture>"
@@ -308,6 +313,12 @@ class Step2Page(QWidget):
         self._old_run_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._old_run_lbl.setVisible(False)
         ll.addWidget(self._old_run_lbl)
+        # Block DV (§3.13): why a new run cannot start now (dirty draft).
+        self._dirty_lbl = QLabel('')
+        self._dirty_lbl.setStyleSheet('color:#e06c75;font-size:10px;padding:2px 4px;')
+        self._dirty_lbl.setWordWrap(True)
+        self._dirty_lbl.setVisible(False)
+        ll.addWidget(self._dirty_lbl)
 
         self._prog_bar = QProgressBar()
         self._prog_bar.setRange(0, 100)
@@ -2713,7 +2724,24 @@ class Step2Page(QWidget):
         return True, {"differences": cmp["differences"],
                       "confirmed_at": time.strftime("%Y-%m-%d %H:%M:%S")}
 
+    def set_data_version(self, version_id, region_fused_paths=None):
+        """Block DV: the data version the next run belongs to."""
+        self._data_version = str(version_id or "")
+        self._region_fused_paths = {str(k): str(v) for k, v in
+                                    (region_fused_paths or {}).items() if v}
+
+    def set_dirty_draft(self, reason):
+        """Block DV (§3.13): a non-empty reason refuses new runs and says why."""
+        self._dirty_reason = str(reason or "")
+        self._dirty_lbl.setText(self._dirty_reason)
+        self._dirty_lbl.setVisible(bool(self._dirty_reason))
+        if not self._run_active:
+            self._btn_run.setEnabled(not self._dirty_reason)
+
     def _run(self):
+        if self._dirty_reason:
+            QMessageBox.warning(self, 'Step2', self._dirty_reason)
+            return
         if not self._zarr_path or not os.path.exists(self._zarr_path):
             QMessageBox.warning(self, 'No data',
                                 'Please load a fused.zarr first.')
@@ -2738,6 +2766,9 @@ class Step2Page(QWidget):
                 if not self._apply_selected_index_params():
                     return
         seg_config = self.get_seg_config()
+        if self._data_version:                      # block DV (§3.5)
+            seg_config["data_version"] = self._data_version
+            seg_config["region_fused_paths"] = dict(self._region_fused_paths)
         identity_confirmation = None
         if source == "index":
             if not self._check_preseg_contract(seg_config):

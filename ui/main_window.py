@@ -4698,8 +4698,49 @@ class MainWindow(QMainWindow):
                     roi_dir=self.step1_output.get("roi_dir") or (self.step0_output or {}).get("roi_dir", ""),
                     step2_dir=step2_dir or "",
                 )
+        self._dv_bind_step2()
         self._stack.setCurrentIndex(2)
         self._set_step_active(2)
+
+    def _dv_step2_state(self):
+        """Block DV (§3.13): (current version record, dirty-draft reason).
+        Outside a workspace: (None, "") -- no gate (pre-DV behaviour)."""
+        from ..utils import data_versions
+        ws = self._dv_workspace()
+        if not ws:
+            return None, ""
+        cur = data_versions.current_version(ws)
+        if cur is None:
+            return None, ("No data version yet: Generate fused.zarr in Step1 first.")
+        try:
+            candidate = self._dv_candidate_record(cur.get("method") or "")
+        except Exception as exc:                            # noqa: BLE001
+            return cur, f"The current settings could not be read ({exc})."
+        if not data_versions.same_content(candidate, cur):
+            return cur, (f"Step0/Step1 settings changed since data version "
+                         f"{cur['version']} (dirty draft): Generate in Step1, or load "
+                         f"{cur['version']} again in Step0, before running Step2.")
+        return cur, ""
+
+    def _dv_bind_step2(self):
+        """Entering Step2: its input is the current data version's fused
+        products, or new runs are refused while the draft is dirty."""
+        step2 = self.__dict__.get("_step2")
+        if step2 is None or not hasattr(step2, "set_data_version") or step2._run_active:
+            return
+        cur, reason = self._dv_step2_state()
+        if cur is None and not reason:
+            return                                          # not versioned
+        step2.set_dirty_draft(reason)
+        if cur is None or reason:
+            step2.set_data_version("", {})
+            return
+        paths = {r.get("roi_name"): r.get("fused_zarr_path") for r in cur.get("regions") or []}
+        first = next((p for p in paths.values() if p and os.path.isdir(p)), "")
+        if first and os.path.abspath(step2._zarr_edit.text().strip() or "") != first:
+            step2._zarr_edit.setText(first)
+            step2._load_zarr_info()
+        step2.set_data_version(cur["version"], paths)
 
     def _go_to_step1(self):
         # Step1 reads the handoff from DISK. While a patch edit is still being

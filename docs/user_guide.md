@@ -127,7 +127,7 @@ Read in the raw big image, **circle the region you actually care about (ROI)**, 
 
 **Output:** `corrected_channels.zarr` (corrected image), `roi_config.json`, `patch_config.json`, `correction_config.json`, `step0_roi_result.json`. These are read automatically by all later steps.
 
-**Workspaces — coming back to a project:** every Save writes into a **workspace** (a folder under `<output>/rois/`). When you load a slide into an output folder that already holds workspaces of **the same slide**, Step 0 opens one (it asks which one when there are several) and restores its region, patches, channel methods, parameters and Intensity. The Load line then ends with `Workspace: <id>`.
+**Workspaces — coming back to a project:** every Save writes into a **workspace** (a folder under `<output>/rois/`). When you load a slide into an output folder that already holds workspaces of **the same slide**, Step 0 opens one (it always asks which one; the last one is preselected, so Enter opens it) and restores its region, patches, channel methods, parameters and Intensity. The Load line then ends with `Workspace: <id>`.
 - **Save** writes back into the open workspace; with nothing changed it says *No changes* and rewrites nothing.
 - **Save ▾ › Save as new workspace** always starts a new workspace; the old one is left as it is and the next steps use the new one.
 - If you redrew the analysis region, Save asks first: *Save as new workspace* (recommended) or *Overwrite this workspace*.

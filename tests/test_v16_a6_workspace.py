@@ -175,6 +175,10 @@ def page(app, tmp_path, monkeypatch, slides):
     monkeypatch.setattr(sp.QMessageBox, "information", lambda *a, **k: None)
     monkeypatch.setattr(sp.QMessageBox, "question",
                         lambda *a, **k: sp.QMessageBox.Ok)
+    # Block DV-D (ruling 4a): the chooser is shown even for one row; by
+    # default a test answers the way Enter does -- the preselected row.
+    monkeypatch.setattr(Step0Page, "_choose_workspace",
+                        lambda self, rows: rows[self._default_row_index(rows)] if rows else None)
     p._seen = seen
     yield p
     p.deleteLater()

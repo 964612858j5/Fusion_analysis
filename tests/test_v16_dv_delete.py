@@ -793,3 +793,19 @@ def test_an_earlier_run_reads_the_legacy_versions_decisions(tmp_path):
         dv.commit_version(ws, alloc, {"corrected": {"path": shared}, "legacy": legacy,
                                       "regions": []})
     assert qs._version_referencing(ws, shared)["version"] == "v001"
+
+
+def test_one_row_still_shows_the_chooser_with_it_preselected(page, tmp_path, slides,
+                                                            monkeypatch):
+    """User ruling 4a: one row is not opened silently -- its × and Empty trash
+    must be reachable; Enter opens the preselected row."""
+    from block01.ui.step0.step0_page import Step0Page
+    proj, made = _a6_project(tmp_path, slides["a"])
+    shown = []
+
+    def _choose(self, rows):
+        shown.append(len(rows))
+        return rows[self._default_row_index(rows)]
+    monkeypatch.setattr(Step0Page, "_choose_workspace", _choose)
+    opened = page._open_existing_workspace()
+    assert shown == [1] and opened.workspace_id == made[0]["roi_id"]

@@ -170,6 +170,10 @@ from test_v16_a6_workspace import (  # noqa: E402,F401  (fixtures)
 
 
 from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.ui.step0.step0_page import Step0Page as _Step0Page  # noqa: E402
+
+#: the real chooser (the A6 `page` fixture answers it the way Enter does)
+_REAL_CHOOSE = _Step0Page._choose_workspace
 
 
 @pytest.fixture(autouse=True)
@@ -643,7 +647,7 @@ def test_the_chooser_lists_one_row_per_workspace_and_version(page, tmp_path, sli
         shown["tags"] = [lst.item(i).data(TAG_ROLE) for i in range(lst.count())]
         return QtWidgets.QDialog.Accepted
     monkeypatch.setattr(QtWidgets.QDialog, "exec_", _exec)
-    chosen = page._choose_workspace(rows)
+    chosen = _REAL_CHOOSE(page, rows)
     assert shown["delegate"] is TaggedItemDelegate
     assert shown["tags"][:3] == [r[2] for r in rows] and shown["tags"][3] is None
     assert chosen[2] == "v002  (current)"
@@ -1039,7 +1043,7 @@ def test_a_dirty_draft_is_its_own_row_first_and_preselected(page, tmp_path, slid
     rows = page._workspace_rows(found)
     assert [r[2] for r in rows] == [DRAFT_TAG, "v002  (current)", "v001"]
     monkeypatch.setattr(QtWidgets.QDialog, "exec_", lambda dlg: QtWidgets.QDialog.Accepted)
-    assert page._choose_workspace(rows)[2] == DRAFT_TAG
+    assert _REAL_CHOOSE(page, rows)[2] == DRAFT_TAG
 
 
 def test_the_draft_row_continues_the_draft(page, tmp_path, slides, monkeypatch):

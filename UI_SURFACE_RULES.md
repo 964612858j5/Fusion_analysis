@@ -466,7 +466,8 @@ row, and the duplicate Tissue Preview button in the step bar.
   version?` (`None` default: delete, then a new empty window); the last
   version asks whether the whole workspace goes too (default No). Nothing
   is deleted while a Step0 Save, a Generate, a Step2 run or a Step4
-  extraction runs. Its region, patches, channel decisions, parameters and Intensity
+  extraction runs. The chooser is shown even for a single row (ruling
+  2026-10-03), that row preselected so Enter opens it. Its region, patches, channel decisions, parameters and Intensity
   come back, so an unchanged Save says `No changes`. `Save` writes the open
   workspace; the `▾` joined to its right holds one item, `Save as new
   workspace`. A Save whose analysis region differs from the open workspace's

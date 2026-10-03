@@ -10997,11 +10997,7 @@ class Step0Page(QWidget):
                 item.setToolTip(f"{self._row_text(row)}  \u2014  {row[2]}")
                 lst.addItem(item)
             lst.addItem("Start a new workspace (open none)")
-            first = next((i for i, r in enumerate(state["rows"]) if r[2] == DRAFT_TAG), None)
-            if first is None:
-                first = next((i for i, r in enumerate(state["rows"])
-                              if "(current)" in r[2]), 0)
-            lst.setCurrentRow(first)
+            lst.setCurrentRow(self._default_row_index(state["rows"]))
             trash_btn.setText(f"Empty trash\u2026 ({self._fmt_bytes(self._dv_trash_size())})")
 
         def _closed(index):
@@ -11040,6 +11036,15 @@ class Step0Page(QWidget):
             return None
         row = lst.currentRow()
         return state["rows"][row] if 0 <= row < len(state["rows"]) else None
+
+    @staticmethod
+    def _default_row_index(rows):
+        """The row the chooser preselects (Enter opens it): the draft, else
+        the current version's newest row, else the first."""
+        first = next((i for i, r in enumerate(rows) if r[2] == DRAFT_TAG), None)
+        if first is None:
+            first = next((i for i, r in enumerate(rows) if "(current)" in r[2]), 0)
+        return first
 
     # ── Block DV-D: deleting from the chooser ──────────────────────────────
 
@@ -11303,7 +11308,10 @@ class Step0Page(QWidget):
         if not found:
             return None
         rows = self._workspace_rows(found)
-        chosen = rows[0] if len(rows) == 1 else self._choose_workspace(rows)
+        # User ruling 2026-10-03 (DV-D, codex review 2 #6, option a): the
+        # chooser is shown even for one row, so its × and Empty trash can be
+        # reached; the row is preselected -- Enter opens it.
+        chosen = self._choose_workspace(rows)
         if chosen is None:
             print("[Workspace] no workspace opened; the first Save makes a new one")
             return None

@@ -44,7 +44,10 @@ PROVENANCE_DIR = "provenance"
 KINDS = ("raw_slide", "corrected_channel", "fused", "segmentation_run", "step4_h5ad",
          "cells_parquet", "regions_parquet",
          # P3: the schema is defined here; §5.8's own producer registers it
-         "corrected_coarse_levels")
+         "corrected_coarse_levels",
+         # block DV-D: what a user deletion moved into the trash (appended;
+         # the entries of the moved artifacts are never rewritten)
+         "deletion")
 
 FLAG_RUN_ID_COLLISION = "segmentation_run_id_collision"
 FLAG_REGION_MISMATCH = "region_mismatch"

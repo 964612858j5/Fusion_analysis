@@ -315,3 +315,195 @@ def is_published_product(workspace_dir, path) -> bool:
         if any(p and os.path.abspath(p) == os.path.abspath(path) for p in refs):
             return True
     return False
+
+
+# ── deleting (block DV-D; docs/v16_DV_delete_application.md) ──────────────
+
+def runs_of_version(workspace_dir, version_id) -> List:
+    """The workspace's segmentation runs made from `version_id`, newest
+    first (`core.step3_masks.Run`)."""
+    from ..core import step3_masks
+    return [r for r in step3_masks.list_runs(workspace_dir)
+            if str((r.meta or {}).get("data_version") or "") == str(version_id)]
+
+
+def handoff_corrected(workspace_dir) -> str:
+    manifest = _load(os.path.join(workspace_dir, "step0", "step0_roi_result.json")) or {}
+    path = manifest.get("corrected_zarr_path") or ""
+    return os.path.abspath(path) if path else ""
+
+
+def corrected_users(workspace_dir, path, excluding=()) -> List[str]:
+    """The versions (ids) other than `excluding` that reference the
+    corrected product at `path`."""
+    want = os.path.abspath(path)
+    return [rec["version"] for rec in list_versions(workspace_dir)
+            if rec.get("version") not in excluding
+            and (rec.get("corrected") or {}).get("path")
+            and os.path.abspath(rec["corrected"]["path"]) == want]
+
+
+def _corrected_folder(path):
+    """What moves with a corrected product: its own cNNN folder (with the
+    coarse sidecar) when it has one, else the Zarr alone."""
+    parent = os.path.dirname(os.path.abspath(path))
+    if os.path.basename(os.path.dirname(parent)) == CORRECTED_DIR:
+        return parent
+    return os.path.abspath(path)
+
+
+def plan_delete(workspace_dir, *, run_dir=None, version_id=None, draft=False,
+                workspace=False, release_handoff=False) -> Dict:
+    """What a deletion moves and which records it changes -- read only.
+
+    * `run_dir`: the run and its Step4 results;
+    * `version_id`: the version's folder, and its corrected product when no
+      other version references it -- nor the workspace's handoff, unless
+      `release_handoff` (the current version deleted without loading another:
+      the handoff is left naming a product that is gone);
+    * `draft`: the handoff's corrected product when it is a draft (inside
+      ``versions/corrected``, referenced by no version);
+    * `workspace`: the whole workspace folder."""
+    ws = os.path.abspath(workspace_dir)
+    paths, what = [], []
+    plan = {"workspace": ws, "run_dir": "", "version": "", "draft": False,
+            "delete_workspace": bool(workspace)}
+    if workspace:
+        return dict(plan, paths=[ws], what="workspace")
+    if run_dir:
+        run_dir = os.path.abspath(run_dir)
+        paths.append(run_dir)
+        quant = os.path.join(ws, "step4", "quantification_runs", os.path.basename(run_dir))
+        if os.path.isdir(quant):
+            paths.append(quant)
+        plan["run_dir"] = run_dir
+        what.append(os.path.basename(run_dir))
+    handoff = handoff_corrected(ws)
+    if version_id:
+        rec = get_version(ws, version_id)
+        if rec is None:
+            raise ValueError(f"no data version {version_id!r} in {ws}")
+        paths.append(version_dir(ws, rec["folder"]))
+        corrected = (rec.get("corrected") or {}).get("path") or ""
+        if corrected and os.path.exists(corrected) \
+                and not corrected_users(ws, corrected, excluding=(version_id,)) \
+                and (release_handoff or os.path.abspath(corrected) != handoff) \
+                and not is_inside(corrected, version_dir(ws, rec["folder"])):
+            paths.append(_corrected_folder(corrected))
+        for region in rec.get("regions") or []:        # a legacy v1's fused, in place
+            fused = region.get("fused_zarr_path") or ""
+            if fused and os.path.exists(fused) \
+                    and not is_inside(fused, version_dir(ws, rec["folder"])):
+                paths.append(os.path.abspath(fused))
+        plan["version"] = version_id
+        what.append(version_id)
+    if draft:
+        if handoff and is_inside(handoff, corrected_root(ws)) \
+                and not corrected_users(ws, handoff) and os.path.exists(handoff):
+            paths.append(_corrected_folder(handoff))
+        plan["draft"] = True
+        what.append("draft")
+    seen, unique = set(), []
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return dict(plan, paths=unique, what="_".join(what) or "nothing")
+
+
+def _drop_run_records(ws, run_dir):
+    """`roi_index.json` stops naming the run (active / latest included)."""
+    path = os.path.join(ws, "roi_index.json")
+    index = _load(path)
+    if not isinstance(index, dict):
+        return
+    runs = dict(index.get("segmentation_runs") or {})
+    gone = [k for k, e in runs.items()
+            if os.path.abspath(os.path.join(ws, (e or {}).get("path") or "")) == run_dir
+            or k == os.path.basename(run_dir)]
+    if not gone:
+        return
+    for k in gone:
+        runs.pop(k, None)
+    index["segmentation_runs"] = runs
+    if index.get("active_segmentation_run") in gone:
+        index["active_segmentation_run"] = ""
+    latest = dict(index.get("latest_by_method") or {})
+    for method, rid in list(latest.items()):
+        if rid in gone:
+            latest.pop(method)
+    index["latest_by_method"] = latest
+    _write_json_atomic(path, index)
+
+
+def _drop_version_record(ws, version_id):
+    index = load_index(ws)
+    index["versions"] = [e for e in index["versions"] if e.get("version") != version_id]
+    if index.get("current") == version_id:
+        index["current"] = ""
+    _write_json_atomic(index_path(ws), index)
+
+
+def _drop_workspace_record(project_dir, workspace_id):
+    from .roi_project import project_roi_index_path
+    path = project_roi_index_path(project_dir)
+    index = _load(path)
+    if not isinstance(index, dict):
+        return
+    index["rois"] = [r for r in index.get("rois") or [] if r.get("roi_id") != workspace_id]
+    if index.get("active_roi_id") == workspace_id:
+        index["active_roi_id"] = ""
+    _write_json_atomic(path, index)
+
+
+def _drop_records(project, ws, details):
+    if details.get("delete_workspace"):
+        _drop_workspace_record(project, os.path.basename(ws))
+        return
+    if details.get("run_dir"):
+        _drop_run_records(ws, details["run_dir"])
+    if details.get("version"):
+        _drop_version_record(ws, details["version"])
+
+
+def resume_deletions(project_dir) -> List[str]:
+    """A deletion interrupted half-way (§6): its records are dropped (again;
+    harmless when they already were), then what is still in place moves.
+    Called when the project is loaded. Returns the finished entries."""
+    from . import trash
+    project = os.path.abspath(project_dir)
+    for entry in trash.entries(project):
+        if entry.get("status") == "complete":
+            continue
+        ws = os.path.join(project, "rois", str(entry.get("workspace") or ""))
+        _drop_records(project, ws, entry.get("details") or {})
+    return trash.resume_incomplete(project)
+
+
+def execute_delete(plan, now=None) -> Dict:
+    """Carry out `plan` (§6): the trash entry is written `in_progress`, the
+    records stop naming what goes, the folders move, the entry is marked
+    complete; then one A3 `deletion` entry is appended. Returns the entry."""
+    from . import trash
+    from ..core import provenance as prov
+    ws = plan["workspace"]
+    project = os.path.dirname(os.path.dirname(ws))
+    ws_id = os.path.basename(ws)
+    details = {k: plan[k] for k in ("run_dir", "version", "draft", "delete_workspace")}
+    entry = trash.begin(project, ws_id, plan["what"], plan["paths"], details, now=now)
+    _drop_records(project, ws, details)
+    entry = trash.finish(entry)
+    try:
+        loc = prov.location(project, entry["folder"])
+        prov.register(project, "deletion", loc, os.path.basename(entry["folder"]),
+                      workspace_id=ws_id,
+                      parameters={"what": plan["what"], "run_dir": plan["run_dir"],
+                                  "data_version": plan["version"],
+                                  "draft": plan["draft"],
+                                  "workspace": plan["delete_workspace"],
+                                  "moved": [{"from": i["from"], "to": i["to"]}
+                                            for i in entry["items"]]})
+    except Exception as exc:               # noqa: BLE001 -- auxiliary record
+        print(f"[Provenance] deletion not recorded ({type(exc).__name__}: {exc})")
+    print(f"[Trash] moved {len(entry['items'])} item(s) to {entry['folder']}")
+    return entry

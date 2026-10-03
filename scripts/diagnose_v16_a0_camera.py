@@ -276,6 +276,15 @@ def neutralise_modals(log):
             log.write("modal", which=_n, text=[repr(x)[:200] for x in a[1:3]])
             return QtWidgets.QMessageBox.No if _n == "question" else QtWidgets.QMessageBox.Ok
         setattr(QtWidgets.QMessageBox, name, staticmethod(fake))
+    # Block DV-D (user ruling 2026-10-03): Step0's "Open a workspace" chooser
+    # is shown even for one row; answer it the way Enter does.
+    from block01.ui.step0.step0_page import Step0Page
+
+    def choose(self, rows):
+        row = rows[self._default_row_index(rows)] if rows else None
+        log.write("modal", which="open_a_workspace", rows=len(rows))
+        return row
+    Step0Page._choose_workspace = choose
 
 
 def open_copy(w, dest, log):

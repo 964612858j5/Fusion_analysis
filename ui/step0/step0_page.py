@@ -11038,6 +11038,18 @@ class Step0Page(QWidget):
         return state["rows"][row] if 0 <= row < len(state["rows"]) else None
 
     @staticmethod
+    def _dv_fused_readable(path):
+        """A fused product Step1 can open (codex review 4, #2): the folder
+        is there AND its Zarr opens."""
+        if not path or not os.path.isdir(path):
+            return False
+        try:
+            zarr.open(path, mode="r")
+        except Exception:                             # noqa: BLE001
+            return False
+        return True
+
+    @staticmethod
     def _default_row_index(rows):
         """The row the chooser preselects (Enter opens it): the draft, else
         the current version's newest row, else the first."""
@@ -11368,7 +11380,7 @@ class Step0Page(QWidget):
             accepted = getattr(self, "handoff_accepted", None)
             loaded = getattr(self, "_dv_loaded_record", None) or {}
             missing = [r.get("roi_name") for r in loaded.get("regions") or []
-                       if not os.path.isdir(r.get("fused_zarr_path") or "")]
+                       if not self._dv_fused_readable(r.get("fused_zarr_path") or "")]
             if callable(accepted) and not accepted():
                 print("[Workspace] the other version's handoff was not accepted: "
                       "nothing was deleted")

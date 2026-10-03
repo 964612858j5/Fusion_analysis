@@ -908,3 +908,42 @@ def test_a_recovery_that_stops_half_way_still_records_what_it_finished(tmp_path,
         dv.resume_deletions(proj)
     recs = [e for e in prov.load_entries(proj) if e["kind"] == "deletion"]
     assert [r["parameters"]["what"] for r in recs] == ["a"]
+
+
+# ── codex review 4 (astra low): findings 2, 3 ──────────────────────────────
+
+def test_an_unreadable_replacement_fused_deletes_nothing(page, two, slides, monkeypatch):
+    """#2: the folder is there, the Zarr does not open."""
+    from block01.ui.step0.step0_page import Step0Page
+    proj, ctx, v1, v2 = two
+    _answers(monkeypatch, also=True, load_other=lambda others: others[-1])
+    monkeypatch.setattr(Step0Page, "_write_step0_handoff",
+                        lambda self, config, zarr_path, remap_config_path=None: (config, [], [], {}))
+    monkeypatch.setattr(Step0Page, "_choose_workspace",
+                        lambda self, rows: self._dv_delete_row(
+                            _row(rows, "v002", "seg_20261003_120000_c"))[1])
+    page.handoff_accepted = lambda: True
+    fused = v1["regions"][0]["fused_zarr_path"]
+    shutil.rmtree(fused)
+    os.makedirs(fused)                                    # a folder, no Zarr in it
+    page._open_existing_workspace()
+    page._announce_opened_workspace()
+    assert dv.get_version(ctx["roi_dir"], "v002") is not None
+
+
+def test_an_earlier_run_without_its_version_is_refused_not_guessed(tmp_path):
+    """#3: the legacy version is gone; today's config corrects nothing, but
+    the product the run read was made with CD3 corrected -> refused."""
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_quant_sources import build_project, _edit_json
+    from block01.core import quant_sources as qs
+    p = build_project(tmp_path)
+    _edit_json(os.path.join(p["run_dir"], "segmentation_meta.json"),
+               lambda d: d.setdefault("paths", {}).update(corrected_channels_zarr=p["zarr"]))
+    _edit_json(p["cfg"], lambda d: d.update(channel_decisions={
+        k: "original" for k in d.get("channel_decisions") or {}}))
+    _edit_json(os.path.join(p["ws"], "step0", "step0_roi_result.json"),
+               lambda d: d.pop("corrected_decisions", None))
+    with pytest.raises(qs.QuantSourceError, match="cannot be resolved"):
+        qs.resolve_quant_job(p["run_dir"], open_slide=p["slide"])

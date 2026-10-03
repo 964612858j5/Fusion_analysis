@@ -616,7 +616,8 @@ def _two_versions(ws_ctx):
         with open(os.path.join(alloc["path"], "step0_channel_remap.json"), "w") as f:
             json.dump({"version_marker": n}, f)
         fused = os.path.join(alloc["path"], f"fused_ROI {n}.zarr")
-        os.makedirs(fused)
+        import zarr as _zarr
+        _zarr.open_group(fused, mode="w")
         rec = dict(_record(bbox=bbox), corrected={"path": corrected},
                    regions=[{"roi_name": f"ROI {n}", "roi_id": f"r{n}", "bbox_fullres": bbox,
                              "polygon_fullres": None, "fused_zarr_path": fused}])

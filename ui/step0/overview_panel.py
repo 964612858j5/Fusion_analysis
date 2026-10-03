@@ -313,6 +313,11 @@ class FullFusionWorker(QThread):
         # alive: then every `.inprogress.*` beside the target is a leftover of
         # a killed run, and is removed (user ruling 2026-10-02).
         self.sweep_leftovers = False
+        # Block DV (§3.12): when False, the A3 `fused` entries are not
+        # registered as each region is published; they are kept here and
+        # registered by the window once the data version is committed.
+        self.register_provenance = True
+        self.provenance_jobs = []
 
     def stop(self):
         self._stop = True
@@ -738,8 +743,12 @@ class FullFusionWorker(QThread):
                 gc.collect()
                 self._publish_store(tmp_path, zarr_path)
                 self._tmp_stores.remove(tmp_path)
-                self._register_fused(zarr_path, ome_path, rname, (ry0, ry1, rx0, rx1),
-                                     all_channels)
+                if self.register_provenance:
+                    self._register_fused(zarr_path, ome_path, rname, (ry0, ry1, rx0, rx1),
+                                         all_channels)
+                else:
+                    self.provenance_jobs.append(
+                        (zarr_path, ome_path, rname, (ry0, ry1, rx0, rx1), list(all_channels)))
 
                 zarr_paths[rname] = zarr_path
                 all_meta.append({

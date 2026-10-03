@@ -12,6 +12,7 @@ import collections
 import copy
 import time
 import weakref
+import shutil
 import traceback
 import multiprocessing as mp
 from queue import Empty
@@ -613,6 +614,9 @@ class MainWindow(QMainWindow):
         # user has pressed Cancel on it.
         self._fusion_exit_actions = []
         self._fusion_stopping     = False
+        # Block DV (§3.12): the data version a running Generate will publish
+        # {"workspace", "alloc", "record", "worker"}; None otherwise.
+        self._dv_pending = None
 
         self._preload_debounce = QTimer()
         self._preload_debounce.setSingleShot(True)
@@ -8720,6 +8724,17 @@ class MainWindow(QMainWindow):
             d.setLabelText(msg)
 
     def _on_fusion_done(self, zarr_path):
+        if self._dv_pending is not None:
+            try:
+                committed = self._dv_commit_pending()
+                zarr_path = (committed.get("regions") or [{}])[0].get("fused_zarr_path") \
+                    or zarr_path
+            except Exception as exc:                        # noqa: BLE001
+                print(f"[Step1] data version not published: {exc}\n{traceback.format_exc()}")
+                self._dv_discard_pending(f"publishing failed: {exc}")
+                self._on_fusion_error(f"The fused products were written but the data "
+                                      f"version could not be published: {exc}")
+                return
         self._fusion_pbar.setValue(100)
         method = CELLPOSE_WHOLECELL_FUSION
         if self._p2_params:
@@ -8759,8 +8774,11 @@ class MainWindow(QMainWindow):
         ):
             self._write_fused_zarr_meta(self._pending_fused_zarr_meta, zarr_path)
         self._save_step1_session()
-        # Count per-ROI zarrs from meta
-        meta_path = os.path.join(OUTPUT_DIR, "fusion_meta.json")
+        # Count per-ROI zarrs from meta (a data version keeps its own, beside
+        # its fused products -- block DV)
+        meta_path = os.path.join(os.path.dirname(os.path.abspath(zarr_path)), "fusion_meta.json")
+        if not os.path.isfile(meta_path):
+            meta_path = os.path.join(OUTPUT_DIR, "fusion_meta.json")
         n_zarrs = 1
         try:
             with open(meta_path) as f:
@@ -8786,6 +8804,8 @@ class MainWindow(QMainWindow):
         print(f"[Fusion Error]\n{msg}")
 
         def _release():
+            # Block DV: the thread has ended -- its unfinished version goes.
+            self._dv_discard_pending("the Generate did not complete")
             self._close_fusion_dialog()
             self._unlock_ui()
             QMessageBox.critical(self, "Fusion Error", msg)
@@ -9838,16 +9858,27 @@ class MainWindow(QMainWindow):
             expected_dapi_meta = self._expected_dapi_input_meta(worker_fcfg, selected_method)
             self._pending_dapi_input_meta = expected_dapi_meta
             self._reused_dapi_input_meta = False
-            if self._try_reuse_dapi_input_zarr(expected_dapi_meta):
-                return
         else:
             self._pending_dapi_input_meta = None
             self._reused_dapi_input_meta = False
             expected_fused_meta = self._expected_fused_zarr_meta(worker_fcfg, selected_method)
             self._pending_fused_zarr_meta = expected_fused_meta
             self._reused_fused_zarr_meta = False
-            if self._try_reuse_fused_zarr(expected_fused_meta):
+        # Block DV (§3.3, §3.12): inside a workspace, a Generate either
+        # returns to an existing version with the same content (its fused
+        # products are reused) or makes a new one in its own folder.
+        dv_ws = self._dv_workspace()
+        dv_record = None
+        if dv_ws:
+            dv_record = self._dv_candidate_record(selected_method)
+            reused = self._dv_reuse_same(dv_ws, dv_record)
+            if reused:
                 return
+        elif not is_wholecell:
+            if self._try_reuse_dapi_input_zarr(expected_dapi_meta):
+                return
+        elif self._try_reuse_fused_zarr(expected_fused_meta):
+            return
         # The worker stamps these into the zarr itself, so a finished store can
         # say what it is without a sidecar vouching for it.
         identity = (self._pending_fused_zarr_meta
@@ -9886,6 +9917,13 @@ class MainWindow(QMainWindow):
         n_rows, n_cols = sel
 
         # ── Start FullFusionWorker ────────────────────────────────────
+        dv_alloc = None
+        if dv_ws:
+            from ..utils import data_versions
+            dv_alloc = data_versions.new_version_folder(dv_ws)
+            worker_fcfg["output_dir"] = dv_alloc["path"]
+            print(f"[Step1] Generate into data version {dv_alloc['version']} "
+                  f"(published only when every region succeeds)")
         worker = FullFusionWorker(
             loader     = self.loader,
             fusion_cfg = worker_fcfg,
@@ -9898,10 +9936,133 @@ class MainWindow(QMainWindow):
             corrected_decisions = dict(self._corrected_decisions),
             use_pixel_sources   = True,
         )
-        self._start_fusion_worker(
+        if dv_alloc is not None:
+            worker.register_provenance = False
+            self._dv_pending = {"workspace": dv_ws, "alloc": dv_alloc,
+                                "record": dv_record, "worker": worker}
+        started = self._start_fusion_worker(
             worker,
             job_name="fusion" if is_wholecell else "DAPI input zarr",
             n_rows=n_rows, n_cols=n_cols)
+        if started is None and dv_alloc is not None:
+            self._dv_discard_pending("the fusion job was not started")
+
+    # ── data versions (block DV) ──────────────────────────────────────
+
+    def _dv_workspace(self):
+        """The workspace folder Generate versions into, or "" outside one."""
+        roi_dir = str((self.step0_output or {}).get("roi_dir") or "")
+        if roi_dir and os.path.isfile(os.path.join(roi_dir, "roi_manifest.json")):
+            return roi_dir
+        return ""
+
+    def _dv_regions(self):
+        """The analysis regions this Generate fuses, frozen (§3.11)."""
+        if self._rois:
+            return [{"roi_name": str(r.get("name") or ""),
+                     "roi_id": str(r.get("roi_id") or ""),
+                     "bbox_fullres": [int(v) for v in r.get("bbox_fullres") or []],
+                     "polygon_fullres": r.get("polygon_fullres") or None}
+                    for r in self._rois]
+        h, w = (int(v) for v in self.loader.shape[:2])
+        return [{"roi_name": "full", "roi_id": str((self.step0_output or {}).get("roi_id") or ""),
+                 "bbox_fullres": [0, h, 0, w], "polygon_fullres": None}]
+
+    def _dv_candidate_record(self, method):
+        """What a version made by this Generate would be (§3.2, §3.11):
+        existing fields only."""
+        from ..utils import workspace_session
+        from .step0.search_ctrl import read_corrected_zarr_state
+        s0 = self.step0_output or {}
+        raw = os.path.abspath(OME_TIFF_FILE) if OME_TIFF_FILE else ""
+        project = os.path.dirname(os.path.dirname(self._dv_workspace()))
+        try:
+            with open(os.path.join(project, "project_manifest.json"), encoding="utf-8") as f:
+                sources = (json.load(f) or {}).get("sources") or {}
+        except (OSError, ValueError):
+            sources = {}
+        corrected = str(self._corrected_zarr_path or s0.get("corrected_zarr_path") or "")
+        sigs, bboxes = read_corrected_zarr_state(corrected) if corrected else ({}, [])
+        snapshot = self._committed_fusion_settings() or {}
+        return {
+            "slide_id": workspace_session.slide_id_of(raw, sources) or "",
+            "raw_ome_path": raw,
+            "method": str(method or ""),
+            "regions": self._dv_regions(),
+            "corrected": {"path": os.path.abspath(corrected) if corrected else "",
+                          "signatures": {k: list(v) for k, v in sigs.items()},
+                          "bboxes": [list(b) for b in bboxes],
+                          "source_identity": s0.get("source_identity")},
+            "step0_remap_hash": str(s0.get("channel_remap_config_hash") or ""),
+            "fusion_settings_hash": str(snapshot.get("hash") or ""),
+        }
+
+    def _dv_reuse_same(self, workspace, record):
+        """Generate with nothing changed: the existing version is current
+        again and its fused products are used (§3.3). True when reused."""
+        from ..utils import data_versions
+        same = data_versions.find_same(workspace, record)
+        if same is None:
+            return False
+        fused = [r.get("fused_zarr_path") for r in same.get("regions") or []]
+        if not fused or not all(p and os.path.isdir(p) for p in fused):
+            return False
+        data_versions.set_current(workspace, same["version"])
+        print(f"[Step1] nothing changed since data version {same['version']}: "
+              f"its fused products are reused")
+        self._on_fusion_done(fused[0])
+        return True
+
+    def _dv_commit_pending(self):
+        """Every region succeeded: publish the version (§3.12 steps 3-6) --
+        parameter files in, `version.json` with complete last, index and
+        current last, and only then its A3 provenance. Returns the record."""
+        from ..core import provenance as prov
+        from ..utils import data_versions
+        pending = self._dv_pending      # kept until published: a failure is discarded
+        alloc, record = pending["alloc"], dict(pending["record"])
+        worker, ws = pending["worker"], pending["workspace"]
+        by_name = {}
+        try:
+            with open(os.path.join(alloc["path"], "fusion_meta.json"), encoding="utf-8") as f:
+                for reg in (json.load(f) or {}).get("regions") or []:
+                    by_name[str(reg.get("roi_name"))] = reg.get("zarr_path")
+        except (OSError, ValueError):
+            pass
+        regions = []
+        for reg in record.get("regions") or []:
+            path = by_name.get(reg["roi_name"])
+            if not path or not os.path.isdir(path):
+                raise RuntimeError(f"region {reg['roi_name']!r} has no fused product")
+            regions.append(dict(reg, fused_zarr_path=os.path.abspath(path)))
+        record["regions"] = regions
+        s0 = self.step0_output or {}
+        step0_dir = str(s0.get("step0_dir") or "")
+        copies = [(os.path.join(step0_dir, "correction_config.json"), "correction_config.json"),
+                  (str(s0.get("channel_remap_config_path") or ""), "step0_channel_remap.json"),
+                  (self._fusion_settings_path(), "step1_fusion_settings.json")]
+        for src, name in copies:
+            if src and os.path.isfile(src):
+                shutil.copy2(src, os.path.join(alloc["path"], name))
+        committed = data_versions.commit_version(ws, alloc, record)
+        self._dv_pending = None         # published: nothing left to discard
+        project = os.path.dirname(os.path.dirname(ws))
+        corrected = (record.get("corrected") or {}).get("path") or ""
+        if corrected and os.path.isdir(corrected):
+            prov.register_corrected_channels(project, ws, corrected, record.get("raw_ome_path"))
+        for job in worker.provenance_jobs:
+            worker._register_fused(*job)
+        print(f"[Step1] data version {committed['version']} published "
+              f"({len(regions)} region(s))")
+        return committed
+
+    def _dv_discard_pending(self, reason):
+        """Cancel / error / not started: no version, the folder goes (§3.12)."""
+        pending, self._dv_pending = self._dv_pending, None
+        if pending is None:
+            return
+        shutil.rmtree(pending["alloc"]["path"], ignore_errors=True)
+        print(f"[Step1] no data version: {reason}; {pending['alloc']['folder']} removed")
 
     def _start_fusion_worker(self, worker, job_name, n_rows, n_cols):
         """Bind a fusion job to the dataset and handoff it was started for.
@@ -10015,6 +10176,9 @@ class MainWindow(QMainWindow):
         self._fusion_token = None
         worker = self._fusion_worker
         self._fusion_worker = None
+        # Block DV: a retired job publishes nothing; its folder is cleaned
+        # when the workspace is opened next (cleanup_incomplete).
+        self._dv_pending = None
         self._fusion_exit_actions = []
         self._fusion_stopping = False
         self._close_fusion_dialog()

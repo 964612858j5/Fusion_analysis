@@ -10971,6 +10971,11 @@ class Step0Page(QWidget):
         return True
 
     def _restore_workspace(self, ws):
+        # Block DV (§3.12): a Generate that was cancelled, failed or killed
+        # left a version folder that is not a version: it goes now.
+        removed = data_versions.cleanup_incomplete(ws.workspace_dir)
+        if removed:
+            print(f"[Workspace] removed unfinished data-version folders: {removed}")
         published = step0_handoff.published_handoff(ws.step0_dir)
         if published is None:
             raise ValueError("no committed Step0 result")

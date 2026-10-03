@@ -169,7 +169,7 @@ from test_v16_a6_workspace import (  # noqa: E402,F401  (fixtures)
     app, slides, page, _project, _commit_step0, _tree)
 
 
-from PyQt5 import QtCore  # noqa: E402
+from PyQt5 import QtCore, QtWidgets  # noqa: E402
 
 
 class _FakeWsi(QtCore.QThread):
@@ -332,3 +332,144 @@ def test_the_handoff_stays_in_the_workspaces_step0_and_registers_nothing(
     assert spec["manifest_path"] == os.path.join(ctx["step_dirs"]["step0"],
                                                  "step0_roi_result.json")
     assert spec["register_corrected"] is False
+
+
+# ── part 3: the Generate transaction and the deferred A3 (§3.12) ──────────
+
+import test_step1_fusion_isolation as iso    # noqa: E402
+import test_v16_a6_async as a6               # noqa: E402
+import test_step1_result_publication as pub  # noqa: E402
+
+
+def _dv_window(app, tmp_path):
+    w = iso._window(app, tmp_path)
+    ws = tmp_path / "proj" / "rois" / "ws1"
+    (ws / "step0").mkdir(parents=True)
+    (ws / "roi_manifest.json").write_text("{}")
+    w.step0_output = dict(w.step0_output, roi_dir=str(ws), roi_id="ws1",
+                          step0_dir=str(ws / "step0"))
+    return w, str(ws)
+
+
+class _JobsWorker:
+    def __init__(self):
+        self.provenance_jobs = [("/f1", "/raw", "R1", (0, 1, 0, 1), ["CD3"])]
+        self.registered = []
+
+    def _register_fused(self, *job):
+        self.registered.append(job)
+
+
+def _pending(w, ws, regions, write_meta_for):
+    alloc = dv.new_version_folder(ws)
+    metas = []
+    for name in write_meta_for:
+        z = os.path.join(alloc["path"], f"fused_{name}.zarr")
+        os.makedirs(z)
+        metas.append({"roi_name": name, "zarr_path": z})
+    with open(os.path.join(alloc["path"], "fusion_meta.json"), "w") as f:
+        json.dump({"regions": metas}, f)
+    rec = dict(_record(), regions=[{"roi_name": n, "roi_id": n, "bbox_fullres": [0, 10, 0, 10],
+                                    "polygon_fullres": None} for n in regions])
+    worker = _JobsWorker()
+    w._dv_pending = {"workspace": ws, "alloc": alloc, "record": rec, "worker": worker}
+    return alloc, worker
+
+
+def test_a_successful_generate_publishes_then_registers_a3(app, tmp_path, monkeypatch):
+    from block01.core import provenance as prov
+    w, ws = _dv_window(app, tmp_path)
+    seen = []
+    monkeypatch.setattr(prov, "register_corrected_channels",
+                        lambda *a, **k: seen.append(("corrected", dv.load_index(ws)["current"])))
+    try:
+        alloc, worker = _pending(w, ws, ["R1", "R2"], ["R1", "R2"])
+        committed = w._dv_commit_pending()
+        assert committed["version"] == "v001" and dv.current_version(ws)["version"] == "v001"
+        regions = dv.current_version(ws)["regions"]
+        assert [r["roi_name"] for r in regions] == ["R1", "R2"]          # multi-ROI
+        assert all(os.path.isdir(r["fused_zarr_path"]) for r in regions)
+        # A3 after the index named the version, never before
+        assert worker.registered == [("/f1", "/raw", "R1", (0, 1, 0, 1), ["CD3"])]
+        assert w._dv_pending is None
+    finally:
+        w.close()
+
+
+def test_a_region_without_its_product_publishes_nothing_and_registers_nothing(
+        app, tmp_path, monkeypatch):
+    from block01.core import provenance as prov
+    w, ws = _dv_window(app, tmp_path)
+    first = dv.commit_version(ws, dv.new_version_folder(ws), _record())     # v1
+    calls = []
+    monkeypatch.setattr(prov, "register_corrected_channels", lambda *a, **k: calls.append(1))
+    errors = []
+    monkeypatch.setattr(w, "_on_fusion_error", lambda msg: errors.append(msg))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *a, **k: None)
+    try:
+        alloc, worker = _pending(w, ws, ["R1", "R2"], ["R1"])            # R2 failed
+        w._on_fusion_done("/whatever")
+        assert errors and "could not be published" in errors[0]
+        assert [v["version"] for v in dv.list_versions(ws)] == ["v001"]
+        assert dv.current_version(ws)["version"] == first["version"]
+        assert not os.path.exists(alloc["path"])                          # folder gone
+        assert worker.registered == [] and calls == []                    # no A3
+    finally:
+        w.close()
+
+
+def test_an_error_or_cancel_leaves_no_version_and_the_current_one(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *a, **k: None)
+    w, ws = _dv_window(app, tmp_path)
+    dv.commit_version(ws, dv.new_version_folder(ws), _record())         # v1
+    worker = a6._SlowStop()
+    try:
+        alloc = dv.new_version_folder(ws)
+        w._start_fusion_worker(worker, job_name="fusion", n_rows=1, n_cols=1)
+        w._dv_pending = {"workspace": ws, "alloc": alloc, "record": _record(),
+                         "worker": worker}
+        worker.release()                                   # error("stopped") from run()
+        worker.exit_gate.set()
+        worker.wait(5000)
+        a6._pump()
+        assert not os.path.exists(alloc["path"])
+        assert [v["version"] for v in dv.list_versions(ws)] == ["v001"]
+        assert dv.current_version(ws)["version"] == "v001"
+    finally:
+        worker.release()
+        worker.exit_gate.set()
+        worker.wait(5000)
+        a6._pump()
+        w.close()
+
+
+def test_generate_with_nothing_changed_returns_to_the_same_version(app, tmp_path, monkeypatch):
+    w, ws = _dv_window(app, tmp_path)
+    done = []
+    monkeypatch.setattr(w, "_on_fusion_done", lambda path: done.append(path))
+    try:
+        alloc = dv.new_version_folder(ws)
+        fused = os.path.join(alloc["path"], "fused_R1.zarr")
+        os.makedirs(fused)
+        rec = dict(_record(), regions=[{"roi_name": "R1", "roi_id": "R1",
+                                        "bbox_fullres": [0, 10, 0, 10], "polygon_fullres": None,
+                                        "fused_zarr_path": fused}])
+        dv.commit_version(ws, alloc, rec)
+        dv.commit_version(ws, dv.new_version_folder(ws), _record(fusion="other"))  # v2 current
+        assert w._dv_reuse_same(ws, dict(rec)) is True
+        assert dv.current_version(ws)["version"] == "v001" and done == [fused]
+        assert w._dv_reuse_same(ws, _record(fusion="third")) is False
+    finally:
+        w.close()
+
+
+def test_the_worker_keeps_the_a3_entries_for_later(tmp_path, monkeypatch):
+    from block01.ui.step0 import overview_panel as op
+    called = []
+    monkeypatch.setattr(op.FullFusionWorker, "_register_fused",
+                        lambda self, *a: called.append(a))
+    wk = pub._worker(tmp_path)
+    wk.register_provenance = False
+    wk.run()
+    assert called == []
+    assert len(wk.provenance_jobs) == 1 and wk.provenance_jobs[0][2] == "full"

@@ -10,15 +10,20 @@ under ``<workspace>/versions/``:
         version.json                    its record ("complete": true, written last)
         correction_config.json, step0_channel_remap.json,
         step1_fusion_settings.json      copies of its parameter files
-        corrected_channels.zarr         its corrected product (unless it
-                                        references another version's, identical one)
         fused_<region>.zarr             one per region
-    versions/.draft/                    the dirty draft's corrected product
+    versions/corrected/c003_<stamp>/    corrected products (with their coarse
+        corrected_channels.zarr         sidecar). A version REFERENCES one in
+        corrected_coarse.zarr           place; once referenced it is read-only,
+                                        and a Save that must change pixels
+                                        copies it into a new cNNN folder (§3.15).
+                                        One that no version references yet is
+                                        the dirty draft's.
 
 A version EXISTS only when it is listed in ``index.json`` and its
 ``version.json`` says ``"complete": true`` (application §3.12). A folder that
 is neither -- a Generate that was cancelled, failed or killed -- is removed by
-`cleanup_incomplete`. A published version is never written again (§3.14).
+`cleanup_incomplete`. A published version, and every product it references, is
+never written again (§3.14).
 
 Ids are a counter plus a timestamp (``v003_20261003_231500``): no hash
 (application §3.2). Whether two versions are the same is decided by comparing
@@ -36,7 +41,8 @@ from typing import Dict, List, Optional
 VERSIONS_DIR = "versions"
 INDEX = "index.json"
 RECORD = "version.json"
-DRAFT_DIR = ".draft"
+CORRECTED_DIR = "corrected"
+CORRECTED_ZARR = "corrected_channels.zarr"
 LEGACY_LABEL = "v1 (registered from an earlier workspace)"
 
 
@@ -50,13 +56,20 @@ def index_path(workspace_dir) -> str:
     return os.path.join(versions_dir(workspace_dir), INDEX)
 
 
-def draft_dir(workspace_dir) -> str:
-    """Where the dirty draft's corrected product is built (§3.15)."""
-    return os.path.join(versions_dir(workspace_dir), DRAFT_DIR)
+def corrected_root(workspace_dir) -> str:
+    return os.path.join(versions_dir(workspace_dir), CORRECTED_DIR)
 
 
-def draft_corrected_path(workspace_dir) -> str:
-    return os.path.join(draft_dir(workspace_dir), "corrected_channels.zarr")
+def new_corrected_folder(workspace_dir, now=None) -> str:
+    """A new corrected-product folder for the dirty draft; returns the path
+    of the corrected Zarr inside it (not created)."""
+    root = corrected_root(workspace_dir)
+    os.makedirs(root, exist_ok=True)
+    used = [int(n[1:4]) for n in os.listdir(root) if n.startswith("c") and n[1:4].isdigit()]
+    stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    folder = os.path.join(root, f"c{(max(used) if used else 0) + 1:03d}_{stamp}")
+    os.makedirs(folder, exist_ok=False)
+    return os.path.join(folder, CORRECTED_ZARR)
 
 
 def version_dir(workspace_dir, folder) -> str:
@@ -176,7 +189,8 @@ def set_current(workspace_dir, version_id) -> bool:
 def cleanup_incomplete(workspace_dir) -> List[str]:
     """Remove version folders that do not exist as versions: not in the
     index, or without a complete record (a Generate that was cancelled,
-    failed or killed). The draft is kept. Returns the removed folders."""
+    failed or killed). Corrected-product folders are kept (the draft may be
+    one of them). Returns the removed folders."""
     root = versions_dir(workspace_dir)
     if not os.path.isdir(root):
         return []
@@ -185,7 +199,7 @@ def cleanup_incomplete(workspace_dir) -> List[str]:
     removed = []
     for name in sorted(os.listdir(root)):
         path = os.path.join(root, name)
-        if name in (INDEX, DRAFT_DIR) or name.startswith(".") or not os.path.isdir(path):
+        if name in (INDEX, CORRECTED_DIR) or name.startswith(".") or not os.path.isdir(path):
             continue
         if name not in listed:
             shutil.rmtree(path, ignore_errors=True)

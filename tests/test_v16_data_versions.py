@@ -80,10 +80,10 @@ def test_incomplete_folders_are_cleaned_and_numbers_never_reused(tmp_path):
     ws = _ws(tmp_path)
     _commit(ws)
     failed = dv.new_version_folder(ws)
-    os.makedirs(dv.draft_dir(ws))
+    draft = dv.new_corrected_folder(ws)
     removed = dv.cleanup_incomplete(ws)
     assert removed == [failed["folder"]]
-    assert os.path.isdir(dv.draft_dir(ws))                # the draft is kept
+    assert os.path.isdir(os.path.dirname(draft))          # corrected folders are kept
     # the failed folder is gone, so v001 is the highest number on disk
     assert dv.new_version_folder(ws)["version"] == "v002"
 
@@ -149,7 +149,7 @@ def test_products_of_published_versions_are_recognised(tmp_path):
     inside = os.path.join(dv.version_dir(ws, rec["folder"]), "corrected_channels.zarr")
     assert dv.is_published_product(ws, inside)
     assert dv.is_published_product(ws, "/x/corrected.zarr")   # a referenced legacy product
-    assert not dv.is_published_product(ws, dv.draft_corrected_path(ws))
+    assert not dv.is_published_product(ws, dv.new_corrected_folder(ws))
 
 
 def test_a_versions_own_folder_size_excludes_what_it_references(tmp_path):
@@ -206,7 +206,15 @@ def _published_with_tophat(tmp_path, slides):
         f.write(b"published pixels")
     sidecar = os.path.join(ctx["step_dirs"]["step0"], "corrected_coarse.zarr")
     os.makedirs(sidecar)
+    # a version references it: from now on it is read-only (§3.14)
+    alloc = dv.new_version_folder(ctx["roi_dir"])
+    dv.commit_version(ctx["roi_dir"], alloc, dict(_record(), corrected={"path": z}))
     return proj, ctx, z
+
+
+def _drafts(ws):
+    root = dv.corrected_root(ws)
+    return sorted(os.listdir(root)) if os.path.isdir(root) else []
 
 
 @pytest.fixture
@@ -239,11 +247,12 @@ def test_changing_one_channel_copies_the_published_product_once_and_corrects_onl
     dv_page._channel_params = {"CD8": {"tophat_radius": 40}}     # CD8 25 -> 40
     dv_page._save_and_continue()
     w = _FakeWsi.made[-1]
-    draft = dv.draft_corrected_path(ctx["roi_dir"])
-    assert w.output_dir == os.path.dirname(draft)                 # written into the draft
+    (folder,) = _drafts(ctx["roi_dir"])
+    draft_dir = os.path.join(dv.corrected_root(ctx["roi_dir"]), folder)
+    assert w.output_dir == draft_dir                              # written into the draft
     assert w.incremental is True and w.process_channels == {"CD8"}
-    assert os.path.isfile(os.path.join(draft, "marker.bin"))     # copied once
-    assert os.path.isdir(os.path.join(dv.draft_dir(ctx["roi_dir"]), "corrected_coarse.zarr"))
+    assert os.path.isfile(os.path.join(draft_dir, "corrected_channels.zarr", "marker.bin"))
+    assert os.path.isdir(os.path.join(draft_dir, "corrected_coarse.zarr"))   # sidecar too
     assert _tree(published) == before                             # read-only
 
 
@@ -258,7 +267,7 @@ def test_a_save_with_no_corrected_change_references_the_published_product(
                         lambda path: (dict(held), [(0, 1001, 0, 999)]))
     dv_page._save_and_continue()
     assert _FakeWsi.made == []                                    # nothing recomputed
-    assert not os.path.exists(dv.draft_dir(ctx["roi_dir"]))       # nothing copied
+    assert _drafts(ctx["roi_dir"]) == []                          # nothing copied
 
 
 def test_another_roi_makes_a_fresh_draft_and_recomputes_every_channel(
@@ -279,20 +288,28 @@ def test_another_roi_makes_a_fresh_draft_and_recomputes_every_channel(
     before = _tree(published)
     dv_page._save_and_continue()
     w = _FakeWsi.made[-1]
-    draft = dv.draft_corrected_path(ctx["roi_dir"])
-    assert w.output_dir == os.path.dirname(draft)
+    (folder,) = _drafts(ctx["roi_dir"])
+    draft_dir = os.path.join(dv.corrected_root(ctx["roi_dir"]), folder)
+    assert w.output_dir == draft_dir
     assert w.incremental is False and w.process_channels == {"CD3", "CD8"}
-    assert not os.path.exists(os.path.join(draft, "marker.bin"))  # not copied
+    assert not os.path.exists(os.path.join(draft_dir, "corrected_channels.zarr"))  # not copied
     assert _tree(published) == before
 
 
 def test_once_a_draft_exists_saves_only_touch_the_draft(dv_page, tmp_path, slides,
                                                          monkeypatch):
+    """The handoff references the draft (no version references it yet):
+    the next Save corrects it in place and copies nothing."""
+    import json as _json
     import block01.ui.step0.step0_page as sp
     proj, ctx, published = _published_with_tophat(tmp_path, slides)
-    dv_page._open_existing_workspace()
-    draft = dv.draft_corrected_path(ctx["roi_dir"])
+    draft = dv.new_corrected_folder(ctx["roi_dir"])
     os.makedirs(draft)
+    manifest = os.path.join(ctx["step_dirs"]["step0"], "step0_roi_result.json")
+    m = _json.load(open(manifest))
+    m["corrected_zarr_path"] = draft
+    _json.dump(m, open(manifest, "w"))
+    dv_page._open_existing_workspace()
     held = _sigs(dv_page, {"tophat_radius": 25, "cucim_sigma": 30},
                  {"CD3": "tophat", "CD8": "tophat"})
     monkeypatch.setattr(sp, "read_corrected_zarr_state",
@@ -302,14 +319,15 @@ def test_once_a_draft_exists_saves_only_touch_the_draft(dv_page, tmp_path, slide
     dv_page._save_and_continue()
     w = _FakeWsi.made[-1]
     assert w.output_dir == os.path.dirname(draft) and w.process_channels == {"CD3"}
+    assert w.incremental is True
+    assert len(_drafts(ctx["roi_dir"])) == 1                     # no second copy
     assert _tree(published) == before
-
 
 def test_the_handoff_stays_in_the_workspaces_step0_and_registers_nothing(
         dv_page, tmp_path, slides):
     proj, ctx, published = _published_with_tophat(tmp_path, slides)
     dv_page._open_existing_workspace()
-    spec = dv_page._handoff_spec({}, dv.draft_corrected_path(ctx["roi_dir"]))
+    spec = dv_page._handoff_spec({}, dv.new_corrected_folder(ctx["roi_dir"]))
     assert spec["step0_dir"] == ctx["step_dirs"]["step0"]
     assert spec["manifest_path"] == os.path.join(ctx["step_dirs"]["step0"],
                                                  "step0_roi_result.json")

@@ -11151,41 +11151,38 @@ class Step0Page(QWidget):
     # ── data versions: the corrected draft (block DV §3.15) ─────────────
 
     def _dv_base_corrected_path(self, step0_dir):
-        """The corrected product this Save starts from."""
+        """The corrected product this Save starts from: the one the handoff
+        references (a published, read-only product or the dirty draft), or a
+        new draft folder when there is none."""
         ws = (self._roi_context or {}).get("roi_dir")
         if not ws:
             return os.path.join(step0_dir, "corrected_channels.zarr")
-        draft = data_versions.draft_corrected_path(ws)
-        if os.path.isdir(draft):
-            return draft
         published = self._published_handoff()
         if published is not None and published[2] and os.path.isdir(published[2]):
             return published[2]
-        return draft
+        return data_versions.new_corrected_folder(ws)
 
     def _dv_prepare_draft(self, base_path, incremental):
         """The draft to correct into, and whether to correct incrementally.
 
-        * the base is the draft already: correct it (as today);
-        * same ROI and source (`incremental`): copy the base -- a published,
-          read-only product -- into the draft once, with its coarse sidecar,
-          and correct only the changed channels;
-        * another ROI: a fresh, empty draft; every channel recomputed."""
+        * the base is the dirty draft (no version references it): correct it
+          in place, as today;
+        * the base is published (read-only) and the ROI and source are the
+          same (`incremental`): copy it once, with its coarse sidecar, into a
+          new corrected folder and correct only the changed channels;
+        * another ROI: a new, empty corrected folder; every channel recomputed."""
         ws = (self._roi_context or {}).get("roi_dir")
         if not ws:
             return base_path, incremental
-        draft = data_versions.draft_corrected_path(ws)
-        if os.path.abspath(base_path) == os.path.abspath(draft):
-            return draft, incremental
-        ddir = data_versions.draft_dir(ws)
-        if os.path.isdir(ddir):
-            shutil.rmtree(ddir, ignore_errors=True)
-        os.makedirs(ddir, exist_ok=True)
+        if not data_versions.is_published_product(ws, base_path):
+            return base_path, incremental
+        draft = data_versions.new_corrected_folder(ws)
         if incremental and os.path.isdir(base_path):
             shutil.copytree(base_path, draft)
             sidecar = os.path.join(os.path.dirname(base_path), "corrected_coarse.zarr")
             if os.path.isdir(sidecar):
-                shutil.copytree(sidecar, os.path.join(ddir, "corrected_coarse.zarr"))
+                shutil.copytree(sidecar, os.path.join(os.path.dirname(draft),
+                                                      "corrected_coarse.zarr"))
             print(f"[Step0] corrected draft: copied {base_path} (read-only) to {draft}")
             return draft, True
         print(f"[Step0] corrected draft: new at {draft}; every channel recomputed")

@@ -204,6 +204,15 @@ def test_a_new_schema_preserves_an_intentional_override_equal_to_old_defaults(
     assert page._dec_radius.value() == 15
 
 
+def _until_started(captured, ms=3000):
+    """Block CS P2: Save starts its worker once its hand-off is done."""
+    from PyQt5 import QtTest
+    for _ in range(ms // 10):
+        if captured.get("started"):
+            return
+        QtTest.QTest.qWait(10)
+
+
 def _write_real_corrected_zarr(step0_dir, loader, config, rois,
                                process_channels=("CD3",)):
     result = {}
@@ -336,6 +345,7 @@ def test_a_global_change_dirties_only_channels_that_still_inherit_it(
     page._watch_production_worker = lambda worker: None
 
     page._save_and_continue()
+    _until_started(captured)
 
     assert captured == {
         "channels": {"CD3"},
@@ -473,6 +483,7 @@ def test_no_patch_background_change_processes_the_full_wsi_region(
     page._watch_production_worker = lambda worker: None
 
     page._save_and_continue()
+    _until_started(captured)
 
     assert captured["started"] is True
     assert captured["channels"] == {"CD3"}

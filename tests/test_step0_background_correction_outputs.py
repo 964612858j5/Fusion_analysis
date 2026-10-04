@@ -577,6 +577,12 @@ def _step0_dispatch_capture(tmp_path, monkeypatch, existing_sigs):
     monkeypatch.setattr(Step0Page, "_ensure_empty_corrected_zarr",
                         lambda self, *a, **k: None)
     p._save_and_continue()
+    # Block CS P2: the worker starts once Save's preparation is done.
+    from PyQt5 import QtTest
+    for _ in range(300):
+        if p.__dict__.get("_save_prep") is None:
+            break
+        QtTest.QTest.qWait(10)
     return cap, p
 
 
@@ -684,6 +690,11 @@ def test_dispatch_roi_bbox_mismatch_reprocesses_all(app, tmp_path, monkeypatch):
     monkeypatch.setattr(sp, "_WsiCorrectionProgressDialog", _FD)
     monkeypatch.setattr(Step0Page, "_emit_complete", lambda self, *a, **k: None)
     p._save_and_continue()
+    from PyQt5 import QtTest                     # (block CS P2: started after
+    for _ in range(300):                         # Save's preparation)
+        if p.__dict__.get("_save_prep") is None:
+            break
+        QtTest.QTest.qWait(10)
     assert cap["process"] == {"CD68", "Ki67"}    # ROI changed -> no unsafe skip
     assert cap["incremental"] is False           # not incremental on ROI mismatch
 

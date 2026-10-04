@@ -179,8 +179,23 @@ def dv_page(page, monkeypatch, tmp_path, slides):
     monkeypatch.setattr(sp, "_WsiCorrectionProgressDialog",
                         lambda parent: type("D", (), {"cancel_requested": type(
                             "S", (), {"connect": lambda *a, **k: None})(),
-                            "show": lambda self: None, "exec_": lambda self: 0})())
+                            "show": lambda self: None, "exec_": lambda self: 0,
+                            "set_progress": lambda self, *a: None,
+                            "allow_close": lambda self: None,
+                            "accept": lambda self: None,
+                            "reject": lambda self: None})())
     return page
+
+
+def _prepared(page, ms=5000):
+    """Block CS P2: a Save that copies a run, or hands the viewer off,
+    finishes its preparation off the GUI thread; wait for it."""
+    from PyQt5 import QtTest
+    for _ in range(ms // 10):
+        if page.__dict__.get("_save_prep") is None:
+            return
+        QtTest.QTest.qWait(10)
+    raise AssertionError("the Save preparation did not finish")
 
 
 def _sigs(page, config_mp, decisions):
@@ -237,6 +252,7 @@ def test_a_correction_change_writes_a_new_run_and_leaves_the_old_one(
     before = _tree(base)
     dv_page._channel_params = {"CD8": {"tophat_radius": 40}}     # CD8 25 -> 40
     dv_page._save_and_continue()
+    _prepared(dv_page)
     w = _FakeWsi.made[-1]
     new = [n for n in _runs(ctx) if n != os.path.basename(base)]
     assert len(new) == 1
@@ -259,6 +275,7 @@ def test_an_intensity_only_save_keeps_the_correct_run(dv_page, tmp_path, slides,
     monkeypatch.setattr(Step0Page, "_intensity_settings_changed", lambda self: True)
     emitted = _quiet_emit(monkeypatch)
     dv_page._save_and_continue()
+    _prepared(dv_page)
     assert _FakeWsi.made == []                                    # nothing recomputed
     assert _runs(ctx) == [os.path.basename(base)]                 # nothing copied, no new run
     assert emitted == [os.path.join(base, "corrected_channels.zarr")]   # the same run
@@ -274,6 +291,7 @@ def test_a_withdrawn_channel_is_a_new_run_of_the_same_pixels(dv_page, tmp_path, 
     dv_page._set_channel_decision("CD8", "original")
     _quiet_emit(monkeypatch)
     dv_page._save_and_continue()
+    _prepared(dv_page)
     assert _FakeWsi.made == []                                    # no channel recomputed
     new = [n for n in _runs(ctx) if n != os.path.basename(base)]
     assert len(new) == 1
@@ -290,6 +308,7 @@ def test_publishing_a_correct_run_freezes_its_parameters(dv_page, tmp_path, slid
                         lambda path: (dict(held), [(0, 1001, 0, 999)]))
     dv_page._channel_params = {"CD8": {"tophat_radius": 40}}
     dv_page._save_and_continue()
+    _prepared(dv_page)
     run = dv_page._rm_pending_run
     zarr_path = os.path.join(run, "corrected_channels.zarr")
     config = dv_page._clean_correction_config(dv_page._build_config())
@@ -320,6 +339,7 @@ def test_a_cancelled_correction_leaves_no_run(dv_page, tmp_path, slides, monkeyp
     monkeypatch.setattr(sp.QMessageBox, "information", lambda *a, **k: None)
     dv_page._channel_params = {"CD8": {"tophat_radius": 40}}
     dv_page._save_and_continue()
+    _prepared(dv_page)
     run = dv_page._rm_pending_run
     dv_page._wsi_dialog = None                                    # the test's dialog is a stub
     dv_page._on_wsi_canceled(os.path.join(run, "corrected_channels.zarr"))
@@ -735,6 +755,7 @@ def test_a_save_never_corrects_into_another_projects_run(dv_page, tmp_path, slid
     before = _tree(str(other))
     _quiet_emit(monkeypatch)
     dv_page._save_and_continue()
+    _prepared(dv_page)
     w = _FakeWsi.made[-1]
     assert os.path.dirname(w.output_dir) == rs.runs_dir(ctx["roi_dir"])   # its own run
     assert _tree(str(other)) == before                                    # never written

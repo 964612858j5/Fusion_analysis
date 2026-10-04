@@ -7,7 +7,7 @@ Qt tests need an offscreen platform (env: QT_QPA_PLATFORM=offscreen).
 import os
 
 import pytest
-from PyQt5 import QtCore
+from PyQt5 import QtCore, QtTest
 
 pytest.importorskip("PyQt5")
 
@@ -683,6 +683,11 @@ def _install_gpu_path_recorders(monkeypatch, timeline):
     monkeypatch.setattr(
         Step0Page, "_release_explore_for_production",
         lambda self, reason: timeline.append(f"release:{reason}"))
+    # Block CS P2: Save's own, non-blocking hand-off.
+    monkeypatch.setattr(
+        Step0Page, "_begin_release_explore_for_production",
+        lambda self, reason, cancelled=None:
+        (timeline.append(f"release:{reason}"), _handed_off())[1])
     # The watcher records the OBJECT it was handed, so a path that watched
     # a different worker than the one it started -- or watched after
     # starting -- is visible rather than merely absent.
@@ -692,6 +697,34 @@ def _install_gpu_path_recorders(monkeypatch, timeline):
         lambda self, worker: (timeline.append(("watch", id(worker))),
                               real_watch(self, worker))[0])
     return mod
+
+
+def _handed_off():
+    import threading
+    done = threading.Event()
+    done.set()
+    return done, {}
+
+
+def test_a_failing_save_hand_off_starts_nothing_and_leaves_nothing(gpu_path_page,
+                                                                   monkeypatch):
+    """Block CS P2: Save's non-blocking hand-off failing is the same refusal
+    as the blocking one -- no worker, no watcher, Save usable again."""
+    from block01.ui.step0.step0_page import Step0Page
+
+    timeline = []
+    _install_gpu_path_recorders(monkeypatch, timeline)
+    page = gpu_path_page
+    monkeypatch.setattr(
+        Step0Page, "_begin_release_explore_for_production",
+        lambda self, reason, cancelled=None:
+        (_ for _ in ()).throw(RuntimeError("release failed")))
+    with pytest.raises(RuntimeError, match="release failed"):
+        page._save_and_continue()
+    QtTest.QTest.qWait(100)
+    assert not [e for e in timeline if isinstance(e, tuple)
+                and e[0] in ("worker.start", "watch")], timeline
+    assert page.production_correction_busy() is None
 
 
 def _build_gpu_path_page(app, tmp_path):
@@ -771,6 +804,11 @@ def test_a_gpu_path_releases_explore_before_starting(gpu_path_page,
     page = gpu_path_page
 
     driver(page)
+    # (Save starts its worker once its preparation is done -- block CS P2)
+    for _ in range(300):
+        if any(isinstance(e, tuple) and e[0] == "worker.start" for e in timeline):
+            break
+        QtTest.QTest.qWait(10)
 
     starts = [i for i, e in enumerate(timeline)
               if isinstance(e, tuple) and e[0] == "worker.start"]

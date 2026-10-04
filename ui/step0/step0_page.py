@@ -3497,6 +3497,8 @@ class Step0Page(QWidget):
         loop stays: proving no handle can ever land there is a stronger
         claim than checking.
         """
+        if self.__dict__.get("_save_prep") is not None:      # block CS P2
+            return "whole-slide correction (Save)"
         worker = getattr(self, "_batch_worker", None)
         if worker is not None and worker.isRunning():
             return "patch background correction"
@@ -3538,6 +3540,23 @@ class Step0Page(QWidget):
         explore_tab.release_for_production(reason)
         print(f"[step0] suspended Explore for {reason} in "
               f"{(time.perf_counter() - t0) * 1000:.0f} ms", flush=True)
+
+    def _begin_release_explore_for_production(self, reason, cancelled=None):
+        """`_release_explore_for_production` without blocking (block CS P2,
+        Step0 Save only): stops the strip's neighbour preparation and the
+        full image's producers now and returns `(event, timings)` -- the
+        event is set once the floor computation has ended and the scheduler
+        reached idle (already set when there is no stack)."""
+        import threading
+        strip = getattr(self, "_compare_strip_widget", None)
+        if strip is not None:
+            strip.stop_hot()
+        explore_tab = getattr(self, "_explore_tab", None)
+        if explore_tab is None or explore_tab.stack is None:
+            done = threading.Event()
+            done.set()
+            return done, {}
+        return explore_tab.begin_release_for_production(reason, cancelled=cancelled)
 
     @property
     def preview_source_provider(self):
@@ -5046,6 +5065,9 @@ class Step0Page(QWidget):
         scheduler = getattr(self, "_preload", None)
         if scheduler is not None:
             scheduler.stop()
+        prep = self.__dict__.get("_save_prep")           # block CS P2
+        if prep is not None:
+            prep["cancel"] = True
 
     def geometry_ready_for_consumers(self):
         """May a step downstream read the published handoff right now?
@@ -11335,11 +11357,12 @@ class Step0Page(QWidget):
         return self._rm_sigs(run_store.read_params(os.path.dirname(base_path))
                              .get("corrected") or {})
 
-    def _rm_new_correct_run(self, base_path="", copy=False):
+    def _rm_new_correct_run(self, base_path="", copy=False, defer_copy=False):
         """A new, unpublished correct run; returns the corrected zarr path in
         it. `copy`: start from the base run's pixels (and coarse sidecar), so
         only the changed channels are recomputed. A published run is never
-        written."""
+        written. `defer_copy`: the caller copies (`_rm_copy_pixels`, off the
+        GUI thread -- block CS P2)."""
         ws = (self._roi_context or {}).get("roi_dir")
         if not ws:
             return base_path or self._rm_base_corrected_path()   # in place, no runs
@@ -11348,19 +11371,142 @@ class Step0Page(QWidget):
         self._rm_pending_run = run_dir
         zarr_path = os.path.join(run_dir, "corrected_channels.zarr")
         if copy and base_path and os.path.isdir(base_path):
+            if defer_copy:
+                return zarr_path
             try:
-                shutil.copytree(base_path, zarr_path)
-                sidecar = os.path.join(os.path.dirname(base_path), "corrected_coarse.zarr")
-                if os.path.isdir(sidecar):
-                    shutil.copytree(sidecar, os.path.join(run_dir, "corrected_coarse.zarr"))
+                self._rm_copy_pixels(base_path, zarr_path)
             except Exception:
                 self._rm_discard_pending("copying the pixels failed")
                 raise
-            print(f"[Step0] new correct run {os.path.basename(run_dir)}: copied the "
-                  f"pixels of {os.path.basename(os.path.dirname(base_path))}")
         else:
             print(f"[Step0] new correct run {os.path.basename(run_dir)}")
         return zarr_path
+
+    @staticmethod
+    def _rm_copy_pixels(base_path, zarr_path):
+        """The base run's corrected pixels (and coarse sidecar) into the new
+        run's folder. Thread-safe: touches only those two folders."""
+        run_dir = os.path.dirname(zarr_path)
+        shutil.copytree(base_path, zarr_path)
+        sidecar = os.path.join(os.path.dirname(base_path), "corrected_coarse.zarr")
+        if os.path.isdir(sidecar):
+            shutil.copytree(sidecar, os.path.join(run_dir, "corrected_coarse.zarr"))
+        print(f"[Step0] new correct run {os.path.basename(run_dir)}: copied the "
+              f"pixels of {os.path.basename(os.path.dirname(base_path))}", flush=True)
+
+    def _rm_prepare_save(self, base_path, copy, release, then):
+        """Block CS P2: everything a Save must finish BEFORE it starts --
+        copying the base run's pixels into the new correct run and, for a
+        correction run, the viewer's hand-off (`release` = its reason) --
+        happens off the GUI thread. The window stays responsive, the
+        progress dialog says what is being waited for, and `then(zarr_path)`
+        runs on the GUI thread once both are done. Cancel (or an error, or a
+        dataset switch) discards the unpublished run and gives the viewer
+        back. A hand-off still in progress is never a reason to start."""
+        import threading
+        zarr_path = self._rm_new_correct_run(base_path, copy=copy, defer_copy=True)
+        needs_copy = bool(copy and base_path and os.path.isdir(base_path)
+                          and os.path.abspath(zarr_path) != os.path.abspath(base_path)
+                          and not os.path.exists(zarr_path))
+        if not needs_copy and not release:
+            # Nothing slow to wait for: done here, as before.
+            then(zarr_path)
+            return
+        prep = {"cancel": False, "error": None, "copied": not needs_copy}
+        self._save_prep = prep
+        self._set_save_enabled(False)
+        self._btn_load.setEnabled(False)
+        # The viewer is asked to stop FIRST (it returns at once; the waiting
+        # is done off this thread), so nothing new starts on it meanwhile.
+        if release:
+            try:
+                ready, timings = self._begin_release_explore_for_production(
+                    release, cancelled=lambda: prep["cancel"])
+            except Exception:
+                # No hand-off, no run: nothing of this Save stays behind.
+                self._save_prep = None
+                self._rm_discard_pending("the viewer could not be handed off")
+                self._set_save_enabled(True)
+                self._btn_load.setEnabled(True)
+                raise
+        else:
+            ready, timings = threading.Event(), {}
+            ready.set()
+        dialog = _WsiCorrectionProgressDialog(self)
+        self._wsi_dialog = dialog
+        dialog.cancel_requested.connect(lambda: prep.__setitem__("cancel", True))
+        waiting = []
+        if needs_copy:
+            waiting.append("copying the previous Step0 result")
+        if release:
+            waiting.append("waiting for the preview to stop")
+        dialog.set_progress(0, "Preparing: " + (" and ".join(waiting) or "starting")
+                            + "\u2026", None)
+        dialog.show()
+        if needs_copy:
+            def copy_job():
+                try:
+                    self._rm_copy_pixels(base_path, zarr_path)
+                except Exception as exc:                    # noqa: BLE001
+                    prep["error"] = exc
+                prep["copied"] = True
+            threading.Thread(target=copy_job, daemon=True, name="step0-save-copy").start()
+        gen = self._dataset_gen
+        t0 = time.perf_counter()
+        timer = QTimer(self)
+        timer.setInterval(50)
+
+        def give_up(reason):
+            self._save_prep = None
+            self._rm_discard_pending(reason)
+            dialog.allow_close()
+            dialog.reject()
+            self._set_save_enabled(True)
+            self._btn_load.setEnabled(True)
+            if release:
+                self._on_production_worker_finished()
+
+        def poll():
+            if gen != self._dataset_gen:
+                # Another dataset: this Save is over (its viewer is gone with
+                # the old dataset, so nothing is resumed) -- once the copy,
+                # which cannot be interrupted, has finished.
+                prep["cancel"] = True
+                if not prep["copied"]:
+                    return
+                timer.stop()
+                self._save_prep = None
+                self._rm_discard_pending("another dataset was loaded")
+                dialog.allow_close()
+                dialog.reject()
+                return
+            if not prep["copied"]:
+                return
+            if not prep["cancel"] and not ready.is_set():
+                return
+            timer.stop()
+            if prep["error"] is not None:
+                give_up("copying the pixels failed")
+                QMessageBox.critical(self, "Save", f"The previous Step0 result could not "
+                                     f"be copied, so nothing was saved.\n\n{prep['error']}")
+                return
+            if prep["cancel"]:
+                give_up("Save canceled while preparing")
+                return
+            self._save_prep = None
+            print(f"[step0] Save prepared in {(time.perf_counter() - t0) * 1000:.0f} ms"
+                  + (f" (floor join {timings.get('floor_join_ms', 0):.0f} ms, scheduler "
+                     f"drain {timings.get('scheduler_drain_ms', 0):.0f} ms)" if release else ""),
+                  flush=True)
+            if not release:
+                dialog.allow_close()
+                dialog.accept()
+                self._set_save_enabled(True)
+                self._btn_load.setEnabled(True)
+            then(zarr_path)
+
+        timer.timeout.connect(poll)
+        timer.start()
 
     def _rm_discard_pending(self, reason):
         """Remove the correct run this Save started and did not publish."""
@@ -11690,16 +11836,20 @@ class Step0Page(QWidget):
             # Block RM (§5): only Intensity changed -> the same correct run.
             # A withdrawn channel or another outline -> a new run made of
             # the same pixels.
+            def _finish(zarr_path):
+                self._apply_corrected_store(zarr_path, corrected)
+                completed = self._emit_complete(config, zarr_path, corrected)
+                if completed and intensity_changed and not correction_changed:
+                    QMessageBox.information(
+                        self, "Intensity saved",
+                        "Intensity/remap parameters were saved.\n\n"
+                        "Background-correction parameters did not change, so the "
+                        "existing corrected results were reused.")
             if region_rewritten or self._rm_sigs(current_sigs) != base_sigs:
-                zarr_path = self._rm_new_correct_run(base_path, copy=True)
-            self._apply_corrected_store(zarr_path, corrected)
-            completed = self._emit_complete(config, zarr_path, corrected)
-            if completed and intensity_changed and not correction_changed:
-                QMessageBox.information(
-                    self, "Intensity saved",
-                    "Intensity/remap parameters were saved.\n\n"
-                    "Background-correction parameters did not change, so the "
-                    "existing corrected results were reused.")
+                # (the copy runs off the GUI thread -- block CS P2)
+                self._rm_prepare_save(base_path, True, None, _finish)
+                return
+            _finish(zarr_path)
             return
 
         # Hot-swap after the worker should touch ONLY the channels we reprocess.
@@ -11710,13 +11860,18 @@ class Step0Page(QWidget):
         # Block RM (§5): never write a published run. Same ROI and source ->
         # a new run starting from its pixels, only changed channels
         # recomputed; another ROI -> a new empty run, every channel computed.
-        zarr_path = self._rm_new_correct_run(base_path, copy=rois_match)
         if not rois_match:
             to_process = dict(corrected)
+        # Block CS P2: the copy of the base run and the viewer's hand-off are
+        # done off the GUI thread; the run starts when both have finished.
+        self._rm_prepare_save(base_path, rois_match, "whole-slide correction (Save)",
+                              lambda zarr_path: self._start_wsi_correction(
+                                  config, rois, zarr_path, to_process, rois_match))
+
+    def _start_wsi_correction(self, config, rois, zarr_path, to_process, rois_match):
+        """The whole-slide correction run, once `_rm_prepare_save` is done
+        (the progress dialog is already up and the viewer handed off)."""
         self._incremental_processed = set(to_process)
-        self._set_save_enabled(False)
-        self._btn_load.setEnabled(False)
-        self._wsi_dialog = _WsiCorrectionProgressDialog(self)
         self._wsi_worker = WsiCorrectionWorker(
             self.loader, os.path.dirname(zarr_path), config, rois=rois, parent=self,
             process_channels=set(to_process), incremental=rois_match,
@@ -11727,17 +11882,13 @@ class Step0Page(QWidget):
         self._wsi_worker.canceled.connect(self._gen_slot(self._on_wsi_canceled))
         self._wsi_worker.error.connect(self._gen_slot(self._on_wsi_error))
         self._wsi_dialog.cancel_requested.connect(self._wsi_worker.stop_after_current_channel)
-        self._release_explore_for_production("whole-slide correction (Save)")
         # Before start(), like the other three production paths: a worker
         # that finished before the connection was made would never announce
         # it, and the full image would stay released for good.
         self._watch_production_worker(self._wsi_worker)
         self._wsi_worker.start()
-        # `show()`, not `exec_()`: a modal dialog froze every other window
-        # for the whole run (the Tissue Preview could not even be closed).
-        # Nothing follows this call that needed the modal loop to return;
-        # the run's end is handled by the worker's signals.
-        self._wsi_dialog.show()
+        # (the dialog is already up: `_rm_prepare_save` showed it -- `show()`,
+        # not `exec_()`, so no other window is frozen for the whole run)
 
     def _on_wsi_progress(self, channel_idx, channel_total, tile_idx, tile_total, ch_name, method, eta_s):
         pct = int(((channel_idx - 1) + tile_idx / max(1, tile_total)) / max(1, channel_total) * 100)

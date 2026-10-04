@@ -3745,24 +3745,8 @@ class ExploreController(QtCore.QObject):
         Idempotent. Returns timings for the log.
         """
         timings = {}
-        if self._torn_down or self._suspended:
+        if not self._begin_suspend(reason, badge):
             return timings
-        self._suspended = True
-        self._suspend_reason = reason
-        # A production run is not the only reason to pause any more: the
-        # compare strip pauses the full image (and the full image pauses the
-        # strip) for exactly the same "keep the pools, stop the GPU work"
-        # reason. `badge` lets such a pause say something true instead of
-        # claiming a correction run is going.
-        self._suspend_badge = badge
-        self._settle_timer.stop()
-        self._motion_timer.stop()
-
-        self.scheduler.cancel_generation(self.view_generation)
-        self.scheduler.cancel_generation(self._settled_generation)
-        self._cancel_directional_prefetch()
-        if self._overlay is not None:
-            self._overlay.cancel_inflight()
 
         t0 = time.perf_counter()
         for t in self._floor_threads:
@@ -3783,6 +3767,82 @@ class ExploreController(QtCore.QObject):
         self.view.view_box.setMouseEnabled(False, False)
         self.view.set_status_text(self._suspend_badge_text())
         return timings
+
+    def _begin_suspend(self, reason, badge) -> bool:
+        """The non-waiting half of a suspend: mark it, stop every producer
+        and cancel what is queued. False when there is nothing to do."""
+        if self._torn_down or self._suspended:
+            return False
+        self._suspended = True
+        self._suspend_reason = reason
+        # A production run is not the only reason to pause any more: the
+        # compare strip pauses the full image (and the full image pauses the
+        # strip) for exactly the same "keep the pools, stop the GPU work"
+        # reason. `badge` lets such a pause say something true instead of
+        # claiming a correction run is going.
+        self._suspend_badge = badge
+        self._settle_timer.stop()
+        self._motion_timer.stop()
+
+        self.scheduler.cancel_generation(self.view_generation)
+        self.scheduler.cancel_generation(self._settled_generation)
+        self._cancel_directional_prefetch()
+        if self._overlay is not None:
+            self._overlay.cancel_inflight()
+        return True
+
+    def begin_suspend_for_production(self, reason: str, *,
+                                     badge: Optional[str] = None,
+                                     cancelled=None):
+        """`suspend_for_production` WITHOUT blocking the caller (block CS P2,
+        Step0 Save only; every other caller keeps the synchronous one).
+
+        The producers stop and the camera locks now, on the calling (GUI)
+        thread; a waiter thread then joins the floor thread(s) and waits for
+        the scheduler to REACH idle -- with no timeout, because a preview
+        computation still running is never a reason to start. Returns a
+        `threading.Event` set when the hand-off is complete (already set
+        when there was nothing to suspend), and a dict the waiter fills with
+        the timings. `cancelled()` -- optional -- lets the waiter give up
+        (the event is then left unset)."""
+        done = threading.Event()
+        timings = {}
+        if self._torn_down:
+            done.set()
+            return done, timings
+        # Already suspended (e.g. by an earlier synchronous hand-off whose
+        # drain timed out) says the producers are stopped, NOT that their
+        # work has finished: the same waits below still apply.
+        if self._begin_suspend(reason, badge):
+            self.view.view_box.setMouseEnabled(False, False)
+            self.view.set_status_text(self._suspend_badge_text())
+        floors = list(self._floor_threads)
+        notify = getattr(self.scheduler, "notify_when_idle", None)
+        stop = cancelled or (lambda: False)
+
+        def wait():
+            t0 = time.perf_counter()
+            for t in floors:
+                while t.is_alive():
+                    if stop():
+                        return
+                    t.join(0.05)
+            timings["floor_join_ms"] = (time.perf_counter() - t0) * 1000.0
+            t0 = time.perf_counter()
+            if notify is not None:
+                idle = threading.Event()
+                notify(idle.set)
+                # (a scheduler shut down meanwhile never calls back: the
+                # caller's `cancelled` ends this wait)
+                while not idle.wait(0.05):
+                    if stop():
+                        return
+            timings["scheduler_drain_ms"] = (time.perf_counter() - t0) * 1000.0
+            done.set()
+
+        threading.Thread(target=wait, daemon=True,
+                         name="explore-production-handoff").start()
+        return done, timings
 
     def resume_from_production(self) -> None:
         """The production run is over: unlock the camera, start the floor

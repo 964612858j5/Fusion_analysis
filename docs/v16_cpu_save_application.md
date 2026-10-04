@@ -90,3 +90,12 @@
 - 真实切片：整通道 16 块 r=15，skimage 100.5 s → OpenCV 8.9 s，逐块相同；完整 Save（CD68 r15 + TIM3 r5）新代码 7.7 s，level-0 与粗平面与旧代码产物（proj2 correct_20261004_123913）逐像素相同。
 - 回归 76 模块：失败均在旧代码上复现；`test_step0_compare_tiles::test_hot_requests_never_outrank_the_foreground` 因计算变快、合成切片在平移前已全部预取而变得不稳定，经用户授权改为平移同时放大 4 倍（10/10 通过），测试意图不变。
 - codex 代码审核：同意。
+
+### P2（2026-10-04，本地提交）
+- `viewer/explore_view.py`：`suspend_for_production` 拆为 `_begin_suspend` + 原有等待（同步语义不变，Compare 照旧使用）；新增仅供 Save 用的 `begin_suspend_for_production`：生产者立即停止、相机锁定，后台线程等 floor 线程结束、调度器真正空闲（无超时，可取消）后置位事件；已处于暂停状态时同样等待（codex P2 审核意见）。
+- `ui/step0/step0_explore_tab.py`：`begin_release_for_production`。
+- `ui/step0/step0_page.py`：`_rm_prepare_save` —— 复制上一份校正结果与视图交接都在后台完成，界面以 50 ms 轮询；无需等待时保持同步；取消 / 复制失败 / 切换数据集都会丢弃未发布的 run 并恢复视图；准备期间 `production_correction_busy` 报告 Save；关闭程序时置取消，残留的未完成 run 由 RM 既有规则在下次打开时清理（`run_store.cleanup_incomplete`）。
+- 测试：新增 `tests/test_step0_save_handoff_async.py`（10 项）；既有测试仅改为等待准备完成 / 改桩新接口（`test_step0_full_image_recovery`、`test_step0_background_correction_tab`（+1 项）、`test_step0_correction_param_inheritance`、`test_step0_background_correction_outputs`、`test_v16_rm1_run_store`）。
+- 回归 21 模块：仅 `test_step0_compare_tiles::test_a_pan_during_a_pending_switch_replans_for_the_new_viewport` 失败，旧代码上同样失败。
+- 真实切片（MainWindow 无头，预览计算中按 Save）：Save 点击后 49 ms / 6 ms 返回；第二次 Save 后台等待预览 3.2 s（floor join），期间 GUI 最长停顿 56 ms（原 11.8 s 冻结）；每次全片单通道 Save 约 6 s。
+- codex 代码审核：第 1 轮 2 条——已暂停时也要等待（已修）；关闭时的残留 run（由既有清理规则覆盖，未扩大到 `ui/main_window.py`）。

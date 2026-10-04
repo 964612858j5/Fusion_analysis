@@ -575,9 +575,21 @@ def _drive_real_save(app, monkeypatch, tmp_path, tab):
                         lambda self, *a, **k: timeline.append("emit_complete"))
     monkeypatch.setattr(Step0Page, "_release_explore_for_production",
                         lambda self, reason: timeline.append("release"))
+    # Block CS P2: Save hands the viewer off without blocking and starts
+    # its worker once the hand-off (and any copy) is done.
+    monkeypatch.setattr(Step0Page, "_begin_release_explore_for_production",
+                        lambda self, reason, cancelled=None:
+                        (timeline.append("release"), _set_event())[1])
 
     page._save_and_continue()
+    assert _wait_until(lambda: getattr(page, "_wsi_worker", None) is not None)
     return page, timeline
+
+
+def _set_event():
+    done = threading.Event()
+    done.set()
+    return done, {}
 
 
 def test_the_real_save_path_resumes_only_after_the_thread_exits(

@@ -771,6 +771,23 @@ class Step0ExploreTab(QtWidgets.QWidget):
               f"scheduler drain {timings.get('scheduler_drain_ms', 0):.0f} ms, "
               f"drained={timings.get('scheduler_drained', 'n/a')})", flush=True)
 
+    def begin_release_for_production(self, reason, cancelled=None):
+        """`release_for_production` without blocking (block CS P2, Step0
+        Save only): returns `(event, timings)` -- the event is set once the
+        floor computation has ended and the scheduler reached idle; already
+        set when there is no stack or it is already released."""
+        import threading
+        if self._stack is None:
+            done = threading.Event()
+            done.set()
+            return done, {}
+        # (already released: the controller still waits for the work to end)
+        self.stop_hot()
+        done, timings = self._stack.controller.begin_suspend_for_production(
+            reason, cancelled=cancelled)
+        self._released = True
+        return done, timings
+
     def resume_from_production(self):
         """The production run that suspended the stack is over: unlock the
         camera and re-issue for the current viewport. No-op unless a stack

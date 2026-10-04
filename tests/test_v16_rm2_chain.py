@@ -725,3 +725,53 @@ def test_fusion_settings_are_bound_to_the_correct_run_being_edited(app, tmp_path
         assert w._settings_binding()["correct_run"] == rs.rel(project, c2)
     finally:
         w.close()
+
+
+
+@pytest.mark.parametrize("original_still_there", [False, True])
+def test_a_copied_project_reads_its_own_masks(app, tmp_path, original_still_there):
+    """F6 (#8): Step2 records its products with absolute paths of the project
+    it ran in; a copied / moved project reads its OWN copies (Step3 and Step4
+    both go through step3_masks), whether or not the original is still there.
+    Paths outside this workspace's runs are left alone."""
+    from block01.core import step3_masks, quant_sources
+    _w, ws = _rm_window(app, tmp_path)
+    _w.close()
+    c = _correct_run(ws)
+    f = _fuse_run(ws, c)
+    s = _segment_run(ws, f, _t(2), method="cellpose_wholecell_fusion")
+    name = os.path.basename(s)
+    old = f"/elsewhere/proj_old/rois/ws1/runs/{name}"
+    if original_still_there:
+        old = str(tmp_path / "proj_old" / "rois" / "ws1" / "runs" / name)
+        os.makedirs(os.path.join(old, "global_mask_R1.zarr"))
+    for sub in ("global_mask_R1.zarr", "global_nuclei_mask_R1.zarr", "label_pyramid_R1.zarr"):
+        os.makedirs(os.path.join(s, sub))
+    meta = {"run_id": name, "method": "cellpose_wholecell_fusion", "rois": [{
+        "roi_name": "R1", "zarr_path": f"{old}/global_mask_R1.zarr",
+        "paths": {"mask_zarr": f"{old}/global_mask_R1.zarr",
+                  "raw_ome": "/data/slide.ome.tif"},
+        "label_pyramid": {"cell": f"{old}/label_pyramid_R1.zarr", "nucleus": None},
+        "label_store": {"complete": True,
+                        "cell": {"path": f"{old}/global_mask_R1.zarr"},
+                        "nucleus": {"path": f"{old}/global_nuclei_mask_R1.zarr"},
+                        "nucleus_to_cell": {"path": f"{old}/missing_table.json"}}}]}
+    with open(os.path.join(s, "segmentation_meta.json"), "w") as fh:
+        json.dump(meta, fh)
+    run = step3_masks.load_run(s)
+    entry = run.meta["rois"][0]
+    assert entry["paths"]["mask_zarr"] == os.path.join(s, "global_mask_R1.zarr")
+    assert entry["zarr_path"] == os.path.join(s, "global_mask_R1.zarr")
+    assert entry["label_pyramid"]["cell"] == os.path.join(s, "label_pyramid_R1.zarr")
+    assert entry["label_store"]["nucleus"]["path"] == os.path.join(
+        s, "global_nuclei_mask_R1.zarr")
+    # not in this project either: left as recorded
+    assert entry["label_store"]["nucleus_to_cell"]["path"] == f"{old}/missing_table.json"
+    assert entry["paths"]["raw_ome"] == "/data/slide.ome.tif"
+    store = quant_sources._label_store(run, "R1")
+    assert store["cell"]["path"] == os.path.join(s, "global_mask_R1.zarr")
+    listed = [r for r in step3_masks.list_runs(ws) if r.run_dir == os.path.realpath(s)]
+    assert listed and listed[0].meta["rois"][0]["paths"]["mask_zarr"] == \
+        os.path.join(s, "global_mask_R1.zarr")
+    with open(os.path.join(s, "segmentation_meta.json")) as fh:  # file untouched
+        assert json.load(fh) == meta

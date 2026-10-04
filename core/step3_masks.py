@@ -150,9 +150,35 @@ def _run_meta(run_dir):
         path = os.path.join(run_dir, name)
         meta = _load_json(path) if os.path.isfile(path) else None
         if meta is not None:
-            return meta, path
+            return _in_this_project(meta, run_dir), path
     return None, None
 
+
+def _in_this_project(meta, run_dir):
+    """`meta` with each recorded path of a product of THIS workspace's runs
+    (`<anything>/rois/<workspace>/runs/<run>/...`, as Step2 writes them --
+    absolute, naming the project it was made in) pointing into the project
+    `run_dir` is in now, when that file exists there (acceptance 2026-10-04:
+    a copied or moved project read its masks from the original). In memory
+    only; the file is not rewritten. Any other path is left alone."""
+    runs = os.path.dirname(os.path.abspath(run_dir))
+    ws = os.path.dirname(runs)
+    if os.path.basename(runs) != "runs" or \
+            os.path.basename(os.path.dirname(ws)) != "rois":
+        return meta
+    marker = os.sep + os.path.join("rois", os.path.basename(ws), "runs") + os.sep
+
+    def fix(value):
+        if isinstance(value, dict):
+            return {k: fix(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [fix(v) for v in value]
+        if isinstance(value, str) and os.path.isabs(value) and marker in value:
+            here = os.path.join(runs, value.split(marker, 1)[1])
+            if os.path.exists(here):
+                return here
+        return value
+    return fix(meta)
 
 
 def _created_from_name(name):

@@ -546,7 +546,7 @@ def test_a_failed_commit_leaves_the_committed_snapshot_alone(app, monkeypatch):
         good = {"hash": w._fusion_settings_hash()}
         w._display.fusion.install_committed_snapshot(good)
         w._display.fusion.edit_channel_weight("CD3", 0.2)
-        monkeypatch.setattr(type(w), "_handoff_identity", lambda self: None)
+        monkeypatch.setattr(type(w), "_settings_binding", lambda self: None)
 
         assert w._commit_fusion_settings() is False
 

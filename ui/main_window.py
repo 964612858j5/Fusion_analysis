@@ -2064,13 +2064,18 @@ class MainWindow(QMainWindow):
         self._step3_mask_key = entry.key if entry is not None else None
         several = {r.run_dir: len(step3_masks.run_regions(r)) > 1 for r in runs}
         project = run_store.project_dir_of(roi_dir) if roi_dir else None
+        if entry is not None and run_store.kind_of(entry.run.run_dir) == "segment":
+            self._rm_note_viewing(entry.run.run_dir)        # §6: what is viewed
+        if entry is not None:
+            # `(active)` is the chosen run now, not the one viewed before
+            import dataclasses
+            items = [dataclasses.replace(e, run=dataclasses.replace(
+                e.run, active=(e.run.run_dir == entry.run.run_dir))) for e in items]
         bar.set_runs([(self._step3_run_label(e, current_ws, several[e.run.run_dir]), e.key,
                        self._step3_run_tag(e.run),
                        bool(project) and run_store.kind_of(e.run.run_dir) == "segment"
                        and run_store.project_dir_of(e.run.run_dir) == project)
                       for e in items], entry.key if entry is not None else None)
-        if entry is not None and run_store.kind_of(entry.run.run_dir) == "segment":
-            self._rm_note_viewing(entry.run.run_dir)        # §6: what is viewed
         mount = self.__dict__.get("_step3_mount")
         stack = getattr(getattr(mount, "host", None), "stack", None) if mount else None
         resolved = {"cell": None, "nucleus": None, "reasons": {}}
@@ -5441,7 +5446,7 @@ class MainWindow(QMainWindow):
     def _preseg_source(self):
         """(pixel_key, source dict, manifest) for what Step1 holds now, or
         (None, None, None) when there is no handoff to be bound to."""
-        ident = self._handoff_identity()
+        ident = self._settings_binding()
         if not ident:
             return None, None, None
         try:
@@ -5458,7 +5463,7 @@ class MainWindow(QMainWindow):
         identity = preseg_run.pixel_identity(manifest, roi, channels, products)
         key = preseg_run.pixel_key(identity)
         source = {"pixel_key": key, "pixel_identity": identity,
-                  "manifest_digest": ident.get("manifest_digest"),
+                  "correct_run": ident.get("correct_run"),
                   "manifest_path": ident.get("manifest_path"),
                   "raw_ome_path": ident.get("raw_ome_path")}
         return key, source, manifest
@@ -6043,7 +6048,7 @@ class MainWindow(QMainWindow):
         and which are ticked (user ruling, 2026-09-24). No computation."""
         patches = [{"id": _patch_id_of(p), "name": self._patch_label(i), "bbox": list(p)}
                    for i, p in enumerate(self._all_patches)]
-        ident = self._handoff_identity() or {}
+        ident = self._settings_binding() or {}
         source = {k: ident.get(k) for k in ("manifest_path", "raw_ome_path") if ident.get(k)}
         path = plan_store.save_plan(self._preseg_step1_dir(), self._preseg_methods.methods(),
                                     patches, self._preseg_patches.selected_ids(), source)
@@ -8537,37 +8542,28 @@ class MainWindow(QMainWindow):
 
     # ── the fusion settings: a draft on screen, a snapshot for the workers ──
 
-    def _handoff_identity(self):
-        """WHAT the handoff says right now, not merely where it lives.
-
-        The manifest keeps one stable path and Step0 republishes it in place, so
-        a path and a source identity can be identical across a republish that
-        changed the ROI, the geometry or the display mapping. The manifest's own
-        contents are what actually changed, so they are what a snapshot is bound
-        to. Returns None when there is nothing to be bound to.
-        """
+    def _settings_binding(self):
+        """What saved fusion settings are bound to (user ruling 2026-10-03,
+        block RM-4 option C): the workspace's handoff file, the slide, and
+        the correct run being edited -- so only new pixels (a new Step0
+        result) make them stale; an Intensity-only Save does not. Compared
+        field by field, no digest. None without a published handoff."""
         s0 = self.step0_output or {}
         path = str(s0.get("step0_manifest_path") or "")
         if not path or not os.path.exists(path):
             return None
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                manifest = json.load(f) or {}
-        except Exception as exc:                            # noqa: BLE001
-            print(f"[Step1] could not read the manifest to bind against: {exc}")
-            return None
-        # The whole manifest, minus what changes without meaning anything.
+        manifest = step0_handoff.read_manifest(path) or {}
+        correct = self._rm_current_correct_run()
+        if correct:
+            project = run_store.project_dir_of(correct)
+            pixels = run_store.rel(project, correct) if project else os.path.abspath(correct)
+        else:                       # outside a workspace: the corrected product
+            pixels = os.path.abspath(self._corrected_zarr_path) if self._corrected_zarr_path else ""
         return {
             "manifest_path": os.path.abspath(path),
-            "manifest_digest": self._step1_config_hash(manifest),
-            "channel_remap_config_hash": str(
-                manifest.get("channel_remap_config_hash")
-                or s0.get("channel_remap_config_hash") or ""),
-            "handoff_schema_version": manifest.get("handoff_schema_version"),
-            "source_identity": manifest.get("source_identity")
-            or s0.get("source_identity"),
-            "raw_ome_path": os.path.abspath(
-                str(getattr(self.loader, "filepath", "") or "")),
+            "correct_run": pixels,
+            "source_identity": manifest.get("source_identity") or s0.get("source_identity"),
+            "raw_ome_path": os.path.abspath(str(getattr(self.loader, "filepath", "") or "")),
         }
 
     def _fusion_settings_draft(self):
@@ -8642,23 +8638,23 @@ class MainWindow(QMainWindow):
         if snapshot.get("version") != FUSION_SETTINGS_VERSION:
             return _refuse(f"version {snapshot.get('version')!r}, not "
                            f"{FUSION_SETTINGS_VERSION}")
-        current = self._handoff_identity()
-        saved = snapshot.get("handoff_identity")
+        current = self._settings_binding()
+        saved = snapshot.get("bound_to")
         if current is None:
             return _refuse("no published handoff to compare against")
         if not isinstance(saved, dict) or not saved:
-            return _refuse("it records no handoff identity")
+            return _refuse("it records what it was saved for in an earlier form")
         if not saved.get("source_identity") or not current.get("source_identity"):
             return _refuse("the source identity is missing on one side")
-        for field in ("manifest_path", "manifest_digest",
-                      "channel_remap_config_hash", "handoff_schema_version",
-                      "raw_ome_path"):
+        for field in ("manifest_path", "raw_ome_path"):
             if not current.get(field) or not saved.get(field):
                 return _refuse(f"{field} is missing on one side")
             if current[field] != saved[field]:
                 return _refuse(f"{field} changed since it was saved")
-        if self._step1_config_hash(current.get("source_identity")) != \
-                self._step1_config_hash(saved.get("source_identity")):
+        # (empty on both sides: no corrected pixels at all, outside a workspace)
+        if "correct_run" not in saved or current.get("correct_run") != saved.get("correct_run"):
+            return _refuse("the Step0 result changed since it was saved (new pixels)")
+        if current.get("source_identity") != saved.get("source_identity"):
             return _refuse("another source identity")
         # The stored hash is the file's own claim about itself; a file that was
         # edited would keep the old one. Recompute it from the content.
@@ -8707,7 +8703,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Fusion settings",
                                 "Load a dataset before saving fusion settings.")
             return False
-        identity = self._handoff_identity()
+        identity = self._settings_binding()
         if identity is None:
             QMessageBox.warning(
                 self, "Fusion settings",
@@ -8722,9 +8718,9 @@ class MainWindow(QMainWindow):
             "hash": self._fusion_settings_hash(draft),
             "fusion_config": draft["fusion_config"],
             "display_mapping": draft["display_mapping"],
-            # WHAT the handoff said when these settings were frozen, not just
-            # where it lives: the manifest keeps one path across republishes.
-            "handoff_identity": identity,
+            # what these settings were saved for: this workspace, this slide,
+            # the correct run being edited (user ruling, RM-4 option C)
+            "bound_to": identity,
             "source_identity": identity.get("source_identity"),
             "step0_manifest_path": identity.get("manifest_path", ""),
             "raw_ome_path": identity.get("raw_ome_path", ""),
@@ -8946,22 +8942,8 @@ class MainWindow(QMainWindow):
                 print(f"[Step1] failed to update ROI step1 status:\n{traceback.format_exc()}")
         self.step1_done = True
         self._update_next_button()
-        # Block RM: a fuse run carries its identity in its own params.json;
-        # these settings-folder files are for Step1 outside a workspace.
-        rm_mode = bool(self.__dict__.get("_rm_fuse_mode"))
-        if (
-            not rm_mode and not is_wholecell
-            and getattr(self, "_pending_dapi_input_meta", None)
-            and not getattr(self, "_reused_dapi_input_meta", False)
-        ):
-            self._write_dapi_input_meta(self._pending_dapi_input_meta)
-        if (
-            not rm_mode and is_wholecell
-            and getattr(self, "_pending_fused_zarr_meta", None)
-            and not getattr(self, "_reused_fused_zarr_meta", False)
-        ):
-            self._write_fused_zarr_meta(self._pending_fused_zarr_meta, zarr_path)
-        if rm_mode:
+        # Block RM: a fuse run carries its identity in its own params.json.
+        if self.__dict__.get("_rm_fuse_mode"):
             self._rm_note_viewing(os.path.dirname(os.path.abspath(zarr_path)))
         self._save_step1_session()
         # Count per-ROI zarrs from meta (a data version keeps its own, beside
@@ -9039,9 +9021,6 @@ class MainWindow(QMainWindow):
             for button in d.findChildren(QtWidgets.QPushButton):
                 button.setEnabled(False)
             d.show()
-
-    def _dapi_input_meta_path(self):
-        return os.path.join(OUTPUT_DIR, "dapi_input_meta.json")
 
     def _expected_dapi_input_meta(self, worker_fcfg, selected_method):
         active_roi = self._active_roi or (self._rois[0] if self._rois else None)
@@ -9172,9 +9151,6 @@ class MainWindow(QMainWindow):
             path = os.path.join(OUTPUT_DIR, "fused.zarr")
         return path if os.path.exists(path) else ""
 
-    def _fusion_meta_path(self):
-        return os.path.join(OUTPUT_DIR, "fusion_meta.json")
-
     @staticmethod
     def _canonical_step1_config_value(value):
         return _config_hash.canonical_value(value)
@@ -9238,26 +9214,6 @@ class MainWindow(QMainWindow):
         meta["config_hash"] = self._step1_config_hash(meta)
         return meta
 
-    def _existing_fused_zarr_path(self):
-        meta_path = self._fusion_meta_path()
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-                regions = meta.get("regions") or []
-                if regions:
-                    path = regions[0].get("zarr_path")
-                    if path and os.path.isdir(path):
-                        return path
-            except Exception:
-                pass
-        if self._rois:
-            name = self._rois[0].get("name", "ROI_1")
-            path = os.path.join(OUTPUT_DIR, f"fused_{name}.zarr")
-        else:
-            path = os.path.join(OUTPUT_DIR, "fused.zarr")
-        return path if os.path.isdir(path) else ""
-
     @staticmethod
     def _is_valid_existing_fused_zarr(path):
         if not path or not os.path.isdir(path):
@@ -9279,118 +9235,6 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
         return False
-
-    def _write_fused_zarr_meta(self, expected_meta, zarr_path=""):
-        meta_path = self._fusion_meta_path()
-        meta = {}
-        try:
-            if os.path.exists(meta_path):
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-        except Exception:
-            meta = {}
-        if not isinstance(meta, dict):
-            meta = {}
-        meta.update({
-            "purpose": expected_meta.get("purpose"),
-            "method": expected_meta.get("method"),
-            "source_path": expected_meta.get("source_path"),
-            "raw_ome_path": expected_meta.get("raw_ome_path"),
-            "roi_id": expected_meta.get("roi_id"),
-            "roi_bbox": expected_meta.get("roi_bbox"),
-            "shape": expected_meta.get("shape"),
-            "dtype": expected_meta.get("dtype"),
-            "resolution": expected_meta.get("resolution"),
-            "normalization_source": expected_meta.get("normalization_source"),
-            "background_correction_source": expected_meta.get("background_correction_source"),
-            "pixel_size": expected_meta.get("pixel_size"),
-            "fusion_config": expected_meta.get("fusion_config"),
-            "artifact_kind": expected_meta.get("artifact_kind"),
-            "fusion_formula_version": expected_meta.get("fusion_formula_version"),
-            "display_mapping": expected_meta.get("display_mapping"),
-            "config_hash": expected_meta.get("config_hash"),
-            "last_used": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "code_version": expected_meta.get("code_version"),
-        })
-        if not meta.get("regions"):
-            regions = []
-            for region in expected_meta.get("regions") or []:
-                item = {
-                    "roi_name": region.get("roi_name", "full"),
-                    "zarr_path": zarr_path or self._existing_fused_zarr_path(),
-                    "zarr_shape": region.get("shape"),
-                    "bbox": region.get("roi_bbox"),
-                }
-                regions.append(item)
-            meta["regions"] = regions
-        try:
-            with open(meta_path, "w", encoding="utf-8") as f:
-                json.dump(meta, f, indent=2, ensure_ascii=False)
-        except Exception:
-            print(f"[Step1] failed to write fusion_meta.json:\n{traceback.format_exc()}")
-
-    def _all_regions_reusable(self, expected_meta, old_meta):
-        """Every region of a multi-ROI result has to be there and be current.
-
-        The reuse decision used to look at the first zarr the meta names. With
-        several ROIs that meant an intact ROI_1 vouched for the whole batch,
-        while ROI_2 could be missing, truncated or left over from another
-        configuration.
-        """
-        expected_regions = list(expected_meta.get("regions") or [])
-        old_regions = list(old_meta.get("regions") or [])
-        if not expected_regions:
-            return True
-        if len(old_regions) != len(expected_regions):
-            print(f"[Step1] the existing result covers {len(old_regions)} region(s), "
-                  f"not {len(expected_regions)}; regenerating")
-            return False
-        by_name = {str(r.get("roi_name") or ""): r for r in old_regions}
-        seen_paths = {}
-        for i, want in enumerate(expected_regions):
-            name = str(want.get("roi_name") or "")
-            have = by_name.get(name)
-            if have is None:
-                if name and any(str(r.get("roi_name") or "") for r in old_regions):
-                    # The recorded regions are named and none of them is this
-                    # one: matching by position here is how ROI_1's file came to
-                    # stand in for ROI_2.
-                    print(f"[Step1] the existing result has no region named "
-                          f"{name}; regenerating")
-                    return False
-                have = old_regions[i]
-            path = str(have.get("zarr_path") or "")
-            if not path:
-                # The DAPI-input meta records regions without paths; the worker
-                # names them by ROI, so derive the name it would have written.
-                path = os.path.join(
-                    OUTPUT_DIR,
-                    f"fused_{name}.zarr" if name and name != "full" else "fused.zarr")
-            label = f"region {name or i + 1}"
-            real = os.path.realpath(path)
-            if real in seen_paths:
-                print(f"[Step1] {label} and region {seen_paths[real]} name the "
-                      "same store; regenerating")
-                return False
-            seen_paths[real] = name or i + 1
-            if not self._is_valid_existing_fused_zarr(path):
-                print(f"[Step1] {label} is missing or unreadable at {path}; "
-                      "regenerating")
-                return False
-            want_shape = [int(v) for v in (want.get("shape") or [])]
-            have_shape = [int(v) for v in (have.get("zarr_shape") or [])]
-            if want_shape and have_shape and want_shape != have_shape:
-                print(f"[Step1] {label} has shape {have_shape}, not {want_shape}; "
-                      "regenerating")
-                return False
-            if not self._body_matches_expected(path, expected_meta, label):
-                return False
-            # The store's own account of which region it covers. Every ROI of
-            # one run shares a config hash, so the hash alone cannot tell them
-            # apart; the pixels' extent can.
-            if not self._body_is_region(path, want, label):
-                return False
-        return True
 
     def _body_is_region(self, path, want, label):
         """Does the store itself say it covers the region we expect?
@@ -9589,125 +9433,6 @@ class MainWindow(QMainWindow):
                   f"not {want_hash or 'none'}; regenerating")
             return False
         return True
-
-    def _try_reuse_fused_zarr(self, expected_meta):
-        existing_zarr = self._existing_fused_zarr_path()
-        if bool(getattr(self, "_force_dapi_zarr", None) and self._force_dapi_zarr.isChecked()):
-            print("[Step1] force overwrite enabled, regenerating fused zarr")
-            return False
-        if not existing_zarr or not self._is_valid_existing_fused_zarr(existing_zarr):
-            return False
-
-        print(f"[Step1] existing fused zarr found: {existing_zarr}")
-        meta_path = self._fusion_meta_path()
-        old_meta = {}
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    old_meta = json.load(f) or {}
-            except Exception as e:
-                print(f"[Step1] failed to read fusion_meta.json: {e}")
-                old_meta = {}
-        old_hash = str(old_meta.get("config_hash") or "")
-        new_hash = str(expected_meta.get("config_hash") or "")
-
-        # Fail closed. A file that cannot say what made it is not evidence that
-        # it matches: an unreadable meta, a missing hash, a missing formula
-        # version and a run of the other kind all used to end in "reuse it
-        # anyway", which is how a DAPI-input run's zarr could be served as the
-        # whole-cell fusion.
-        kind = str(old_meta.get("artifact_kind") or "")
-        if kind != expected_meta.get("artifact_kind"):
-            print(f"[Step1] existing fused zarr was written as {kind or 'an unknown kind'}, "
-                  f"not {expected_meta.get('artifact_kind')}; regenerating")
-            return False
-        if old_meta.get("fusion_formula_version") != expected_meta.get(
-                "fusion_formula_version"):
-            print("[Step1] existing fused zarr was made by another fusion formula "
-                  f"({old_meta.get('fusion_formula_version')!r} vs "
-                  f"{expected_meta.get('fusion_formula_version')!r}); regenerating")
-            return False
-        if not old_hash:
-            print("[Step1] existing fused zarr has no config hash; regenerating")
-            return False
-        if old_hash == new_hash:
-            if not self._body_matches_expected(existing_zarr, expected_meta,
-                                               "the existing fused zarr"):
-                return False
-            if not self._all_regions_reusable(expected_meta, old_meta):
-                return False
-            print("[Step1] config unchanged, skip generation")
-            self._write_fused_zarr_meta(expected_meta, existing_zarr)
-            self._reused_fused_zarr_meta = True
-            self._on_fusion_done(existing_zarr)
-            print("[Step1] Next unlocked")
-            return True
-
-        print("[Step1] fused zarr exists but config changed")
-        print(f"[Step1] old_hash={old_hash}")
-        print(f"[Step1] new_hash={new_hash}")
-        print("[Step1] regenerating fused zarr")
-        return False
-
-    def _try_reuse_dapi_input_zarr(self, expected_meta):
-        meta_path = self._dapi_input_meta_path()
-        existing_zarr = self._existing_dapi_zarr_path()
-        if bool(getattr(self, "_force_dapi_zarr", None) and self._force_dapi_zarr.isChecked()):
-            reason = "force_regenerate_dapi_zarr checked"
-        elif not existing_zarr:
-            reason = "no existing DAPI input zarr"
-        elif not os.path.exists(meta_path):
-            reason = "dapi_input_meta.json missing"
-        else:
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    old_meta = json.load(f) or {}
-                if str(old_meta.get("artifact_kind") or "") != expected_meta.get("artifact_kind"):
-                    raise _ArtifactKindMismatch(
-                        old_meta.get("artifact_kind") or "an unknown kind")
-                if (self._dapi_meta_compare_view(old_meta)
-                        == self._dapi_meta_compare_view(expected_meta)
-                        and self._body_matches_expected(
-                            existing_zarr, expected_meta,
-                            "the existing DAPI input zarr")
-                        and self._all_regions_reusable(expected_meta, old_meta)):
-                    print(f"[Step1] DAPI input zarr meta: {json.dumps(expected_meta, indent=2, default=str)}")
-                    print("[Step1] DAPI input zarr reuse/regenerate reason: metadata match")
-                    print("Reusing existing DAPI input zarr")
-                    self._reused_dapi_input_meta = True
-                    self._on_fusion_done(existing_zarr)
-                    return True
-                reason = "metadata changed"
-            except _ArtifactKindMismatch as e:
-                reason = f"existing zarr was written as {e}"
-            except Exception as e:
-                reason = f"failed to read existing meta: {e}"
-        print(f"[Step1] DAPI input zarr meta: {json.dumps(expected_meta, indent=2, default=str)}")
-        print(f"[Step1] DAPI input zarr reuse/regenerate reason: {reason}")
-        if existing_zarr and reason != "force_regenerate_dapi_zarr checked":
-            answer = QMessageBox.question(
-                self,
-                "Regenerate DAPI input zarr?",
-                "Existing DAPI input zarr metadata does not match the current source/ROI/DAPI settings.\n\n"
-                f"Reason: {reason}\n\n"
-                "Regenerate and overwrite the DAPI input zarr?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if answer != QMessageBox.Yes:
-                print("[Step1] DAPI input zarr reuse/regenerate reason: user cancelled overwrite")
-                return True
-        return False
-
-    def _write_dapi_input_meta(self, expected_meta):
-        meta = dict(expected_meta)
-        meta["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            with open(self._dapi_input_meta_path(), "w", encoding="utf-8") as f:
-                json.dump(meta, f, indent=2, ensure_ascii=False)
-            print(f"[Step1] DAPI input zarr meta: {json.dumps(meta, indent=2, default=str)}")
-        except Exception:
-            print(f"[Step1] failed to write dapi_input_meta.json:\n{traceback.format_exc()}")
 
     def _preview_channel_signal(self, ch, arr, remap):
         """One channel's [0,1] signal for the Step1 fusion PREVIEW, cached.
@@ -10057,7 +9782,6 @@ class MainWindow(QMainWindow):
         worker_fcfg = dict(fcfg)
         if not is_wholecell:
             self._pending_fused_zarr_meta = None
-            self._reused_fused_zarr_meta = False
             nuc_ch = fcfg.get("nucleus", {}).get("channel") or self.config.nucleus_channel()
             worker_fcfg = dict(fcfg)
             # DAPI-only methods use channel 1 as segmentation input, but the
@@ -10066,13 +9790,10 @@ class MainWindow(QMainWindow):
             worker_fcfg["nucleus"] = {"channel": nuc_ch, "weight": 1.0}
             expected_dapi_meta = self._expected_dapi_input_meta(worker_fcfg, selected_method)
             self._pending_dapi_input_meta = expected_dapi_meta
-            self._reused_dapi_input_meta = False
         else:
             self._pending_dapi_input_meta = None
-            self._reused_dapi_input_meta = False
             expected_fused_meta = self._expected_fused_zarr_meta(worker_fcfg, selected_method)
             self._pending_fused_zarr_meta = expected_fused_meta
-            self._reused_fused_zarr_meta = False
         # Block DV (§3.3, §3.12): inside a workspace, a Generate either
         # returns to an existing version with the same content (its fused
         # products are reused) or makes a new one in its own folder.
@@ -10095,11 +9816,8 @@ class MainWindow(QMainWindow):
             same = run_store.find_same(rm_roi, "fuse", rm_upstream, rm_key)
             if same and self._rm_reuse_fuse_run(same):
                 return
-        elif not is_wholecell:
-            if self._try_reuse_dapi_input_zarr(expected_dapi_meta):
-                return
-        elif self._try_reuse_fused_zarr(expected_fused_meta):
-            return
+        # (outside a workspace a Generate always computes: block RM-4 keeps
+        # only §8's reuse)
         # The worker stamps these into the zarr itself, so a finished store can
         # say what it is without a sidecar vouching for it.
         identity = (self._pending_fused_zarr_meta

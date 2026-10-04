@@ -493,7 +493,7 @@ def test_three_layers_of_step1_settings_survive_a_reopen(app, tmp_path, monkeypa
         rs.update_session(ws, editing=editing)
         f1 = _fuse_run(ws, c)
         rs.write_params(f1, dict(rs.read_params(f1), fusion_settings={"w": 0.5}))
-        w._write_fusion_settings({"w": 0.8, "handoff_identity": {
+        w._write_fusion_settings({"w": 0.8, "bound_to": {
             "manifest_path": os.path.join(ws, "settings", "step0", "step0_roi_result.json")}})
         monkeypatch.setattr(w, "_step1_session_payload", lambda: {
             "fusion_draft": {"w": 0.9}, "fusion_zarr_path": os.path.join(f1, "fused_R1.zarr")})
@@ -503,7 +503,7 @@ def test_three_layers_of_step1_settings_survive_a_reopen(app, tmp_path, monkeypa
         with open(os.path.join(ws, "settings", "step1_fusion_settings.json")) as f:
             saved = json.load(f)
         assert saved["w"] == 0.8
-        assert saved["handoff_identity"]["manifest_path"] == \
+        assert saved["bound_to"]["manifest_path"] == \
             "rois/ws1/settings/step0/step0_roi_result.json"            # relative on disk
         draft, why = w._rm_read_step1_draft(rs.session_path(ws))
         assert why == "" and draft["fusion_draft"] == {"w": 0.9}

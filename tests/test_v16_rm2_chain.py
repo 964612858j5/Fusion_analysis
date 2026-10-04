@@ -700,3 +700,28 @@ def test_a_malformed_handoff_schema_is_refused(app, tmp_path):
         assert w._load_step0_roi_result(auto=True) is False
     finally:
         w.close()
+
+
+def test_fusion_settings_are_bound_to_the_correct_run_being_edited(app, tmp_path):
+    """User ruling 2026-10-03 (RM-4, option C): only a new Step0 result (new
+    pixels) changes what saved fusion settings are bound to."""
+    w, ws = _rm_window(app, tmp_path)
+    try:
+        project = rs.project_dir_of(ws)
+        manifest = os.path.join(ws, "settings", "step0", "step0_roi_result.json")
+        json.dump({"handoff_schema_version": 2, "source_identity": {"dataset_path": "/s"}},
+                  open(manifest, "w"))
+        w.step0_output = dict(w.step0_output, step0_manifest_path=manifest)
+        c1 = _correct_run(ws)
+        w._corrected_zarr_path = os.path.join(c1, "corrected_channels.zarr")
+        first = w._settings_binding()
+        assert first["correct_run"] == rs.rel(project, c1)
+        assert "manifest_digest" not in first                     # no digest any more
+        json.dump({"handoff_schema_version": 2, "source_identity": {"dataset_path": "/s"},
+                   "channel_remap_config_hash": "an Intensity-only Save"}, open(manifest, "w"))
+        assert w._settings_binding() == first                     # same pixels: still bound
+        c2 = _correct_run(ws, now=_t(9))
+        w._corrected_zarr_path = os.path.join(c2, "corrected_channels.zarr")
+        assert w._settings_binding()["correct_run"] == rs.rel(project, c2)
+    finally:
+        w.close()

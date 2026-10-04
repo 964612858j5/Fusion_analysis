@@ -565,34 +565,6 @@ def test_closing_the_batch_dialog_stops_waits_then_closes(app, tmp_path, monkeyp
 
 # ── G2: Step2's results index is swapped in whole ───────────────────────
 
-def test_step2s_results_index_survives_a_failed_write(tmp_path, monkeypatch):
-    """The index is read, changed and written back; a write that fails half
-    way leaves the previous index whole (`write_json_atomic`)."""
-    import json
-    from block01.workers.segment_merge_worker import SegmentMergeWorker
-    wk = SegmentMergeWorker("unused.zarr", seg_config={"method": "cellpose_wholecell_fusion"},
-                            output_dir=str(tmp_path / "run"))
-    wk.project_output_dir = str(tmp_path / "step2")
-    entry = {"result_id": "r1", "method": "m", "status": "done"}
-    path = wk._update_results_index(entry)
-    with open(path) as f:
-        before = f.read()
-
-    real_dump = json.dump
-
-    def _half_then_fail(obj, f, *a, **k):
-        if isinstance(obj, dict) and "runs" in obj:
-            f.write('{"runs": [')
-            raise OSError("disk full")
-        return real_dump(obj, f, *a, **k)
-    monkeypatch.setattr(json, "dump", _half_then_fail)
-    with pytest.raises(OSError):
-        wk._update_results_index(dict(entry, result_id="r2"))
-    with open(path) as f:
-        assert f.read() == before
-    assert not glob.glob(os.path.join(os.path.dirname(path), ".*.tmp.*"))
-
-
 # ── §6: the two commit protocols the compliant rows rely on ─────────────
 
 def test_protocol_a_single_file_is_replaced_whole(tmp_path, monkeypatch):
@@ -772,27 +744,6 @@ def test_r7_the_window_allows_the_sweep_only_with_no_live_retired_thread(app, tm
             wk.wait(5000)
         _pump()
         w.close()
-
-
-def test_r6_the_segmentation_registry_survives_a_failed_write(tmp_path, monkeypatch):
-    import json
-    from block01.utils import segmentation_registry as reg
-    reg.save_registry(str(tmp_path), {"version": 1, "results": [{"id": "a"}]})
-    path = reg.registry_path(str(tmp_path))
-    with open(path) as f:
-        before = f.read()
-    real_dump = json.dump
-
-    def _half(obj, f, *a, **k):
-        if isinstance(obj, dict) and "results" in obj:
-            f.write('{"results": [')
-            raise OSError("disk full")
-        return real_dump(obj, f, *a, **k)
-    monkeypatch.setattr(json, "dump", _half)
-    with pytest.raises(OSError):
-        reg.save_registry(str(tmp_path), {"version": 1, "results": [{"id": "b"}]})
-    with open(path) as f:
-        assert f.read() == before
 
 
 def test_r5_an_old_runs_progress_is_not_drawn_and_the_page_says_where_it_writes(step2):

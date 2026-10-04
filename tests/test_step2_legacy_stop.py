@@ -40,18 +40,26 @@ def app():
 
 @pytest.fixture
 def roi_dir(tmp_path):
-    """A synthetic ROI workspace: manifest, and step1/fused.zarr."""
+    """A synthetic ROI workspace of the run model (block RM): a published
+    correct run and, on it, a published fuse run holding fused.zarr."""
     pytest.importorskip("stardist")
     import zarr
+    from block01.utils import run_store
+    (tmp_path / "project_manifest.json").write_text("{}")
     d = tmp_path / "rois" / ROI_ID
-    (d / "step1").mkdir(parents=True)
-    (d / "step2").mkdir()
+    (d / "step2").mkdir(parents=True)
     with open(d / "roi_manifest.json", "w", encoding="utf-8") as f:
         json.dump({"roi_id": ROI_ID, "display_name": "A"}, f)
+    correct = run_store.new_run(str(d), "correct")
+    run_store.write_inputs(correct, None, slide_id="s")
+    run_store.publish(correct)
+    fuse = run_store.new_run(str(d), "fuse")
     img = _image()
-    z = zarr.open(str(d / "step1" / "fused.zarr"), mode="w", shape=img.shape,
+    z = zarr.open(os.path.join(fuse, "fused.zarr"), mode="w", shape=img.shape,
                   chunks=(64, 64, 2), dtype=np.uint16)
     z[:] = img
+    run_store.write_inputs(fuse, correct)
+    run_store.publish(fuse)
     return d
 
 
@@ -78,7 +86,9 @@ def _legacy_config():
 
 def _worker(roi_dir, rois):
     from block01.workers.segment_merge_worker import SegmentMergeWorker
-    w = SegmentMergeWorker(str(roi_dir / "step1" / "fused.zarr"), seg_config=_legacy_config(),
+    from block01.utils import run_store
+    fused = os.path.join(run_store.latest_run(str(roi_dir), "fuse"), "fused.zarr")
+    w = SegmentMergeWorker(fused, seg_config=_legacy_config(),
                            n_rows=ROWS, n_cols=COLS, overlap_px=OVERLAP,
                            output_dir=str(roi_dir / "step2"), rois=rois)
     assert w.roi_dir == str(roi_dir) and w.roi_id == ROI_ID
@@ -95,37 +105,18 @@ def _collect(worker):
 
 
 def _records(roi_dir):
-    """Every place a run is registered, as bytes (None when absent)."""
-    from block01.utils.roi_project import roi_index_path
-    from block01.utils.segmentation_registry import registry_path
-    step2 = str(roi_dir / "step2")
-    out = {}
-    for path in (registry_path(step2),
-                 os.path.join(step2, "segmentation_results", "segmentation_results_index.json"),
-                 roi_index_path(str(roi_dir))):
-        out[path] = open(path, "rb").read() if os.path.exists(path) else None
-    return out
+    """Block RM: what says a run exists -- the published segment runs and
+    their .done -- as bytes."""
+    from block01.utils import run_store
+    return {r: open(os.path.join(r, run_store.DONE), "rb").read()
+            for r in run_store.list_runs(str(roi_dir), "segment")}
 
 
 def _registered(worker, roi_dir):
-    from block01.utils.roi_project import roi_index_path
-    from block01.utils.segmentation_registry import load_registry
-    rid = worker.result_id
-    in_registry = any(r.get("result_id") == rid
-                      for r in load_registry(worker.project_output_dir).get("results", []))
-    idx_path = os.path.join(worker.project_output_dir, "segmentation_results",
-                            "segmentation_results_index.json")
-    in_index = False
-    if os.path.exists(idx_path):
-        with open(idx_path, encoding="utf-8") as f:
-            in_index = any(rid in (r.get("run_id"), r.get("result_id"))
-                           for r in json.load(f).get("runs") or [])
-    roi_status = None
-    if os.path.exists(roi_index_path(str(roi_dir))):
-        with open(roi_index_path(str(roi_dir)), encoding="utf-8") as f:
-            run = (json.load(f).get("segmentation_runs") or {}).get(rid)
-        roi_status = run.get("status") if run else None
-    return in_registry, in_index, roi_status
+    """Block RM-4: a run is registered by being published (its .done); the
+    registry and the run indexes are gone."""
+    from block01.utils import run_store
+    return run_store.is_done(worker.output_dir)
 
 
 def _complete_run(roi_dir, rois):
@@ -133,7 +124,7 @@ def _complete_run(roi_dir, rois):
     got = _collect(worker)
     worker.run()
     assert got["error"] == [] and len(got["finished"]) == 1 and got["finished"][0] > 0
-    assert _registered(worker, roi_dir) == (True, True, "done")
+    assert _registered(worker, roi_dir) is True
     return worker
 
 
@@ -163,8 +154,8 @@ def test_a_stop_registers_nothing(app, roi_dir, case, rois, stop_on):
     if len(rois) == 2 and stop_on.startswith("[B]"):
         assert any(m.startswith("✓ ROI A") for m in got["progress"])
     assert got["finished"] == [] and got["error"] == ["Stopped by user."]
-    assert _registered(worker, roi_dir) == (False, False, None)
+    assert _registered(worker, roi_dir) is False
     assert not os.path.exists(os.path.join(worker.output_dir, "segmentation_meta.json"))
     # What was registered before is untouched.
     assert _records(roi_dir) == before
-    assert _registered(earlier, roi_dir) == (True, True, "done")
+    assert _registered(earlier, roi_dir) is True

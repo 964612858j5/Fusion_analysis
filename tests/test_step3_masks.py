@@ -73,6 +73,7 @@ def _labels(shape, seed=0):
 def _workspace(tmp_path, roi_id="roi_a", bbox=BBOX, name="ROI_1"):
     rdir = tmp_path / "rois" / roi_id
     (rdir / "step2" / "segmentation_runs").mkdir(parents=True)
+    (tmp_path / "project_manifest.json").write_text("{}")      # block RM: a project
     (rdir / "roi_manifest.json").write_text(json.dumps(
         {"roi_id": roi_id, "display_name": name, "bbox_fullres": list(bbox)}))
     (rdir / "roi_index.json").write_text(json.dumps({"version": 1, "roi_id": roi_id}))
@@ -80,14 +81,14 @@ def _workspace(tmp_path, roi_id="roi_a", bbox=BBOX, name="ROI_1"):
 
 
 def _index(rdir, **fields):
-    path = os.path.join(rdir, "roi_index.json")
-    idx = json.load(open(path))
-    for key, value in fields.items():
-        if key == "runs":
-            idx.setdefault("segmentation_runs", {}).update(value)
-        else:
-            idx[key] = value
-    open(path, "w").write(json.dumps(idx))
+    """Block RM-4: the run being viewed is session.json's `viewing` (the run
+    indexes are gone); `runs=` entries no longer mean anything."""
+    active = fields.get("active_segmentation_run")
+    if active is not None:
+        from block01.utils import run_store
+        folder = active if active.startswith("segment_") else f"segment_{active}"
+        project = os.path.dirname(os.path.dirname(rdir))
+        run_store.update_session(rdir, viewing=f"rois/{os.path.basename(rdir)}/runs/{folder}")
 
 
 def _run(rdir, run_id, method="cellpose_wholecell_fusion", *, mode="roi", roi_name="ROI_1",

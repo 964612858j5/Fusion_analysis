@@ -154,6 +154,7 @@ def _run_meta(run_dir):
     return None, None
 
 
+
 def _created_from_name(name):
     m = re.search(r"(\d{8})_(\d{6})", str(name or ""))
     if not m:
@@ -171,11 +172,10 @@ def list_runs(roi_dir):
     roi_dir = _real(roi_dir)
     manifest = _load_json(os.path.join(roi_dir, "roi_manifest.json")) or {}
     label = _workspace_label(manifest)
-    # (`active`: the workspace index's active run, until block RM-4 retires
-    # the index)
-    index = _load_json(os.path.join(roi_dir, "roi_index.json")) or {}
-    active = str(index.get("active_segmentation_run") or "")
-    roi_id = str(manifest.get("roi_id") or index.get("roi_id") or "")
+    # `active`: the run session.json says is being viewed (block RM §6)
+    viewing = run_store.session_pointers(roi_dir).get("viewing") or ""
+    active = _real(viewing) if viewing else ""
+    roi_id = str(manifest.get("roi_id") or "")
     out = []
     for path in run_store.list_runs(roi_dir, "segment"):
         meta, meta_path = _run_meta(path)
@@ -188,7 +188,7 @@ def list_runs(roi_dir):
         up = run_store.upstream_of(run_dir)
         run_id = str(meta.get("run_id") or meta.get("result_id") or os.path.basename(run_dir))
         out.append(Run(
-            run_id=run_id, active=(run_id == active),
+            run_id=run_id, active=bool(active) and run_dir == active,
             method=str(meta.get("method") or params.get("method") or ""),
             created_at=str(meta.get("created_at") or params.get("created_at")
                            or _created_from_name(os.path.basename(run_dir))),

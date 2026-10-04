@@ -45,12 +45,10 @@ from ..utils.segmentation_config import (
 )
 from ..utils.segmentation_registry import (
     create_result_dir,
-    upsert_result,
 )
 from ..utils.roi_project import (
     load_json,
     roi_manifest_path,
-    update_roi_segmentation_run,
 )
 from ..utils.step2_profiler import Step2Profiler
 from ..utils.runtime_resource_monitor import RuntimeResourceMonitor
@@ -927,34 +925,6 @@ class SegmentMergeWorker(QThread):
             json.dump(meta, f, indent=2)
         return path
 
-    def _update_results_index(self, entry):
-        path = os.path.join(self.project_output_dir, "segmentation_results", "segmentation_results_index.json")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            data = {"version": 1, "runs": [], "latest_by_method": {}}
-        runs = data.setdefault("runs", [])
-        rid = entry.get("result_id")
-        runs[:] = [r for r in runs if r.get("run_id") != rid and r.get("result_id") != rid]
-        runs.append({
-            "run_id": rid,
-            "result_id": rid,
-            "method": entry.get("method"),
-            "display_name": entry.get("display_name"),
-            "created_at": entry.get("created_at"),
-            "status": entry.get("status"),
-            "output_dir": entry.get("output_dir"),
-            "config_path": entry.get("config_path"),
-            "meta_path": entry.get("meta_path"),
-            "param_file": self.param_file,
-        })
-        data.setdefault("latest_by_method", {})[entry.get("method")] = rid
-        data["updated_at"] = datetime.now().isoformat()
-        write_json_atomic(path, data)                           # block A6 G2
-        return path
-
     def _multichannel_source_path(self):
         # Block RM (§5): a run on a published fuse run reads the corrected
         # product of THAT chain, whatever the parameter file names.
@@ -1056,51 +1026,6 @@ class SegmentMergeWorker(QThread):
         run_store.write_params(self.output_dir, run_store.to_records(params, project))
         run_store.write_inputs(self.output_dir, upstream)
         run_store.publish(self.output_dir)
-
-    def _register_completed_result(self, summary_meta):
-        config_path = os.path.join(self.output_dir, "run_segmentation_params.json")
-        meta_path = os.path.join(self.output_dir, "segmentation_meta.json")
-        method = self._name_method()
-        display_name = self.seg_config.get("display_name", method)
-        if method != str(self.seg_config.get("method", self.method)):
-            display_name = f"{display_name} (cds2)"
-
-        mask_path = summary_meta.get("ome_tiff") or summary_meta.get("mask_path") or ""
-        dapi_path = summary_meta.get("global_dapi") or summary_meta.get("dapi_path") or ""
-        fusion_path = (
-            summary_meta.get("fused_zarr_path")
-            or summary_meta.get("input_zarr")
-            or summary_meta.get("source_zarr")
-            or self.zarr_path
-        )
-        rois = summary_meta.get("rois") or []
-        if rois:
-            first = rois[0]
-            mask_path = first.get("ome_tiff") or first.get("mask_path") or mask_path
-            dapi_path = first.get("global_dapi") or first.get("dapi_path") or dapi_path
-            fusion_path = first.get("fused_zarr_path") or first.get("input_zarr") or fusion_path
-
-        entry = {
-            "result_id": self.result_id,
-            "method": method,
-            "display_name": display_name,
-            "created_at": self.created_at,
-            "status": "completed",
-            "mask_path": self._abs(mask_path) if mask_path else "",
-            "dapi_path": self._abs(dapi_path) if dapi_path else "",
-            "fusion_path": self._abs(fusion_path) if fusion_path else "",
-            "multichannel_source_path": self._multichannel_source_path(),
-            "config_path": self._abs(config_path),
-            "meta_path": self._abs(meta_path),
-            "output_dir": self._abs(self.output_dir),
-            "notes": "",
-        }
-        run_meta_path = self._write_run_metadata(summary_meta)
-        entry["run_metadata_path"] = self._abs(run_meta_path)
-        entry["param_file"] = self.param_file
-        upsert_result(self.project_output_dir, entry)
-        self._update_results_index(entry)
-        return entry
 
     def _make_alias(self, source_path, alias_name):
         if not source_path or not os.path.exists(source_path):
@@ -3614,17 +3539,8 @@ class SegmentMergeWorker(QThread):
                 summary_meta_path = os.path.join(self.output_dir, "segmentation_meta.json")
                 with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(summary_meta_path)):
                     write_json_atomic(summary_meta_path, summary_meta)   # block A6 G2
-                self._register_completed_result(summary_meta)
+                self._write_run_metadata(summary_meta)   # the remap promotion reads it
                 if self.roi_dir and self.roi_id:
-                    rel_run_path = os.path.relpath(self.output_dir, self.roi_dir)
-                    update_roi_segmentation_run(self.roi_dir, {
-                        "run_id": self.result_id,
-                        "method": self.method,
-                        "created_at": self.created_at,
-                        "path": rel_run_path,
-                        "status": "done",
-                        "meta_path": os.path.join(rel_run_path, "segmentation_meta.json"),
-                    })
                     self._rm_publish_segment_run()
                     register_segmentation_run(self.output_dir, summary_meta)   # block A3
                     print(f"[Step2] run_id={self.result_id}")
@@ -4344,20 +4260,10 @@ class SegmentMergeWorker(QThread):
             meta_path = os.path.join(self.output_dir, 'segmentation_meta.json')
             with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(meta_path)):
                 write_json_atomic(meta_path, meta)              # block A6 G2
-            self._register_completed_result(meta)
+            self._write_run_metadata(meta)               # the remap promotion reads it
             if self.roi_dir and self.roi_id:
-                rel_run_path = os.path.relpath(self.output_dir, self.roi_dir)
-                update_roi_segmentation_run(self.roi_dir, {
-                    "run_id": self.result_id,
-                    "method": self.method,
-                    "created_at": self.created_at,
-                    "path": rel_run_path,
-                    "status": "done",
-                    "meta_path": os.path.join(rel_run_path, "segmentation_meta.json"),
-                })
                 self._rm_publish_segment_run()
                 register_segmentation_run(self.output_dir, meta)           # block A3
-                log.info("[Step2] updated roi_index latest_by_method")
 
             log.info(
                 f"=== Segmentation complete ===  "

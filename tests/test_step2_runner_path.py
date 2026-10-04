@@ -151,13 +151,10 @@ def _collect(worker):
 
 
 def _registered(worker):
-    path = os.path.join(worker.project_output_dir, "segmentation_results",
-                        "segmentation_results_index.json")
-    if not os.path.exists(path):
-        return False
-    with open(path, encoding="utf-8") as f:
-        runs = json.load(f).get("runs") or []
-    return any(worker.result_id in (r.get("run_id"), r.get("result_id")) for r in runs)
+    """Block RM-4: outside a workspace a finished run is one whose
+    segmentation_meta.json -- written last, never by a stopped run -- exists
+    (the results index is gone)."""
+    return os.path.isfile(os.path.join(worker.output_dir, "segmentation_meta.json"))
 
 
 def _assert_nuclei(output_dir, sfx, nuclei, table):

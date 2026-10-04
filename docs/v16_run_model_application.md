@@ -410,3 +410,16 @@ raw OME-TIFF ──> correct run ──┬──> preseg run      (Step1 预分�
 - codex RM-3 第 1 轮 2 条已修：segment 记录中的区域绝对路径；删除 DV 测试时丢失的 30 天清理 / 清空回收站 / schema 损坏拒绝三项检查已在新接口上补回。范围确认在 RM-3 内，无遗留调用、无新机制。
 - 聚焦回归 100 模块：与旧基线相比仅 `test_step1_channel_state_contract`、`test_step2_remap_integration` 新增失败，均为夹具迁移（前者改为写 schema-2 交接，后者重映射放 `settings/step0`），迁移后通过。纯 v1 交接测试 3 项删除。
 - 全量回归：待定（与 RM-4 合并或单独，用户裁定）。
+
+---
+
+## 20. RM-4 实施记录（2026-10-03 晚，与 RM-3 合并回归，未提交）
+
+用户裁定：RM-3 聚焦回归后直接做 RM-4，两块合并一次全量回归，之后分阶段提交；handoff_identity 选方案 C。
+
+- 三个运行索引删除：worker 不再写 `segmentation_registry.json`、`segmentation_results_index.json`、`roi_index.segmentation_runs`；`segmentation_registry` 只留建结果目录（工作区外用）；`roi_project.update_roi_segmentation_run` 删除；Step3 的「当前运行」改读 `session.json` 的 `viewing`。
+- 第二套复用删除：`_try_reuse_fused_zarr`、`_try_reuse_dapi_input_zarr`、`_all_regions_reusable` 及 settings 目录里的 fusion / DAPI meta 读写；工作区外 Generate 总是计算，工作区内只有 §8。
+- handoff_identity → `_settings_binding`（方案 C）：融合设置绑定工作区交接文件、原图与「正在编辑的 correct run」（项目相对路径），逐字段比较、无摘要；只有新像素（新 correct run）使已保存设置失效，只改 Intensity 不失效。预分割来源记录 correct run 而非交接摘要。
+- 测试：被删功能本身的测试删除（哈希复用 19 项、登记表 / 索引写入 2 项）；停止 / 登记测试改为「工作区内已发布（.done）」「工作区外 segmentation_meta.json 已写」；Step3 测试改设 `viewing`；融合设置测试按方案 C 改写。
+- codex RM-4 第 1 轮 2 条已修：删除登记函数时误删了 `run_metadata.json` 的写入（重映射提升读它），已在两条完成路径发布前补回；Step3 的 `(active)` 标记滞后一次选择，已改为先记 `viewing` 再标记。
+- **全量回归（RM-3 + RM-4，230 模块，2026-10-03 23:44 起）**：15 个模块有失败 / 超时 / 崩溃，全部在旧代码（`9be3386`）上以相同结果复现，新代码独有的失败为 0。日志在 `~/fusionflux/bench_rm/full_reg/`、`full_old/`。

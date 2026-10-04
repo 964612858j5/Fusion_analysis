@@ -369,7 +369,7 @@ def test_a_snapshot_from_another_handoff_is_not_adopted(app, tmp_path):
         path = tmp_path / "step1_fusion_settings.json"
         with open(path) as f:
             snapshot = json.load(f)
-        snapshot["handoff_identity"]["manifest_path"] = str(
+        snapshot["bound_to"]["manifest_path"] = str(
             tmp_path / "another" / "manifest.json")
         with open(path, "w") as f:
             json.dump(snapshot, f)
@@ -531,9 +531,8 @@ def test_hand_written_params_make_no_claim(app, tmp_path):
 
 
 @pytest.mark.parametrize("break_it", [
-    "manifest_path", "manifest_digest", "channel_remap_config_hash",
-    "handoff_schema_version", "raw_ome_path", "source_identity",
-    "handoff_identity", "version", "fusion_config"])
+    "manifest_path", "correct_run", "raw_ome_path", "source_identity",
+    "bound_to", "version", "fusion_config"])
 def test_a_snapshot_that_cannot_prove_itself_is_refused(app, tmp_path, break_it):
     """Fail closed: a missing field is not a wildcard, and an edited file keeps
     the hash it used to have."""
@@ -550,10 +549,10 @@ def test_a_snapshot_that_cannot_prove_itself_is_refused(app, tmp_path, break_it)
             snapshot["fusion_config"]["groups"]["markers"]["channels"]["CD3"] = 0.9
         elif break_it == "version":
             snapshot["version"] = 1
-        elif break_it in ("handoff_identity",):
-            snapshot.pop("handoff_identity", None)
+        elif break_it in ("bound_to",):
+            snapshot.pop("bound_to", None)
         else:
-            snapshot["handoff_identity"].pop(break_it, None)
+            snapshot["bound_to"].pop(break_it, None)
         with open(path, "w") as f:
             json.dump(snapshot, f)
 
@@ -564,11 +563,11 @@ def test_a_snapshot_that_cannot_prove_itself_is_refused(app, tmp_path, break_it)
         w.close()
 
 
-def test_a_republished_handoff_invalidates_the_snapshot(app, tmp_path):
-    """The manifest keeps ONE path. Step0 republishing it in place — a new ROI,
-    a new display mapping, new geometry — leaves the path and the source
-    identity untouched, so only its contents can say the settings no longer
-    describe this handoff."""
+def test_only_new_pixels_invalidate_the_snapshot(app, tmp_path):
+    """User ruling 2026-10-03 (block RM-4, option C): the settings are bound
+    to the correct run being edited. Step0 republishing its handoff with the
+    same pixels (another display mapping) keeps them; another corrected
+    product makes them stale."""
     w = _window(app, tmp_path)
     try:
         _enable(w, "CD3", True)
@@ -576,9 +575,14 @@ def test_a_republished_handoff_invalidates_the_snapshot(app, tmp_path):
         w._commit_fusion_settings()
         assert w._fusion_settings_dirty() is False
 
-        # Same path, same source identity, different contents.
+        # Same path, same source identity, same pixels, different contents.
         _publish_manifest(tmp_path, w.loader, remap_hash="remap-2", roi="ROI_2")
+        w._display.fusion.install_committed_snapshot(None)
+        assert w._restore_fusion_settings() is not None
+        assert w._fusion_settings_dirty() is False
 
+        # New pixels (another Step0 result).
+        w._corrected_zarr_path = str(tmp_path / "another_corrected.zarr")
         w._display.fusion.install_committed_snapshot(None)
         assert w._restore_fusion_settings() is None
         assert w._fusion_settings_dirty() is True

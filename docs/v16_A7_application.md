@@ -10,7 +10,7 @@
   - §20.3 A9-8（v2.4:149）：A9 要求「A1 zero-drift and A7 zero-write-back invariants still pass」，所以 A7 要留下一条可以反复使用的自动断言。
 - `AGENTS.md` 第 5 条：Viewer 的改动需要单独的 P0 批准。本申请就是这份批准的请求。
 
-状态：**申请 v1，用户 2026-10-02 批准**（「确认」，第 12–14 题按推荐项）。还没有改代码。**开工前提**：用户先完成 W1–W3 的 Step0 真机验收（§9）。
+状态：**申请 v1，用户 2026-10-02 批准；2026-10-04 开工前复核（§13）与第 15–17 题裁定已批准**（「确认」，第 12–14 题按推荐项）。还没有改代码。**开工前提**：用户先完成 W1–W3 的 Step0 真机验收（§9）。
 
 修订记录：v0 草稿；v1 写入用户对 v0 的审阅：第 1、2、6、7、8 题加条件；第 9 题改写；新增第 12–14 题；§1 写明 E4 的核心语义。
 
@@ -195,3 +195,71 @@ active source / source binding；显示状态（`ChannelDisplayState`）；viewe
    - **建议 (a)**：A7 只依赖 A6 的过期结果拒绝（G 系列），不依赖工作区的部分。
 10. **「每天跑相机日志」的具体内容**：每天跑 `test_v16_zero_drift` 加 C4 零回写断言，**不跑**诊断脚本。**建议同意**。
 11. **回退时 waiver 记在哪里**：执行记录，加上项目 provenance 目录里的一条记录（kind 和字段在执行时提交给用户审）。**建议同意**。
+
+---
+
+## 13. 开工前复核（2026-10-04，只读，HEAD `74a3505` + 未提交的 CG）
+
+申请写于 `bf048c7`；其后 RM、CS、CG 共 45 个提交改动了 `main_window.py`、`step0_page.py`、`viewer/explore_view.py`。按现码复核如下（未改代码）。
+
+### 13.1 结构未变，行号更新
+
+| 申请里的位置 | 现在 |
+|---|---|
+| `main_window.py:520` `_shared_camera` | `:522` |
+| `main_window.py:2270–2316` `_on_step0/1/3_camera`、`_remember_camera`、`_capture_camera_of`、`_apply_shared_camera_to` | `:2324–2397`，内容未变（仍「应用后读回」） |
+| `main_window.py:5205–5251` `_set_step_active` 调用 | `:5274`（离开时 capture）、`:5318`（进入时 apply + 读回） |
+| `step0_page.py:2426–2460` snapshot / apply / publish | `:2426–2460`（未变） |
+| `step0_page.py:5898–5907` 全图 `sigRangeChanged` → publish | `:5745` 连接、`:5751–5754` `_on_full_image_camera_moved` → `publish_camera("step0-full")` |
+| `step0_page.py:3001` compare publish | `:3001`（未变） |
+| `step1_viewer_mount.py:1053–1113, 1194–1251` | `:1053–1113`、`:1181–1251`（`_kept_camera` 仍在） |
+
+六个既有相机测试都在：zero_drift 4、frame_lock 12、step1_shared_camera 14、compare_toggle_drift 27、camera_stability 6、overview_camera_ownership 15 项。
+
+### 13.2 C3 的前提成立
+
+pyqtgraph 0.14.0：`ViewBox.wheelEvent`、`mouseDragEvent` 发 `sigRangeChangedManually`；`setRange`、`translateBy`、`scaleBy` 不发。Step0 全图、Step1、Step3、compare 面板都是 `ExploreView`，其 `RightClickViewBox` 只接管右键，拖动 / 滚轮走基类。
+
+### 13.3 §3.1 清单核对结果
+
+| # | 现码 |
+|---|---|
+| U1/U2 | 三页均为 `ExploreView` 的 ViewBox，可接 `sigRangeChangedManually` |
+| U3 键盘 | **不存在**：唯一的键是 compare 中的 Esc（`step0_page.py:2278–2290`，离开 compare，不移动相机）。记为不存在 |
+| U4 Navigator | Step0 全图 `_on_tissue_navigate`（`:5733` `controller.jump_to`）、Step0 compare `_navigate_compare_to`（`:5661`）；Step1 `main_window.py:2494` `jump_to_point` |
+| U5 patch | Step0 全图 `_navigate_full_image_to_patch`（`:10199`）、Step0 compare `_navigate_compare_to_patch`（`:10281`）；Step3 `main_window.py:6422`（`_select_step3_patch`）、Step1 `:6553` `show_patch` |
+| U6 preview | Step1 `jump_to_point`（mount `:1261`） |
+| U7 Fit | **只有 Step0** 的 `_btn_full_fit` → `_fit_full_image`（`:1762`、`:3151`）；Step1 / Step3 没有 Fit 按钮 |
+| U8 compare 进入 | 见 13.4 第 15 题 |
+| U9 Load 初始 fit | 建栈时 `step0_explore_tab.py:319/322`（`jump_to` / `setRange`）；`:717` 是换源时的视口恢复，**不是** Load 的初始 fit，不写 |
+| U10 | MainWindow 切换数据集 |
+| 表外（程序调用，均不写） | `compare_strip.py:293/297`（建栈初始视口）、`:765`（三面板联动 `set_view_rect_l0`）；`step1_viewer_binding.py:142`（换源后恢复视口）；`step1_viewer_host.py:418`（初始化范围）。后两个文件不在白名单，也不需要改：去掉 `sigRangeChanged` 上的 publish 后它们自然不写 |
+
+### 13.4 新发现，需要裁定
+
+15. **compare 面板里的用户拖动 / 缩放**：现在 `step0_page.py:3001` 在 compare 的任何范围变化时都 publish，且 compare 打开时 `current_camera_snapshot` 返回 compare 的相机——即用户在 compare 里平移后切到 Step1，Step1 会到 compare 的位置。第 8 题只裁定了 compare 的**进入 / 离开**不写。
+    - (a) compare 面板上的拖动 / 滚轮（`sigRangeChangedManually`）= `user_navigated`；进入、离开、三面板联动不写。
+    - (b) compare 里什么都不写，持有者停在进入 compare 前的位置。
+    - **建议 (a)**：保留今天「在 compare 里看到哪里，切页就到哪里」的行为，只去掉非用户的写入。
+16. **Step1 / Step3 的 `_on_gesture_quiet`**（`step1_viewer_mount.py:1269–1271`）：controller 的 `gesture_quiet` 在手势结束后发，但**程序跳转之后也会发**（`explore_view.py:4742` 注释），它现在调用 `publish_camera`——这是申请 §2.1 没列出的一条非用户写入路径。
+    - 做法：`_on_gesture_quiet` 不再 publish（它的重组、`publish_view_rect` 保留）；用户写入只来自 `sigRangeChangedManually`，跳转由各自的 `jump` 写。属于白名单里「`publish_camera` 的调用点」，不扩白名单。
+
+### 13.4b 测试口径修订（codex）
+
+- `sigRangeChangedManually` 在一次拖动中**每次移动都会发**，不是每个手势一次。§3.1 / §6 的「恰好写一次」改为：**每个手动通知恰好写一次**，且同一移动没有来自 `sigRangeChanged` / `gesture_quiet` 的重复写入；跳转类（U4–U7、U9）仍是每次命令恰好一次。
+- U2 包括**右键拖动缩放**（`RightClickViewBox` 只接管右键单击，不接管右键拖动）。
+- compare 的 Navigator / patch 跳转（`:5661`、`:10281`）各自显式 `jump`：去掉 compare 的通用 publish 后不能丢掉这两条用户命令。第 15 题选 (a) 时，从 `step0_page.py` 连接三个 compare ViewBox 的 `sigRangeChangedManually`，不改 strip / controller 内部。
+
+### 13.5 与 CS / CG 的关系
+
+CS P2 在 `viewer/explore_view.py` 加的 `begin_suspend_for_production` 只锁相机、不写相机；A7 不改 `explore_view.py`（§5），无冲突。CG 未动相机相关文件。
+
+### 13.6 复核审核
+
+codex（astra low，2026-10-04）：主要行号、C3 前提、第 16 题正确；补充了 U5 的 Step3、compare 的两条跳转、两处程序视口路径、测试口径与右键拖动（均已并入 13.3 / 13.4b）；第 15 题 (a) 可行，在白名单内；RM / CS / CG 不影响 A7 的做法；U3 无可用的键盘导航。
+
+### 13.7 用户裁定（2026-10-04）
+
+- **第 15 题：(a)**。保留「在哪看就切到哪」：在 compare 里拖动 / 缩放到哪里，进入 Step1 也必须在那里。compare 面板的拖动 / 滚轮 = `user_navigated`；进入、离开、三面板联动不写。
+- **第 16 题：同意**。`_on_gesture_quiet` 不再写持有者，其余工作保留。用户补充：程序的位置记录与用户的位置记录解耦——这正是 E4 的做法：持有者只存用户意图，各 viewer 自己显示的（clamp 后的）范围是程序的，永不写回持有者。
+- **第 17 题：同意**（修订 2026-10-02 第 8 题）。compare 的「进入」是用户右键点 P，属于用户命令：进入时 `jump` 写一次（P）；在 compare 里拖动 / 滚轮只记用户操作的那个面板（`user_navigated`）；另外两个面板的联动不写；离开不写（持有者已是最后看的位置，离开时全图回到面板相机，现有规则）。§3.1 的 U8 与 C4 的零回写事件随之改为：进入 = 恰好一次 `jump`，离开 / 联动 = 0 次。

@@ -727,6 +727,158 @@ def test_fusion_settings_are_bound_to_the_correct_run_being_edited(app, tmp_path
         w.close()
 
 
+# ── acceptance 2026-10-04 ──────────────────────────────────────────────────
+
+_CELLPOSE = {"method": "cellpose_wholecell_fusion", "flow_threshold": 0.6,
+             "cellprob_threshold": 0.3, "min_size": 22}
+
+
+@pytest.mark.parametrize("before", ["stardist_nuclei_dapi", "cellpose_wholecell_fusion"])
+def test_a_step2_draft_keeps_its_parameters(app, tmp_path, before):
+    """#4: the parameters of a restored draft / a result chosen in Step3 were
+    put back to the method's defaults (flow 0.6 came back as 0.4)."""
+    w, _ws = _rm_window(app, tmp_path)
+    try:
+        step2 = w._step2
+        step2._method_combo.setCurrentIndex(step2._method_combo.findData(before))
+        assert step2.apply_draft({"segmentation_config": dict(_CELLPOSE)})
+        assert step2._method_combo.currentData() == "cellpose_wholecell_fusion"
+        assert step2._cp_flow.value() == pytest.approx(0.6)
+        assert step2._cp_prob.value() == pytest.approx(0.3)
+        assert step2._cp_minsize.value() == 22
+        cfg = step2.get_seg_config()
+        assert cfg["flow_threshold"] == pytest.approx(0.6)
+        assert cfg["min_size"] == 22
+    finally:
+        w.close()
+
+
+def _click_close(combo, row):
+    from PyQt5 import QtCore
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtTest import QTest
+    combo.showPopup()
+    QtWidgets.QApplication.processEvents()
+    view = combo.view()
+    rect = view.visualRect(combo.model().index(row, 0))
+    QTest.mouseClick(view.viewport(), Qt.LeftButton, Qt.NoModifier,
+                     QtCore.QPoint(rect.left() + 8, rect.center().y()))
+    for _ in range(3):
+        QtWidgets.QApplication.processEvents()
+    return view
+
+
+def test_the_x_in_step3s_run_list_deletes_that_run(app):
+    """#6: in a drop-down the popup takes the mouse release, so the x acts on
+    the press -- once, for its own row, without choosing the current row."""
+    from block01.ui.step3_mask_bar import Step3MaskBar
+    bar = Step3MaskBar()
+    wanted, chosen = [], []
+    bar.delete_requested.connect(wanted.append)
+    bar.run_chosen.connect(chosen.append)
+    bar.set_runs([("a", "/r/a", "f1", True), ("b", "/r/b", "f1", True)])
+    host = QtWidgets.QWidget()
+    QtWidgets.QHBoxLayout(host).addWidget(bar.corner())
+    host.show()
+    try:
+        view = _click_close(bar.run_combo, 1)
+        assert wanted == ["/r/b"]
+        assert chosen == []
+        assert not view.isVisible()
+    finally:
+        host.close()
+
+
+def test_the_x_in_step2s_input_list_deletes_that_run(app, tmp_path):
+    w, _ws = _rm_window(app, tmp_path)
+    try:
+        step2 = w._step2
+        wanted = []
+        step2.fuse_delete_requested.connect(wanted.append)
+        step2.set_fuse_runs([{"run": "/r/f2", "label": "f2", "tag": "", "zarr": "",
+                              "regions": {}, "rois": [], "tooltip": "f2"},
+                             {"run": "/r/f1", "label": "f1", "tag": "", "zarr": "",
+                              "regions": {}, "rois": [], "tooltip": "f1"}], "")
+        step2.show()
+        _click_close(step2._fuse_combo, 1)
+        assert wanted == ["/r/f1"]
+    finally:
+        w.close()
+
+
+def test_a_reopened_step2_shows_the_result_step3_is_using(app, tmp_path, monkeypatch):
+    """#7 (user ruling 2026-10-04): on reopening, the result Step3 is using
+    wins over the saved Step2 draft, which it replaces."""
+    w, ws = _rm_window(app, tmp_path)
+    try:
+        monkeypatch.setattr(w._step2, "_load_zarr_info", lambda: None)
+        c = _correct_run(ws)
+        f = _fuse_run(ws, c)
+        s = _segment_run(ws, f, _t(2), method="cellpose_wholecell_fusion")
+        rs.write_params(s, dict(rs.read_params(s), segmentation_config=dict(_CELLPOSE)))
+        rs.update_session(ws, editing={"correct_run": "x", "geometry_revision": 0})
+        sess = rs.put_draft(rs.load_session(ws), "step2", {
+            "segmentation_config": {"method": "stardist_nuclei_dapi"},
+            "edited_against": {"correct_run": "x", "geometry_revision": 0}})
+        rs.save_session(ws, sess)
+        w._corrected_zarr_path = os.path.join(c, "corrected_channels.zarr")
+        w._rm_note_viewing(s)
+        w._rm_step2_draft_pending = True                    # an opened workspace
+        w._rm_bind_step2()
+        assert not w._rm_restore_page_draft("step2", w._step2)
+        assert w._step2._method_combo.currentData() == "cellpose_wholecell_fusion"
+        assert w._step2._cp_flow.value() == pytest.approx(0.6)
+        w._rm_save_page_drafts()                            # the old draft is replaced
+        draft = rs.load_session(ws)["drafts"]["step2"]["segmentation_config"]
+        assert draft["method"] == "cellpose_wholecell_fusion"
+    finally:
+        w.close()
+
+
+def test_a_new_step0_result_unsaves_the_fusion_settings_in_the_session(app, tmp_path):
+    """RM-4 II.2: inside one session too, a new correct run (new pixels) makes
+    the committed fusion settings unsaved; the same run (an Intensity-only
+    Save) keeps them."""
+    w, ws = _rm_window(app, tmp_path)
+    try:
+        manifest = os.path.join(ws, "settings", "step0", "step0_roi_result.json")
+        json.dump({"handoff_schema_version": 2, "source_identity": {"dataset_path": "/s"}},
+                  open(manifest, "w"))
+        w.step0_output = dict(w.step0_output, step0_manifest_path=manifest)
+        c1 = _correct_run(ws)
+        w._corrected_zarr_path = os.path.join(c1, "corrected_channels.zarr")
+        snapshot = {"version": 1, "hash": "h", "bound_to": w._settings_binding()}
+        w._display.fusion.install_committed_snapshot(snapshot)
+        assert not w._rm_check_settings_binding()            # same pixels
+        assert w._committed_fusion_settings() is not None
+        c2 = _correct_run(ws, now=_t(9))
+        w._corrected_zarr_path = os.path.join(c2, "corrected_channels.zarr")
+        assert w._rm_check_settings_binding()                # new pixels
+        assert w._committed_fusion_settings() is None
+    finally:
+        w.close()
+
+
+def test_a_correct_runs_geometry_names_its_folders_relatively(tmp_path):
+    """F5: geometry.rois[].roi_dir in a correct run's params.json is
+    project-relative."""
+    from block01.ui.step0.step0_page import Step0Page
+    proj = tmp_path / "proj"
+    ws = proj / "rois" / "ws1"
+    ws.mkdir(parents=True)
+    (proj / "project_manifest.json").write_text("{}")
+    (ws / "roi_manifest.json").write_text("{}")
+    run = rs.new_run(str(ws), "correct", now=T0)
+    fake = types.SimpleNamespace(_roi_context={}, _rm_pending_run=run)
+    fake._rm_sigs = Step0Page._rm_sigs
+    spec = {"config": {"channel_decisions": {}}, "analysis_region_type": "full_wsi",
+            "rois": [{"name": "Full WSI", "roi_dir": str(ws)}], "patches": [],
+            "raw_path": "/s.ome.tif"}
+    Step0Page._rm_publish_correct_run(fake, run, spec)
+    params = rs.read_params(run)
+    assert params["geometry"]["rois"][0]["roi_dir"] == "rois/ws1"
+    assert rs.is_done(run)
+
 
 @pytest.mark.parametrize("original_still_there", [False, True])
 def test_a_copied_project_reads_its_own_masks(app, tmp_path, original_still_there):

@@ -1293,7 +1293,14 @@ class Step2Page(QWidget):
         # The draft IS the configuration that was on screen: it runs as typed
         # (source manual), so no index file is reloaded over it at Run.
         self._set_param_source("manual")
-        self._apply_seg_config_to_ui(cfg)
+        # (acceptance 2026-10-04: without this guard the method change at the
+        # end of the apply put every parameter back to the method's default)
+        old = self._loading_index_selection
+        self._loading_index_selection = True
+        try:
+            self._apply_seg_config_to_ui(cfg)
+        finally:
+            self._loading_index_selection = old
         self._seg_config = cfg
         self._seg_param_file = ""
         self._resolved_param_edit.setText(str((draft or {}).get("param_file") or ""))

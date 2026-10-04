@@ -3394,6 +3394,7 @@ class MainWindow(QMainWindow):
             print(f"[Step1] nucleus_channel={nucleus_channel}")
             print(f"[Step1] panel_groups source={source}")
             print(f"[Step1] config panel initialized={bool(self.config.get_groups())}")
+        self._rm_check_settings_binding()
 
         self._stop_all_loaders()
         self._patch_channel_cache.clear()
@@ -4656,14 +4657,14 @@ class MainWindow(QMainWindow):
         result chosen in Step3 brings its own method and parameters into
         Step2 (its params.json) -- once per choice, so later edits stay. What
         Step2 held is kept as its draft first. On first entry into an opened
-        workspace its saved Step2 draft wins."""
+        workspace the result Step3 is using wins over the saved Step2 draft,
+        which is then replaced (user ruling 2026-10-04)."""
         if run_store.kind_of(viewing) != "segment" or not run_store.is_done(viewing):
             return False
         if os.path.abspath(viewing) == os.path.abspath(
                 self.__dict__.get("_rm_step2_applied_from") or "."):
             return False
-        self._rm_step2_applied_from = viewing
-        if self.__dict__.get("_rm_step2_draft_pending") or not hasattr(step2, "apply_draft"):
+        if not hasattr(step2, "apply_draft"):
             return False
         cfg = run_store.read_params(viewing).get("segmentation_config")
         if not isinstance(cfg, dict) or not cfg:
@@ -4672,6 +4673,11 @@ class MainWindow(QMainWindow):
         roi = self._rm_roi_dir()
         cfg = run_store.from_records(cfg, run_store.project_dir_of(roi)) if roi else cfg
         ok = step2.apply_draft({"segmentation_config": cfg})
+        if not ok:
+            return False
+        self._rm_step2_applied_from = viewing
+        # (the saved Step2 draft is not restored over it)
+        self._rm_step2_draft_pending = False
         print(f"[Step2] the settings of {os.path.basename(viewing)} were loaded "
               f"(chosen in Step3)")
         return ok
@@ -8604,6 +8610,24 @@ class MainWindow(QMainWindow):
         out = output_dir or (self.step0_output or {}).get("step1_dir") \
             or (self.step0_output or {}).get("output_dir") or OUTPUT_DIR
         return os.path.join(out, "step1_fusion_settings.json")
+
+    def _rm_check_settings_binding(self):
+        """Block RM option C, inside a session (acceptance 2026-10-04): a
+        republished handoff on a NEW correct run makes the committed fusion
+        settings unsaved. Only the snapshot is dropped -- the draft, and the
+        Intensity Step0 just saved, stay as they are."""
+        snapshot = self._committed_fusion_settings()
+        saved = (snapshot or {}).get("bound_to")
+        current = self._settings_binding()
+        if not isinstance(saved, dict) or current is None:
+            return False
+        if current.get("correct_run") == saved.get("correct_run"):
+            return False
+        self._display.fusion.install_committed_snapshot(None)
+        print("[Step1] saved fusion settings not adopted: the Step0 result "
+              "changed since it was saved (new pixels)")
+        self._update_fusion_settings_state()
+        return True
 
     def _restore_fusion_settings(self):
         """Adopt the saved snapshot, but only if it is THIS handoff's.

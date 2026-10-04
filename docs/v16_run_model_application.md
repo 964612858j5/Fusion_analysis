@@ -423,3 +423,18 @@ raw OME-TIFF ──> correct run ──┬──> preseg run      (Step1 预分�
 - 测试：被删功能本身的测试删除（哈希复用 19 项、登记表 / 索引写入 2 项）；停止 / 登记测试改为「工作区内已发布（.done）」「工作区外 segmentation_meta.json 已写」；Step3 测试改设 `viewing`；融合设置测试按方案 C 改写。
 - codex RM-4 第 1 轮 2 条已修：删除登记函数时误删了 `run_metadata.json` 的写入（重映射提升读它），已在两条完成路径发布前补回；Step3 的 `(active)` 标记滞后一次选择，已改为先记 `viewing` 再标记。
 - **全量回归（RM-3 + RM-4，230 模块，2026-10-03 23:44 起）**：15 个模块有失败 / 超时 / 崩溃，全部在旧代码（`9be3386`）上以相同结果复现，新代码独有的失败为 0。日志在 `~/fusionflux/bench_rm/full_reg/`、`full_old/`。
+
+---
+
+## 21. RM-1～RM-4 验收修复（2026-10-04，未提交）
+
+用户验收发现，经 codex 审方案、用户授权后修复：
+- F1 `ui/step2_page.py`：`apply_draft` 套用参数时，方法切换把全部参数重置为默认值（Step3 选回 Cellpose 后 flow 0.6 显示 0.4）；加与参数文件载入相同的 `_loading_index_selection` 防护。
+- F2 `ui/step3_mask_bar.py`：下拉框弹层吃掉鼠标松开事件，Step3 / Step2 下拉框里的 × 无反应；下拉框中改为按下即收起弹层、延后发出删除请求，对话框列表行为不变。
+- F3 `ui/main_window.py`：重开项目后首次进入 Step2，以 Step3 正在查看的分割结果的参数为准，覆盖旧的 Step2 草稿（用户 2026-10-04 接受覆盖）。
+- F4 `ui/main_window.py`：同一会话内 Step0 产生新 correct run 后，Step1 重读交接时检查融合设置绑定，绑定的 correct run 不同即撤销已提交快照（不覆盖 Step0 新存的 Intensity）。
+- F5 `ui/step0/step0_page.py`：correct run 的 `params.json` 中 `geometry` 改为项目相对路径（只影响新 run）。
+- F6 `core/step3_masks.py`：segment run 的 `segmentation_meta.json` 记的是原项目绝对路径；读取时（内存中，不改文件）把本工作区 runs 下的产物路径换到当前项目，存在即用，不论原件是否还在；Step3、Step4 共用这一入口。
+- 说明（未改）：预分割结果未恢复是因为该 preseg run 已被用户删除；只改 Intensity 也需重存融合设置，因为 Intensity 属于融合设置内容（用户认可）。
+- 测试：`tests/test_v16_rm2_chain.py` 新增 9 项；聚焦回归 21 模块 + Step3/Step4 相关 9 模块全部通过。codex 代码审核 F1–F6 均同意。
+- 另立议题（不在 RM 内）：Save 时界面冻结 11.8 s（Explore floor 线程同步 join）；本机 Step0 GPU 校正因找不到 libnvrtc.so.12 全部回退 CPU。

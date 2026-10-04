@@ -92,7 +92,16 @@ class _TaggedItemDelegate(QtWidgets.QStyledItemDelegate):
                 QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease,
                 QtCore.QEvent.MouseButtonDblClick) \
                 and self.close_rect(option.rect).contains(event.pos()):
-            if event.type() == QtCore.QEvent.MouseButtonRelease:
+            combo = self.parent()
+            if isinstance(combo, QtWidgets.QComboBox):
+                # (acceptance 2026-10-04) A combo's popup takes the release
+                # for itself, so the × acts on the press: the popup closes,
+                # then the deletion asks -- outside the popup's mouse handler.
+                if event.type() == QtCore.QEvent.MouseButtonPress:
+                    row = index.row()
+                    combo.hidePopup()
+                    QtCore.QTimer.singleShot(0, lambda: self.close_clicked.emit(row))
+            elif event.type() == QtCore.QEvent.MouseButtonRelease:
                 self.close_clicked.emit(index.row())
             return True                     # the × is not a click on the row
         return super().editorEvent(event, model, option, index)

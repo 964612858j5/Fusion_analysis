@@ -11404,6 +11404,10 @@ class Step0Page(QWidget):
                                                      manifest.get("sources")) or ""
         except Exception as exc:                            # noqa: BLE001
             print(f"[Step0] slide id not recorded ({type(exc).__name__}: {exc})")
+        # (acceptance 2026-10-04: the frozen geometry names its ROI folders
+        # project-relative, like every other record)
+        params["geometry"] = run_store.to_records(params["geometry"],
+                                                  run_store.project_dir_of(run_dir))
         run_store.write_params(run_dir, params)
         run_store.write_inputs(run_dir, None, slide_id=slide_id)
         run_store.publish(run_dir)

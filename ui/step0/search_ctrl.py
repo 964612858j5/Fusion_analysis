@@ -42,6 +42,11 @@ from ...core.bg_correction import (
     BG_CORRECTION_ALGO_VERSION,
     GpuBackendFailed,
     compute_path,
+    compute_impl,
+    legacy_compute_impl,
+    CpuImplUnavailable,
+    GAUSSIAN_IMPL_SCIPY,
+    GAUSSIAN_IMPL_OPENCV,
     correct_tile,
     tophat_footprint,
     resolve_effective_correction_params,
@@ -1979,9 +1984,14 @@ def read_corrected_zarr_state(zarr_path):
             foot = a.get("tophat_footprint")
             if path is None:
                 foot = "<unrecorded>"     # a pre-S0P product: never equal
+            # Block CG: the implementation; a product made before it used
+            # the scipy / cupyx Gaussian (TopHat: None).
+            impl = (a.get("bg_compute_impl") if "bg_compute_impl" in a
+                    else legacy_compute_impl(m, path))
             gm[str(ch)] = (str(m), None if pv is None else int(pv), ver,
                            None if path is None else str(path),
-                           None if foot is None else str(foot))
+                           None if foot is None else str(foot),
+                           None if impl is None else str(impl))
         per_group.append(gm)
     common = set(per_group[0])
     for gm in per_group[1:]:
@@ -2102,6 +2112,16 @@ def coarsest_level_stride(slide_path):
     return len(shapes) - 1, stride
 
 
+def correction_tile_size(method, impl=None):
+    """The Save tile edge (block CG G1b). The Gaussian's halo covers its whole
+    truncated kernel, so its result does not depend on the tile size --
+    verified bitwise on a whole real channel, seams included, for both
+    implementations. 1024 suits the OpenCV Gaussian (cache: 14.6 -> 10.0 s on
+    8 workers); scipy is faster at 4096 (15.3 vs 22.8 s), and TopHat stays
+    at 4096."""
+    return 1024 if impl == GAUSSIAN_IMPL_OPENCV else 4096
+
+
 class WsiCorrectionWorker(QThread):
     progress = pyqtSignal(int, int, int, int, str, str, int)
     finished = pyqtSignal(str, dict)
@@ -2155,7 +2175,7 @@ class WsiCorrectionWorker(QThread):
         return False
 
     def _correct_channel(self, ds, accumulator, tiles, ch_name, method, param, path,
-                         info, roi_y0, roi_x0, poly_mask, progress):
+                         info, roi_y0, roi_x0, poly_mask, progress, impl=None):
         """Every tile of one channel on ONE backend, written and accumulated in
         tile order. Returns "done" or "canceled"; a GPU failure raises
         `GpuBackendFailed` (the caller recomputes the channel on the CPU).
@@ -2192,7 +2212,7 @@ class WsiCorrectionWorker(QThread):
                 page, roi_y0 + py0, roi_y0 + py1, roi_x0 + px0, roi_x0 + px1,
             ).astype(np.float32, copy=False)
             read_done()
-            corr = correct_tile(raw, method, param, path)
+            corr = correct_tile(raw, method, param, path, impl)
             cy0, cy1, cx0, cx1 = crop
             return corr[cy0:cy1, cx0:cx1].astype(np.float32, copy=True)
 
@@ -2442,7 +2462,9 @@ class WsiCorrectionWorker(QThread):
                 roi_h, roi_w = info["shape"]
                 for _, method, param in channels:
                     tile_counts.append(len(list(_tile_slices(
-                        roi_h, roi_w, 4096, method_overlap(method, param)))))
+                        roi_h, roi_w,
+                        correction_tile_size(method, compute_impl(method, compute_path(method))),
+                        method_overlap(method, param)))))
             total_units = sum(tile_counts)
             started = time.time()
             completed_units = 0
@@ -2470,13 +2492,18 @@ class WsiCorrectionWorker(QThread):
                     progress_idx += 1
                     print(f"[WsiCorrectionWorker] processing channel={ch_name} method={method}")
                     overlap = method_overlap(method, param)
-                    tiles = list(_tile_slices(roi_h, roi_w, 4096, overlap))
                     # Block S0P: ONE backend for the whole channel, chosen
                     # here; a GPU failure part-way discards the channel and
                     # computes it again on the CPU from tile 0 -- never a
                     # channel half square-footprint, half disk.
                     path = compute_path(method)
+                    # Block CG: ONE implementation for the whole channel too.
+                    impl = compute_impl(method, path)
                     while True:
+                        # (the tiles follow the implementation: a channel
+                        # recomputed with scipy goes back to 4096)
+                        tiles = list(_tile_slices(roi_h, roi_w,
+                                                  correction_tile_size(method, impl), overlap))
                         # THIS CHANNEL'S PLANE GOES FIRST. Its level 0 is about
                         # to be rewritten, so the plane beside it stops being
                         # true at the first tile written below.
@@ -2512,13 +2539,22 @@ class WsiCorrectionWorker(QThread):
                                 ds, accumulator, tiles, ch_name, method, param, path,
                                 info, roi_y0, roi_x0, poly_mask,
                                 (progress_idx, channel_total, completed_units,
-                                 total_units, started))
+                                 total_units, started), impl)
                         except GpuBackendFailed as exc:
                             print(f"[WsiCorrectionWorker] {ch_name}: {exc}; the channel "
                                   f"is discarded and computed again on the CPU from tile 0")
                             if ch_name in group:
                                 del group[ch_name]
                             path = "cpu"
+                            impl = compute_impl(method, path)
+                            continue
+                        except CpuImplUnavailable as exc:
+                            # Block CG: never a channel half OpenCV, half scipy.
+                            print(f"[WsiCorrectionWorker] {ch_name}: {exc}; the channel "
+                                  f"is discarded and computed again with scipy from tile 0")
+                            if ch_name in group:
+                                del group[ch_name]
+                            impl = GAUSSIAN_IMPL_SCIPY
                             continue
                         break
                     if outcome == "canceled":
@@ -2537,6 +2573,7 @@ class WsiCorrectionWorker(QThread):
                     # the incremental-reuse signature.
                     ds.attrs["bg_compute_path"] = path
                     ds.attrs["tophat_footprint"] = tophat_footprint(method, path)
+                    ds.attrs["bg_compute_impl"] = impl          # block CG
 
                     # WHICH WRITE THIS IS. Minted once per channel per real
                     # recomputation, after its level 0 is whole: the static

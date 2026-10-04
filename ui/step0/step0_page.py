@@ -8903,7 +8903,8 @@ class Step0Page(QWidget):
         """What the corrected zarr records for a channel saved with `config`:
         (method, param, algorithm version) -- a channel saved by an older
         numeric version never matches, so incremental save reprocesses it --
-        + (backend, tophat footprint) of this machine (block S0P)."""
+        + (backend, tophat footprint) of this machine (block S0P)
+        + the implementation (block CG)."""
         from ...core.bg_correction import (
             BG_CORRECTION_ALGO_VERSION, current_compute_signature)
         radius, sigma = resolve_effective_correction_params(
@@ -11354,8 +11355,12 @@ class Step0Page(QWidget):
         """What the base correct run froze: {channel: signature}."""
         if not base_path:
             return {}
-        return self._rm_sigs(run_store.read_params(os.path.dirname(base_path))
-                             .get("corrected") or {})
+        # (block CG: a run frozen before the implementation field existed is
+        # read in today's 6-field form)
+        from ...core.bg_correction import normalize_save_signature
+        saved = run_store.read_params(os.path.dirname(base_path)).get("corrected") or {}
+        return self._rm_sigs({ch: normalize_save_signature(sig)
+                              for ch, sig in saved.items()})
 
     def _rm_new_correct_run(self, base_path="", copy=False, defer_copy=False):
         """A new, unpublished correct run; returns the corrected zarr path in
@@ -11521,6 +11526,14 @@ class Step0Page(QWidget):
         correction parameters, per-channel decisions and frozen geometry."""
         from ...core.bg_correction import BG_CORRECTION_ALGO_VERSION
         sigs = self._rm_sigs(self.__dict__.get("_rm_save_sigs", {}) or {})
+        # Block CG (codex): what the product ACTUALLY holds -- a channel that
+        # had to be recomputed with scipy says so in its zarr, and the run
+        # must not record the implementation that was only predicted.
+        actual, _bboxes = read_corrected_zarr_state(
+            os.path.join(run_dir, "corrected_channels.zarr"))
+        if actual:
+            sigs = {ch: (self._rm_sigs({ch: actual[ch]})[ch] if ch in actual else sig)
+                    for ch, sig in sigs.items()}
         config = spec["config"]
         decisions = {str(ch): str(m).strip().lower()
                      for ch, m in (config.get("channel_decisions") or {}).items()}

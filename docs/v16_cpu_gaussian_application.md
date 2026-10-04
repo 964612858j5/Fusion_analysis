@@ -73,3 +73,14 @@
 - **签名**：`bg_compute_path` 仍只表示 `cpu` / `gpu`；新增 `bg_compute_impl`：CPU 高斯 `opencv-gaussian` / `scipy-gaussian`，GPU 高斯 `cupyx-gaussian`。增量 Save 签名概念上为（方法, 参数, 算法版本, 计算位置, 足迹, 实现）。旧产物无该字段：高斯按其计算位置视为 `scipy-gaussian` / `cupyx-gaussian`（即旧实现），仍可在只装 scipy 的机器上复用。TopHat 的 OpenCV 与 skimage 实现逐像素相同（P1 已验证），实现字段记为空，不使旧 TopHat 产物失效。
 - **G1b 有条件批准**：同一完整通道 1024 tile 与 4096 tile 的 level-0 全图逐像素比较、所有 tile 接缝单独检查；完全一致即采用 1024，不再另行请示；不一致则保持 4096。
 - **G2 不做**；FFT 不做；Mac / 少核真机有则测，不阻塞。
+
+## 9. 实施记录（2026-10-04，本地提交）
+
+- `core/bg_correction.py`：OpenCV 高斯（`GaussianBlur`，核长 2·int(4σ+0.5)+1，σx=σy，`BORDER_REFLECT`）与 scipy 两种实现；显示路径逐次选择，Save 通道按冻结的实现执行，OpenCV 不能处理的块抛 `CpuImplUnavailable`；`compute_impl` / `legacy_compute_impl` / `normalize_save_signature`；签名为（方法, 参数, 版本, 位置, 足迹, 实现）。
+- `ui/step0/search_ctrl.py`：每通道冻结实现，`CpuImplUnavailable` → 丢弃本通道、从第 0 块起整通道 scipy 重算；`bg_compute_impl` 写入 zarr；旧产物缺该字段按旧实现读取；tile 大小随实现：OpenCV 高斯 1024，scipy 与 TopHat 4096。
+- `ui/step0/step0_page.py`：读取旧 run 的 5 字段签名时补全；发布 run 时以产物里实际记录的签名为准（codex）。
+- G1b 门槛：真实切片 CD68 σ=50 全通道，1024 与 4096 的 level-0 与粗平面逐像素相同、接缝差 0（OpenCV 与 scipy 两种实现均验证）；scipy 在 1024 更慢（22.8 vs 15.3 s），故 1024 只用于 OpenCV。
+- 精度：OpenCV 对 scipy 全通道最大 1.6e-4、平均 2.3e-7，粗平面 1.5e-5；49499 个 Cellpose 细胞平均强度最大差 1.2e-5。速度：14.9 s → 10.1 s（8 线程）。
+- 测试：新增 `tests/test_bg_gaussian_cpu.py`（34 项）；既有测试仅为 6 字段签名、`correct_tile` 桩的实现参数、以及发布读产物签名而更新（`test_step0_bg_parallel`、`test_bg_correction_halo` +1 项、`test_v16_rm1_run_store` 一处桩）。
+- 回归 63 模块：失败均在旧代码上存在（`test_global_channel_dock`、`test_preview_source_provider`、`test_step0_floor_prefetch` 2 项、`test_step0_no_process_button`、`test_step0_process_incremental`）。
+- codex 代码审核：1 条（发布签名应取自产物）已修。

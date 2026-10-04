@@ -187,6 +187,9 @@ def dv_page(page, monkeypatch, tmp_path, slides):
     return page
 
 
+from block01.ui.step0.step0_page import read_corrected_zarr_state as _REAL_READ_STATE  # noqa: E402
+
+
 def _prepared(page, ms=5000):
     """Block CS P2: a Save that copies a run, or hands the viewer off,
     finishes its preparation off the GUI thread; wait for it."""
@@ -320,6 +323,9 @@ def test_publishing_a_correct_run_freezes_its_parameters(dv_page, tmp_path, slid
         return {"config": spec["config"], "rois": spec["rois"], "patches": spec["patches"],
                 "manifest": {}, "corrected_report": None}
     monkeypatch.setattr(step0_handoff, "write_handoff", _write)
+    # Block CG: publication reads the product's own signatures; the stub
+    # above (the BASE run's) must not stand in for this run's product.
+    monkeypatch.setattr(sp, "read_corrected_zarr_state", _REAL_READ_STATE)
     dv_page._write_step0_handoff(config, zarr_path)
     assert seen["spec"]["register_corrected"] is True             # A3 at publication
     assert rs.is_done(run) and dv_page._rm_pending_run is None

@@ -200,8 +200,8 @@ def _save(out_dir, loader=None, method="tophat", **kw):
 def test_the_backend_is_recorded_on_the_array(tmp_path, method):
     from block01.core.bg_correction import current_compute_signature
     _w, _g, arr = _save(tmp_path, method=method)
-    assert (arr.attrs["bg_compute_path"], arr.attrs["tophat_footprint"]) == \
-        current_compute_signature(method)
+    assert (arr.attrs["bg_compute_path"], arr.attrs["tophat_footprint"],
+            arr.attrs["bg_compute_impl"]) == current_compute_signature(method)
 
 
 def test_a_gpu_failure_mid_channel_recomputes_the_whole_channel_on_the_cpu(tmp_path, monkeypatch):
@@ -212,7 +212,7 @@ def test_a_gpu_failure_mid_channel_recomputes_the_whole_channel_on_the_cpu(tmp_p
     reference = np.asarray(ref[...])
     calls = []
 
-    def fake_correct(raw, method, param, path):
+    def fake_correct(raw, method, param, path, impl=None):
         calls.append(path)
         if path == "gpu":
             if sum(1 for c in calls if c == "gpu") == 2:       # the 2nd GPU tile fails
@@ -243,8 +243,8 @@ def test_reuse_needs_the_same_backend(tmp_path):
     assert read_corrected_zarr_state(zp)[0]["CD3"] != current             # pre-S0P -> recompute
     g.attrs["bg_compute_path"], g.attrs["tophat_footprint"] = "gpu", "square"
     other = read_corrected_zarr_state(zp)[0]["CD3"]
-    assert other[3:] == ("gpu", "square")
-    if current_compute_signature("tophat") == ("cpu", "disk"):
+    assert other[3:5] == ("gpu", "square")
+    if current_compute_signature("tophat")[:2] == ("cpu", "disk"):
         assert other != current                                           # GPU product on a CPU machine
 
 
@@ -383,7 +383,7 @@ def test_the_gpu_backend_stays_one_tile_at_a_time(tmp_path, monkeypatch):
     from block01.ui.step0 import search_ctrl as sc
     order = []
 
-    def fake(raw, method, param, path):
+    def fake(raw, method, param, path, impl=None):
         order.append(path)
         return bg.correct_tile(raw, method, param, "cpu")
     monkeypatch.setattr(sc, "compute_path", lambda method: "gpu")

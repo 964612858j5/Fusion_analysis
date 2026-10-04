@@ -376,9 +376,61 @@ def _cucim_gpu(arr32, sigma):
     return out
 
 
-def _cucim_cpu(arr32, sigma):
+# Block CG (2026-10-04): the CPU Gaussian has two implementations of the same
+# estimator (truncate 4 sigma, reflect border). OpenCV is 2x faster per call
+# and agrees with scipy to float32 rounding (max ~1.8e-4 on 0-255 data), but
+# not bitwise -- so a Save channel records which one made it
+# (`bg_compute_impl`) and never mixes them.
+GAUSSIAN_IMPL_OPENCV = "opencv-gaussian"
+GAUSSIAN_IMPL_SCIPY = "scipy-gaussian"
+GAUSSIAN_IMPL_GPU = "cupyx-gaussian"
+
+
+class CpuImplUnavailable(RuntimeError):
+    """The implementation a Save channel was frozen to cannot take a tile."""
+
+
+def _cucim_cpu_scipy(arr32, sigma):
     bg = sk_gaussian(arr32, sigma=sigma, preserve_range=True, mode='reflect')
     return np.clip(arr32 - bg.astype(np.float32, copy=False), 0, None).astype(np.float32)
+
+
+def _cucim_cpu_opencv_ok(arr32):
+    return _cv2 is not None and arr32.ndim == 2 and arr32.size > 0 \
+        and bool(np.isfinite(arr32).all())
+
+
+def _cucim_cpu_opencv(arr32, sigma):
+    """The same Gaussian with OpenCV: kernel 2*int(4*sigma + 0.5) + 1 (scipy's
+    truncate=4 radius), sigma on both axes, `BORDER_REFLECT` (= scipy
+    'reflect'; NOT BORDER_REFLECT_101)."""
+    arr32 = np.ascontiguousarray(arr32, dtype=np.float32)
+    size = 2 * int(4.0 * sigma + 0.5) + 1
+    bg = _cv2.GaussianBlur(arr32, (size, size), sigmaX=float(sigma), sigmaY=float(sigma),
+                           borderType=_cv2.BORDER_REFLECT)
+    return np.clip(arr32 - bg, 0, None).astype(np.float32, copy=False)
+
+
+def gaussian_cpu_impl():
+    """The CPU Gaussian implementation a new Save channel starts with."""
+    return GAUSSIAN_IMPL_OPENCV if _cv2 is not None else GAUSSIAN_IMPL_SCIPY
+
+
+def _cucim_cpu(arr32, sigma, impl=None):
+    """CPU Gaussian background subtraction. `impl` None (display paths:
+    viewer tiles, floor, calibration): OpenCV when it can take the array,
+    else scipy, per call. A named `impl` (a Save channel) is used as is;
+    OpenCV that cannot take a tile raises `CpuImplUnavailable` so the channel
+    is recomputed with scipy from its first tile -- never a mixed channel."""
+    arr32 = np.asarray(arr32, dtype=np.float32)
+    if impl is None:
+        impl = GAUSSIAN_IMPL_OPENCV if _cucim_cpu_opencv_ok(arr32) else GAUSSIAN_IMPL_SCIPY
+    if impl == GAUSSIAN_IMPL_OPENCV:
+        if not _cucim_cpu_opencv_ok(arr32):
+            raise CpuImplUnavailable("OpenCV cannot take this tile (missing, or "
+                                     "non-finite pixels)")
+        return _cucim_cpu_opencv(arr32, sigma)
+    return _cucim_cpu_scipy(arr32, sigma)
 
 
 # ── block S0P: one backend per channel ──────────────────────────────────
@@ -411,17 +463,46 @@ def tophat_footprint(method, path):
     return "square" if path == "gpu" else "disk"
 
 
+def compute_impl(method, path):
+    """``bg_compute_impl`` (block CG): which implementation of the method
+    computes on `path`. Only the Gaussian has two non-identical ones; the
+    TopHat's OpenCV and skimage implementations are bitwise equal (block CS
+    P1), so it records None."""
+    if str(method or "").strip().lower() != "cucim":
+        return None
+    return GAUSSIAN_IMPL_GPU if path == "gpu" else gaussian_cpu_impl()
+
+
+def legacy_compute_impl(method, path):
+    """The implementation a product made before block CG used: the scipy /
+    cupyx Gaussian (TopHat: None)."""
+    if str(method or "").strip().lower() != "cucim" or path is None:
+        return None
+    return GAUSSIAN_IMPL_GPU if path == "gpu" else GAUSSIAN_IMPL_SCIPY
+
+
 def current_compute_signature(method):
-    """``(bg_compute_path, tophat_footprint)`` this machine would write now --
-    the two fields incremental Save adds to its signature."""
+    """``(bg_compute_path, tophat_footprint, bg_compute_impl)`` this machine
+    would write now -- the fields incremental Save adds to its signature."""
     path = compute_path(method)
-    return path, tophat_footprint(method, path)
+    return path, tophat_footprint(method, path), compute_impl(method, path)
 
 
-def correct_tile(arr, method, param, path):
+def normalize_save_signature(sig):
+    """A saved signature in today's 6-field form: (method, param, algorithm
+    version, compute path, footprint, implementation). A 5-field one (before
+    block CG) gets its implementation from `legacy_compute_impl`."""
+    sig = list(sig or ())
+    if len(sig) == 5:
+        sig.append(legacy_compute_impl(sig[0], sig[3]))
+    return tuple(sig)
+
+
+def correct_tile(arr, method, param, path, impl=None):
     """One tile on the given backend. A GPU failure raises
     `GpuBackendFailed` (and disables the GPU for the session) instead of
-    falling back to the CPU for this tile."""
+    falling back to the CPU for this tile. `impl`: the CPU Gaussian
+    implementation the channel is frozen to (block CG)."""
     arr32 = arr.astype(np.float32, copy=False)
     method = str(method).strip().lower()
     param = max(1, int(param))
@@ -431,7 +512,7 @@ def correct_tile(arr, method, param, path):
         except Exception as exc:
             _disable_gpu_morph(exc, method)
             raise GpuBackendFailed(f"{method} on the GPU failed: {exc}") from exc
-    return _tophat_cpu(arr32, param) if method == "tophat" else _cucim_cpu(arr32, param)
+    return _tophat_cpu(arr32, param) if method == "tophat" else _cucim_cpu(arr32, param, impl)
 
 
 def _apply_background_method_tiled(arr, method, radius=None, sigma=None,

@@ -83,7 +83,7 @@ def test_legacy_zarr_without_version_is_reprocessed(tmp_path):
     from block01.core.bg_correction import current_compute_signature
     sigs, bboxes = read_corrected_zarr_state(path)
     # legacy -> version "1"; no backend recorded (block S0P) -> never equal
-    assert sigs["CD3"] == ("cucim", 50, "1", None, "<unrecorded>")
+    assert sigs["CD3"] == ("cucim", 50, "1", None, "<unrecorded>", None)
     current = ("cucim", 50, BG_CORRECTION_ALGO_VERSION) + current_compute_signature("cucim")
     assert sigs["CD3"] != current                          # -> reprocess
 
@@ -97,9 +97,25 @@ def test_current_version_zarr_is_skipped(tmp_path):
     path = _make_corrected_zarr(tmp_path, {
         "correction_method": "cucim", "correction_param_value": 50,
         "bg_correction_algo_version": BG_CORRECTION_ALGO_VERSION,
-        "bg_compute_path": here[0], "tophat_footprint": here[1]})
+        "bg_compute_path": here[0], "tophat_footprint": here[1],
+        "bg_compute_impl": here[2]})                   # block CG: the implementation
     sigs, _ = read_corrected_zarr_state(path)
     assert sigs["CD3"] == ("cucim", 50, BG_CORRECTION_ALGO_VERSION) + here
+
+
+def test_a_gaussian_made_before_the_implementation_field_reads_as_scipy(tmp_path):
+    """Block CG: no `bg_compute_impl` -> the scipy (CPU) / cupyx (GPU)
+    Gaussian it was made with, so it is still reused where that is what
+    runs, and recomputed where OpenCV runs now."""
+    from block01.ui.step0.search_ctrl import read_corrected_zarr_state
+    from block01.core.bg_correction import BG_CORRECTION_ALGO_VERSION
+    for where, impl in (("cpu", "scipy-gaussian"), ("gpu", "cupyx-gaussian")):
+        path = _make_corrected_zarr(tmp_path / where, {
+            "correction_method": "cucim", "correction_param_value": 50,
+            "bg_correction_algo_version": BG_CORRECTION_ALGO_VERSION,
+            "bg_compute_path": where, "tophat_footprint": None})
+        sigs, _ = read_corrected_zarr_state(path)
+        assert sigs["CD3"][5] == impl
 
 
 def test_stamp_writes_algo_version(tmp_path):

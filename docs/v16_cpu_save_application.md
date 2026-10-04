@@ -1,6 +1,6 @@
 # v16 CPU Save 优化申请（块 CS，待用户审批）
 
-日期：2026-10-04。分支 `v16`，HEAD `390a736`。状态：**方案稿 v2，codex 已审、独立审核已审（意见均已并入），未经用户批准，不得实施**。
+日期：2026-10-04。分支 `v16`，HEAD `390a736`。状态：**方案 v2，用户 2026-10-04 批准**（codex、独立审核意见均已并入）。
 
 ## 1. 背景
 
@@ -81,3 +81,12 @@
 
 - codex（astra low，2026-10-04）：同意 P1 → P2 → 实测后 P3 → 视情况 P4；P2 必须做；P1 先只做 float32；NaN/Inf 回退；P3 需按方法估内存；验收比较解码后的数组而非目录字节。均已并入本稿。
 - 独立审核（2026-10-04）：P1 直接批准；P2 必须同时把增量 Save 的 `copytree` 移出界面线程，且只为 Save 新增异步路径、不改全局 `suspend_for_production()` 的同步语义（已核实：`_hand_gpu_to_compare` 与 `compare_strip` 同步调用它；`copytree` 在等待视图之前、界面线程上执行）；P3 改为先测量、超过 4 线程确有收益才实施；P4 维持视实测决定。均已并入 v2。
+
+## 8. 实施记录
+
+### P1（2026-10-04，本地提交）
+- `core/bg_correction._tophat_cpu`：OpenCV 腐蚀 + 膨胀，核为 `disk(r)`，`BORDER_REFLECT`；无 OpenCV、非二维、含 NaN/Inf、图小于核时回退 skimage。
+- 等价：`tests/test_bg_tophat_cpu_equivalence.py` 88 项（r=1–40、奇偶 / 极小形状、非连续、uint16、NaN/Inf、回退）；极小图（小于核）上 skimage 自身输出不可重复（越界读取），该情形只验证走回退。
+- 真实切片：整通道 16 块 r=15，skimage 100.5 s → OpenCV 8.9 s，逐块相同；完整 Save（CD68 r15 + TIM3 r5）新代码 7.7 s，level-0 与粗平面与旧代码产物（proj2 correct_20261004_123913）逐像素相同。
+- 回归 76 模块：失败均在旧代码上复现；`test_step0_compare_tiles::test_hot_requests_never_outrank_the_foreground` 因计算变快、合成切片在平移前已全部预取而变得不稳定，经用户授权改为平移同时放大 4 倍（10/10 通过），测试意图不变。
+- codex 代码审核：同意。

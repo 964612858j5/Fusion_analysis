@@ -2997,8 +2997,11 @@ def test_hot_requests_never_outrank_the_foreground(real_strip):
         # Far enough that the new view is certainly not already cached: a
         # 40 px nudge could be answered entirely from tiles the first draw
         # had already fetched, and then "no foreground request" says nothing
-        # about priorities.
-        strip.set_camera(cx + 400.0, cy + 400.0, scale)
+        # about priorities. (Block CS P1: with the CPU TopHat 20x faster the
+        # whole 4096 px fake slide is prefetched at this magnification
+        # before the nudge, so the nudge also zooms in to a level nothing
+        # has asked for yet.)
+        strip.set_camera(cx + 400.0, cy + 400.0, scale * 4.0)
         _hot_settle(strip)
     finally:
         scheduler.request = real_request

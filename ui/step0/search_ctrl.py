@@ -47,7 +47,8 @@ from ...core.bg_correction import (
     resolve_effective_correction_params,
     stamp_corrected_channel_identity,
 )
-from ...core.bg_parallel import choose_workers, mem_available_bytes, ordered_results
+from ...core.bg_parallel import (MEM_PER_TILE_BYTES, MEM_PER_TILE_FAST_BYTES, choose_workers,
+                                 mem_available_bytes, ordered_results)
 from ...core.io_loader import OMETIFFLoader
 from ...viewer import step1_source as sources
 from ...utils.segmentation_config import (
@@ -2167,8 +2168,22 @@ class WsiCorrectionWorker(QThread):
         and writes nothing more."""
         progress_idx, channel_total, completed_units, total_units, started = progress
         page = self.loader.ch_map[ch_name]
-        n = 1 if path == "gpu" else choose_workers(os.cpu_count(), len(tiles),
-                                                   mem_available_bytes())
+        if path == "gpu":
+            n = 1
+        else:
+            # Block CS P3: the per-tile memory of the kernel that will run --
+            # the skimage TopHat fallback needs far more than OpenCV / scipy.
+            # (codex CS P3: only an integer source is sure to reach OpenCV --
+            # a float one may hold NaN/Inf, which go to skimage)
+            from ...core import bg_correction as _bg
+            fast = method == "cucim" or (_bg._cv2 is not None
+                                         and self._source_is_integer())
+            avail = mem_available_bytes()
+            n = choose_workers(os.cpu_count(), len(tiles), avail,
+                               MEM_PER_TILE_FAST_BYTES if fast else MEM_PER_TILE_BYTES)
+            print(f"[WsiCorrectionWorker] {ch_name}: {n} worker(s) (cpu={os.cpu_count()}, "
+                  f"free={'?' if avail is None else f'{avail / 1e9:.1f} GB'}, "
+                  f"tiles={len(tiles)}, {'fast' if fast else 'skimage'} kernel)", flush=True)
 
         def task(tile, read_done):
             _core, padded, crop = tile
@@ -2202,6 +2217,21 @@ class WsiCorrectionWorker(QThread):
         if written < len(tiles):
             return "canceled"
         return "done"
+
+    def _source_is_integer(self):
+        """Is the slide stored as integers (so its tiles are finite)? False
+        -- the conservative answer -- when it cannot be told."""
+        known = self.__dict__.get("_source_integer")
+        if known is None:
+            known = False
+            try:
+                import tifffile
+                with tifffile.TiffFile(self.loader.filepath) as tif:
+                    known = np.dtype(tif.series[0].dtype).kind in "ui"
+            except Exception:                               # noqa: BLE001
+                known = False
+            self._source_integer = known
+        return known
 
     @staticmethod
     def _write_tile(ds, accumulator, out, core, poly_mask):

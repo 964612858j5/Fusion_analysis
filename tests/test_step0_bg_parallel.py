@@ -15,20 +15,28 @@ import pytest
 from block01.core import bg_parallel as bp  # noqa: E402
 
 
-# ── the worker-count rule (ruling 4) ────────────────────────────────────
+# ── the worker-count rule (block CS P3, replacing ruling 4) ─────────────
 
 @pytest.mark.parametrize("cpu,tiles,avail,want", [
-    (16, 16, None, 4),                      # this machine, memory unknown
-    (16, 16, int(8e9), 4),
+    (16, 16, None, 4),                      # memory unknown: the old cap of 4
+    (16, 16, int(8e9), 8),                  # this machine: half the CPUs
+    (16, 16, int(4e9), 4),                  # (4 - 1) / 0.75 = 4
     (16, 2, None, 2),                       # never more than the tiles
     (16, 16, int(2.6e9), 2),                # (2.6 - 1.0) / 0.75 = 2
     (16, 16, int(1.5e9), 1),                # < 2 fit: serial
-    (4, 16, None, 1),                       # 4 // 2 - 1 = 1: serial
-    (6, 16, None, 2),
+    (4, 16, None, 2),                       # 4 // 2 = 2
+    (2, 16, None, 1),
+    (64, 64, int(1e12), 16),                # the ceiling
     (None, 16, None, 1),
 ])
 def test_choose_workers(cpu, tiles, avail, want):
     assert bp.choose_workers(cpu, tiles, avail) == want
+
+
+@pytest.mark.parametrize("avail,want", [(int(8e9), 8), (int(2.6e9), 5), (int(1.2e9), 1)])
+def test_choose_workers_with_the_fast_kernels_memory(avail, want):
+    """OpenCV TopHat / scipy Gaussian: ~0.3 GB per in-flight tile."""
+    assert bp.choose_workers(16, 16, avail, bp.MEM_PER_TILE_FAST_BYTES) == want
 
 
 def test_mem_available_is_read_or_none():
@@ -271,7 +279,7 @@ def _real_save(out_dir, slide, method, monkeypatch, n=None, hook=None):
     from block01.core.io_loader import OMETIFFLoader
     from block01.ui.step0 import search_ctrl as sc
     if n is not None:
-        monkeypatch.setattr(sc, "choose_workers", lambda cpu, tiles, avail: n)
+        monkeypatch.setattr(sc, "choose_workers", lambda cpu, tiles, avail, *_a: n)
     loader = OMETIFFLoader(slide)
     cfg = {"channel_decisions": {"CD3": method},
            "method_params": {"tophat_radius": 3, "cucim_sigma": 6}, "channel_params": {}}
@@ -380,8 +388,24 @@ def test_the_gpu_backend_stays_one_tile_at_a_time(tmp_path, monkeypatch):
         return bg.correct_tile(raw, method, param, "cpu")
     monkeypatch.setattr(sc, "compute_path", lambda method: "gpu")
     monkeypatch.setattr(sc, "correct_tile", fake)
-    monkeypatch.setattr(sc, "choose_workers", lambda cpu, tiles, avail: 4)
+    monkeypatch.setattr(sc, "choose_workers", lambda cpu, tiles, avail, *_a: 4)
     w, got, arr = _save(tmp_path)
     assert got["finished"] and set(order) == {"gpu"}
     assert w._tile_stats["workers"] == 1 and w._tile_stats["max_in_flight"] == 1
     assert arr.attrs["bg_compute_path"] == "gpu" and arr.attrs["tophat_footprint"] == "square"
+
+
+def test_the_memory_budget_follows_the_kernel_that_will_run(tmp_path):
+    """codex CS P3: the 0.3 GB budget only when the tiles are sure to reach
+    OpenCV (an integer slide); a float slide may hold NaN/Inf -> skimage."""
+    import tifffile
+    from block01.ui.step0.search_ctrl import WsiCorrectionWorker
+    for dtype, want in ((np.uint8, True), (np.uint16, True), (np.float32, False)):
+        path = tmp_path / f"s_{np.dtype(dtype).name}.ome.tif"
+        tifffile.imwrite(str(path), np.zeros((2, 32, 32), dtype))
+        w = WsiCorrectionWorker.__new__(WsiCorrectionWorker)
+        w.loader = type("L", (), {"filepath": str(path)})()
+        assert w._source_is_integer() is want
+    w = WsiCorrectionWorker.__new__(WsiCorrectionWorker)
+    w.loader = type("L", (), {"filepath": str(tmp_path / "missing.tif")})()
+    assert w._source_is_integer() is False

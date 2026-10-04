@@ -30,9 +30,17 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Callable, Iterable, Iterator, Optional
 
 #: Fixed constants of the worker-count rule (§9; no user setting).
-MAX_WORKERS = 4
+#: Block CS P3 (2026-10-04, measured on the real 15437x16215 slide, 16 logical
+#: CPUs): with the OpenCV TopHat (P1) a channel takes 17.2 / 9.5 / 5.9 / 4.4 /
+#: 4.2 s on 1 / 2 / 4 / 8 / 12 workers, the scipy Gaussian 64 / 35 / 20.5 /
+#: 15.0 / 14.9 s -- the gain ends at half the logical CPUs -- and each
+#: in-flight tile costs ~0.15-0.2 GB. The old cap of 4 is kept only when the
+#: free memory cannot be read.
+MAX_WORKERS = 16                   # a ceiling, not the usual answer
+MAX_WORKERS_MEMORY_UNKNOWN = 4
 MEM_RESERVE_BYTES = 1.0e9          # left free beside the in-flight tiles
-MEM_PER_TILE_BYTES = 0.75e9        # one in-flight 4096 tile (measured 2.34 GB / 4 at n=4)
+MEM_PER_TILE_BYTES = 0.75e9        # skimage TopHat fallback (measured 2.34 GB / 4 at n=4)
+MEM_PER_TILE_FAST_BYTES = 0.3e9    # OpenCV TopHat / scipy Gaussian (measured <= 0.2 GB)
 
 
 def mem_available_bytes() -> Optional[int]:
@@ -47,14 +55,18 @@ def mem_available_bytes() -> Optional[int]:
     return None
 
 
-def choose_workers(cpu: Optional[int], n_tiles: int, avail_bytes: Optional[int]) -> int:
-    """How many tiles of one channel run at once (§9, ruling 4):
-    ``min(4, cpu//2 - 1, n_tiles, (MemAvailable - 1 GB) // 0.75 GB)``; the
-    memory term is left out when unknown. Below 2 the caller runs serially."""
-    n_cpu = max(1, (cpu or 2) // 2 - 1)
+def choose_workers(cpu: Optional[int], n_tiles: int, avail_bytes: Optional[int],
+                   per_tile_bytes: float = MEM_PER_TILE_BYTES) -> int:
+    """How many tiles of one channel run at once (block CS P3, replacing
+    ruling 4's fixed 4): ``min(cpu//2, n_tiles, (MemAvailable - 1 GB) //
+    per_tile_bytes, 16)``; when the free memory is unknown, at most 4 (the
+    old rule). Below 2 the caller runs serially."""
+    n_cpu = max(1, (cpu or 2) // 2)
     n = min(MAX_WORKERS, n_cpu, max(1, int(n_tiles)))
-    if avail_bytes is not None:
-        n = min(n, max(0, math.floor((avail_bytes - MEM_RESERVE_BYTES) / MEM_PER_TILE_BYTES)))
+    if avail_bytes is None:
+        n = min(n, MAX_WORKERS_MEMORY_UNKNOWN)
+    else:
+        n = min(n, max(0, math.floor((avail_bytes - MEM_RESERVE_BYTES) / per_tile_bytes)))
     return max(1, n)
 
 

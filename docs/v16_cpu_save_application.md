@@ -99,3 +99,10 @@
 - 回归 21 模块：仅 `test_step0_compare_tiles::test_a_pan_during_a_pending_switch_replans_for_the_new_viewport` 失败，旧代码上同样失败。
 - 真实切片（MainWindow 无头，预览计算中按 Save）：Save 点击后 49 ms / 6 ms 返回；第二次 Save 后台等待预览 3.2 s（floor join），期间 GUI 最长停顿 56 ms（原 11.8 s 冻结）；每次全片单通道 Save 约 6 s。
 - codex 代码审核：第 1 轮 2 条——已暂停时也要等待（已修）；关闭时的残留 run（由既有清理规则覆盖，未扩大到 `ui/main_window.py`）。
+
+### P3（2026-10-04，本地提交）
+- 测量（真实切片，16 逻辑核、10 GB，全片单通道 16 块）：OpenCV TopHat r15 在 1/2/4/8/12 线程下 17.2/9.5/5.9/4.4/4.2 s；scipy Gaussian σ50 64/35/20.5/15.0/14.9 s；额外内存 0.35/0.56/0.88/1.52/2.02 GB（每块约 0.15–0.2 GB）；`cv2.getNumThreads()`=16，且对吞吐无影响。超过 4 线程约快 25%，到逻辑核数一半饱和 → 实施。
+- `core/bg_parallel.choose_workers`：min(逻辑核数//2, 块数, (可用内存 − 1 GB) ÷ 每块内存, 16)；可用内存读不到时仍不超过 4（旧规则）。每块内存：OpenCV TopHat / scipy Gaussian 0.3 GB，skimage 回退 0.75 GB。
+- `ui/step0/search_ctrl.py`：按将要运行的核选择每块内存——只有整数原图（不会有 NaN/Inf）的 TopHat 才按 0.3 GB 计（codex P3 意见）；终端打印线程数与依据。
+- 测试：沿用 `tests/test_step0_bg_parallel.py`（替代申请 §5 中的 `test_bg_parallel_workers.py`）：规则表按新规则更新，+3 项省内存核用例，+1 项整数 / 浮点原图判定；32 项通过。相关 14 模块回归全部通过。
+- 真实切片：两个通道均自动选 8 线程；level-0 与粗平面仍与旧代码产物逐像素相同。

@@ -303,3 +303,4 @@ codex（astra low，2026-10-04）：主要行号、C3 前提、第 16 题正确�
 
 - 聚焦回归 102 模块（涉及相机、切页、compare、视图范围信号、MainWindow 的全部测试模块）：失败均在旧代码上存在（`test_global_channel_dock`、`test_step0_floor_prefetch` 2 项、`test_step1_channel_panel`、`test_step3_patch_strip`、`test_step1_montage_view` 崩溃）。`test_step0_compare_tiles` 这一轮有 1 项（`test_the_dapi_mapping_is_its_own_channels`）失败，单独重跑 3 次均通过，整模块重跑 190 项全部通过——该模块本身有时序不稳定（以往轮次失败的是另一项）。
 - 待办：用户真机验收（§6：50 次 Step0↔1↔3，含 resize、Navigator 跳转、粗→细、打开通道；compare 中移动后进入 Step1 位置一致）。
+- **真机验收（2026-10-05）：用户确认 1–5 全部通过**（基本往返；50 次切换含 resize / Navigator / 粗→细 / 打开通道；compare 进入、面板拖动后进入 Step1、Esc 离开；patch 与 Fit 跳转；第一次 Save 前的移动）。门 8 通过。

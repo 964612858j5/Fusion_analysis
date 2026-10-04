@@ -366,18 +366,6 @@ def resolve_roi_context(path, default_project_dir=None):
         if roi_id:
             return build_roi_context(cur, roi_id)
 
-    print("[Project] legacy layout detected")
-    return {
-        "project_dir": path,
-        "roi_id": "",
-        "roi_dir": "",
-        "manifest_path": "",
-        "index_path": "",
-        "step_dirs": {
-            "step0": path,
-            "step1": path,
-            "step2": path,
-            "step3": path,
-        },
-        "legacy": True,
-    }
+    # Block RM-3 (§11): a folder that is neither a project nor a workspace
+    # of this version is not read as a flat earlier layout.
+    return None

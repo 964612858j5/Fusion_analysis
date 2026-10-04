@@ -4,7 +4,6 @@ block01/ui/main_window.py — MainWindow.
 
 import os
 import gc
-import glob
 import hashlib
 import json
 import math
@@ -616,9 +615,6 @@ class MainWindow(QMainWindow):
         # user has pressed Cancel on it.
         self._fusion_exit_actions = []
         self._fusion_stopping     = False
-        # Block DV (§3.12): the data version a running Generate will publish
-        # {"workspace", "alloc", "record", "worker"}; None otherwise.
-        self._dv_pending = None
         # Block RM (§5): the fuse run a running Generate will publish
         # {"run", "upstream", "worker", "params"}; None otherwise.
         self._rm_pending_fuse = None
@@ -784,16 +780,10 @@ class MainWindow(QMainWindow):
         # derived from the previous dataset.  This is a different event from
         # step0_complete (Save/handoff) and must not be folded into it.
         self._step0.dataset_committed.connect(self._on_step0_dataset_committed)
-        # Block DV-D: deleting from Step0's chooser asks the window whether
-        # anything is running, detaches what it has open, and -- when the
-        # current version went with no other loaded -- starts over empty.
-        self._step0.deletion_blocker = self._dv_deletion_blocker
-        self._step0.delete_run = self._rm_delete_run         # block RM §9
-        self._step0.release_paths = self._dv_release_paths
-        # ...and whether the handoff it just announced was accepted: a version
-        # replacing a deleted one must be loaded before anything is deleted.
-        self._step0.handoff_accepted = lambda: bool(self.__dict__.get("step0_done"))
-        self._step0.unload_requested.connect(self._dv_restart_empty)
+        # Block RM (§9): Step0's chooser deletes through the window, which
+        # knows whether anything is running and what it holds open.
+        self._step0.deletion_blocker = self._busy_reason
+        self._step0.delete_run = self._rm_delete_run
         # ROI/patch edits made anywhere are published by Step0's writer; Step1
         # re-reads them from that commit instead of keeping its own copy.
         self._step0.geometry_committed.connect(self._on_step0_geometry_committed)
@@ -2042,9 +2032,6 @@ class MainWindow(QMainWindow):
         return str(getattr(getattr(self, "loader", None), "filepath", "") or "")
 
     def _step3_refresh_masks(self, requested_dir=None):
-        if requested_dir is None and self.__dict__.get("_dv_step3_run"):
-            # Block DV-D: the run whose chooser row was opened, once.
-            requested_dir, self._dv_step3_run = self._dv_step3_run, ""
         """Step3 as a general result viewer (block B3): the runs of EVERY ROI
         workspace of the project made on the open slide, plus the ones loaded
         with `Load…`; each shown on its own region. Choose one, resolve its
@@ -3030,9 +3017,9 @@ class MainWindow(QMainWindow):
         # §16.4).
         # (still pending after a later Step0 Save: the draft is restored, or
         # kept, only when Step1 is entered -- codex RM-1 review 2)
-        self._dv_auto_step1 = bool(accepted is True and (
+        self._rm_auto_step1 = bool(accepted is True and (
             self.step0_output.get("opened_workspace")
-            or self.__dict__.get("_dv_auto_step1")))
+            or self.__dict__.get("_rm_auto_step1")))
         if accepted is True and self.step0_output.get("opened_workspace"):
             self._rm_step2_draft_pending = True        # §6: restored on first entry
             self._rm_step4_draft_pending = True
@@ -3064,10 +3051,6 @@ class MainWindow(QMainWindow):
                 value = os.path.join(base, value)
             return os.path.abspath(value)
 
-        payload_schema = _schema(self.step0_output.get("handoff_schema_version", 1))
-        if payload_schema is None:
-            print("[Step1] invalid handoff schema hint")
-            return False
         # A restart/manual v2 restore may provide only the exact manifest
         # path.  Let this authoritative reader create the loader from that
         # manifest; broad directory bootstrap is only a legacy fallback.
@@ -3099,7 +3082,7 @@ class MainWindow(QMainWindow):
                 os.path.join(step0_dir, "step0_roi_result.json"))
         manifest = {}
         manifest_exists = os.path.isfile(manifest_path)
-        if payload_schema >= 2 and not manifest_exists:
+        if not manifest_exists:
             print(f"[Step1] authoritative handoff manifest missing: {manifest_path}")
             return False
         if manifest_exists:
@@ -3124,59 +3107,47 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"[Step1] failed to load step0_roi_result.json: {e}")
                 return False
-        manifest_schema = _schema(manifest.get("handoff_schema_version", 1)) if manifest_exists else payload_schema
-        if manifest_schema is None:
-            print("[Step1] invalid handoff schema in manifest")
-            return False
-        # A v1 manifest remains legacy-compatible even if a stale payload
-        # advertised v2 only when the payload itself was legacy. A payload
-        # that explicitly declares v2 must never be downgraded by a stale v1
-        # manifest.
-        handoff_schema = manifest_schema if manifest_exists else payload_schema
-        if payload_schema >= 2 and manifest_exists and handoff_schema < 2:
-            print("[Step1] v2 handoff payload cannot use a v1 manifest")
-            return False
-        if handoff_schema >= 2 and not manifest_exists:
-            print("[Step1] authoritative handoff requires a readable manifest")
+        # Block RM-3 (§11): only a schema-2 handoff is read.
+        handoff_schema = _schema(manifest.get("handoff_schema_version", 1))
+        if handoff_schema is None or handoff_schema < 2:
+            print("[Step1] the Step0 handoff is not schema 2 (an earlier version's)")
             return False
         print(f"[Step1] manifest found={bool(manifest)}")
-        if handoff_schema >= 2:
-            identity = manifest.get("source_identity")
-            if not isinstance(identity, dict):
-                print("[Step1] authoritative handoff has no source identity")
-                return False
-            manifest_base = os.path.dirname(manifest_path)
-            raw_identity_path = _path(identity.get("dataset_path"), manifest_base)
-            raw_manifest_path = _path(manifest.get("raw_ome_path"), manifest_base)
-            if not raw_identity_path or not raw_manifest_path or raw_identity_path != raw_manifest_path:
-                print("[Step1] authoritative handoff source paths disagree")
-                return False
-            if not identity.get("dataset_fingerprint") or not os.path.exists(raw_identity_path):
-                print("[Step1] authoritative handoff source is missing")
-                return False
-            try:
-                st = os.stat(raw_identity_path)
-                actual_fp = f"{st.st_size}:{st.st_mtime_ns}"
-            except OSError:
-                return False
-            if actual_fp != str(identity.get("dataset_fingerprint", "")):
-                print("[Step1] authoritative handoff source identity mismatch")
-                return False
+        identity = manifest.get("source_identity")
+        if not isinstance(identity, dict):
+            print("[Step1] authoritative handoff has no source identity")
+            return False
+        manifest_base = os.path.dirname(manifest_path)
+        raw_identity_path = _path(identity.get("dataset_path"), manifest_base)
+        raw_manifest_path = _path(manifest.get("raw_ome_path"), manifest_base)
+        if not raw_identity_path or not raw_manifest_path or raw_identity_path != raw_manifest_path:
+            print("[Step1] authoritative handoff source paths disagree")
+            return False
+        if not identity.get("dataset_fingerprint") or not os.path.exists(raw_identity_path):
+            print("[Step1] authoritative handoff source is missing")
+            return False
+        try:
+            st = os.stat(raw_identity_path)
+            actual_fp = f"{st.st_size}:{st.st_mtime_ns}"
+        except OSError:
+            return False
+        if actual_fp != str(identity.get("dataset_fingerprint", "")):
+            print("[Step1] authoritative handoff source identity mismatch")
+            return False
         print("[Step1] loading ROI context")
         print(f"[Step1] roi_id={manifest.get('roi_id') or (ctx or {}).get('roi_id', '')}")
         print(f"[Step1] step0_result={manifest_path}")
 
         manifest_base = os.path.dirname(manifest_path)
         raw_ome = _path(manifest.get("raw_ome_path"), manifest_base)
-        if handoff_schema >= 2:
-            # A v2 handoff cannot silently reuse a loader from another dataset.
-            if not raw_ome:
-                print("[Step1] authoritative handoff has no raw OME path")
-                return False
-            raw_ome = os.path.abspath(raw_ome)
-            if not os.path.exists(raw_ome):
-                print(f"[Step1] authoritative raw OME is missing: {raw_ome}")
-                return False
+        # A v2 handoff cannot silently reuse a loader from another dataset.
+        if not raw_ome:
+            print("[Step1] authoritative handoff has no raw OME path")
+            return False
+        raw_ome = os.path.abspath(raw_ome)
+        if not os.path.exists(raw_ome):
+            print(f"[Step1] authoritative raw OME is missing: {raw_ome}")
+            return False
         if raw_ome and os.path.exists(raw_ome) and (
             self.loader is None or _path(getattr(self.loader, "filepath", "")) != raw_ome
         ):
@@ -3188,9 +3159,8 @@ class MainWindow(QMainWindow):
                 self.step0_output["ome_tiff_path"] = raw_ome
             except Exception:
                 print(f"[Step1] failed to load raw OME from manifest:\n{traceback.format_exc()}")
-                if handoff_schema >= 2:
-                    return False
-        if handoff_schema >= 2 and self.loader is None:
+                return False
+        if self.loader is None:
             print("[Step1] authoritative handoff has no usable loader")
             return False
         print(f"[Step1] loader initialized={self.loader is not None}")
@@ -3199,82 +3169,68 @@ class MainWindow(QMainWindow):
                 print(f"[Step1] loader channels count={len(self.loader.channel_names())}")
             except Exception as e:
                 print(f"[Step1] loader channel parse failed: {e}")
-                if handoff_schema >= 2:
-                    return False
+                return False
 
-        if handoff_schema >= 2:
-            corr_path = _path(manifest.get("corrected_zarr_path"), manifest_base)
-            cfg_path = _path(manifest.get("correction_config_path"), manifest_base)
-            roi_path = _path(manifest.get("roi_config_path"), manifest_base)
-            patch_path = _path(manifest.get("patch_config_path"), manifest_base)
-            required_paths = (cfg_path, roi_path, patch_path, corr_path)
-            if any(not path or not os.path.exists(path) for path in required_paths):
-                print("[Step1] authoritative handoff artifact is missing")
-                return False
-            # Remap is optional, but when the manifest declares one both its
-            # path and semantic hash are authoritative.  Never substitute a
-            # Step0 widget/legacy Step1.5 path when this check fails.
-            remap_path = _path(manifest.get("channel_remap_config_path"), manifest_base)
-            remap_hash = str(manifest.get("channel_remap_config_hash") or "")
-            if not remap_path and not remap_hash:
-                print("[Step1] authoritative remap declaration is incomplete")
-                return False
-            if remap_path:
-                if not os.path.isfile(remap_path):
-                    if remap_hash:
-                        print("[Step1] authoritative remap config is missing")
+        corr_path = _path(manifest.get("corrected_zarr_path"), manifest_base)
+        cfg_path = _path(manifest.get("correction_config_path"), manifest_base)
+        roi_path = _path(manifest.get("roi_config_path"), manifest_base)
+        patch_path = _path(manifest.get("patch_config_path"), manifest_base)
+        required_paths = (cfg_path, roi_path, patch_path, corr_path)
+        if any(not path or not os.path.exists(path) for path in required_paths):
+            print("[Step1] authoritative handoff artifact is missing")
+            return False
+        # Remap is optional, but when the manifest declares one both its
+        # path and semantic hash are authoritative.  Never substitute a
+        # Step0 widget/legacy Step1.5 path when this check fails.
+        remap_path = _path(manifest.get("channel_remap_config_path"), manifest_base)
+        remap_hash = str(manifest.get("channel_remap_config_hash") or "")
+        if not remap_path and not remap_hash:
+            print("[Step1] authoritative remap declaration is incomplete")
+            return False
+        if remap_path:
+            if not os.path.isfile(remap_path):
+                if remap_hash:
+                    print("[Step1] authoritative remap config is missing")
+                    return False
+            else:
+                try:
+                    from ..utils.channel_remap_config import (
+                        load_channel_remap_config, channel_remap_config_hash,
+                    )
+                    remap_cfg = load_channel_remap_config(remap_path)
+                    if not remap_hash or channel_remap_config_hash(remap_cfg) != remap_hash:
+                        print("[Step1] authoritative remap config hash mismatch")
                         return False
-                else:
-                    try:
-                        from ..utils.channel_remap_config import (
-                            load_channel_remap_config, channel_remap_config_hash,
-                        )
-                        remap_cfg = load_channel_remap_config(remap_path)
-                        if not remap_hash or channel_remap_config_hash(remap_cfg) != remap_hash:
-                            print("[Step1] authoritative remap config hash mismatch")
-                            return False
-                    except Exception as e:
-                        print(f"[Step1] authoritative remap config failed: {e}")
-                        return False
-            elif remap_hash:
-                print("[Step1] authoritative remap hash has no path")
-                return False
-        else:
-            corr_path = (
-                manifest.get("corrected_zarr_path")
-                or self.step0_output.get("corrected_zarr_path")
-                or self._corrected_zarr_path
-                or os.path.join(out_dir, "corrected_channels.zarr")
-            )
-            cfg_path = manifest.get("correction_config_path") or os.path.join(out_dir, "correction_config.json")
-            roi_path = manifest.get("roi_config_path") or os.path.join(out_dir, "roi_config.json")
-            patch_path = manifest.get("patch_config_path") or os.path.join(out_dir, "patch_config.json")
+                except Exception as e:
+                    print(f"[Step1] authoritative remap config failed: {e}")
+                    return False
+        elif remap_hash:
+            print("[Step1] authoritative remap hash has no path")
+            return False
         print(f"[Step1] raw_ome={getattr(self.loader, 'filepath', raw_ome or '')}")
         print(f"[Step1] corrected_zarr={corr_path}")
 
-        correction_config = None if handoff_schema >= 2 else self.step0_output.get("correction_config")
+        correction_config = None
         if os.path.exists(cfg_path):
             try:
                 with open(cfg_path, "r", encoding="utf-8") as f:
                     correction_config = json.load(f)
-                if handoff_schema >= 2 and not isinstance(correction_config, dict):
+                if not isinstance(correction_config, dict):
                     raise ValueError("correction config root must be an object")
             except Exception as e:
                 print(f"[Step1] failed to load correction_config.json: {e}")
-                if handoff_schema >= 2:
-                    return False
+                return False
 
-        rois = [] if handoff_schema >= 2 else list(self.step0_output.get("rois") or self._rois or [])
+        rois = []
         if os.path.exists(roi_path):
             try:
                 with open(roi_path, "r", encoding="utf-8") as f:
                     rois = json.load(f)
-                if handoff_schema >= 2 and not isinstance(rois, list):
+                if not isinstance(rois, list):
                     raise ValueError("ROI config root must be an array")
             except Exception as e:
                 print(f"[Step1] failed to load roi_config.json: {e}")
-                if handoff_schema >= 2:
-                    return False
+                return False
 
         corrected_mode = ""
         if corr_path and os.path.exists(corr_path):
@@ -3293,8 +3249,7 @@ class MainWindow(QMainWindow):
                         })
             except Exception as e:
                 print(f"[Step1] failed to inspect corrected zarr: {e}")
-                if handoff_schema >= 2:
-                    return False
+                return False
         self._corrected_zarr_path = corr_path if corr_path and os.path.exists(corr_path) else ""
         self._corrected_zarr_mode = corrected_mode
         print(f"[Step1] corrected_zarr_mode={corrected_mode or 'none'}")
@@ -3306,15 +3261,14 @@ class MainWindow(QMainWindow):
                 for ch, method in (correction_config.get("channel_decisions") or {}).items()
                 if str(method).strip().lower() in {"tophat", "cucim"}
             }
-        decisions.update((manifest.get("corrected_decisions") if handoff_schema >= 2 else self.step0_output.get("corrected_decisions")) or {})
+        decisions.update(manifest.get("corrected_decisions") or {})
         self._corrected_decisions = decisions
         try:
             self.loader.set_correction_config(correction_config)
             self.loader.set_corrected_zarr_store(self._corrected_zarr_path, decisions)
         except Exception as e:
             print(f"[Step1] loader correction handoff failed: {e}")
-            if handoff_schema >= 2:
-                return False
+            return False
 
         self._rois = list(rois or [])
         self._active_roi = self._rois[0] if self._rois else None
@@ -3325,18 +3279,17 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Step1", msg)
             return False
 
-        patches = [] if handoff_schema >= 2 else list(self.step0_output.get("patches") or self._all_patches or [])
+        patches = []
         if os.path.exists(patch_path):
             try:
                 with open(patch_path, "r", encoding="utf-8") as f:
                     patch_cfg = json.load(f)
-                if handoff_schema >= 2 and not isinstance(patch_cfg, list):
+                if not isinstance(patch_cfg, list):
                     raise ValueError("patch config root must be an array")
                 patches = self._patches_from_records(patch_cfg)
             except Exception as e:
                 print(f"[Step1] failed to load patch_config.json: {e}")
-                if handoff_schema >= 2:
-                    return False
+                return False
         print(f"[Step1] rois={len(rois or [])}")
         print(f"[Step1] patches={len(patches or [])}")
         if self._active_roi:
@@ -3357,15 +3310,14 @@ class MainWindow(QMainWindow):
                 channels = self.loader.channel_names()
             except Exception as e:
                 print(f"[Step1] loader channel list failed: {e}")
-                if handoff_schema >= 2:
-                    return False
+                return False
                 channels = []
             nucleus_channel = self._choose_step1_nucleus_channel(
                 channels,
                 manifest=manifest,
                 correction_config=correction_config,
             )
-            panel_groups = (manifest.get("panel_groups") if handoff_schema >= 2 else self.step0_output.get("panel_groups")) or {}
+            panel_groups = manifest.get("panel_groups") or {}
             source = "step0_panel"
             if not panel_groups:
                 panel_groups = {
@@ -3456,7 +3408,7 @@ class MainWindow(QMainWindow):
         # project/ROI location in that case, which must not redirect the
         # handoff away from the manifest's own step0 directory.
         roi_dir = manifest.get("roi_dir") or ""
-        if not roi_dir and handoff_schema >= 2:
+        if not roi_dir:
             settings_dir = os.path.dirname(os.path.abspath(step0_dir))
             if (os.path.basename(os.path.abspath(step0_dir)) == "step0"
                     and os.path.basename(settings_dir) == run_store.SETTINGS_DIR):
@@ -3504,7 +3456,7 @@ class MainWindow(QMainWindow):
             "source_identity": manifest.get("source_identity", self.step0_output.get("source_identity")),
             "handoff_schema_version": manifest.get("handoff_schema_version", handoff_schema),
             "geometry_revision": int(manifest.get("geometry_revision") or 0),
-            "panel_groups": (manifest.get("panel_groups") if handoff_schema >= 2 else self.step0_output.get("panel_groups")) or {},
+            "panel_groups": manifest.get("panel_groups") or {},
             "panel_nucleus": manifest.get("panel_nucleus", self.step0_output.get("panel_nucleus")),
             "rois": self._rois,
             "patches": list(patches or []),
@@ -3618,32 +3570,15 @@ class MainWindow(QMainWindow):
         try:
             manifest_schema = int(manifest.get("handoff_schema_version", 1) or 1)
         except (TypeError, ValueError):
-            print("[Step1] invalid handoff schema in bootstrap manifest")
+            manifest_schema = 0
+        if manifest_schema < 2:
+            # Block RM-3 (§11): an earlier version's Step0 output is not read.
+            print("[Step1] no schema-2 Step0 handoff to bootstrap from")
             return False
-        ome_candidates = []
-        for p in (
-            manifest.get("raw_ome_path"),
-            self._ome_path_edit.text().strip() if hasattr(self, "_ome_path_edit") else "",
-            OME_TIFF_FILE,
-        ):
-            if p and p not in ome_candidates:
-                ome_candidates.append(p)
-        parent = os.path.dirname(out_dir)
-        if manifest_schema < 2 and parent and os.path.isdir(parent):
-            ome_candidates.extend(glob.glob(os.path.join(parent, "*.ome.tif")))
-            ome_candidates.extend(glob.glob(os.path.join(parent, "*.ome.tiff")))
-
-        ome_path = next((p for p in ome_candidates if p and os.path.exists(p)), "")
-        if manifest_schema >= 2 and (not manifest.get("raw_ome_path") or not ome_path):
+        ome_path = manifest.get("raw_ome_path") or ""
+        if not ome_path or not os.path.exists(ome_path):
             print("[Step1] authoritative manifest has no usable raw OME path")
             return False
-        if not ome_path and not auto:
-            ome_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-                self,
-                "Select raw OME-TIFF for Step1",
-                parent if parent and os.path.isdir(parent) else os.getcwd(),
-                "OME-TIFF (*.ome.tif *.ome.tiff *.tif *.tiff)",
-            )
         if not ome_path or not os.path.exists(ome_path):
             if not auto:
                 QMessageBox.warning(self, "Step1", "Raw OME-TIFF path missing.")
@@ -3751,27 +3686,22 @@ class MainWindow(QMainWindow):
             return ""
         expected_manifest_raw = handoff.get("step0_manifest_path") or ""
         expected_manifest = os.path.abspath(expected_manifest_raw) if expected_manifest_raw else ""
-        try:
-            handoff_schema = int(handoff.get("handoff_schema_version", 1) or 1)
-        except (TypeError, ValueError):
+        # A session is restorable only when the current handoff itself
+        # is fully bound.  Never treat an absent manifest/identity as a
+        # wildcard that can match a sibling session.
+        if not expected_manifest or not isinstance(
+                handoff.get("source_identity"), dict) or not handoff.get("source_identity"):
             return ""
-        if handoff_schema >= 2:
-            # A v2 session is restorable only when the current handoff itself
-            # is fully bound.  Never treat an absent manifest/identity as a
-            # wildcard that can match a sibling session.
-            if not expected_manifest or not isinstance(
-                    handoff.get("source_identity"), dict) or not handoff.get("source_identity"):
-                return ""
-            actual_manifest_raw = sess.get("step0_manifest_path") or ""
-            actual_manifest = os.path.abspath(actual_manifest_raw) if actual_manifest_raw else ""
-            if not actual_manifest or actual_manifest != expected_manifest:
-                return ""
-            expected_identity = handoff.get("source_identity") or {}
-            actual_identity = sess.get("source_identity") or {}
-            if not isinstance(actual_identity, dict) or not actual_identity:
-                return ""
-            if actual_identity != expected_identity:
-                return ""
+        actual_manifest_raw = sess.get("step0_manifest_path") or ""
+        actual_manifest = os.path.abspath(actual_manifest_raw) if actual_manifest_raw else ""
+        if not actual_manifest or actual_manifest != expected_manifest:
+            return ""
+        expected_identity = handoff.get("source_identity") or {}
+        actual_identity = sess.get("source_identity") or {}
+        if not isinstance(actual_identity, dict) or not actual_identity:
+            return ""
+        if actual_identity != expected_identity:
+            return ""
         return candidate
 
     def _step1_session_payload(self):
@@ -3996,7 +3926,7 @@ class MainWindow(QMainWindow):
     def _save_step1_session(self):
         if self._step1_restore_active:
             return
-        if self.__dict__.get("_dv_auto_step1"):
+        if self.__dict__.get("_rm_auto_step1"):
             # Block RM (§6): an opened workspace's Step1 draft is restored on
             # entering Step1; until then nothing may overwrite it.
             return
@@ -4577,50 +4507,18 @@ class MainWindow(QMainWindow):
                 raise ValueError("session root must be an object")
 
             session_manifest_raw = sess.get("step0_manifest_path") or ""
-            try:
-                session_schema_hint = int(sess.get("handoff_schema_version", 1) or 1)
-            except (TypeError, ValueError):
-                return False
-            # A v2 session must invalidate any previous readiness before the
-            # manifest binding checks below.  Leave the legacy compatibility
-            # branch isolated from this state transition.
-            if session_schema_hint >= 2:
-                self.step0_done = False
-                self._step1_context_ready = False
-            # Read only the manifest schema header to choose the restore
-            # protocol.  The v2 reader remains the sole owner of all manifest
-            # validation and artifact loading.
+            # Block RM-3 (§11): only a schema-2 session on a schema-2 handoff;
+            # what Step0 holds is invalid until the authority reader accepts it.
+            self.step0_done = False
+            self._step1_context_ready = False
             session_manifest_path = os.path.abspath(session_manifest_raw) if session_manifest_raw else ""
-            manifest_schema = session_schema_hint
-            manifest_header = {}
-            if session_manifest_path:
-                try:
-                    with open(session_manifest_path, "r", encoding="utf-8") as f:
-                        manifest_header = json.load(f)
-                    if not isinstance(manifest_header, dict):
-                        raise ValueError("manifest root must be an object")
-                    manifest_schema = int(
-                        manifest_header.get("handoff_schema_version", 1) or 1
-                    )
-                except Exception as e:
-                    self._refuse_session(f"The Step0 manifest this session names could not be read: {e}")
-                    if session_schema_hint >= 2:
-                        return False
-                    manifest_schema = session_schema_hint
-            if manifest_schema >= 2 and session_schema_hint < 2:
-                # A legacy-looking session can still point at a v2 manifest;
-                # fail closed before any v2 binding check in that case too.
-                self.step0_done = False
-                self._step1_context_ready = False
-            if manifest_schema >= 2 and session_manifest_path:
-                # This is only a session-to-manifest binding check.  Artifact
-                # identity and all other validation remain in the authority
-                # reader below.
-                if sess.get("source_identity") != manifest_header.get("source_identity"):
-                    self._refuse_session("The session and its Step0 manifest describe different slides.")
-                    return False
-            if session_schema_hint >= 2 and manifest_schema < 2:
-                self._refuse_session("This session needs a newer Step0 manifest than the one it names.")
+            # The manifest's schema decides, never the session's own hint.
+            manifest_header = (step0_handoff.read_manifest(session_manifest_path)
+                               if session_manifest_path else None)
+            if isinstance(manifest_header, dict) and \
+                    sess.get("source_identity") != manifest_header.get("source_identity"):
+                # a binding check only; all other validation is the reader's
+                self._refuse_session("The session and its Step0 manifest describe different slides.")
                 return False
             # A manually browsed session is still not allowed to replace the
             # active Step0 handoff with a sibling ROI.  When a handoff is
@@ -4652,156 +4550,12 @@ class MainWindow(QMainWindow):
             # handoff.  The manifest reader owns raw/corrected/ROI/Patch,
             # remap, and all workspace directories; the session contributes
             # only Step1 UI/history state after that read succeeds.
-            if manifest_schema >= 2:
-                return self._restore_step1_session_v2(sess, session_manifest_path)
-
-            session_dir = os.path.dirname(os.path.abspath(session_path))
-            # Schema 1 sessions retain their historical self-contained
-            # geometry/data-source compatibility behavior.
-            out_dir = sess.get("output_dir") or session_dir
-            raw_ome = sess.get("raw_ome_path") or OME_TIFF_FILE
-            if not raw_ome or not os.path.exists(raw_ome):
-                QMessageBox.warning(self, "Step1", "Raw OME-TIFF path missing. Please load Step0 or edit the session.")
+            if not isinstance(manifest_header, dict) or int(
+                    manifest_header.get("handoff_schema_version", 1) or 1) < 2:
+                self._refuse_session("The Step0 result this session names was made by an "
+                                     "earlier version.")
                 return False
-            roi_dir = sess.get("roi_dir", "")
-            step2_dir = (sess.get("step2_dir")
-                         or (os.path.join(roi_dir, "step2") if roi_dir else ""))
-            if not step2_dir and os.path.basename(os.path.abspath(out_dir)) == "step1":
-                step2_dir = os.path.join(os.path.dirname(os.path.abspath(out_dir)), "step2")
-            OUTPUT_DIR = out_dir
-            OME_TIFF_FILE = raw_ome
-            self._set_gui_work_dir(out_dir)
-            self.step0_output = {
-                "output_dir": out_dir,
-                "ome_tiff_path": raw_ome,
-                "roi_id": sess.get("roi_id", ""),
-                "roi_dir": roi_dir,
-                "step0_dir": sess.get("step0_dir", ""),
-                "step1_dir": sess.get("step1_dir", out_dir),
-                "step2_dir": step2_dir,
-                "step0_manifest_path": (os.path.abspath(session_manifest_raw)
-                                         if session_manifest_raw else ""),
-                "handoff_schema_version": session_schema_hint,
-                "source_identity": sess.get("source_identity"),
-            }
-            self.loader = OMETIFFLoader(raw_ome)
-
-            corr_path = (sess.get("corrected_zarr_path")
-                         or os.path.join(out_dir, "corrected_channels.zarr"))
-            if corr_path and not os.path.exists(corr_path):
-                QMessageBox.warning(self, "Step1", "Corrected channel source missing.")
-                corr_path = ""
-            correction_config = None
-            cfg_path = os.path.join(out_dir, "correction_config.json")
-            if os.path.exists(cfg_path):
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    correction_config = json.load(f)
-            decisions = {}
-            if correction_config:
-                decisions = {
-                    str(ch): str(method).strip().lower()
-                    for ch, method in (correction_config.get("channel_decisions") or {}).items()
-                    if str(method).strip().lower() in {"tophat", "cucim"}
-                }
-            self.loader.set_correction_config(correction_config)
-            self.loader.set_corrected_zarr_store(corr_path, decisions)
-            self._corrected_zarr_path = corr_path
-            self._corrected_decisions = decisions
-            self._corrected_zarr_mode = str(sess.get("corrected_zarr_mode") or "")
-
-            # One migration for every session shape, weight provenance and
-            # participation included -- so this path no longer has to restore
-            # a separate "which zeros are answers" marker afterwards. The
-            # slide is the LOADER's, not the session's claim about it.
-            self._restore_step1_scientific_state(
-                sess, source_path=getattr(self.loader, "filepath", ""))
-
-            rois = list(sess.get("rois") or [])
-            if not rois and sess.get("roi_bbox"):
-                rois = [{
-                    "name": sess.get("active_roi") or "ROI_1",
-                    "bbox_fullres": sess.get("roi_bbox"),
-                    "polygon_fullres": sess.get("polygon_fullres"),
-                    "patch_indices": [],
-                }]
-            self._rois = rois
-            active_name = sess.get("active_roi") or (rois[0].get("name") if rois else "")
-            self._active_roi = next(
-                (r for r in rois if r.get("name") == active_name),
-                rois[0] if rois else None,
-            )
-            print(f"[Step1] active_roi={active_name or 'none'}")
-
-            patches = []
-            ry0, _, rx0, _ = [0, 0, 0, 0]
-            if self._active_roi and self._active_roi.get("bbox_fullres"):
-                ry0, _, rx0, _ = [int(v) for v in self._active_roi["bbox_fullres"]]
-            for item in sess.get("patches") or []:
-                pid = item.get("id")
-                name = item.get("name") if pid is not None else ""
-                if item.get("bbox_fullres"):
-                    patches.append(Patch(item["bbox_fullres"], pid, name))
-                elif item.get("bbox_local"):
-                    y0, y1, x0, x1 = [int(v) for v in item["bbox_local"]]
-                    patches.append(Patch((ry0 + y0, ry0 + y1, rx0 + x0, rx0 + x1), pid, name))
-            # A session from before stable ids: P1..Pn by position, as shown.
-            patches, _ = with_patch_ids(patches)
-            self._p2_params = sess.get("p2_params")
-            if self._p2_params and hasattr(self.search, "apply_seg_config_to_ui"):
-                self.search.apply_seg_config_to_ui(self._p2_params)
-            self._seg_preview_history = dict(sess.get("segmentation_preview_history") or {})
-            self._active_segmentation_method = str(
-                sess.get("active_segmentation_method")
-                or (self._p2_params or {}).get("method")
-                or ""
-            )
-            self._active_preview_patch = str(sess.get("active_preview_patch") or "")
-            self._p1_diam = sess.get("p1_diam")
-            self._last_save = sess.get("last_save")
-            self._params_source = sess.get("params_source")
-            self._fused_zarr_path = self._restorable_fused_zarr(
-                sess.get("fusion_zarr_path")) or None
-            self.step1_output = {
-                "correction_config_path": os.path.join(out_dir, "correction_config.json"),
-                "zarr_path": self._fused_zarr_path,
-                "roi_info": self._rois,
-                "output_dir": out_dir,
-                "step2_dir": step2_dir,
-                "roi_id": sess.get("roi_id", ""),
-                "roi_dir": roi_dir,
-                "ome_tiff_path": raw_ome,
-            }
-
-            self._stop_all_loaders()
-            self._patch_channel_cache.clear()
-            self._overlay_display_cache.clear()
-            self._signal_cache.clear()
-            self._patch_load_ready.clear()
-            self._preview_patch_idx = -1
-            self._on_rois_changed(self._rois)
-            self._on_patches(patches)
-            selected_name = sess.get("selected_patch")
-            if selected_name:
-                sel_idx = self._patch_index_for_key(selected_name)
-                if sel_idx >= 0:
-                    self._select_preview_patch(sel_idx)
-            self._show_active_roi_preview()
-            self.step0_done = True
-            self._step1_context_ready = True
-            self.step1_done = bool(self._fused_zarr_path)
-            if hasattr(self._step2, "set_roi_context"):
-                self._step2.set_roi_context(
-                    roi_id=sess.get("roi_id", ""),
-                    roi_dir=roi_dir,
-                    step2_dir=step2_dir,
-                )
-            else:
-                self._step2._out_edit.setText(step2_dir or out_dir)
-            self._update_next_button()
-            self.prev_status.setText("Loaded previous Step1 session.")
-            print(f"[Step1] restored patches={len(patches)}")
-            print(f"[Step1] restored channel weights count={len(sess.get('channel_weights') or {})}")
-            return True
+            return self._restore_step1_session_v2(sess, session_manifest_path)
         except Exception:
             tb = traceback.format_exc()
             print(f"[Step1] failed to load session:\n{tb}")
@@ -4876,8 +4630,6 @@ class MainWindow(QMainWindow):
         roi = self._rm_roi_dir()
         if step2 is None or not roi or step2._run_active:
             return
-        if hasattr(step2, "set_dirty_draft"):
-            step2.set_dirty_draft("")
         viewing = run_store.session_pointers(roi).get("viewing") or ""
         chain = run_store.chain(viewing) if viewing and run_store.is_done(viewing) else []
         upstream = next((r for r in chain if run_store.kind_of(r) == "correct"), "") \
@@ -4924,12 +4676,12 @@ class MainWindow(QMainWindow):
         if item is None:
             step2._zarr_edit.setText("")
             step2._zarr_path = None
-            step2.set_data_version("", {})
+            step2.set_region_inputs({})
             return
         if os.path.abspath(step2._zarr_edit.text().strip() or ".") != item["zarr"]:
             step2._zarr_edit.setText(item["zarr"])
             step2._load_zarr_info()
-        step2.set_data_version("", item["regions"])
+        step2.set_region_inputs(item["regions"])
 
     @staticmethod
     def _rm_fuse_item(run_dir):
@@ -4959,54 +4711,6 @@ class MainWindow(QMainWindow):
                 if r.get("roi_name") and r.get("roi_name") != "full"]
         return {"run": run_dir, "label": label, "tag": tag, "zarr": first, "regions": regions,
                 "rois": rois, "tooltip": label + (f"\n{source}" if source else "")}
-
-    def _dv_step2_state(self):
-        """Block DV (§3.13): (current version record, dirty-draft reason).
-        Outside a workspace: (None, "") -- no gate (pre-DV behaviour)."""
-        from ..utils import data_versions
-        ws = self._dv_workspace()
-        if not ws:
-            return None, ""
-        cur = data_versions.current_version(ws)
-        if cur is None:
-            return None, ("No data version yet: Generate fused.zarr in Step1 first.")
-        try:
-            candidate = self._dv_candidate_record(cur.get("method") or "")
-        except Exception as exc:                            # noqa: BLE001
-            return cur, f"The current settings could not be read ({exc})."
-        if not data_versions.same_content(candidate, cur):
-            return cur, (f"Step0/Step1 settings changed since data version "
-                         f"{cur['version']} (dirty draft): Generate in Step1, or load "
-                         f"{cur['version']} again in Step0, before running Step2.")
-        return cur, ""
-
-    def _dv_bind_step2(self):
-        """Entering Step2: its input is the current data version's fused
-        products, or new runs are refused while the draft is dirty."""
-        step2 = self.__dict__.get("_step2")
-        if step2 is None or not hasattr(step2, "set_data_version") or step2._run_active:
-            return
-        cur, reason = self._dv_step2_state()
-        if cur is None and not reason:
-            return                                          # not versioned
-        step2.set_dirty_draft(reason)
-        if cur is None or reason:
-            step2.set_data_version("", {})
-            return
-        from ..utils import data_versions
-        ws = self._dv_workspace()
-        paths = {r.get("roi_name"): data_versions.localize(ws, r.get("fused_zarr_path") or "")
-                 for r in cur.get("regions") or []}
-        first = next((p for p in paths.values() if p and os.path.isdir(p)), "")
-        if first and os.path.abspath(step2._zarr_edit.text().strip() or "") != first:
-            step2._zarr_edit.setText(first)
-            step2._load_zarr_info()
-        step2.set_data_version(cur["version"], paths)
-        # User ruling 2026-10-03: Step2 follows Step1 -- the version's fused
-        # and the segmentation method/parameters Step1 used LAST; what was set
-        # by hand before is replaced (and can be changed again).
-        if hasattr(step2, "use_version_params"):
-            step2.use_version_params(os.path.join(ws, "step1"), cur["version"])
 
     def _go_to_step1(self):
         # Step1 reads the handoff from DISK. While a patch edit is still being
@@ -5074,8 +4778,8 @@ class MainWindow(QMainWindow):
         self._log_step1_layout("enter Step1")
         # Block DV Q8 (§3.9): an opened workspace's Step1 comes back by
         # itself, once -- no "Load Previous Step1 Session" click.
-        if self.__dict__.get("_dv_auto_step1"):
-            self._dv_auto_step1 = False
+        if self.__dict__.get("_rm_auto_step1"):
+            self._rm_auto_step1 = False
             self._load_previous_step1_session(auto=True)
 
     def _go_to_step1_5(self):
@@ -10627,8 +10331,8 @@ class MainWindow(QMainWindow):
         if step2 is not None and _inside(step2._zarr_edit.text().strip()):
             step2._zarr_edit.setText("")
             step2._zarr_path = None
-            if hasattr(step2, "set_data_version"):
-                step2.set_data_version("", {})
+            if hasattr(step2, "set_region_inputs"):
+                step2.set_region_inputs({})
         if _inside(self.__dict__.get("_fused_zarr_path") or ""):
             self._fused_zarr_path = ""
             self.step1_output = {}
@@ -10644,7 +10348,7 @@ class MainWindow(QMainWindow):
         run_dir = os.path.abspath(run_dir)
         if not run_store.is_done(run_dir):
             return False
-        why = self._dv_deletion_blocker()
+        why = self._busy_reason()
         if why:
             QMessageBox.information(parent or self, "Delete",
                                     f"Nothing can be deleted while {why}.")
@@ -10708,219 +10412,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:               # noqa: BLE001 -- auxiliary record
             print(f"[Provenance] deletion not recorded ({type(exc).__name__}: {exc})")
 
-    def _dv_workspace(self):
-        """The workspace folder Generate versions into, or "" outside one:
-        the workspace the Step0 handoff file actually lives in -- not the
-        folder it names, which in a project copied with its absolute paths is
-        another project's (acceptance finding 2026-10-03)."""
-        s0 = self.step0_output or {}
-        manifest = str(s0.get("step0_manifest_path") or "")
-        if manifest:
-            here = os.path.dirname(os.path.dirname(os.path.abspath(manifest)))
-            if os.path.isfile(os.path.join(here, "roi_manifest.json")):
-                return here
-        roi_dir = str(s0.get("roi_dir") or "")
-        if roi_dir and os.path.isfile(os.path.join(roi_dir, "roi_manifest.json")):
-            return roi_dir
-        return ""
-
-    def _dv_regions(self):
-        """The analysis regions this Generate fuses, frozen (§3.11)."""
-        if self._rois:
-            return [{"roi_name": str(r.get("name") or ""),
-                     "roi_id": str(r.get("roi_id") or ""),
-                     "bbox_fullres": [int(v) for v in r.get("bbox_fullres") or []],
-                     "polygon_fullres": r.get("polygon_fullres") or None}
-                    for r in self._rois]
-        h, w = (int(v) for v in self.loader.shape[:2])
-        return [{"roi_name": "full", "roi_id": str((self.step0_output or {}).get("roi_id") or ""),
-                 "bbox_fullres": [0, h, 0, w], "polygon_fullres": None}]
-
-    def _dv_candidate_record(self, method):
-        """What a version made by this Generate would be (§3.2, §3.11):
-        existing fields only."""
-        from ..utils import workspace_session
-        from .step0.search_ctrl import read_corrected_zarr_state
-        s0 = self.step0_output or {}
-        raw = os.path.abspath(OME_TIFF_FILE) if OME_TIFF_FILE else ""
-        project = os.path.dirname(os.path.dirname(self._dv_workspace()))
-        try:
-            with open(os.path.join(project, "project_manifest.json"), encoding="utf-8") as f:
-                sources = (json.load(f) or {}).get("sources") or {}
-        except (OSError, ValueError):
-            sources = {}
-        corrected = str(self._corrected_zarr_path or s0.get("corrected_zarr_path") or "")
-        sigs, bboxes = read_corrected_zarr_state(corrected) if corrected else ({}, [])
-        snapshot = self._committed_fusion_settings() or {}
-        try:
-            with open(os.path.join(str(s0.get("step0_dir") or ""), "correction_config.json"),
-                      encoding="utf-8") as f:
-                decisions = dict((json.load(f) or {}).get("channel_decisions") or {})
-        except (OSError, ValueError):
-            decisions = {}
-        return {
-            "slide_id": workspace_session.slide_id_of(raw, sources) or "",
-            "channel_decisions": decisions,
-            "raw_ome_path": raw,
-            "method": str(method or ""),
-            "regions": self._dv_regions(),
-            "corrected": {"path": os.path.abspath(corrected) if corrected else "",
-                          "signatures": {k: list(v) for k, v in sigs.items()},
-                          "bboxes": [list(b) for b in bboxes],
-                          "source_identity": s0.get("source_identity")},
-            "step0_remap_hash": str(s0.get("channel_remap_config_hash") or ""),
-            "fusion_settings_hash": str(snapshot.get("hash") or ""),
-        }
-
-    def _dv_reuse_same(self, workspace, record):
-        """Generate with nothing changed: the existing version is current
-        again and its fused products are used (§3.3). True when reused."""
-        from ..utils import data_versions
-        same = data_versions.find_same(workspace, record)
-        if same is None:
-            return False
-        fused = [r.get("fused_zarr_path") for r in same.get("regions") or []]
-        if not fused or not all(p and os.path.isdir(p) for p in fused):
-            return False
-        data_versions.set_current(workspace, same["version"])
-        print(f"[Step1] nothing changed since data version {same['version']}: "
-              f"its fused products are reused")
-        self._on_fusion_done(fused[0])
-        return True
-
-    def _dv_commit_pending(self):
-        """Every region succeeded: publish the version (§3.12 steps 3-6) --
-        parameter files in, `version.json` with complete last, index and
-        current last, and only then its A3 provenance. Returns the record."""
-        from ..core import provenance as prov
-        from ..utils import data_versions
-        pending = self._dv_pending      # kept until published: a failure is discarded
-        alloc, record = pending["alloc"], dict(pending["record"])
-        worker, ws = pending["worker"], pending["workspace"]
-        by_name = {}
-        try:
-            with open(os.path.join(alloc["path"], "fusion_meta.json"), encoding="utf-8") as f:
-                for reg in (json.load(f) or {}).get("regions") or []:
-                    by_name[str(reg.get("roi_name"))] = reg.get("zarr_path")
-        except (OSError, ValueError):
-            pass
-        regions = []
-        for reg in record.get("regions") or []:
-            path = by_name.get(reg["roi_name"])
-            if not path or not os.path.isdir(path):
-                raise RuntimeError(f"region {reg['roi_name']!r} has no fused product")
-            regions.append(dict(reg, fused_zarr_path=os.path.abspath(path)))
-        record["regions"] = regions
-        s0 = self.step0_output or {}
-        step0_dir = str(s0.get("step0_dir") or "")
-        # Step1's session too, so loading this version back restores its
-        # Step1 as it was (§3.9).
-        self._save_step1_session()
-        settings_path = self._fusion_settings_path()
-        copies = [(os.path.join(step0_dir, "correction_config.json"), "correction_config.json"),
-                  (str(s0.get("channel_remap_config_path") or ""), "step0_channel_remap.json"),
-                  (settings_path, "step1_fusion_settings.json"),
-                  (os.path.join(os.path.dirname(settings_path), "step1_session.json"),
-                   "step1_session.json")]
-        for src, name in copies:
-            if src and os.path.isfile(src):
-                shutil.copy2(src, os.path.join(alloc["path"], name))
-        self._dv_freeze_seg_params(os.path.dirname(settings_path), alloc["path"])
-        # The session was saved before this Generate's fused path reached the
-        # window: the frozen copy names the version's own products.
-        frozen = os.path.join(alloc["path"], "step1_session.json")
-        if os.path.isfile(frozen):
-            from ..core.provenance import write_json_atomic
-            with open(frozen, encoding="utf-8") as f:
-                sess = json.load(f) or {}
-            sess["fusion_zarr_path"] = regions[0]["fused_zarr_path"]
-            if (record.get("corrected") or {}).get("path"):
-                sess["corrected_zarr_path"] = record["corrected"]["path"]
-            write_json_atomic(frozen, sess)
-        committed = data_versions.commit_version(ws, alloc, record)
-        self._dv_pending = None         # published: nothing left to discard
-        project = os.path.dirname(os.path.dirname(ws))
-        corrected = (record.get("corrected") or {}).get("path") or ""
-        if corrected and os.path.isdir(corrected):
-            prov.register_corrected_channels(project, ws, corrected, record.get("raw_ome_path"))
-        for job in worker.provenance_jobs:
-            worker._register_fused(*job)
-        print(f"[Step1] data version {committed['version']} published "
-              f"({len(regions)} region(s))")
-        return committed
-
-    def _dv_register_legacy(self):
-        """Block DV §3.8 (ruling 6b): a workspace made before data versions,
-        opened for the first time, has its present state registered as v1 --
-        its products referenced where they are, read-only from now on. Its
-        segmentations are not attached to any version (they stay `unknown`).
-        Nothing is registered without a fused product for every region."""
-        from ..utils import data_versions
-        ws = self._dv_workspace()
-        if not ws or data_versions.load_index(ws)["versions"] or \
-                data_versions.list_versions(ws):
-            return None
-        # the workspace's own folders, never the ones a copied handoff names
-        step1_dir = os.path.join(ws, "step1")
-        if not os.path.isdir(step1_dir):
-            return None
-        meta_paths = {}
-        try:
-            with open(os.path.join(step1_dir, "fusion_meta.json"), encoding="utf-8") as f:
-                for reg in (json.load(f) or {}).get("regions") or []:
-                    meta_paths[str(reg.get("roi_name"))] = str(reg.get("zarr_path") or "")
-        except (OSError, ValueError):
-            return None
-        record = self._dv_candidate_record("")
-        corrected = (record.get("corrected") or {}).get("path") or ""
-        if corrected and not data_versions.is_inside(corrected, ws):
-            own = os.path.join(ws, "step0", "corrected_channels.zarr")
-            if not os.path.isdir(own):
-                print(f"[Step1] earlier workspace not registered as v1: its corrected "
-                      f"product {corrected} lies outside the workspace")
-                return None
-            record["corrected"] = dict(record["corrected"], path=own)
-        regions = []
-        for reg in record["regions"]:
-            here = os.path.join(step1_dir, f"fused_{reg['roi_name']}.zarr")
-            path = here if os.path.isdir(here) else meta_paths.get(reg["roi_name"], "")
-            if not path or not os.path.isdir(path) or not data_versions.is_inside(path, ws):
-                print(f"[Step1] earlier workspace not registered as v1: region "
-                      f"{reg['roi_name']!r} has no fused product")
-                return None
-            regions.append(dict(reg, fused_zarr_path=os.path.abspath(path)))
-        record["regions"] = regions
-        settings_path = os.path.join(step1_dir, "step1_fusion_settings.json")
-        try:
-            with open(settings_path, encoding="utf-8") as f:
-                record["fusion_settings_hash"] = str((json.load(f) or {}).get("hash") or "")
-        except (OSError, ValueError):
-            record["fusion_settings_hash"] = ""
-        record["label"] = data_versions.LEGACY_LABEL
-        record["legacy"] = True
-        alloc = data_versions.new_version_folder(ws)
-        try:
-            step0_dir = os.path.join(ws, "step0")
-            for src, name in (
-                    (os.path.join(step0_dir, "correction_config.json"), "correction_config.json"),
-                    (os.path.join(step0_dir, "step0_channel_remap.json"), "step0_channel_remap.json"),
-                    (settings_path, "step1_fusion_settings.json"),
-                    (os.path.join(step1_dir, "step1_session.json"), "step1_session.json")):
-                if src and os.path.isfile(src):
-                    shutil.copy2(src, os.path.join(alloc["path"], name))
-            self._dv_freeze_seg_params(step1_dir, alloc["path"])
-            committed = data_versions.commit_version(ws, alloc, record)
-        except Exception as exc:                            # noqa: BLE001
-            shutil.rmtree(alloc["path"], ignore_errors=True)
-            print(f"[Step1] earlier workspace not registered as v1: {exc}")
-            return None
-        print(f"[Step1] earlier workspace registered as data version "
-              f"{committed['version']} (its products are referenced in place)")
-        return committed
-
-    # ── Block DV-D: deleting ───────────────────────────────────────────────
-
-    def _dv_deletion_blocker(self):
+    def _busy_reason(self):
         """Why nothing may be deleted now ('' / None when it may): a Step0
         Save, a Generate, a Step2 run or a Step4 extraction is running
         (§4: deleting waits until it has finished)."""
@@ -10941,157 +10433,6 @@ class MainWindow(QMainWindow):
             return "a pre-segmentation run is running"
         return None
 
-    def _dv_release_paths(self, paths):
-        """Before `paths` move to the trash: Step3 and Step4 let go of a
-        run inside them (§4)."""
-        from ..utils import data_versions
-
-        def _inside(path):
-            return bool(path) and any(data_versions.is_inside(path, p) for p in paths)
-        runs = {r.run_dir for r in self.__dict__.get("_step3_mask_runs") or []}
-        key = str(self.__dict__.get("_step3_mask_key") or "").partition("\x1f")[0]
-        if _inside(key) or any(_inside(r) for r in runs):
-            self._step3_clear_masks()
-        step4 = self.__dict__.get("_step4")
-        job = getattr(step4, "_job", None)
-        if step4 is not None and _inside(getattr(job, "run_dir", "")):
-            step4.set_run("")
-
-    #: Windows made by `_dv_restart_empty`, kept alive here (main.py holds
-    #: only the first one).
-    _live_windows = []
-
-    def _dv_restart_empty(self):
-        """DV-D §3.4, §8 ("None"): the window goes back to how it starts --
-        no slide, no channels, no image. A NEW window is made the way main.py
-        makes one and this one closes (its closeEvent stops every job, as on
-        quitting), so nothing of the deleted data can come back."""
-        global OME_TIFF_FILE, OUTPUT_DIR
-        from .. import config as _config
-        OME_TIFF_FILE, OUTPUT_DIR = _config.OME_TIFF_FILE, _config.OUTPUT_DIR
-        fresh = type(self)()
-        fresh.setGeometry(self.geometry())
-        MainWindow._live_windows.append(fresh)
-        if self in MainWindow._live_windows:
-            MainWindow._live_windows.remove(self)
-        if self.isMaximized():
-            fresh.showMaximized()
-        elif self.isVisible():
-            fresh.show()
-        print("[Workspace] the current data version was deleted: the window "
-              "starts over empty")
-        QtCore.QTimer.singleShot(0, self.close)
-        return fresh
-
-    @staticmethod
-    def _dv_localize_dirs(manifest_path, dirs):
-        """`dirs` (name -> path) mapped into the workspace the Step0 manifest
-        file lives in (acceptance finding 2026-10-03; codex reviews 7, 8): a
-        handoff copied with its absolute paths names another project's
-        folders, and nothing may be written there. Paths already inside are
-        kept; `_moved` lists what was mapped."""
-        from ..utils import data_versions
-        out = dict(dirs)
-        if not manifest_path:
-            return out
-        ws = os.path.dirname(os.path.dirname(os.path.abspath(manifest_path)))
-        if not os.path.isfile(os.path.join(ws, "roi_manifest.json")):
-            return out
-        own = {"roi_dir": ws, "step0_dir": os.path.join(ws, "step0"),
-               "step1_dir": os.path.join(ws, "step1"), "step2_dir": os.path.join(ws, "step2")}
-        moved = {}
-        for key, value in dirs.items():
-            if not value or data_versions.is_inside(value, ws):
-                continue
-            here = data_versions.localize(ws, value, must_exist=(key == "corrected")) \
-                or own.get(key, "")
-            out[key] = here
-            moved[key] = (value, here)
-        if moved:
-            out["_moved"] = moved
-            print(f"[Workspace] the handoff named folders of another project; "
-                  f"this workspace's own are used: {moved}")
-        return out
-
-    @staticmethod
-    def _dv_freeze_seg_params(step1_dir, version_folder):
-        """A version keeps, as a RECORD, the segmentation method and
-        parameters Step1 had chosen when it was made -- the active parameter
-        file of ``step1/segmentation_params`` and an index naming only it.
-        Step2 itself takes Step1's latest ones (user ruling 2026-10-03).
-        Returns the method or ""."""
-        from ..utils.segmentation_params import PARAM_INDEX
-        src_dir = os.path.join(step1_dir, "segmentation_params")
-        try:
-            with open(os.path.join(src_dir, PARAM_INDEX), encoding="utf-8") as f:
-                index = json.load(f) or {}
-        except (OSError, ValueError):
-            return ""
-        method = str(index.get("active_method") or "")
-        name = str(index.get("active_param_file") or
-                   ((index.get("methods") or {}).get(method) or {}).get("latest") or "")
-        src = name if os.path.isabs(name) else os.path.join(src_dir, name)
-        if not method or not name or not os.path.isfile(src):
-            return ""
-        dest = os.path.join(version_folder, "segmentation_params")
-        os.makedirs(dest, exist_ok=True)
-        shutil.copy2(src, os.path.join(dest, os.path.basename(src)))
-        from ..core.provenance import write_json_atomic
-        write_json_atomic(os.path.join(dest, PARAM_INDEX), {
-            "active_method": method, "active_param_file": os.path.basename(src),
-            "methods": {method: {"latest": os.path.basename(src),
-                                 "history": [os.path.basename(src)]}}})
-        return method
-
-    def _dv_install_step1_files(self, version_id):
-        """A version was loaded in Step0 (§3.6): its Step1 session and fusion
-        settings become the workspace's Step1 files. They were saved against
-        the handoff Step0 has just republished for this same version, so they
-        are bound to it again; their contents are not changed."""
-        from ..utils import data_versions
-        s0 = self.step0_output or {}
-        step1_dir = str(s0.get("step1_dir") or "")
-        ws = os.path.dirname(os.path.abspath(step1_dir)) if step1_dir else ""
-        rec = data_versions.get_version(ws, version_id) if ws else None
-        if rec is None:
-            print(f"[Step1] data version {version_id!r} not found; Step1 files kept")
-            return False
-        vdir = data_versions.version_dir(ws, rec.get("folder", ""))
-        identity = self._handoff_identity()
-        manifest = str(s0.get("step0_manifest_path") or "")
-        try:
-            with open(manifest, "r", encoding="utf-8") as f:
-                source_identity = (json.load(f) or {}).get("source_identity")
-        except (OSError, ValueError):
-            source_identity = s0.get("source_identity")
-        from ..core.provenance import write_json_atomic
-        installed = []
-        settings = os.path.join(vdir, "step1_fusion_settings.json")
-        if identity is not None and os.path.isfile(settings):
-            with open(settings, "r", encoding="utf-8") as f:
-                snap = json.load(f) or {}
-            snap["handoff_identity"] = identity
-            write_json_atomic(self._fusion_settings_path(), snap)
-            installed.append("fusion settings")
-        session = os.path.join(vdir, "step1_session.json")
-        if os.path.isfile(session):
-            with open(session, "r", encoding="utf-8") as f:
-                sess = json.load(f) or {}
-            sess["step0_manifest_path"] = os.path.abspath(manifest) if manifest else ""
-            sess["source_identity"] = source_identity
-            write_json_atomic(os.path.join(step1_dir, "step1_session.json"), sess)
-            installed.append("session")
-        print(f"[Step1] data version {version_id}: Step1 "
-              f"{' and '.join(installed) or 'files'} installed")
-        return True
-
-    def _dv_discard_pending(self, reason):
-        """Cancel / error / not started: no version, the folder goes (§3.12)."""
-        pending, self._dv_pending = self._dv_pending, None
-        if pending is None:
-            return
-        shutil.rmtree(pending["alloc"]["path"], ignore_errors=True)
-        print(f"[Step1] no data version: {reason}; {pending['alloc']['folder']} removed")
 
     def _start_fusion_worker(self, worker, job_name, n_rows, n_cols):
         """Bind a fusion job to the dataset and handoff it was started for.
@@ -11205,9 +10546,6 @@ class MainWindow(QMainWindow):
         self._fusion_token = None
         worker = self._fusion_worker
         self._fusion_worker = None
-        # Block DV: a retired job publishes nothing; its folder is cleaned
-        # when the workspace is opened next (cleanup_incomplete).
-        self._dv_pending = None
         # Block RM: likewise its unpublished fuse run (cleanup_incomplete).
         self._rm_pending_fuse = None
         self._fusion_exit_actions = []

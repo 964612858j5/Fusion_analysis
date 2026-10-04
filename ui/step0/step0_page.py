@@ -79,7 +79,6 @@ from ...utils.roi_project import (
     roi_shape_from_bbox,
 )
 from ...utils import workspace_session
-from ...utils import data_versions
 from ...utils import run_store
 # Step0 keeps the shared ChannelWorkbench as an internal lifecycle/config owner.
 # Its Intensity inspector is exposed from Background Correction; the former
@@ -261,11 +260,6 @@ class _FixedWidthStatusLabel(QLabel):
         super().setText(shown)
 
 
-#: Block DV (user ruling 2026-10-03): the row of a workspace's dirty draft
-#: in the "Open a workspace" chooser.
-DRAFT_TAG = "draft"
-
-
 class Step0Page(QWidget):
     step0_complete = pyqtSignal(dict)
     # A dataset switch that has been COMMITTED (not a load attempt, not a path
@@ -277,7 +271,6 @@ class Step0Page(QWidget):
     dataset_committed = pyqtSignal(dict)
     #: Block DV-D: the current data version was deleted and no other was
     #: loaded -- the window goes back to its initial, empty state.
-    unload_requested = pyqtSignal()
     # A geometry-only update of the ALREADY published handoff: ROI/patch edits
     # made anywhere (this page, the navigator popup, Step1) have been written
     # through the one Step0 writer and a new manifest has been published.
@@ -6238,16 +6231,6 @@ class Step0Page(QWidget):
         # Block A6 W1: an opened workspace's committed handoff, after the
         # switch has been announced.
         self._announce_opened_workspace()
-        self._dv_unload_if_requested()
-
-    def _dv_unload_if_requested(self):
-        """Block DV-D §3.4: the current version was deleted with "None" --
-        at the end of the load, the window is asked to start over empty."""
-        if getattr(self, "_dv_unload_after_commit", False):
-            self._dv_unload_after_commit = False
-            self.unload_requested.emit()
-            return True
-        return False
 
     def _roi_count(self):
         """ROIs drawn on the overview the user draws on (the navigator's when
@@ -11001,273 +10984,10 @@ class Step0Page(QWidget):
         return state["rows"][row] if 0 <= row < len(state["rows"]) else None
 
     @staticmethod
-    def _dv_fused_readable(path):
-        """A fused product Step1 can open (codex review 4, #2): the folder
-        is there AND its Zarr opens."""
-        if not path or not os.path.isdir(path):
-            return False
-        try:
-            zarr.open(path, mode="r")
-        except Exception:                             # noqa: BLE001
-            return False
-        return True
-
-    @staticmethod
     def _default_row_index(rows):
-        """The row the chooser preselects (Enter opens it): the draft, else
-        the current version's newest row, else the first."""
-        first = next((i for i, r in enumerate(rows) if r[2] == DRAFT_TAG), None)
-        if first is None:
-            first = next((i for i, r in enumerate(rows) if "(current)" in r[2]), 0)
-        return first
-
-    # ── Block DV-D: deleting from the chooser ──────────────────────────────
-
-    @staticmethod
-    def _fmt_bytes(n):
-        n = float(n or 0)
-        for unit in ("B", "KB", "MB", "GB"):
-            if n < 1024 or unit == "GB":
-                return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-            n /= 1024.0
-
-    def _dv_trash_size(self):
-        from ...utils import trash
-        try:
-            return trash.size(self.output_dir) if self.output_dir else 0
-        except OSError:
-            return 0
-
-    def _dv_rows_again(self):
-        try:
-            _sid, found = workspace_session.find_workspaces(self.output_dir, self.ome_path)
-        except Exception:                             # noqa: BLE001
-            return []
-        return self._workspace_rows(found)
-
-    def _dv_confirm(self, parent, title, text, checkbox=None):
-        """A seam: (confirmed, checkbox checked)."""
-        box = QMessageBox(parent or self)
-        box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle(title)
-        box.setText(text)
-        cb = None
-        if checkbox:
-            cb = QtWidgets.QCheckBox(checkbox)
-            box.setCheckBox(cb)
-        delete = box.addButton("Delete", QMessageBox.DestructiveRole)
-        box.addButton(QMessageBox.Cancel)
-        box.setDefaultButton(QMessageBox.Cancel)
-        box.exec_()
-        return box.clickedButton() is delete, bool(cb and cb.isChecked())
-
-    def _dv_ask_keep_workspace(self, parent, ws):
-        """A seam: True when the user also deletes the whole workspace."""
-        answer = QMessageBox.question(
-            parent or self, "Delete the workspace too?",
-            f"{ws.label()} has no data version left.\n\nDelete the whole "
-            f"workspace too (into the trash)? Keep it to open it again later.",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        return answer == QMessageBox.Yes
-
-    def _dv_ask_load_other(self, parent, others):
-        """A seam: the version record to load instead, or None ("None")."""
-        dlg = QtWidgets.QDialog(parent or self)
-        dlg.setWindowTitle("Load another version?")
-        lay = QVBoxLayout(dlg)
-        lay.addWidget(QLabel(
-            "This is the current data version. Load another version of this "
-            "workspace before it is deleted?\nNone: delete it and start from an "
-            "empty window (load data again yourself)."))
-        combo = QtWidgets.QComboBox()
-        combo.addItem("None", None)
-        for rec in others:
-            combo.addItem(rec["version"], rec)
-        lay.addWidget(combo)
-        box = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        box.accepted.connect(dlg.accept)
-        box.rejected.connect(dlg.reject)
-        lay.addWidget(box)
-        if dlg.exec_() != QtWidgets.QDialog.Accepted:
-            return False                               # cancelled: nothing is deleted
-        return combo.currentData()
-
-    def _dv_delete_row(self, row, parent=None):
-        """The × of one chooser row (DV-D §3). Returns None (nothing done or
-        refused), ("deleted",), ("load", row) -- load that row, THEN delete
-        (§3.4: a failed load deletes nothing) -- or ("unload",)."""
-        ws, rec, tag = row[0], row[1], row[2]
-        run = row[3] if len(row) > 3 else None
-        blocker = getattr(self, "deletion_blocker", None)
-        why = blocker() if callable(blocker) else None
-        if why:
-            QMessageBox.information(parent or self, "Not deleted",
-                                    f"Nothing was deleted: {why}.\nDelete it when that "
-                                    f"has finished.")
-            return None
-        wsd = ws.workspace_dir
-        size = lambda paths: self._fmt_bytes(sum(data_versions.folder_size(p) for p in paths))
-
-        if tag == DRAFT_TAG:
-            plan = data_versions.plan_delete(wsd, draft=True)
-            ok, _ = self._dv_confirm(
-                parent, "Discard the draft",
-                f"Discard what was saved in {ws.label()} since its current version "
-                f"(not generated yet)?\nThe workspace goes back to its current version."
-                + (f"\nMoved to the trash: {size(plan['paths'])}." if plan["paths"] else ""))
-            if not ok:
-                return None
-            current = data_versions.current_version(wsd)
-            if current is None:
-                # No current version to go back to (codex review 3, #4): the
-                # workspace goes back to one of its versions -- chosen here;
-                # None keeps the draft.
-                others = list(reversed(data_versions.list_versions(wsd)))
-                target = self._dv_ask_load_other(parent, others) if others else None
-                if not target:
-                    return None
-                self._dv_after_load = plan
-                return ("load", (ws, target, target["version"]))
-            self._dv_after_load = plan
-            return ("load", (ws, current, current["version"] + "  (current)"))
-
-        if rec is None:                                # a workspace without versions
-            plan = data_versions.plan_delete(wsd, workspace=True)
-            ok, _ = self._dv_confirm(
-                parent, "Delete the workspace",
-                f"Delete the whole workspace {ws.label()} ({size(plan['paths'])})?\n"
-                f"It is moved to the project's trash and removed after 30 days.")
-            if not ok:
-                return None
-            self._dv_release(plan["paths"])
-            data_versions.execute_delete(plan)
-            return ("deleted",)
-
-        vid = rec["version"]
-        runs = data_versions.runs_of_version(wsd, vid)
-        delete_version = run is None
-        if run is not None:
-            scope = data_versions.plan_delete(wsd, run_dir=run.run_dir)
-            last = len(runs) == 1
-            ok, also = self._dv_confirm(
-                parent, "Delete the segmentation",
-                f"Delete the segmentation {os.path.basename(run.run_dir)} of {vid} "
-                f"({ws.label()}) with its Step4 results ({size(scope['paths'])})?"
-                + ("" if last else f"\n{vid} stays: {len(runs) - 1} other "
-                   f"segmentation(s) use it."),
-                checkbox=(f"Also delete data version {vid} (its fused products; to use "
-                          f"these settings again you must Generate)") if last else None)
-            if not ok:
-                return None
-            delete_version = last and also
-        else:
-            vplan = data_versions.plan_delete(wsd, version_id=vid)
-            ok, _ = self._dv_confirm(
-                parent, "Delete the data version",
-                f"Delete data version {vid} of {ws.label()} ({size(vplan['paths'])})?\n"
-                f"To use its settings again you must Generate.")
-            if not ok:
-                return None
-        run_dir = run.run_dir if run is not None else None
-        if not delete_version:
-            plan = data_versions.plan_delete(wsd, run_dir=run_dir)
-            self._dv_release(plan["paths"])
-            data_versions.execute_delete(plan)
-            return ("deleted",)
-
-        current = data_versions.current_version(wsd)
-        is_current = current is not None and current.get("version") == vid
-        others = [r for r in data_versions.list_versions(wsd) if r["version"] != vid]
-        whole = False
-        if not others:
-            whole = self._dv_ask_keep_workspace(parent, ws)
-        if whole:
-            plan = data_versions.plan_delete(wsd, workspace=True)
-        else:
-            # The handoff is released only when it describes this version
-            # itself; a draft built on its corrected product keeps it
-            # (codex review 2, #4).
-            draft = is_current and self._dv_has_draft(ws, rec)
-            plan = data_versions.plan_delete(wsd, run_dir=run_dir, version_id=vid,
-                                             release_handoff=is_current and not draft)
-        if is_current and others:
-            target = self._dv_ask_load_other(parent, list(reversed(others)))
-            if target is False:
-                return None
-            if target is not None:
-                self._dv_after_load = plan
-                return ("load", (ws, target, target["version"]))
-        self._dv_release(plan["paths"])
-        data_versions.execute_delete(plan)
-        if is_current:
-            self._dv_unload_after_commit = True
-            return ("unload",)
-        return ("deleted",)
-
-    def _dv_release(self, paths):
-        """Detach what the window has open from `paths` before they move."""
-        release = getattr(self, "release_paths", None)
-        if callable(release):
-            release(list(paths))
-
-    def _dv_empty_trash(self, parent=None):
-        from ...utils import trash
-        total = self._dv_trash_size()
-        if not total:
-            QMessageBox.information(parent or self, "Empty trash", "The trash is empty.")
-            return False
-        answer = QMessageBox.question(
-            parent or self, "Empty trash",
-            f"Permanently delete everything in this project's trash "
-            f"({self._fmt_bytes(total)})? This cannot be undone.",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
-            return False
-        removed = trash.empty(self.output_dir)
-        print(f"[Trash] emptied: {len(removed)} entr(y/ies) removed")
-        return True
-
-    def _dv_tidy_trash(self):
-        """On Load (§5, §6): interrupted deletions are finished (records
-        first); entries deleted more than 30 days ago are removed in the
-        background."""
-        from ...utils import trash
-        project = self.output_dir
-        if not project or not os.path.isdir(os.path.join(project, trash.TRASH_DIR)):
-            return True
-        pending = data_versions.pending_trash_sources(project)
-        if pending:
-            # Finished like any deletion: never while something runs on it,
-            # and what the window has open lets go first (codex review 2, #3).
-            blocker = getattr(self, "deletion_blocker", None)
-            why = blocker() if callable(blocker) else None
-            if why:
-                print(f"[Trash] an interrupted deletion waits ({why}); no workspace "
-                      f"is opened until it is finished")
-                return False
-            self._dv_release(pending)
-        try:
-            done = data_versions.resume_deletions(project)
-            if done:
-                print(f"[Trash] finished interrupted deletion(s): {done}")
-        except Exception as exc:                      # noqa: BLE001
-            # Not finished: opening a workspace now could clean up a folder
-            # that belongs to the trash (codex review 2, #2).
-            print(f"[Trash] interrupted deletions not finished ({exc}); no workspace "
-                  f"is opened until they are")
-            return False
-
-        def _purge():
-            try:
-                removed = trash.purge(project)
-                if removed:
-                    print(f"[Trash] removed after 30 days: {removed}")
-            except Exception as exc:                  # noqa: BLE001
-                print(f"[Trash] purge failed: {exc}")
-        import threading
-        threading.Thread(target=_purge, name="trash-purge", daemon=True).start()
-        return True
+        """The row the chooser preselects (Enter opens it): the newest
+        workspace (block RM)."""
+        return 0
 
     def _rm_old_project_refused(self, parent=None):
         """Block RM (§11): a project written before block RM is not opened
@@ -11311,10 +11031,6 @@ class Step0Page(QWidget):
         Intensity come back, so an unchanged Save says "No changes"."""
         self._workspace_intensity = None
         self._workspace_handoff_pending = None
-        self._dv_after_load = None
-        self._dv_open_run = ""
-        self._dv_delete_after_announce = None
-        self._dv_loaded_record = None
         if self._rm_old_project_refused():
             return None
         self._rm_purge_trash()
@@ -11489,45 +11205,6 @@ class Step0Page(QWidget):
         self._workspace_handoff_pending = (config, list(saved_rois), decisions,
                                            dict(manifest, step0_roi_result_path=_manifest_path),
                                            zarr_path, loaded)
-
-    @classmethod
-    def _dv_has_draft(cls, ws, version):
-        """Has the workspace been saved (Step0, or Step1's fusion settings)
-        since `version`, without a Generate?"""
-        published = step0_handoff.published_handoff(ws.step0_dir)
-        if published is None:
-            return False
-        _dir, _manifest_path, zarr_path, config, _manifest = published
-        return (cls._dv_step0_differs(ws, version, config, zarr_path)
-                or cls._dv_step1_differs(ws, version))
-
-    @staticmethod
-    def _dv_step0_differs(ws, version, config, zarr_path):
-        """Does the workspace's Step0 say something its version does not --
-        another corrected product, correction config or Intensity file?"""
-        vdir = data_versions.version_dir(ws.workspace_dir, version.get("folder", ""))
-        vpath = (version.get("corrected") or {}).get("path") or ""
-        if vpath and os.path.abspath(vpath) != os.path.abspath(zarr_path or ""):
-            return True
-        vcfg = workspace_session._load(os.path.join(vdir, "correction_config.json"))
-        if isinstance(vcfg, dict) and vcfg != config:
-            return True
-        vremap = os.path.join(vdir, "step0_channel_remap.json")
-        mine = os.path.join(ws.step0_dir, "step0_channel_remap.json")
-        if os.path.isfile(vremap):
-            if not os.path.isfile(mine):
-                return True
-            with open(vremap, "rb") as a, open(mine, "rb") as b:
-                return a.read() != b.read()
-        return False
-
-    @staticmethod
-    def _dv_step1_differs(ws, version):
-        """Are the workspace's committed fusion settings not the version's?"""
-        saved = workspace_session._load(
-            os.path.join(ws.workspace_dir, "step1", "step1_fusion_settings.json"))
-        mine = str((saved or {}).get("hash") or "")
-        return mine != str(version.get("fusion_settings_hash") or "")
 
     @staticmethod
     def _step0_conditioning_config_path_for(ws):

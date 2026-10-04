@@ -203,11 +203,8 @@ class Step2Page(QWidget):
         # User ruling 2026-10-03: a workspace handed over while a run is
         # going (Step0 Save as) waits here; Step2 switches when the run ends.
         self._pending_context = None
-        # Block DV: the data version Step2 runs on and each region's fused
-        # product in it; a non-empty reason = dirty draft, Run refused (§3.13).
-        self._data_version = ""
+        # Block RM: each region's fused product in the chosen fuse run.
         self._region_fused_paths = {}
-        self._dirty_reason = ""
         self._last_remap_status = ""     # v14.5d: last Step0-remap applied/not-applied msg
         self._source_aware_attached = False       # a runtime descriptor was attached
         self._source_aware_summary = ""           # "N marker(s), <mixture>"
@@ -243,7 +240,7 @@ class Step2Page(QWidget):
         Marker segmentation (HQ/HQ2/CSD) auto-applies it (see get_seg_config)."""
         rd = getattr(self, "_roi_dir", "") or ""
         if rd:
-            p = os.path.join(rd, "step0", "step0_channel_remap.json")
+            p = os.path.join(rd, "settings", "step0", "step0_channel_remap.json")   # block RM
             if os.path.exists(p):
                 return p
         return ""
@@ -316,12 +313,6 @@ class Step2Page(QWidget):
         self._old_run_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._old_run_lbl.setVisible(False)
         ll.addWidget(self._old_run_lbl)
-        # Block DV (§3.13): why a new run cannot start now (dirty draft).
-        self._dirty_lbl = QLabel('')
-        self._dirty_lbl.setStyleSheet('color:#e06c75;font-size:10px;padding:2px 4px;')
-        self._dirty_lbl.setWordWrap(True)
-        self._dirty_lbl.setVisible(False)
-        ll.addWidget(self._dirty_lbl)
 
         self._prog_bar = QProgressBar()
         self._prog_bar.setRange(0, 100)
@@ -1256,7 +1247,7 @@ class Step2Page(QWidget):
             if self._zarr_edit.text().strip():
                 self._zarr_edit.setText('')
             self._zarr_path = None
-            self.set_data_version('', {})
+            self.set_region_inputs({})
             return
         item = self._fuse_items[index]
         # §7: the regions this fuse run froze, not the ones edited now (none:
@@ -1265,7 +1256,7 @@ class Step2Page(QWidget):
         if os.path.abspath(self._zarr_edit.text().strip() or '.') != os.path.abspath(item["zarr"]):
             self._zarr_edit.setText(item["zarr"])
             self._load_zarr_info()
-        self.set_data_version('', item.get("regions") or {})
+        self.set_region_inputs(item.get("regions") or {})
 
     def selected_fuse_run(self):
         return str(self._fuse_combo.currentData() or '')
@@ -2643,8 +2634,11 @@ class Step2Page(QWidget):
         for key in ("hq_source_zarr", "multichannel_source_path", "corrected_channels_zarr"):
             if cfg.get(key):
                 candidates.append(cfg.get(key))
-        if self._roi_dir:
-            candidates.append(os.path.join(self._roi_dir, "step0", "corrected_channels.zarr"))
+        # Block RM (§5): the corrected product of the chosen input's chain.
+        from ..utils import run_store
+        correct = run_store.correct_run_of(os.path.dirname(os.path.abspath(self._zarr_path or ".")))
+        if correct:
+            candidates.append(os.path.join(correct, "corrected_channels.zarr"))
         out_dir = self._step2_dir or self._out_edit.text().strip() or OUTPUT_DIR
         candidates.extend([
             os.path.join(out_dir, "corrected_channels.zarr"),
@@ -2847,53 +2841,12 @@ class Step2Page(QWidget):
         return True, {"differences": cmp["differences"],
                       "confirmed_at": time.strftime("%Y-%m-%d %H:%M:%S")}
 
-    def use_version_params(self, params_dir, version_id):
-        """User ruling 2026-10-03: the segmentation method and parameters
-        Step1 used last (``params_dir``'s segmentation_params index) become
-        Step2's for data version `version_id`, replacing whatever was set
-        before; the source reads `From Step1 (data version vNNN)`. Returns
-        True when they were loaded. Coming back to Step2 with the same version
-        and the same Step1 parameters keeps what the user changed since."""
-        index = self._resolve_seg_params_index_path(params_dir)
-        try:
-            stamp = os.path.getmtime(index) if index else 0.0
-        except OSError:
-            stamp = 0.0
-        key = (os.path.abspath(params_dir or ""), str(version_id or ""), stamp)
-        if key == getattr(self, "_version_params_key", None):
-            return True
-        self._version_params_key = key
-        self._seg_params_index = {}
-        self._seg_params_edit.setText("")
-        idx = self._param_source_combo.findData("index")
-        if idx >= 0:
-            self._param_source_combo.setItemText(
-                idx, f"From Step1 (data version {version_id})")
-        if self.load_step1_active_params(params_dir):
-            return True
-        print(f"[Step2] data version {version_id} has no segmentation parameters; "
-              f"manual default")
-        self._set_param_source("manual")
-        return False
-
-    def set_data_version(self, version_id, region_fused_paths=None):
-        """Block DV: the data version the next run belongs to."""
-        self._data_version = str(version_id or "")
+    def set_region_inputs(self, region_fused_paths=None):
+        """Block RM: each region's fused product in the chosen fuse run."""
         self._region_fused_paths = {str(k): str(v) for k, v in
                                     (region_fused_paths or {}).items() if v}
 
-    def set_dirty_draft(self, reason):
-        """Block DV (§3.13): a non-empty reason refuses new runs and says why."""
-        self._dirty_reason = str(reason or "")
-        self._dirty_lbl.setText(self._dirty_reason)
-        self._dirty_lbl.setVisible(bool(self._dirty_reason))
-        if not self._run_active:
-            self._btn_run.setEnabled(not self._dirty_reason)
-
     def _run(self):
-        if self._dirty_reason:
-            QMessageBox.warning(self, 'Step2', self._dirty_reason)
-            return
         if not self._zarr_path or not os.path.exists(self._zarr_path):
             QMessageBox.warning(self, 'No data',
                                 'Please load a fused.zarr first.')
@@ -2932,8 +2885,7 @@ class Step2Page(QWidget):
                 if not self._apply_selected_index_params():
                     return
         seg_config = self.get_seg_config()
-        if self._data_version:                      # block DV (§3.5)
-            seg_config["data_version"] = self._data_version
+        if self._region_fused_paths:                # block RM: the chosen fuse run's
             seg_config["region_fused_paths"] = dict(self._region_fused_paths)
         identity_confirmation = None
         if source == "index":

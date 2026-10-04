@@ -143,7 +143,49 @@ from PyQt5 import QtWidgets  # noqa: E402
 
 from test_v16_a6_workspace import (  # noqa: E402,F401  (fixtures)
     app, slides, page, _project, _commit_step0, _tree)
-from test_v16_data_versions import _FakeWsi, dv_page, _sigs  # noqa: E402,F401
+from PyQt5 import QtCore  # noqa: E402
+
+
+class _FakeWsi(QtCore.QThread):
+    """WsiCorrectionWorker's contract (a QThread whose business `finished`
+    shadows the base one); records what it was asked to do, runs nothing.
+    (Moved here from the DV tests, removed with DV in block RM-3.)"""
+    progress = QtCore.pyqtSignal(int, int, int, int, str, str, int)
+    finished = QtCore.pyqtSignal(str, dict)
+    canceled = QtCore.pyqtSignal(str)
+    error = QtCore.pyqtSignal(str)
+    made = []
+
+    def __init__(self, loader, output_dir, config, rois=None, parent=None,
+                 process_channels=None, incremental=False):
+        super().__init__()
+        self.output_dir, self.process_channels = output_dir, set(process_channels or ())
+        self.incremental = incremental
+        _FakeWsi.made.append(self)
+
+    def stop_after_current_channel(self):
+        pass
+
+    def start(self):
+        pass
+
+
+@pytest.fixture
+def dv_page(page, monkeypatch, tmp_path, slides):
+    """The A6 page with Save's worker and dialog stubbed."""
+    import block01.ui.step0.step0_page as sp
+    _FakeWsi.made = []
+    monkeypatch.setattr(sp, "WsiCorrectionWorker", _FakeWsi)
+    monkeypatch.setattr(sp, "_WsiCorrectionProgressDialog",
+                        lambda parent: type("D", (), {"cancel_requested": type(
+                            "S", (), {"connect": lambda *a, **k: None})(),
+                            "show": lambda self: None, "exec_": lambda self: 0})())
+    return page
+
+
+def _sigs(page, config_mp, decisions):
+    cfg = {"method_params": config_mp, "channel_params": {}}
+    return {ch: page._save_signature(cfg, ch, m) for ch, m in decisions.items()}
 import test_step1_fusion_isolation as iso  # noqa: E402
 from block01.core import step0_handoff  # noqa: E402
 
@@ -433,10 +475,9 @@ def test_step2_takes_the_newest_fuse_run_of_the_correct_run_being_edited(app, tm
         f2 = _fuse_run(ws, c, now=datetime(2026, 10, 3, 12, 1))
         w._corrected_zarr_path = os.path.join(c, "corrected_channels.zarr")
         monkeypatch.setattr(w._step2, "_load_zarr_info", lambda: None)
-        w._step2.set_dirty_draft("No data version yet")              # a stale DV gate
         w._rm_bind_step2()
         assert w._step2._zarr_edit.text() == os.path.join(f2, "fused_R1.zarr")
-        assert w._step2._dirty_reason == ""                           # no DV gate (§16.4)
+        assert not hasattr(w._step2, "set_dirty_draft")               # the DV gate is gone
         assert w._step2._region_fused_paths == {"R1": os.path.join(f2, "fused_R1.zarr")}
     finally:
         w.close()
@@ -638,10 +679,10 @@ def test_an_opened_workspace_does_not_overwrite_its_step1_draft_before_restoring
         rs.update_session(ws, drafts={"step1": {"fusion_draft": {"w": 0.9},
                                                 "edited_against": None}})
         monkeypatch.setattr(w, "_step1_session_payload", lambda: {"fusion_draft": {"w": 0}})
-        w._dv_auto_step1 = True                     # opened, Step1 not entered yet
+        w._rm_auto_step1 = True                     # opened, Step1 not entered yet
         w._save_step1_session()
         assert rs.load_session(ws)["drafts"]["step1"]["fusion_draft"] == {"w": 0.9}
-        w._dv_auto_step1 = False                    # restored: autosave resumes
+        w._rm_auto_step1 = False                    # restored: autosave resumes
         w._save_step1_session()
         assert rs.load_session(ws)["drafts"]["step1"]["fusion_draft"] == {"w": 0}
     finally:
@@ -668,9 +709,9 @@ def test_a_later_step0_save_keeps_the_step1_restore_pending(app, tmp_path, monke
     try:
         monkeypatch.setattr(w, "_load_step0_roi_result", lambda auto=False: True)
         w._on_step0_complete({"opened_workspace": True, "roi_dir": ws})
-        assert w._dv_auto_step1 is True
+        assert w._rm_auto_step1 is True
         w._on_step0_complete({"roi_dir": ws})                       # a Save in Step0
-        assert w._dv_auto_step1 is True                             # still to be restored
+        assert w._rm_auto_step1 is True                             # still to be restored
     finally:
         w.close()
 

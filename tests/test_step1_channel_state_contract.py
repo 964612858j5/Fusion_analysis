@@ -39,6 +39,13 @@ class _Loader:
     def channel_names(self):
         return list(self._names)
 
+    # what the schema-2 handoff reader hands every loader (block RM-3)
+    def set_correction_config(self, config):
+        self.correction_config = config
+
+    def set_corrected_zarr_store(self, path, decisions):
+        self.corrected = (path, dict(decisions or {}))
+
     @staticmethod
     def _norm(arr):
         return np.clip(np.asarray(arr, np.float32), 0.0, 1.0)
@@ -968,19 +975,48 @@ def test_the_panels_own_row_syncing_claims_nothing(app):
 
 def _handoff_window(app, tmp_path):
     """A Step1 panel built the way the application builds it."""
+    import json
+    import zarr
     from block01.ui.main_window import MainWindow
+    from block01.utils.channel_remap_config import (
+        channel_remap_config_hash, default_channel_remap_config, save_channel_remap_config)
+    # Block RM-3: the reader takes a schema-2 manifest only; the smallest one
+    # Step0 can publish for this slide (one ROI, one patch, no correction).
+    step0 = tmp_path / "step0"
+    step0.mkdir()
+    raw = tmp_path / "dataset.ome.tiff"
+    raw.write_bytes(b"raw")
+    st = os.stat(raw)
+    zpath = step0 / "corrected_channels.zarr"
+    zarr.open_group(str(zpath), mode="w").attrs["mode"] = "roi_only"
+    files = {"correction_config.json": {"channel_decisions": {"CD3": "original",
+                                                              "CD8": "original"}},
+             "roi_config.json": [{"name": "R1", "bbox_fullres": [0, 64, 0, 64]}],
+             "patch_config.json": [{"coords": [0, 32, 0, 32]}]}
+    for name, value in files.items():
+        (step0 / name).write_text(json.dumps(value))
+    remap = default_channel_remap_config(["CD3", "CD8"])
+    save_channel_remap_config(remap, str(step0 / "step0_channel_remap.json"))
+    manifest = {
+        "handoff_schema_version": 2,
+        "step0_dir": str(step0), "step1_dir": str(tmp_path), "step2_dir": str(tmp_path),
+        "raw_ome_path": str(raw),
+        "source_identity": {"dataset_path": str(raw),
+                            "dataset_fingerprint": f"{st.st_size}:{st.st_mtime_ns}"},
+        "corrected_zarr_path": str(zpath),
+        "correction_config_path": str(step0 / "correction_config.json"),
+        "roi_config_path": str(step0 / "roi_config.json"),
+        "patch_config_path": str(step0 / "patch_config.json"),
+        "channel_remap_config_path": str(step0 / "step0_channel_remap.json"),
+        "channel_remap_config_hash": channel_remap_config_hash(remap),
+        "panel_groups": {"markers": {"CD3": 0.0, "CD8": 0.0}},
+        "panel_nucleus": "DAPI",
+    }
+    (step0 / "step0_roi_result.json").write_text(json.dumps(manifest))
     w = MainWindow()
     w.loader = _Loader()
-    w.step0_output = {
-        "handoff_schema_version": 1,
-        "output_dir": str(tmp_path), "step0_dir": str(tmp_path),
-        "step1_dir": str(tmp_path), "step2_dir": str(tmp_path),
-        "ome_tiff_path": _Loader.filepath,
-        "rois": [{"name": "R1", "bbox_fullres": [0, 64, 0, 64]}],
-        "patches": [(0, 32, 0, 32)],
-        "panel_groups": {"markers": {"CD3": 0.0, "CD8": 0.0}},
-        "corrected_zarr_path": "",
-    }
+    w.loader.filepath = str(raw)
+    w.step0_output = {"step0_manifest_path": str(step0 / "step0_roi_result.json")}
     assert w._load_step0_roi_result(auto=True) is True, \
         "the real handoff did not complete; this test proves nothing"
     # Step1's fields are shown -- and live -- in Step1.

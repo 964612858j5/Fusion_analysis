@@ -45,7 +45,6 @@ from ..utils.segmentation_config import (
 )
 from ..utils.segmentation_registry import (
     create_result_dir,
-    register_legacy_result,
     upsert_result,
 )
 from ..utils.roi_project import (
@@ -980,7 +979,6 @@ class SegmentMergeWorker(QThread):
         correct = run_store.correct_run_of(os.path.dirname(os.path.abspath(self.zarr_path or "")))
         candidates = [
             os.path.join(correct, "corrected_channels.zarr") if correct else "",
-            os.path.join(self.roi_dir, "step0", "corrected_channels.zarr") if self.roi_dir else "",
             self.roi_manifest.get("corrected_zarr_path") or "",
             self._project_path("corrected_channels.zarr"),
             os.path.join(os.path.dirname(self.project_output_dir), "corrected_channels.zarr"),
@@ -1009,18 +1007,15 @@ class SegmentMergeWorker(QThread):
         return ""
 
     def _fusion_source_path(self, roi_name=None):
-        # Block DV (§3.5): a run of a data version reads each region's fused
-        # product from that version's `regions[]`, handed over explicitly --
-        # never a fixed <ws>/step1 path that another version may have made.
+        # Block RM (§5): each region's fused product of the chosen fuse run,
+        # handed over explicitly; else the one beside the input in that run.
         explicit = (self.seg_config.get("region_fused_paths") or {}).get(str(roi_name or ""))
         if explicit and os.path.exists(explicit):
             return self._abs(explicit)
-        if self.seg_config.get("data_version") and self.zarr_path \
-                and os.path.exists(self.zarr_path) and not roi_name:
-            return self._abs(self.zarr_path)
+        beside = os.path.dirname(os.path.abspath(self.zarr_path or ""))
         candidates = [
-            os.path.join(self.roi_dir, "step1", "fused.zarr") if self.roi_dir else "",
-            os.path.join(self.roi_dir, "step1", f"fused_{roi_name}.zarr") if self.roi_dir and roi_name else "",
+            os.path.join(beside, f"fused_{roi_name}.zarr")
+            if roi_name and run_store.kind_of(beside) == "fuse" else "",
             self.zarr_path,
             self._project_path(f"fused_{roi_name}.zarr") if roi_name else "",
             self._project_path("fused.zarr"),
@@ -1048,7 +1043,10 @@ class SegmentMergeWorker(QThread):
             "created_at": self.created_at,
             "summary": str(self._name_method()),
             "method": self.method,
-            "segmentation_config": json.loads(json.dumps(self.seg_config, default=str)),
+            # (each region's fused path is not a setting: it is read again
+            # from the upstream fuse run, so a copied project stays whole)
+            "segmentation_config": {k: v for k, v in json.loads(json.dumps(
+                self.seg_config, default=str)).items() if k != "region_fused_paths"},
             "param_file": self.param_file or "",
             "parameter_source": self.parameter_source,
             "tiles": {"n_rows": self.n_rows, "n_cols": self.n_cols,
@@ -3396,7 +3394,6 @@ class SegmentMergeWorker(QThread):
             }
             meta["roi_bbox_fullres"] = list(bbox) if bbox else self.roi_manifest.get("bbox_fullres")
             meta["roi_shape"] = meta.get("image_shape")
-        meta["data_version"] = self.seg_config.get("data_version") or None   # block DV
         meta_path = os.path.join(self.output_dir, f'segmentation_meta_{out_prefix}.json')
         with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(meta_path)):
             write_json_atomic(meta_path, meta)          # block A6 G2
@@ -3448,7 +3445,6 @@ class SegmentMergeWorker(QThread):
                 log.info(f"[Step2] Step1 hand-over: method={self._contract['method']} "
                          f"run={self._contract['preseg_run_id']} combo={self._contract['combo_id']}")
             self._tile_skip_set()        # block S2T: a skip plan for another grid is refused
-            register_legacy_result(self.project_output_dir)
             config_path = self._write_run_segmentation_config()
             log.info(f"run_segmentation_params.json -> {config_path}")
 
@@ -3615,7 +3611,6 @@ class SegmentMergeWorker(QThread):
                 runtime_meta = self._finish_runtime_monitor()
                 summary_meta["runtime"] = runtime_meta
                 summary_meta["seg_engine"] = self._engine_meta
-                summary_meta["data_version"] = self.seg_config.get("data_version") or None
                 summary_meta_path = os.path.join(self.output_dir, "segmentation_meta.json")
                 with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(summary_meta_path)):
                     write_json_atomic(summary_meta_path, summary_meta)   # block A6 G2
@@ -4346,7 +4341,6 @@ class SegmentMergeWorker(QThread):
             runtime_meta = self._finish_runtime_monitor()
             meta["runtime"] = runtime_meta
             meta["seg_engine"] = self._engine_meta
-            meta["data_version"] = self.seg_config.get("data_version") or None   # block DV
             meta_path = os.path.join(self.output_dir, 'segmentation_meta.json')
             with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(meta_path)):
                 write_json_atomic(meta_path, meta)              # block A6 G2

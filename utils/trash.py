@@ -1,12 +1,12 @@
-"""The project's trash (block DV-D; docs/v16_DV_delete_application.md §5, §6).
+"""The project's trash (block DV-D, reworked in block RM §9).
 
-What the user deletes from Step0's "Open a workspace" chooser is not removed
-at once: it is MOVED into ``<project>/.trash/<entry>/`` -- a rename on the same
-disk, so it takes no time and no space -- and permanently removed 30 days
-after the deletion, or when the user empties the trash.
+What the user deletes (block RM §9: a run and everything made from it) is not
+removed at once: it is MOVED into ``<project>/.trash/<entry>/`` -- a rename on
+the same disk, so it takes no time and no space -- and permanently removed 30
+days after the deletion, or when the trash is emptied.
 
     .trash/20261003_143000_<workspace id>_<what>/
-        trash.json            {"status": "in_progress" | "complete",
+        trash.json            {"status": "complete" | "partial",
                                "deleted_at", "what", "workspace", "items": [...]}
         <path relative to the project>/...   the moved folders and files
 
@@ -63,48 +63,6 @@ def _size(path) -> int:
             except OSError:
                 pass
     return total
-
-
-def begin(project_dir, workspace_id, what, paths, details=None, now=None) -> Dict:
-    """Write an `in_progress` entry for moving `paths` (absolute, inside the
-    project) into the trash. Nothing is moved yet. Returns the entry."""
-    project_dir = os.path.abspath(project_dir)
-    now = now or datetime.now()
-    root = trash_root(project_dir)
-    os.makedirs(root, exist_ok=True)
-    base = f"{now.strftime('%Y%m%d_%H%M%S')}_{workspace_id}_{what}".replace(os.sep, "_")
-    name, n = base, 1
-    while os.path.exists(os.path.join(root, name)):
-        n += 1
-        name = f"{base}_{n}"
-    folder = os.path.join(root, name)
-    os.makedirs(folder)
-    items = []
-    for path in paths:
-        path = os.path.abspath(path)
-        rel = os.path.relpath(path, project_dir)
-        if rel.startswith(os.pardir):
-            raise ValueError(f"{path} is not inside the project {project_dir}")
-        items.append({"from": path, "to": rel, "bytes": _size(path)})
-    entry = {"status": "in_progress", "deleted_at": now.isoformat(timespec="seconds"),
-             "what": what, "workspace": workspace_id, "details": dict(details or {}),
-             "items": items, "folder": folder}
-    _write(os.path.join(folder, ENTRY), entry)
-    return entry
-
-
-def finish(entry) -> Dict:
-    """Move every item that is still in place, then mark the entry complete."""
-    for item in entry["items"]:
-        src = item["from"]
-        dst = os.path.join(entry["folder"], item["to"])
-        if not os.path.lexists(src):
-            continue                       # moved already (a resumed entry)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.move(src, dst)
-    entry = dict(entry, status="complete")
-    _write(os.path.join(entry["folder"], ENTRY), entry)
-    return entry
 
 
 def entries(project_dir) -> List[Dict]:
@@ -198,16 +156,3 @@ def empty(project_dir) -> List[str]:
 def size(project_dir) -> int:
     root = trash_root(project_dir)
     return _size(root) if os.path.isdir(root) else 0
-
-
-def is_in_trash(project_dir, path) -> bool:
-    root = trash_root(project_dir)
-    try:
-        return os.path.commonpath([os.path.abspath(path), root]) == root
-    except ValueError:
-        return False
-
-
-def last_entry(project_dir) -> Optional[Dict]:
-    found = entries(project_dir)
-    return found[-1] if found else None

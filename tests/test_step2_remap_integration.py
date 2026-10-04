@@ -429,7 +429,7 @@ def _set_method(page, method):
 
 def _roi_with_remap(tmp_path):
     from block01.utils.channel_remap_config import save_channel_remap_config
-    step0 = tmp_path / "rois" / "r1" / "step0"
+    step0 = tmp_path / "rois" / "r1" / "settings" / "step0"      # block RM §4
     step0.mkdir(parents=True)
     save_channel_remap_config(
         {"channels": {"PanCK": {"min": 0.0, "max": 200.0, "gamma": 1.0}},

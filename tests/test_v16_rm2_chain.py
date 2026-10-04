@@ -476,7 +476,6 @@ def test_step2_refuses_a_fuse_run_of_another_workspace(app, tmp_path, monkeypatc
         step2 = w._step2
         step2._roi_dir = ws
         step2._zarr_path = os.path.join(f, "fused_R1.zarr")
-        step2._dirty_reason = ""
         step2._run()
         assert warned and "this workspace" in warned[0] and step2._worker is None
     finally:
@@ -515,7 +514,6 @@ def test_step2_runs_only_the_input_it_shows(app, tmp_path, monkeypatch):
         assert w._step2._rois == []                                 # whole image
         w._step2._roi_dir = ws
         w._step2._zarr_path = os.path.join(f2, "fused_R1.zarr")     # typed in by hand
-        w._step2._dirty_reason = ""
         w._step2._run()
         assert warned and "chosen there" in warned[0] and w._step2._worker is None
     finally:
@@ -653,5 +651,52 @@ def test_choosing_a_result_in_step3_brings_its_settings_to_step2(app, tmp_path,
         w._rm_bind_step2()                                   # the same choice again
         assert w._step2._seg_config == {"method": "edited by the user"}
         assert rs.load_session(ws)["viewing"] == rs.rel(project, s1)
+    finally:
+        w.close()
+
+
+# ── codex RM-3 review ──────────────────────────────────────────────────────
+
+def test_a_segment_runs_record_names_no_absolute_region_paths(app, tmp_path):
+    w, ws = _rm_window(app, tmp_path)
+    try:
+        c = _correct_run(ws)
+        f = _fuse_run(ws, c)
+        cls, ns = _worker_stub(tmp_path, os.path.join(f, "fused_R1.zarr"))
+        ns.roi_dir = ws
+        ns.seg_config = {"method": "stardist", "region_fused_paths": {
+            "R1": os.path.join(f, "fused_R1.zarr")}}
+        _rid, ns.output_dir, _ = cls._create_output_dir(ns)
+        cls._rm_publish_segment_run(ns)
+        stored = json.load(open(os.path.join(ns.output_dir, "params.json")))
+        assert "region_fused_paths" not in stored["segmentation_config"]
+        assert str(tmp_path) not in json.dumps(stored)              # nothing absolute
+    finally:
+        w.close()
+
+
+def test_trash_entries_are_purged_after_30_days_and_emptied_on_request(tmp_path):
+    project = tmp_path / "proj"
+    for n in ("a", "b"):
+        (project / "rois" / "w" / "runs" / n).mkdir(parents=True)
+    old = trash.move(str(project), "w", "runs", [str(project / "rois/w/runs/a")],
+                     now=datetime(2026, 8, 1))
+    new = trash.move(str(project), "w", "runs", [str(project / "rois/w/runs/b")],
+                     now=datetime(2026, 10, 1))
+    assert trash.purge(str(project), now=datetime(2026, 10, 3)) == [old["folder"]]
+    assert os.path.isdir(new["folder"]) and trash.size(str(project)) >= 0
+    assert trash.empty(str(project)) == [new["folder"]]
+    assert trash.entries(str(project)) == []
+
+
+def test_a_malformed_handoff_schema_is_refused(app, tmp_path):
+    w, ws = _rm_window(app, tmp_path)
+    try:
+        manifest = os.path.join(ws, "settings", "step0", "step0_roi_result.json")
+        json.dump({"handoff_schema_version": "not a number"}, open(manifest, "w"))
+        w.step0_output = {"step0_manifest_path": manifest}
+        assert w._load_step0_roi_result(auto=True) is False
+        json.dump({"handoff_schema_version": 1}, open(manifest, "w"))   # an earlier version's
+        assert w._load_step0_roi_result(auto=True) is False
     finally:
         w.close()

@@ -491,29 +491,6 @@ def test_step1_navigation_does_not_trust_arbitrary_loader(monkeypatch):
     assert w._stack.currentIndex() == 0
 
 
-def test_legacy_handoff_keeps_payload_compatibility(tmp_path, monkeypatch):
-    run = make_run(tmp_path)
-    run.manifest_path.unlink()
-    import block01.ui.main_window as mw
-    monkeypatch.setattr(mw.zarr, "open", lambda *_a, **_k: Root())
-    w = make_window(run, schema=1)
-    w.step0_output.update(step0_dir=str(run.step0), output_dir=str(run.step0),
-                          step0_manifest_path="",
-                          corrected_zarr_path=str(run.corrected))
-    assert w._load_step0_roi_result(auto=True) is True
-
-    # Restart/bootstrap must fail closed on a malformed schema value rather
-    # than leaking ValueError into navigation.
-    manifest = dict(run.manifest)
-    manifest["handoff_schema_version"] = "not-an-integer"
-    write_json(run.manifest_path, manifest)
-    from block01.ui.main_window import MainWindow
-    bootstrap_window = MainWindow.__new__(MainWindow)
-    bootstrap_window._out_path_edit = SimpleNamespace(text=lambda: str(run.step0))
-    bootstrap_window._ome_path_edit = SimpleNamespace(text=lambda: "")
-    assert bootstrap_window._bootstrap_step1_context_from_disk(auto=True) is False
-
-
 def test_legacy_remap_uses_compatibility_fallback(tmp_path):
     run = make_run(tmp_path)
     legacy_path = run.step0 / "legacy-remap.json"
@@ -801,80 +778,6 @@ def test_step0_write_failure_does_not_emit(monkeypatch):
 # with no visibility field is one in which group membership itself was the
 # participating set, so every member comes back enabled and every restored
 # weight is authoritative -- zero included, and whatever the old marker says.
-
-def test_the_v1_restore_migrates_a_grouped_session_whole(tmp_path, monkeypatch):
-    run = make_run(tmp_path)
-    import block01.ui.main_window as mw
-    monkeypatch.setattr(mw, "OMETIFFLoader", lambda path: Loader(path))
-    monkeypatch.setattr(mw.zarr, "open", lambda *_a, **_k: Root())
-
-    session = run.step1 / "v1-session.json"
-    write_json(session, {
-        "raw_ome_path": str(run.raw),
-        "corrected_zarr_path": str(run.corrected),
-        "output_dir": str(run.step0),
-        "step0_dir": str(run.step0),
-        "step1_dir": str(run.step1),
-        "step2_dir": str(run.step2),
-        "rois": [], "patches": [],
-        "fusion_config": {
-            "nucleus": {"channel": "DAPI", "weight": 1.0},
-            "groups": {"markers": {"group_weight": 1.0,
-                                   "channels": {"CD68": 0.0}}},
-        },
-        # Written by this program: CD68's 0 is nobody's answer.
-        "channel_weight_initialized": [],
-    })
-
-    w = make_window(run)
-    w.step0_output = {}
-    w._update_next_button = lambda: None
-    assert w._load_previous_step1_session(auto=True, path=str(session)) is True
-
-    # THE MODELS, not a call log: the restore is a transaction on the two
-    # owners now, and what it installed is what they say afterwards.
-    model = w._display.fusion
-    assert model.enabled_channels() == ["CD68", "DAPI"], (
-        "group membership WAS the participating set before the split")
-    assert model.weight_provenance("CD68") == "authoritative", (
-        "a zero-weight group member is a member whose weight somebody wrote; "
-        "an empty marker cannot turn it back into an absence")
-    assert _visibility(w._display.state) == {"CD68": True,
-                                                     "DAPI": True}
-
-
-def test_a_v1_session_without_the_field_migrates_the_same_way(tmp_path,
-                                                              monkeypatch):
-    """The marker's absence changes nothing: the shape is read from which
-    fields the session has, and a grouped session with no visibility is
-    migrated by the same rule whether or not it carries the old marker."""
-    run = make_run(tmp_path)
-    import block01.ui.main_window as mw
-    monkeypatch.setattr(mw, "OMETIFFLoader", lambda path: Loader(path))
-    monkeypatch.setattr(mw.zarr, "open", lambda *_a, **_k: Root())
-
-    session = run.step1 / "old-v1-session.json"
-    write_json(session, {
-        "raw_ome_path": str(run.raw),
-        "corrected_zarr_path": str(run.corrected),
-        "output_dir": str(run.step0),
-        "step0_dir": str(run.step0),
-        "step1_dir": str(run.step1),
-        "step2_dir": str(run.step2),
-        "rois": [], "patches": [],
-        "fusion_config": {"nucleus": {"channel": "DAPI", "weight": 1.0},
-                          "groups": {}},
-    })
-
-    w = make_window(run)
-    w.step0_output = {}
-    w._update_next_button = lambda: None
-    assert w._load_previous_step1_session(auto=True, path=str(session)) is True
-
-    model = w._display.fusion
-    assert model.enabled_channels() == ["DAPI"]  # no group members to enable
-    assert model.draft_snapshot()["provenance"] == {"DAPI": "authoritative"}
-
 
 # ── a republished handoff is not a new project ───────────────────────────
 #
@@ -1524,7 +1427,9 @@ def test_a_real_restore_costs_one_refresh_one_frame_and_one_save(
     _prebind(w, run.raw)
 
     # The reader initialises this slide first; that is a different event and
-    # is not what this test counts.
+    # is not what this test counts. (Block RM-3: it reads the schema-2
+    # manifest it is pointed at -- there is no v1 directory reader any more.)
+    w.step0_output = {"step0_manifest_path": str(run.manifest_path)}
     assert w._load_step0_roi_result(auto=True) is True
     before_rev = w._display.fusion.draft_revision()
     before_gen = w._display.state.generation()

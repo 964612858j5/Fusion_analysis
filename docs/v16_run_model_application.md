@@ -380,3 +380,33 @@ raw OME-TIFF ──> correct run ──┬──> preseg run      (Step1 预分�
 - **#8 用户裁定 B**：Step3 选中结果后进入 Step2，Step2 换成该次运行 `params.json` 里的方法与参数（每次选择只载入一次，之前的 Step2 设置先存为草稿）；刚打开工作区时以保存的 Step2 草稿为准。
 - **#8 / #10 下拉框太窄**：Step3 结果列表与 Step2 Input 的弹出列表按最长一行（含行尾标签与 ×）加宽。
 - **#1 Save 弹窗慢**：实测 Save 处理到弹窗 < 2 ms；用户裁定不处理。
+
+---
+
+## 19. RM-3 实施记录（2026-10-03 晚，未提交）
+
+### 19.1 删除
+
+- `utils/data_versions.py`、`tests/test_v16_data_versions.py`、`tests/test_v16_dv_delete.py`（仍需要的测试辅助移入 `tests/test_v16_rm1_run_store.py`）。
+- `ui/main_window.py`：全部 `_dv_*`（版本发布、复用、legacy v1 登记、localize、冻结参数、装回 Step1 文件、Step2 版本门槛、释放路径、卸载重开窗口）；仍在用的两处改名：运行中判断 `_busy_reason`，打开工作区待恢复标记 `_rm_auto_step1`。
+- `ui/step0/step0_page.py`：DV-D 选择框删除与回收站续做、版本草稿判断、卸载信号、`DRAFT_TAG`。
+- `ui/step2_page.py`：dirty-draft 门槛、`use_version_params`；`set_data_version` 改名 `set_region_inputs`，有区域路径即交给 worker。
+- `workers/segment_merge_worker.py`：`data_version` 字段、`register_legacy_result` 调用、`<ws>/step1`、`<ws>/step0` 固定路径回退（改为本 fuse run 与沿链查找）；segment run 记录不再冻结区域绝对路径。
+- `utils/segmentation_registry.py`：`register_legacy_result`。
+- 交接 schema v1：Step1 读取、现场查找、现场载入（schema 1 恢复整段）、磁盘冷启动全部删除；以 manifest 的 schema 为准，低于 2 拒绝。
+- `utils/roi_project.resolve_roi_context`：平铺旧布局回退。
+- `utils/trash.py`：`begin`、`finish`、`last_entry`、`is_in_trash`。
+- 顺带修正（RM-1/2 遗留）：Step2 的 Step0 重映射查找改到 `settings/step0`。
+
+### 19.2 保留（需用户知悉）
+
+- Step0 Save 无工作区时就地写 corrected（非工作区测试用）。
+- Step0 读输出根目录的 `correction_config.json` / `panel.csv`（早于 DV 的平铺布局，不在 RM-3 清单）。
+- `trash.empty` / `size` 保留；RM-1 起 Step0 选择框已无「Empty trash…」按钮（当时未告知用户）。
+- `roi_index` 与两份分割索引留给 RM-4。
+
+### 19.3 审核与回归
+
+- codex RM-3 第 1 轮 2 条已修：segment 记录中的区域绝对路径；删除 DV 测试时丢失的 30 天清理 / 清空回收站 / schema 损坏拒绝三项检查已在新接口上补回。范围确认在 RM-3 内，无遗留调用、无新机制。
+- 聚焦回归 100 模块：与旧基线相比仅 `test_step1_channel_state_contract`、`test_step2_remap_integration` 新增失败，均为夹具迁移（前者改为写 schema-2 交接，后者重映射放 `settings/step0`），迁移后通过。纯 v1 交接测试 3 项删除。
+- 全量回归：待定（与 RM-4 合并或单独，用户裁定）。

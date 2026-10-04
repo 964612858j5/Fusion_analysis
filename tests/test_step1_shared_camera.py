@@ -41,6 +41,7 @@ from test_step0_compare_tiles import (  # noqa: E402
     SLIDE_H, SLIDE_W, _LowresLoader, _fake_compare_factory, app,  # noqa: F401
 )
 from test_step0_compare_toggle_drift import _RealTab  # noqa: E402
+from camera_write_audit import as_user  # noqa: E402  (block A7)
 
 GRID = TileGridSpec(tile_size=512, source_chunk_shape=(), grid_version="v1")
 CHANNELS = ("DAPI", "CD3", "CD8")
@@ -160,6 +161,9 @@ def _window(app, monkeypatch, tmp_path):
     tab = _RealTab()
     w._step0._explore_tab = tab
     w._step0._full_image_host.addWidget(tab, stretch=1)
+    # Block A7: what `_show_full_image` does for a real stack -- the full
+    # image's range signals reach the page (and the user's, the owner).
+    w._step0._connect_full_image_view_rect(tab.stack)
     w._step0._compare_builds = []
     w._step0._compare_strip_widget._stack_factory = _fake_compare_factory(
         w._step0._compare_builds)
@@ -201,6 +205,15 @@ def _in(rig, step):
         QtTest.QTest.qWait(10)
 
 
+def _user_step0(rig):
+    """Block A7: the move just made programmatically was the user's hand."""
+    as_user(rig.w._step0._full_image_view_box())
+
+
+def _user_step1(rig):
+    as_user(rig.w._step1_mount.host.stack.view.view_box)
+
+
 def _step0_camera(rig):
     return rig.w._step0.current_camera_snapshot()
 
@@ -226,6 +239,7 @@ def test_step0_pan_and_zoom_is_where_step1_opens(app, monkeypatch, tmp_path):
         _in(rig, 0)
         rig.w._step0._apply_full_image_view_rect(
             (4000.0, 3000.0, SLIDE_W / 4.0, SLIDE_H / 4.0))
+        _user_step0(rig)
         QtTest.QTest.qWait(20)
         step0 = _step0_camera(rig)
 
@@ -245,6 +259,7 @@ def test_step1_pan_and_zoom_is_where_step0_comes_back_to(app, monkeypatch,
         _in(rig, 1)
         rig.w._step1_mount.apply_camera(9000.0, 6000.0,
                                         _step1_camera(rig)[2] * 2.0)
+        _user_step1(rig)
         QtTest.QTest.qWait(20)
         step1 = _step1_camera(rig)
 
@@ -268,6 +283,7 @@ def test_compare_is_the_camera_step1_takes(app, monkeypatch, tmp_path):
         rig.w._step0._enter_compare_mode()
         QtTest.QTest.qWait(30)
         rig.w._step0._apply_compare_camera(11000.0, 7000.0, full[2] * 3.0)
+        as_user(rig.w._step0._compare_strip_widget.view_boxes[0])
         QtTest.QTest.qWait(20)
         compare = rig.w._step0._compare_camera()
         assert compare is not None
@@ -291,6 +307,7 @@ def test_step1_reaches_all_three_compare_panels(app, monkeypatch, tmp_path):
         _in(rig, 1)
         rig.w._step1_mount.apply_camera(6000.0, 5000.0,
                                         _step1_camera(rig)[2] * 2.0)
+        _user_step1(rig)
         QtTest.QTest.qWait(20)
         step1 = _step1_camera(rig)
 
@@ -316,6 +333,7 @@ def test_round_trips_and_a_resize_do_not_walk_the_view(app, monkeypatch,
         _in(rig, 0)
         rig.w._step0._apply_full_image_view_rect(
             (5000.0, 4000.0, SLIDE_W / 3.0, SLIDE_H / 3.0))
+        _user_step0(rig)
         QtTest.QTest.qWait(20)
         start = _step0_camera(rig)
 
@@ -339,15 +357,17 @@ def test_another_dataset_does_not_inherit_the_old_position(app, monkeypatch,
         _in(rig, 0)
         rig.w._step0._apply_full_image_view_rect(
             (7000.0, 6000.0, SLIDE_W / 5.0, SLIDE_H / 5.0))
+        _user_step0(rig)
         QtTest.QTest.qWait(20)
         _in(rig, 1)
-        assert rig.w._shared_camera is not None
+        # (block A7 read point: the camera owner replaces `_shared_camera`)
+        assert rig.w._camera_owner.current(rig.w._camera_dataset()) is not None
 
         rig.w.loader.filepath = "/fake/other.ome.tif"
-        assert rig.w._shared_camera.valid_for("/fake/other.ome.tif") is False
+        assert rig.w._camera_owner.current("/fake/other.ome.tif") is None
         _in(rig, 0)
 
-        assert rig.w._shared_camera.dataset == "/fake/other.ome.tif", (
+        assert rig.w._camera_owner.dataset == "/fake/other.ome.tif", (
             "the new slide did not establish its own position")
     finally:
         _close(rig)
@@ -368,6 +388,7 @@ def test_moving_in_step0_asks_step1_for_nothing(app, monkeypatch, tmp_path):
         for i in range(3):
             rig.w._step0._apply_full_image_view_rect(
                 (1000.0 * i, 900.0 * i, SLIDE_W / 4.0, SLIDE_H / 4.0))
+            _user_step0(rig)
             QtTest.QTest.qWait(20)
 
         assert len(rig.raws[0].reads) == reads, (

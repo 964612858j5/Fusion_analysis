@@ -28,6 +28,7 @@ from PyQt5 import QtTest, QtWidgets  # noqa: E402
 
 from test_step0_compare_tiles import SLIDE_H, SLIDE_W, app  # noqa: E402,F401
 from test_step1_shared_camera import _close, _window  # noqa: E402
+from camera_write_audit import as_user  # noqa: E402  (block A7)
 
 #: `_go_to_step0/1/3` put these stack pages on screen.
 PAGE = {0: 0, 1: 1, 3: 3}
@@ -69,6 +70,7 @@ def _start(rig):
     vb = rig.w._step0._full_image_view_box()
     scale = 3.37 * vb.width() / SLIDE_W
     assert rig.w._step0._apply_full_image_camera(SLIDE_W * 0.371, SLIDE_H * 0.613, scale)
+    as_user(vb)                 # block A7: this start is the user's own move
     _pump()
     return _on_screen(rig)
 
@@ -93,7 +95,7 @@ def test_fifty_round_trips_do_not_drift(rig):
         for step in (1, 3, 1, 0):
             _enter(rig, step)
     _same(_on_screen(rig), start)
-    _same(rig.w._shared_camera.camera, start)
+    _same(rig.w._camera_owner.current(rig.w._camera_dataset()).camera, start)
 
 
 def test_a_new_drawable_size_keeps_step1s_camera(rig):

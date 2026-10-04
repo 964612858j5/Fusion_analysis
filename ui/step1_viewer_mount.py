@@ -188,6 +188,9 @@ class Step1WholeSlideMount(QtCore.QObject):
         #: Where this viewer publishes its camera, set by the window. A
         #: plain callable, not a signal: one writer, one reader.
         self.camera_sink = None
+        # Block A7: explicit jumps (patch, preview) go here when the owner
+        # wires it; otherwise to `camera_sink`.
+        self.camera_jump_sink = None
         self._rect_connected = False
         #: The GPU backend, when it is the one on screen.
         self.gpu_layer = None
@@ -1110,9 +1113,11 @@ class Step1WholeSlideMount(QtCore.QObject):
         self.publish_view_rect()
         return True
 
-    def publish_camera(self, reason=""):
-        """Tell the window where this viewer is looking."""
-        sink = self.camera_sink
+    def publish_camera(self, reason="", jump=False):
+        """Tell the window where this viewer is looking -- only for a user
+        navigation or an explicit jump (block A7)."""
+        sink = (self.camera_jump_sink if jump and self.camera_jump_sink is not None
+                else self.camera_sink)
         if sink is None:
             return False
         camera = self.current_camera()
@@ -1179,6 +1184,9 @@ class Step1WholeSlideMount(QtCore.QObject):
             return False
         try:
             view_box.sigRangeChanged.connect(self._on_range_changed)
+            # Block A7 (C3): a drag, a wheel or a right-drag zoom -- the user
+            # moving -- is the only range change that reaches the camera owner.
+            view_box.sigRangeChangedManually.connect(self._on_user_range)
             view_box.sigResized.connect(self._on_view_resized)
         except (AttributeError, RuntimeError, TypeError):
             return False
@@ -1191,9 +1199,13 @@ class Step1WholeSlideMount(QtCore.QObject):
         return True
 
     def _on_range_changed(self, *_args):
-        """The camera moved -- by hand, by a jump, by a rebuild."""
+        """The camera moved -- by hand, by a jump, by a rebuild. The viewer's
+        own bookkeeping only: the camera owner hears the user through
+        `_on_user_range` and the jumps through their own entries (A7)."""
         self._keep_camera_unless_resizing()
         self.publish_view_rect()
+
+    def _on_user_range(self, *_args):
         self.publish_camera(self._camera_reason)
 
     # ── a new drawable size keeps the camera (block A1, C3) ───────────
@@ -1255,20 +1267,21 @@ class Step1WholeSlideMount(QtCore.QObject):
         moved = self.viewer.show_patch(bbox)
         self._recompose_for_the_camera()
         self.publish_view_rect()
-        self.publish_camera(f"{self._camera_reason}-patch")
+        self.publish_camera(f"{self._camera_reason}-patch", jump=True)
         return moved
 
     def jump_to_point(self, y, x, size):
         moved = self.viewer.jump_to_point(y, x, size)
         self._recompose_for_the_camera()
         self.publish_view_rect()
-        self.publish_camera(f"{self._camera_reason}-preview")
+        self.publish_camera(f"{self._camera_reason}-preview", jump=True)
         return moved
 
     def _on_gesture_quiet(self, _snapshot):
+        # (block A7, ruling 16: it also follows a programmatic jump, so it
+        # does not write the camera owner)
         self._recompose_for_the_camera()
         self.publish_view_rect()
-        self.publish_camera(f"{self._camera_reason}-gesture")
 
     def _recompose_for_the_camera(self):
         """The camera moved; the draft did not.

@@ -2444,21 +2444,25 @@ class Step0Page(QWidget):
             return bool(self._apply_compare_camera(cx, cy, scale))
         return bool(self._apply_full_image_camera(cx, cy, scale))
 
-    def publish_camera(self, reason=""):
+    def publish_camera(self, reason="", jump=False):
         """Tell the window where this page is looking, if anyone is listening.
 
         A plain callable set by the owner (`camera_sink`), not a signal and
         not a bus: one writer, one reader, and nothing to unsubscribe from
-        when the page dies.
+        when the page dies. Block A7: called only for a USER navigation
+        (drag / wheel) or, with `jump=True`, an explicit command (Navigator,
+        patch, Fit, compare entry, the first fit after a Load) -- which go
+        to `camera_jump_sink` when the window wires one.
         """
-        sink = getattr(self, "camera_sink", None)
+        jump_sink = getattr(self, "camera_jump_sink", None)
+        sink = jump_sink if jump and jump_sink is not None else getattr(self, "camera_sink", None)
         if sink is None:
             return False
         camera = self.current_camera_snapshot()
         if camera is None:
             return False
-        sink(camera, reason)
-        return True
+        # (False only when the window refused it -- e.g. Step0 not on screen)
+        return sink(camera, reason) is not False
 
     def _compare_camera(self):
         """The three panels' shared camera as `(cx, cy, scale)`, or None.
@@ -2664,6 +2668,10 @@ class Step0Page(QWidget):
         # wherever the previous entry left them.
         self._compare_entry_panel_camera = self._compare_camera()
         self._compare_opened = True
+        # Block A7 (ruling 17): the right-click into compare is the user's
+        # command -- one jump; leaving and the mirrored panels write nothing.
+        self._connect_compare_user_ranges(strip)
+        self.publish_camera("step0-compare-enter", jump=True)
         self._btn_snapshot_patch.setEnabled(True)
         self._compare_where_lbl.setText(
             f"Comparing around ({int(round(px))}, {int(round(py))}) "
@@ -2998,7 +3006,25 @@ class Step0Page(QWidget):
         if not self._compare_mode():
             return
         self._update_compare_view_rect()
-        self.publish_camera("step0-compare")
+        # (block A7: the camera owner hears the user through
+        # `_on_compare_user_range`, not every settled change)
+
+    def _connect_compare_user_ranges(self, strip):
+        """Block A7 (ruling 15): a drag / wheel on ANY compare panel is the
+        user moving; the two panels the strip mirrors it onto are not."""
+        for view_box in (strip.view_boxes if strip is not None else ()):
+            if view_box is None or getattr(view_box, "_a7_user_connected", False):
+                continue
+            try:
+                view_box.sigRangeChangedManually.connect(
+                    lambda *_: self._on_compare_user_range())
+                view_box._a7_user_connected = True
+            except (AttributeError, RuntimeError, TypeError):
+                continue
+
+    def _on_compare_user_range(self):
+        if self._compare_mode() and getattr(self, "_compare_opened", False):
+            self.publish_camera("step0-compare")
 
     def _compare_view_rect_l0(self):
         """The panels' shared camera as a level-0 `(x, y, w, h)`, or None.
@@ -3161,6 +3187,7 @@ class Step0Page(QWidget):
         h0, w0 = stack.provider.level_shape(0)
         stack.view.view_box.setRange(xRange=(0, w0), yRange=(0, h0),
                                      padding=0)
+        self.publish_camera("step0-fit", jump=True)                       # A7 U7
 
     def _full_image_visible(self):
         """True when the full image is a live thing on screen.
@@ -3234,6 +3261,10 @@ class Step0Page(QWidget):
         # The Tissue Preview follows the full image's camera while it is up.
         self._connect_full_image_right_click(stack)
         self._connect_full_image_view_rect(stack)
+        if stack is not None and self.__dict__.get("_camera_seed_pending"):
+            # (consumed only once it has really been recorded -- codex A7)
+            if self.publish_camera("step0-load", jump=True):              # A7 U9
+                self._camera_seed_pending = False
         self._connect_overview_seed(
             getattr(stack, "controller", None), owner=stack)
         self._update_full_image_view_rect()
@@ -5682,7 +5713,10 @@ class Step0Page(QWidget):
         if camera is None:
             return self._enter_compare_mode(float(x), float(y)) is not None
         _cx, _cy, scale = camera
-        return bool(self._apply_compare_camera(float(x), float(y), scale))
+        moved = bool(self._apply_compare_camera(float(x), float(y), scale))
+        if moved:
+            self.publish_camera("step0-compare-navigate", jump=True)     # A7 U4
+        return moved
 
     def _on_tissue_navigate(self, y, x):
         """A click on the Tissue Preview at full-image `(y, x)`.
@@ -5732,6 +5766,7 @@ class Step0Page(QWidget):
         x0 = min(max(0, int(x) - w // 2), max(0, w0 - w))
         controller.jump_to(y0, x0, w, h)
         self._update_full_image_view_rect()
+        self.publish_camera("step0-navigate", jump=True)                  # A7 U4
 
     def _connect_full_image_view_rect(self, stack):
         """Once per stack: every camera move of the full image redraws its
@@ -5744,6 +5779,10 @@ class Step0Page(QWidget):
         try:
             stack.view.view_box.sigRangeChanged.connect(
                 lambda *_: self._on_full_image_camera_moved())
+            # Block A7 (C3): only a drag / wheel / right-drag zoom -- the
+            # user -- reaches the camera owner.
+            stack.view.view_box.sigRangeChangedManually.connect(
+                lambda *_: self.publish_camera("step0-full"))
         except (AttributeError, RuntimeError, TypeError):
             return
         stack._nav_rect_connected = True
@@ -5751,7 +5790,6 @@ class Step0Page(QWidget):
     def _on_full_image_camera_moved(self):
         self._update_full_image_view_rect()
         self._update_full_level_hint()
-        self.publish_camera("step0-full")
 
     def _connect_overview_seed(self, controller, owner=None):
         """Once per controller: tell the page when a channel's whole-slide
@@ -6080,6 +6118,8 @@ class Step0Page(QWidget):
         # generation (including signals Qt has already queued) is dropped
         # from this line on.
         self._dataset_gen += 1
+        # Block A7 (U9): the first full image of this slide is a jump.
+        self._camera_seed_pending = True
         # Anything queued for persistence describes the PREVIOUS slide's
         # geometry and would publish it into this slide's directory.
         worker = getattr(self, "_geometry_persist_worker", None)
@@ -10200,6 +10240,7 @@ class Step0Page(QWidget):
         # The dashed rectangle on the Tissue Preview is the full image's
         # viewport, so it follows it here as it does after any other jump.
         self._update_full_image_view_rect()
+        self.publish_camera("step0-patch", jump=True)                     # A7 U5
         return True
 
     # ── Preview Patch → the compare camera ───────────────────────────────
@@ -10310,6 +10351,7 @@ class Step0Page(QWidget):
         if not self._apply_compare_camera(*camera):
             return False
         cx, cy, _scale = camera
+        self.publish_camera("step0-compare-patch", jump=True)            # A7 U5
         self._compare_where_lbl.setText(
             f"Comparing patch P{idx+1} around ({int(round(cx))}, "
             f"{int(round(cy))}) — right-click or Esc to go back.")

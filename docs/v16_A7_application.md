@@ -263,3 +263,43 @@ codex（astra low，2026-10-04）：主要行号、C3 前提、第 16 题正确�
 - **第 15 题：(a)**。保留「在哪看就切到哪」：在 compare 里拖动 / 缩放到哪里，进入 Step1 也必须在那里。compare 面板的拖动 / 滚轮 = `user_navigated`；进入、离开、三面板联动不写。
 - **第 16 题：同意**。`_on_gesture_quiet` 不再写持有者，其余工作保留。用户补充：程序的位置记录与用户的位置记录解耦——这正是 E4 的做法：持有者只存用户意图，各 viewer 自己显示的（clamp 后的）范围是程序的，永不写回持有者。
 - **第 17 题：同意**（修订 2026-10-02 第 8 题）。compare 的「进入」是用户右键点 P，属于用户命令：进入时 `jump` 写一次（P）；在 compare 里拖动 / 滚轮只记用户操作的那个面板（`user_navigated`）；另外两个面板的联动不写；离开不写（持有者已是最后看的位置，离开时全图回到面板相机，现有规则）。§3.1 的 U8 与 C4 的零回写事件随之改为：进入 = 恰好一次 `jump`，离开 / 联动 = 0 次。
+
+---
+
+## 14. 执行记录（2026-10-04/05，未提交）
+
+### 14.1 改动
+
+- 新增 `ui/camera_owner.py`：`CameraOwner`，读 `current(dataset)` / `dataset`，写只有 `user_navigated`、`jump`、`reset_for_dataset`，每次写入一行 debug 日志；无通用 `set`。
+- `ui/main_window.py`：`_shared_camera` → `_camera_owner`；用户导航 `camera_sink`（`_on_stepN_camera`）与显式跳转 `camera_jump_sink`（新 `_on_stepN_jump`）两路，只有在屏的那一步能写；删除 `_capture_camera_of`、`_remember_camera`；切页不再读取离开的那一页；`_apply_owner_camera_to` 只应用、不读回；`_camera_dataset(step)` 按该页显示的切片标记（Step0 用 Step0 自己的切片——第一次 Save 前窗口还没有 loader，codex）；Step0 数据集提交时 `reset_for_dataset`（U10），进入某页时持有者属于另一切片也重置。
+- `ui/step1_viewer_mount.py`：`sigRangeChanged` 只做视口框与 `_kept_camera` 维护，不再 publish；`sigRangeChangedManually` → 用户导航；`show_patch` / `jump_to_point` → 跳转；`_on_gesture_quiet` 不再 publish（第 16 题）。
+- `ui/step0/step0_page.py`：全图只在 `sigRangeChangedManually` 时 publish；compare 面板的 `sigRangeChangedManually` → 用户导航（第 15 题），`_on_compare_camera_changed` 不再 publish；进入 compare 一次跳转（第 17 题）；跳转：Navigator（全图 / compare）、patch（全图 / compare）、Fit；U9：数据集提交后第一次显示全图时一次跳转，写入成功才消费。
+- **偏离申请（需用户知悉）**：§3 C2 写「C3 缓存对在持有者覆盖之后删除」。实施中**保留**了 `_kept_camera`：它是 Step1/Step3 viewer 自己在 resize 时保持显示范围的本地记录，从不写持有者，正是第 16 题用户所说的「程序的位置记录」。删除它会让 resize 后的显示跳回旧范围，且需改动 `test_a_zoom_after_a_resize_is_the_users` 的语义。codex 认为保留合理。
+- U3 键盘：不存在（见 13.3）。U7 Fit：只有 Step0。
+
+### 14.2 既有测试的改动（第 6 题：只改准备步骤与读取点，断言不改）
+
+| 文件 | 旧 → 新 |
+|---|---|
+| `test_v16_zero_drift.py` `_start` | 程序设置起始相机后，加 `as_user(vb)`（发出用户拖动时 pyqtgraph 发的 `sigRangeChangedManually`）——起始位置是用户的 |
+| `test_v16_zero_drift.py::test_fifty_round_trips_do_not_drift` | `rig.w._shared_camera.camera` → `rig.w._camera_owner.current(rig.w._camera_dataset()).camera`；逐位断言一字未改 |
+| `test_step1_shared_camera.py` `_window` | 加 `_connect_full_image_view_rect(tab.stack)`：产品里 `_show_full_image` 做这一步，测试搭的假 Step0 没走到 |
+| `test_step1_shared_camera.py` A1、A2、A3、A4、A5、A6、B1 | 程序移动后加 `as_user(...)`（全图 / Step1 / compare 面板） |
+| `test_step1_shared_camera.py` A6 | `_shared_camera is not None` → `_camera_owner.current(...) is not None`；`_shared_camera.valid_for(other) is False` → `_camera_owner.current(other) is None`；`_shared_camera.dataset == other` → `_camera_owner.dataset == other` |
+
+六个相机模块 + `test_viewer_pause` 共 122 项通过。
+
+### 14.3 新增测试
+
+- `tests/camera_write_audit.py`：可复用 fixture `camera_writes`（monkeypatch 包装三个写入口；A7 之前的代码上改为包装 `MainWindow._remember_camera`，第 13 题）与 `as_user(view_box)`。
+- `tests/test_v16_a7_camera_owner.py`（17 项）：切页 / resize / 同源刷新 / 打开通道 0 次写入；compare 进入恰好 1 次跳转，联动与离开 0 次；Step0/1/3 拖动与滚轮每次通知恰好 1 次；compare 面板拖动后 Step1 跟到那里；8 个显式命令各恰好 1 次跳转；载入后第一次全图 1 次跳转、之后的重建 0 次；另一切片重置；第一次 Save 之前 Step0 的移动不丢；数据集提交重置；没有通用 setter。
+- **反向注入**：在 A7 之前的代码（`a7956b3`）上，零回写测试失败——切页等事件中写入 24 次（离开读取 + 进入读回），compare 中 4 次。
+
+### 14.4 审核
+
+- codex 代码审核第 1 轮：1 条（第一次 Save 前窗口无 loader，Step0 的写入被拒、载入跳转被白白消费、切片标记可能沿用旧切片）——已修，补 2 项测试；保留 `_kept_camera` 合理，需记录（见 14.1）。
+
+### 14.5 回归
+
+- 聚焦回归 102 模块（涉及相机、切页、compare、视图范围信号、MainWindow 的全部测试模块）：失败均在旧代码上存在（`test_global_channel_dock`、`test_step0_floor_prefetch` 2 项、`test_step1_channel_panel`、`test_step3_patch_strip`、`test_step1_montage_view` 崩溃）。`test_step0_compare_tiles` 这一轮有 1 项（`test_the_dapi_mapping_is_its_own_channels`）失败，单独重跑 3 次均通过，整模块重跑 190 项全部通过——该模块本身有时序不稳定（以往轮次失败的是另一项）。
+- 待办：用户真机验收（§6：50 次 Step0↔1↔3，含 resize、Navigator 跳转、粗→细、打开通道；compare 中移动后进入 Step1 位置一致）。

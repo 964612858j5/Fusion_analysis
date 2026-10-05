@@ -44,7 +44,7 @@ def open_loader(spec):
 
 class PresegRunJob:
     def __init__(self, runs_root, run, loader_factory, python=None,
-                 on_record=None, on_progress=None, on_finished=None):
+                 on_record=None, on_progress=None, on_finished=None, reused=None):
         # Block RM (§4): the folder runs go in (a workspace's runs/).
         self.step1_dir = runs_root
         self.run = run
@@ -55,6 +55,8 @@ class PresegRunJob:
         self.on_finished = on_finished
         self.rdir = preseg_run.run_dir(runs_root, run["run_id"])
         self.records = {}
+        # Block PA-2: {task_id: an earlier run's record} kept instead of run
+        self.reused = dict(reused or {})
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._engine = None
@@ -94,7 +96,10 @@ class PresegRunJob:
     def _main(self):
         try:
             preseg_run.write_run(self.step1_dir, self.run)
-            tasks = list(self.run.get("tasks") or [])
+            self._copy_reused()
+            # only what was not kept; a kept task already has its record, so
+            # no stop or failure below can settle it (one record per task)
+            tasks = [t for t in self.run.get("tasks") or [] if t["task_id"] not in self.records]
             by_engine = {}
             for t in tasks:
                 by_engine.setdefault(seg_engines.METHOD_ENGINE[t["method"]], []).append(t)
@@ -130,6 +135,37 @@ class PresegRunJob:
                     print(f"[Preseg] .done not written ({exc})")
             if self.on_finished is not None:
                 self.on_finished(dict(self.records))
+
+    def _copy_reused(self):
+        """Block PA-2: the kept results, copied into this run and published
+        before any engine starts. A copy that fails is computed instead.
+
+        The run records the engine its kept results ran on, as it would for
+        one it started (Step2's contract checks the two agree, codex PA-2):
+        `reusable` already proved that identity is the current one."""
+        engines = self.run.setdefault("engines", {})
+        devices = self.run.setdefault("devices", {})
+        for t in self.run.get("tasks") or []:
+            old = self.reused.get(t["task_id"])
+            if old is None:
+                continue
+            try:
+                rec = preseg_run.copy_reused(self.rdir, self.run, t, old)
+            except OSError as exc:
+                print(f"[Preseg] could not keep {t['task_id']} ({exc}); it runs again")
+                continue
+            engine = preseg_run.ps_engine(t["method"])
+            engines.setdefault(engine, rec.get("engine_identity"))
+            devices.setdefault(engine, rec.get("device"))
+            with self._lock:
+                self.records[t["task_id"]] = rec
+                done = len(self.records)
+            if self.on_record is not None:
+                self.on_record(rec)
+            if self.on_progress is not None:
+                self.on_progress(done, len(self.run.get("tasks") or []))
+        if self.reused:
+            preseg_run.write_run(self.step1_dir, self.run)      # params.json gains them
 
     def _run_engine(self, engine, group, loader):
         inputs_dir = os.path.join(self.rdir, "inputs")

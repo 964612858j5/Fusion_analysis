@@ -5529,17 +5529,31 @@ class MainWindow(QMainWindow):
         if key is None or self.loader is None:
             QMessageBox.warning(self, "Run", "There is no Step0 result to run on.")
             return False
+        # Block PA-2: a finished result of the run on screen that nothing
+        # has changed is kept (copied into the new run), not computed again.
+        _, tasks = preseg_run.build_tasks("", methods, patches)
+        reused = self._preseg_reusable(tasks, source, snapshot)
+        prev = self._preseg_run
+        if (prev is not None and len(reused) == len(tasks)
+                and {t["task_id"] for t in tasks}
+                == {t["task_id"] for t in prev.get("tasks") or []}):
+            QMessageBox.information(self, "Run", "Every result is already up to date: "
+                                    "nothing to run.")
+            return False
+        to_run = len(tasks) - len(reused)
         # Block RM (§3, §5): a preseg run in the workspace's runs/, its pixel
         # upstream the correct run Step1 reads.
         roi_dir = self._rm_roi_dir()
         new_dir = run_store.new_run(roi_dir, "preseg") if roi_dir else ""
         run_id = os.path.basename(new_dir) if new_dir else preseg_run.new_run_id()
         combos, tasks = preseg_run.build_tasks(run_id, methods, patches)
-        if len(tasks) > PRESEG_CONFIRM_TASKS:
+        if to_run > PRESEG_CONFIRM_TASKS:
+            plan = f"{len(patches)} patches × {len(combos)} combinations"
+            what = (f"{to_run} tasks to compute ({len(reused)} unchanged results are kept; "
+                    f"the plan is {plan})" if reused else f"{to_run} tasks ({plan})")
             answer = QMessageBox.question(
-                self, "Run", f"This run has {len(tasks)} tasks "
-                f"({len(patches)} patches × {len(combos)} combinations) and may take a while. "
-                "Run it?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                self, "Run", f"This run has {what} and may take a while. Run it?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if answer != QMessageBox.Yes:
                 if new_dir:
                     run_store.discard(new_dir)
@@ -5568,15 +5582,29 @@ class MainWindow(QMainWindow):
         job = PresegRunJob(self._preseg_runs_root(), run, lambda: open_loader(spec),
                            on_record=sig.record.emit,
                            # Block A6 G5: the answer names its run.
-                           on_finished=lambda recs, rid=run_id: sig.finished.emit((rid, recs)))
+                           on_finished=lambda recs, rid=run_id: sig.finished.emit((rid, recs)),
+                           **({"reused": reused} if reused else {}))
         self._preseg_job, self._preseg_run, self._preseg_records = job, run, {}
         self._start_results_for_run(combos)
         self._preseg_methods.set_running(True)
         self._preseg_methods.set_progress(f"Running: 0/{len(tasks)} tasks")
         self._refresh_preseg_results()
-        print(f"[Step1] pre-segmentation run {run_id}: {len(tasks)} tasks")
+        print(f"[Step1] pre-segmentation run {run_id}: {len(tasks)} tasks"
+              + (f", {len(reused)} kept from {prev['run_id']}" if reused else ""))
         job.start()
         return True
+
+    def _preseg_reusable(self, tasks, source, snapshot):
+        """{task_id: record} of the run on screen that `tasks` may keep
+        (block PA-2; only the current run is looked at -- ruling 2026-10-05)."""
+        prev, records = self._preseg_run, self._preseg_records or {}
+        if prev is None:
+            return {}
+        identity = (source or {}).get("pixel_identity")
+        fhash = (snapshot or {}).get("hash")
+        return {t["task_id"]: records[t["task_id"]] for t in tasks
+                if preseg_run.reusable(records.get(t["task_id"]), t, identity, fhash,
+                                       PRESEG_HALO_PX)}
 
     def _on_preseg_stop(self):
         job = self._preseg_job

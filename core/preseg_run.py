@@ -213,6 +213,60 @@ def load_records(rdir):
     return out
 
 
+# ── reuse (block PA-2) ──────────────────────────────────────────────────────
+def reusable(rec, task, pixel_identity, fusion_hash, halo_px):
+    """Whether `rec`, a record of the run on screen, is `task`'s result as
+    this Run would compute it: the same method, parameters and patch, the
+    same pixels (the structured identity, compared as it is), Fusion
+    settings, halo and engine -- and it succeeded and its files are there.
+    A failed or cancelled task runs again."""
+    from ..seg_runner import engines as seg_engines
+    if not rec or rec.get("status") != OK:
+        return False
+    if (rec.get("task_id") != task["task_id"] or rec.get("method") != task["method"]
+            or rec.get("params") != task["params"]
+            or [int(v) for v in rec.get("patch_bbox") or []] != list(task["patch_bbox"])):
+        return False
+    if ((rec.get("source") or {}).get("pixel_identity") != pixel_identity
+            or rec.get("fusion_settings_hash") != fusion_hash
+            or rec.get("halo_px") != halo_px):
+        return False
+    engine = seg_engines.METHOD_ENGINE.get(task["method"])
+    if engine is None or rec.get("engine_identity") != seg_engines.behavior_identity(engine):
+        return False
+    for kind in ("cell", "nucleus"):
+        out = rec.get(kind) or {}
+        if out.get("status") == OK and not (out.get("path") and os.path.isfile(out["path"])):
+            return False
+    return True
+
+
+def copy_reused(rdir, run, task, rec):
+    """`rec` (an earlier run's result for `task`) into the run in `rdir`:
+    its masks copied, then its record -- the new run's own, naming where it
+    came from. When it was made, by which engine, on what device and in how
+    long stay as they were: they describe how the result was computed."""
+    import shutil
+    outputs = {}
+    for kind in ("cell", "nucleus"):
+        out = dict(rec.get(kind) or {})
+        if out.get("status") == OK:
+            dst = mask_path(rdir, task["task_id"], kind)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            tmp = dst + ".copy.tmp"
+            shutil.copyfile(out["path"], tmp)
+            os.replace(tmp, dst)
+            out["path"] = dst
+        outputs[kind] = out
+    new = dict(rec, run_id=run["run_id"], task_id=task["task_id"],
+               patch_id=task.get("patch_id"), patch_label=task.get("patch_label", ""),
+               cell=outputs["cell"], nucleus=outputs["nucleus"],
+               reused_from_run=rec.get("run_id"), reused_from_task=rec.get("task_id"))
+    os.makedirs(os.path.join(rdir, "records"), exist_ok=True)
+    protocol.publish_json(record_path(rdir, task["task_id"]), new)
+    return new
+
+
 # ── what may be chosen (plan 7.7) ───────────────────────────────────────────
 def is_stale(run, current_pixel_key, current_fusion_hash):
     """Shown, but never chosen: the pixels or the fusion settings changed."""

@@ -11,7 +11,7 @@ import traceback
 import shutil
 import uuid
 import weakref
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import contextlib
 from datetime import datetime
 
 import numpy as np
@@ -37,6 +37,7 @@ from ...core.fusion_engine import (
 )
 from ...core.channel_remap import apply_channel_remap
 from ...core.provenance import write_json_atomic
+from ...core import bg_parallel
 from ...utils import dataset_trace
 from ...utils import tissue_log
 from ...utils import perf_trace
@@ -250,11 +251,10 @@ class FullFusionWorker(QThread):
       cyto = per-pixel max across groups → normalise
       nucleus = nucleus_channel × weight → normalise
 
-    IO optimisation (方案一): for each tile, all required channels are
-    read in parallel using a ThreadPoolExecutor. Each thread opens its
-    own TiffFile handle and reads only the tile region via zarr, so
-    there is no file-handle contention and NVMe queue depth is fully
-    utilised.
+    Work (block PA-3): the region is cut into chunk-aligned units, which
+    run on one bounded pool and are written in order by this thread alone.
+    A pool thread keeps its own TiffFile handle for the whole region (a
+    fresh pool per tile used to open, and keep, a new handle per thread).
 
     Output: (H, W, 2) uint16 zarr written chunk-by-chunk. The full
     fused image never lives in RAM simultaneously.
@@ -264,8 +264,19 @@ class FullFusionWorker(QThread):
     finished   = pyqtSignal(str)             # zarr_path on success
     error      = pyqtSignal(str)             # traceback string
 
-    # Max parallel IO threads per tile (tune to NVMe queue depth)
-    MAX_IO_WORKERS = 8
+    # Block PA-3 (G1): the work is cut into UNITS on the output store's own
+    # chunk grid -- one chunk high, this many chunks wide, from the region's
+    # origin -- whatever grid was asked for. A unit is a few MP, so a 1-Gpx
+    # slide no longer holds a 167-MP tile's channels and temporaries at once
+    # (A5: 9.9 GB). The windows are frozen at Save, so the cut changes no
+    # pixel (`test_the_tile_grid_does_not_change_the_result`).
+    # Measured on the A5 synthetic slide (1 Gpx, 4 channels, 8 units at
+    # once): 8 chunks wide 29 s / 3.0 GB, 4 -> 20 s / 1.7 GB, 2 -> 19 s /
+    # 1.05 GB (the old 2 x 3 grid: 154 s / 8.5 GB).
+    UNIT_CHUNKS_WIDE = 2
+    # Host bytes a unit holds per pixel besides 8 per channel (G2's sizing):
+    # the fusion's float32 planes, the remap's temporaries, the uint16 out.
+    UNIT_BYTES_PER_PX = 40
 
     def __init__(self, loader, fusion_cfg, n_rows, n_cols,
                  zarr_chunk=1024, preview_ds=16, rois=None,
@@ -477,6 +488,71 @@ class FullFusionWorker(QThread):
         del cyto, nucleus, signals
         return result
 
+    @staticmethod
+    def _poly_mask_packed(polygon_fullres, ry0, rx0, h, w):
+        """`_poly_mask` of the whole region, packed to one BIT per pixel
+        (block PA-3). Drawn once on the region's own canvas, exactly as
+        before: OpenCV clips the polygon's outline to the canvas, so drawing
+        it per unit moved boundary pixels (measured) -- the raster is the
+        region's, only its storage is 1/16 of the old uint8 + bool pair."""
+        import cv2 as _cv2
+        mask = np.zeros((h, w), dtype=np.uint8)
+        pts = np.array(
+            [[int(x - rx0), int(y - ry0)] for x, y in polygon_fullres],
+            dtype=np.int32,
+        )
+        _cv2.fillPoly(mask, [pts], color=1)
+        return np.packbits(mask, axis=1)
+
+    @staticmethod
+    def _unpack_part(packed, oy, ox, h, w):
+        """The (h, w) window at region offset (oy, ox) of a packed mask."""
+        b0, b1 = ox // 8, -(-(ox + w) // 8)      # only this window's bytes (codex)
+        rows = np.unpackbits(packed[oy:oy + h, b0:b1], axis=1)
+        return rows[:, ox - 8 * b0:ox - 8 * b0 + w].astype(bool)
+
+    def _unit_workers(self, n_units, n_channels):
+        """How many units at once: the Step0 Save rule (block CS P3) with a
+        unit's own footprint -- each channel's float32 read and mapped
+        signal, plus the fusion's and the remap's temporaries."""
+        from ...core import bg_parallel
+        px = int(self.zarr_chunk) ** 2 * int(self.UNIT_CHUNKS_WIDE)
+        per_unit = px * (self.UNIT_BYTES_PER_PX + 8 * max(1, int(n_channels)))
+        return bg_parallel.choose_workers(os.cpu_count(), n_units,
+                                          bg_parallel.mem_available_bytes(),
+                                          per_tile_bytes=per_unit)
+
+    def _compute_unit(self, tile, channels, region_sources, packed, ry0, rx0,
+                      groups, group_weights, nucleus_ch, nucleus_w):
+        """One unit, fused and polygon-cut: (h, w, 2) uint16, or None once
+        the run is stopped. Its channels are read here, one after another."""
+        ty0, ty1, tx0, tx1 = tile
+        raw_cache = {}
+        for ch in channels:
+            if self._stop:
+                return None
+            if region_sources is not None:
+                _, arr = self._read_one_source(*region_sources[ch], ch, ty0, ty1, tx0, tx1)
+            else:
+                _, arr = self._read_one_channel(self.loader, ch, ty0, ty1, tx0, tx1)
+            raw_cache[ch] = arr
+        fused = self._fuse_tile(raw_cache, groups, group_weights, nucleus_ch, nucleus_w)
+        del raw_cache
+        if packed is not None:
+            # zero outside the polygon here, one unit at a time (it was a
+            # second pass over the finished store)
+            fused[~self._unpack_part(packed, ty0 - ry0, tx0 - rx0,
+                                     ty1 - ty0, tx1 - tx0)] = 0
+        return fused
+
+    def _units(self, ry0, ry1, rx0, rx1):
+        """The region's computation units, row-major, in full-res coords."""
+        uh = int(self.zarr_chunk)
+        uw = uh * int(self.UNIT_CHUNKS_WIDE)
+        return [(ry0 + y, min(ry0 + y + uh, ry1), rx0 + x, min(rx0 + x + uw, rx1))
+                for y in range(0, ry1 - ry0, uh)
+                for x in range(0, rx1 - rx0, uw)]
+
     # ── main run ──────────────────────────────────────────────────────
 
     @staticmethod
@@ -625,105 +701,46 @@ class FullFusionWorker(QThread):
                 # Flipped only after every tile and the polygon mask are in.
                 out_zarr.attrs["complete"] = False
 
-                # Tile the region
-                tile_h = -(-rh // self.n_rows)
-                tile_w = -(-rw // self.n_cols)
-                tiles  = []
-                for tr in range(self.n_rows):
-                    for tc in range(self.n_cols):
-                        ty0 = ry0 + tr * tile_h
-                        ty1 = min(ty0 + tile_h, ry1)
-                        tx0 = rx0 + tc * tile_w
-                        tx1 = min(tx0 + tile_w, rx1)
-                        tiles.append((ty0, ty1, tx0, tx1))
+                # Block PA-3: chunk-aligned units, not the asked-for grid
+                tiles  = self._units(ry0, ry1, rx0, rx1)
                 n_tiles    = len(tiles)
-                tile_times = []
+                region_t0  = time.time()
+                polygon    = region["polygon_fullres"]
+                packed     = (self._poly_mask_packed(polygon, ry0, rx0, rh, rw)
+                              if polygon is not None else None)
 
-                for i, (ty0, ty1, tx0, tx1) in enumerate(tiles):
-                    if self._stop:
-                        self.error.emit("Fusion stopped by user.")
-                        return
+                # Block PA-3 (G2): the units run on ONE pool -- the only
+                # concurrency there is; a unit reads its channels itself, one
+                # after the other -- and come back IN ORDER to this thread,
+                # the one writer of the store. At most `n` units are held.
+                n_workers = self._unit_workers(n_tiles, len(all_channels))
 
-                    self.progress.emit(
-                        reg_i * units + (i * units) // max(1, n_tiles), total_units,
-                        f"[{rname}] Tile [{i+1}/{n_tiles}]  "
-                        f"reading {len(all_channels)} channels…"
-                    )
-                    t0 = time.time()
+                def _unit(tile, read_done):
+                    read_done()                  # reads of units may overlap
+                    return tile, self._compute_unit(
+                        tile, all_channels, region_sources, packed, ry0, rx0,
+                        groups, group_weights, nucleus_ch, nucleus_w)
 
-                    # Parallel channel IO
-                    raw_cache = {}
-                    with ThreadPoolExecutor(max_workers=self.MAX_IO_WORKERS) as pool:
-                        if region_sources is not None:
-                            futures = {
-                                pool.submit(
-                                    self._read_one_source, *region_sources[ch],
-                                    ch, ty0, ty1, tx0, tx1
-                                ): ch
-                                for ch in all_channels
-                            }
-                        else:
-                            futures = {
-                                pool.submit(
-                                    self._read_one_channel,
-                                    self.loader, ch, ty0, ty1, tx0, tx1
-                                ): ch
-                                for ch in all_channels
-                            }
-                        for fut in as_completed(futures):
-                            if self._stop:
-                                break
-                            ch_name, arr = fut.result()
-                            raw_cache[ch_name] = arr
+                t0 = time.time()
+                with contextlib.closing(bg_parallel.ordered_results(
+                        _unit, tiles, n_workers,
+                        should_stop=lambda: self._stop)) as results:
+                    for i, ((ty0, ty1, tx0, tx1), fused) in enumerate(results):
+                        if self._stop or fused is None:
+                            self.error.emit("Fusion stopped by user.")
+                            return
+                        # Write to zarr (relative coords within this region)
+                        out_zarr[ty0 - ry0:ty1 - ry0, tx0 - rx0:tx1 - rx0, :] = fused
+                        del fused
 
-                    if self._stop:
-                        self.error.emit("Fusion stopped by user.")
-                        return
-
-                    fused = self._fuse_tile(
-                        raw_cache, groups, group_weights,
-                        nucleus_ch, nucleus_w,
-                    )
-                    del raw_cache
-                    gc.collect()
-
-                    # Write to zarr (relative coords within this region)
-                    lty0 = ty0 - ry0
-                    lty1 = ty1 - ry0
-                    ltx0 = tx0 - rx0
-                    ltx1 = tx1 - rx0
-                    out_zarr[lty0:lty1, ltx0:ltx1, :] = fused
-                    del fused
-                    gc.collect()
-
-                    elapsed = time.time() - t0
-                    tile_times.append(elapsed)
-                    avg = sum(tile_times) / len(tile_times)
-                    eta = avg * (n_tiles - i - 1)
-                    self.progress.emit(
-                        reg_i * units + ((i + 1) * units) // max(1, n_tiles), total_units,
-                        f"[{rname}] ✓ Tile [{i+1}/{n_tiles}]  "
-                        f"{elapsed:.1f}s  ETA {eta/60:.1f} min"
-                    )
-
-                # Apply polygon mask (zero out pixels outside polygon)
-                if region["polygon_fullres"] is not None:
-                    self.progress.emit(
-                        (reg_i + 1) * units - 1, total_units,
-                        f"[{rname}] Applying polygon mask…"
-                    )
-                    poly_mask = self._poly_mask(
-                        region["polygon_fullres"], ry0, rx0, rh, rw
-                    )
-                    # Zero outside polygon, chunk by chunk to save RAM
-                    for cy in range(0, rh, self.zarr_chunk):
-                        cy1 = min(cy + self.zarr_chunk, rh)
-                        chunk = np.array(out_zarr[cy:cy1, :, :])
-                        m     = poly_mask[cy:cy1, :]
-                        chunk[~m] = 0
-                        out_zarr[cy:cy1, :, :] = chunk
-                    del poly_mask
-                    gc.collect()
+                        done_s = time.time() - region_t0
+                        eta = done_s / (i + 1) * (n_tiles - i - 1)
+                        self.progress.emit(
+                            reg_i * units + ((i + 1) * units) // max(1, n_tiles), total_units,
+                            f"[{rname}] ✓ Part [{i+1}/{n_tiles}]  "
+                            f"{time.time() - t0:.1f}s  ETA {eta/60:.1f} min"
+                        )
+                        t0 = time.time()
 
                 # No preview PNG (user ruling 2026-10-02): nothing read it --
                 # Step2 draws its overview from the fused zarr itself -- and a
@@ -756,8 +773,12 @@ class FullFusionWorker(QThread):
                     "zarr_path":  zarr_path,
                     "zarr_shape": [rh, rw, 2],
                     "bbox":       [ry0, ry1, rx0, rx1],
-                    "grid":       [self.n_rows, self.n_cols],
-                    "avg_tile_s": round(sum(tile_times)/len(tile_times), 1) if tile_times else 0,
+                    # block PA-3: how it was really computed (the grid
+                    # once asked for no longer is)
+                    "compute_unit": [int(self.zarr_chunk),
+                                     int(self.zarr_chunk) * int(self.UNIT_CHUNKS_WIDE)],
+                    "n_units":    n_tiles,
+                    "elapsed_s":  round(time.time() - region_t0, 1),
                 })
 
                 self.progress.emit(

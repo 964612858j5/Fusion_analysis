@@ -67,14 +67,21 @@ def _percents(worker):
     return seen
 
 
+def _units(worker, chunk, wide):
+    """Block PA-3: the work is cut into chunk-aligned units, not the asked-for
+    grid; small chunks give this tiny slide several of them."""
+    worker.zarr_chunk, worker.UNIT_CHUNKS_WIDE = chunk, wide
+    return worker
+
+
 def test_one_roi_two_by_two_climbs_per_tile(app, tmp_path):
-    seen = _percents(pub._worker(tmp_path, n_rows=2, n_cols=2))
+    seen = _percents(_units(pub._worker(tmp_path, n_rows=2, n_cols=2), 8, 1))
     assert seen == sorted(seen) and seen[-1] == 100
     assert {25, 50, 75} <= set(seen)
 
 
 def test_two_rois_climb_per_tile_too(app, tmp_path):
-    worker = pub._worker(tmp_path, n_rows=2, n_cols=2)
+    worker = _units(pub._worker(tmp_path, n_rows=2, n_cols=2), 4, 2)
     worker.rois = [{"name": "A", "bbox_fullres": [0, 8, 0, 16], "polygon_fullres": None},
                    {"name": "B", "bbox_fullres": [8, 16, 0, 16], "polygon_fullres": None}]
     seen = _percents(worker)

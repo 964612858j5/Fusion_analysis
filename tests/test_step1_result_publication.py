@@ -86,6 +86,8 @@ def test_a_stopped_run_leaves_the_previous_result_alone(tmp_path):
     # before the first tile would never touch the previous result and would
     # prove nothing about where the tiles are written.
     second = _worker(tmp_path, n_rows=4, hash_="second")
+    # block PA-3: several chunk-aligned units on this small slide
+    second.zarr_chunk, second.UNIT_CHUNKS_WIDE = 4, 1
     errors = []
     second.error.connect(errors.append)
     real_fuse = second._fuse_tile

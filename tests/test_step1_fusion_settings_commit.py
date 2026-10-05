@@ -755,19 +755,11 @@ def test_generate_leaves_step0s_handoff_alone_and_the_settings_restorable(
         seen = _launched(w, monkeypatch)
         monkeypatch.setattr(mw, "OUTPUT_DIR", str(tmp_path))
         monkeypatch.setattr(mw, "OME_TIFF_FILE", w.loader.filepath)
-        monkeypatch.setattr(type(w), "_start_fusion_worker",
-                            lambda self, *a, **k: None)
-
         reached = []
-
-        class _NoDialog:
-            # reached only after the point where the old write-back sat
-            def __init__(self, *a, **k):
-                reached.append(1)
-
-            def exec_(self):
-                return QtWidgets.QDialog.Rejected
-        monkeypatch.setattr(mw, "TileSelectDialog", _NoDialog)
+        # reached only after the point where the old write-back sat (it was
+        # the grid dialog, which block PA-3 no longer shows)
+        monkeypatch.setattr(type(w), "_start_fusion_worker",
+                            lambda self, *a, **k: reached.append(1))
 
         mapping = {"CD3": {"min": 0.0, "max": 208.0, "gamma": 1.0},
                    "DAPI": {"min": 0.0, "max": 175.0, "gamma": 1.0}}

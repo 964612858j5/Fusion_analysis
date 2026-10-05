@@ -9878,35 +9878,11 @@ class MainWindow(QMainWindow):
         worker_fcfg["artifact_kind"] = identity.get("artifact_kind") or ""
         worker_fcfg["config_hash"] = identity.get("config_hash") or ""
 
-        active_ch = set([worker_fcfg["nucleus"]["channel"]])
-        for gdata in worker_fcfg["groups"].values():
-            active_ch.update(gdata["channels"].keys())
-        n_channels = len([ch for ch in active_ch if ch in self.loader.ch_map])
-
-        try:
-            import psutil
-            sys_ram_gb = int(psutil.virtual_memory().total / 1e9)
-        except ImportError:
-            sys_ram_gb = 128   # conservative default
-
-        tile_h, tile_w = self.loader.shape
-        if self._active_roi and self._active_roi.get("bbox_fullres"):
-            ry0, ry1, rx0, rx1 = [int(v) for v in self._active_roi["bbox_fullres"]]
-            tile_h, tile_w = ry1 - ry0, rx1 - rx0
-
-        dlg = TileSelectDialog(
-            tile_h,
-            tile_w,
-            n_channels,
-            sys_ram_gb=sys_ram_gb,
-            parent=self,
-        )
-        if dlg.exec_() != QDialog.Accepted:
-            return   # user cancelled — JSONs already saved, that's fine
-        sel = dlg.get_selection()
-        if sel is None:
-            return
-        n_rows, n_cols = sel
+        # Block PA-3: no grid to choose any more -- the worker cuts the work
+        # into chunk-aligned units of its own, so a grid changed neither the
+        # memory nor the pixels; asking for one was a control that did
+        # nothing.
+        n_rows, n_cols = 1, 1
 
         # ── Start FullFusionWorker ────────────────────────────────────
         rm_run = ""

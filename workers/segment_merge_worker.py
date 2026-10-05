@@ -95,6 +95,36 @@ from .constrained_donut_segmentation import (
 )
 
 
+OME_TILE = 512
+
+
+def _ome_tiles(arr, dtype, tile=OME_TILE):
+    """`arr` as `tile`x`tile` blocks in row-major order, edge blocks padded
+    with zeros -- what tifffile cuts a whole array into. One block in memory
+    at a time."""
+    h, w = arr.shape
+    for y in range(0, h, tile):
+        for x in range(0, w, tile):
+            part = np.asarray(arr[y:y + tile, x:x + tile])
+            block = np.zeros((tile, tile), dtype=dtype)
+            block[:part.shape[0], :part.shape[1]] = part
+            yield block
+
+
+def write_tiled_ome_tiff(path, arr, dtype=None):
+    """Block PA-4: Step2's OME-TIFF export, one 512x512 tile at a time.
+
+    The same file, byte for byte, as `tif.write(arr.astype(dtype), ...)` with
+    the arguments below, without the whole array in memory -- a float32 copy
+    of a 1-Gpx mask was 4 GB, the DAPI copy 2 GB more (A5, 2026-10-05).
+    `dtype` None keeps the array's own."""
+    dtype = np.dtype(arr.dtype if dtype is None else dtype)
+    with tifffile.TiffWriter(path, bigtiff=True) as tif:
+        tif.write(_ome_tiles(arr, dtype), shape=tuple(arr.shape), dtype=dtype,
+                  tile=(OME_TILE, OME_TILE), compression='lzw',
+                  photometric='minisblack', metadata=None)
+
+
 class _ContractStopped(Exception):
     """A Step1 hand-over run stopped by the user (Step2 hook-up, step 3):
     the run ends here -- no summary, no registered result, no `finished`."""
@@ -3152,14 +3182,7 @@ class SegmentMergeWorker(QThread):
             self.output_dir, f'global_mask_{out_prefix}.ome.tiff'
         )
         with self.step2_profiler.time_stage("export_mask_ome_tiff", method=self.method, output_path=self._abs(ome_path)):
-            with tifffile.TiffWriter(ome_path, bigtiff=True) as tif:
-                tif.write(
-                    mmap_ro.astype(np.float32),
-                    tile=(512, 512),
-                    compression='lzw',
-                    photometric='minisblack',
-                    metadata=None,
-                )
+            write_tiled_ome_tiff(ome_path, mmap_ro, np.float32)
         self._drop_caches()
 
         if self._stop:
@@ -3169,14 +3192,7 @@ class SegmentMergeWorker(QThread):
             self.output_dir, f'global_dapi_{out_prefix}.ome.tiff'
         )
         with self.step2_profiler.time_stage("export_ome_tiff", method=self.method, output_path=self._abs(global_dapi_path)):
-            with tifffile.TiffWriter(global_dapi_path, bigtiff=True) as tif:
-                tif.write(
-                    np.array(dapi_mmap_ro),
-                    tile=(512, 512),
-                    compression='lzw',
-                    photometric='minisblack',
-                    metadata=None,
-                )
+            write_tiled_ome_tiff(global_dapi_path, dapi_mmap_ro)
         self._drop_caches()
 
         nuclei_ome_path = ""
@@ -3202,14 +3218,7 @@ class SegmentMergeWorker(QThread):
                 self.output_dir, f'global_nuclei_mask_{out_prefix}.ome.tiff'
             )
             with self.step2_profiler.time_stage("export_mask_ome_tiff", method=self.method, output_path=self._abs(nuclei_ome_path)):
-                with tifffile.TiffWriter(nuclei_ome_path, bigtiff=True) as tif:
-                    tif.write(
-                        nuclei_mmap_ro.astype(np.float32),
-                        tile=(512, 512),
-                        compression='lzw',
-                        photometric='minisblack',
-                        metadata=None,
-                    )
+                write_tiled_ome_tiff(nuclei_ome_path, nuclei_mmap_ro, np.float32)
             if is_mesmer_guided:
                 qc_table_path = ""
             elif is_hq2:
@@ -4090,14 +4099,7 @@ class SegmentMergeWorker(QThread):
             ome_path = os.path.join(self.output_dir, 'global_mask.ome.tiff')
             self.progress.emit(n_tiles, n_tiles, 'Writing global mask OME-TIFF…')
             with self.step2_profiler.time_stage("export_mask_ome_tiff", method=self.method, output_path=self._abs(ome_path)):
-                with tifffile.TiffWriter(ome_path, bigtiff=True) as tif:
-                    tif.write(
-                        mmap_ro.astype(np.float32),
-                        tile=(512, 512),
-                        compression='lzw',
-                        photometric='minisblack',
-                        metadata=None,
-                    )
+                write_tiled_ome_tiff(ome_path, mmap_ro, np.float32)
             self.progress.emit(n_tiles, n_tiles, '✓ global mask OME-TIFF written')
             log.info(f"mask OME-TIFF → {ome_path}  {self._mem_snapshot()}")
             self._drop_caches()
@@ -4105,14 +4107,7 @@ class SegmentMergeWorker(QThread):
             global_dapi_path = os.path.join(self.output_dir, 'global_dapi.ome.tiff')
             self.progress.emit(n_tiles, n_tiles, 'Writing global DAPI OME-TIFF…')
             with self.step2_profiler.time_stage("export_ome_tiff", method=self.method, output_path=self._abs(global_dapi_path)):
-                with tifffile.TiffWriter(global_dapi_path, bigtiff=True) as tif:
-                    tif.write(
-                        np.array(dapi_mmap_ro),
-                        tile=(512, 512),
-                        compression='lzw',
-                        photometric='minisblack',
-                        metadata=None,
-                    )
+                write_tiled_ome_tiff(global_dapi_path, dapi_mmap_ro)
             self.progress.emit(n_tiles, n_tiles, '✓ global DAPI OME-TIFF written')
             log.info(f"DAPI OME-TIFF → {global_dapi_path}  {self._mem_snapshot()}")
 
@@ -4137,14 +4132,7 @@ class SegmentMergeWorker(QThread):
                         nz[y:y1, :] = nuclei_mmap_ro[y:y1, :]
                 nuclei_ome_path = os.path.join(self.output_dir, 'global_nuclei_mask.ome.tiff')
                 with self.step2_profiler.time_stage("export_mask_ome_tiff", method=self.method, output_path=self._abs(nuclei_ome_path)):
-                    with tifffile.TiffWriter(nuclei_ome_path, bigtiff=True) as tif:
-                        tif.write(
-                            nuclei_mmap_ro.astype(np.float32),
-                            tile=(512, 512),
-                            compression='lzw',
-                            photometric='minisblack',
-                            metadata=None,
-                        )
+                    write_tiled_ome_tiff(nuclei_ome_path, nuclei_mmap_ro, np.float32)
                 if is_mesmer_guided:
                     qc_table_path = ""
                 elif is_hq2:

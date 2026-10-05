@@ -58,15 +58,38 @@
 | `core/object_tables.py:199–252` `build_cells` | 整个 cells.parquet 在内存（含重复的 run_id / slide_id 字符串列表） | 不分块 | PROP（细胞数） |
 | `core/quant_engine.py:385–420` | 表达矩阵 zarr | 磁盘，按组写、按行块读 | BS（磁盘） |
 
-## 4. 资源记录（§7.1）
+## 4. 资源记录（§7.1）—— 2026-10-05 本机实测
 
-待测：视图浏览、Step2、Step4 各在代表性数据上跑一次，记录峰值 RSS、峰值显存、tile 大小、队列深度、缓存字节、耗时；Windows 侧 working set、commit、系统 commit、page file 增长由用户读取。数据：`~/fusionflux/synthetic/synthetic_2x2_mirror.ome.tif`（2026-10-05 重新生成，3.72 GB，生成峰值 RSS 2.73 GB）与原始 `cropped_region.ome.tif`。
+- **机器**：开发档（WSL2，约 10 GB 内存 + 24 GB 交换区；RTX 3060 Laptop 6 GB；Windows 提交上限 40.6 GB）。
+- **数据**：合成 2×2 拼接大图 `synthetic_2x2_mirror.ome.tif`（30,874 × 32,430 像素，29 通道 uint8，3.72 GB）。全片模式；Step0 对 CD4 做 cuCIM；Step1 预分割 + Use + Generate；Step2 Cellpose 全细胞融合；Step4 定量。分割得到 **202,051 个细胞**。
+- **记录方式**：`scripts/measure_a5.py` 每 0.5 s 采样程序进程（RSS、子进程 RSS、WSL 可用内存、交换区、显卡显存——WSL 下只能读整卡总量）；Step2 中途起，另由 WSL 调用 PowerShell 每 5 s 读取 Windows 侧计数（系统已提交 / 上限、`VmmemWSL` 工作集与提交大小、页面文件）。原始数据：`~/fusionflux/bench_rm/a5_record/`（第一段）、`a5_record2/`（第二段）。Step2 运行到约第 8 分钟时记录器因子进程结束误退出，约 20 s 无数据，随后续录。
+
+| 阶段 | 时长 | 主进程 RSS 峰值 | 子进程 RSS 峰值 | WSL 可用内存最低 | 交换区峰值 | 显存峰值（整卡） |
+|---|---|---|---|---|---|---|
+| Step0 载入 + 浏览 | 2.3 min | 3.8 GB | — | 6.4 GB | 0.1 GB | 0.6 GB |
+| Step0 Save（CD4 cuCIM，全片） | 1.4 min | 4.9 GB | — | 5.3 GB | 0.1 GB | 0.6 GB |
+| **Step1（预分割 + Use + Generate）** | 8.4 min | **9.9 GB** | 1.9 GB | **0.1 GB** | **4.0 GB** | 4.0 GB |
+| **Step2（Cellpose 全细胞融合，全片）** | 约 64 min | **9.4 GB** | **8.8 GB**（合计同时峰值 **14.0 GB**） | 0.9 GB | **8.7 GB** | **6.0 GB**（满） |
+| Step4 定量 | 2.1 min | 2.6 GB | — | 7.6 GB | 5.7 GB（Step2 遗留） | 0.5 GB |
+
+Windows 侧（Step2 中途起有数据）：
+
+| 阶段 | 系统已提交峰值 / 上限 | `VmmemWSL` 工作集峰值 | `VmmemWSL` 提交大小峰值 | 页面文件 |
+|---|---|---|---|---|
+| Step2 | **39.4 / 40.6 GB（97%）** | 4.6 GB | 20.8 GB | 已分配 25 GB，使用峰值 4.0 GB（本次开机峰值 7.5 GB） |
+| Step4 | 29.9 / 40.6 GB | 7.7 GB | 11.6 GB | 使用 2.9 GB |
+
+**判读**（按 §7.3 本机档「有界、不 OOM」）：
+- **通过，但余量极小**：全流程没有 OOM、没有崩溃；但 Step1 时 WSL 可用内存降到约 0.1 GB，Step2 时 Windows 系统提交达上限的 97%，靠交换区 / 页面文件支撑。
+- **瓶颈已能指名**：Step2 主进程 + 分割子进程同时约 14 GB、显存用满；Step1 的峰值发生在预分割 / Generate 阶段（主进程 9.9 GB）。与 §2 列出的「整块进内存」项吻合（导出 mask / DAPI、接缝候选整区读回），子进程的 8.8 GB 来自分割引擎本身。
+- **未来边缘档**（16 GB 内存，目标 ≤ 12 GB、硬限 < 14 GB）：本次 Step2 合计峰值约 14 GB，**触及硬限**。按 §7.3，这不阻挡 TMA，前提是架构有界、瓶颈已指名——两者本次都已满足。
 
 ## 5. 结论与待裁定事项
 
 - **新路径**（A6 以来新增的代码）没有发现无界或与像素数成正比的结构。
 - **已有路径中值得关注的**（只记录，不在本块修改；修改需另行申请）：
-  1. Step2 导出 OME-TIFF：mask（float32）与 DAPI 整块进内存——在大切片上最可能导致本机内存不足；§4 的测量会验证。
+  1. Step2：实测主进程 + 子进程同时约 14 GB、显存用满；导出 OME-TIFF 时 mask（float32）与 DAPI 整块进内存、接缝候选整区读回，是可以指名的主进程瓶颈。
+  1b. Step1 预分割 / Generate：主进程 9.9 GB、WSL 可用内存降到约 0.1 GB——清单之外、实测发现的第二个峰值，需单独定位。
   2. Step4：`Geometry` 不在累加器预算内；写 h5ad 时整个 X 矩阵进内存；`build_cells` 整表进内存——随细胞数增长，TMA 规模下需要关注。
   3. 视图调度器的 `_stale_gens` 随会话增长（很小）。
   4. 主机缓存上限之和约 7.4 GB，接近本机内存。

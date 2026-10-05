@@ -44,7 +44,7 @@ def _gpu_mb(pids):
     total, seen = 0, False
     for line in out.strip().splitlines():
         parts = [p.strip() for p in line.split(",")]
-        if len(parts) == 2 and parts[0].isdigit():
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
             seen = True
             if int(parts[0]) in pids:
                 total += int(parts[1])
@@ -83,9 +83,14 @@ def _record(pid, out_dir, interval):
                 try:
                     kids = proc.children(recursive=True)
                     mem = proc.memory_info()
-                    kid_rss = sum(k.memory_info().rss for k in kids if k.is_running())
                 except psutil.Error:
-                    break
+                    break                       # the process itself is gone
+                kid_rss = 0
+                for k in kids:                  # a child may end between the two calls
+                    try:
+                        kid_rss += k.memory_info().rss
+                    except psutil.Error:
+                        pass
                 vm, sw = psutil.virtual_memory(), psutil.swap_memory()
                 gpu = _gpu_mb({pid} | {k.pid for k in kids})
                 row = [round(time.time(), 3), mem.rss / 2**20, mem.vms / 2**20,

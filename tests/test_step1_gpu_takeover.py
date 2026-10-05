@@ -239,6 +239,9 @@ def _state(visible=("CD3",), windows=CHANNELS):
             if channel in windows:
                 state.set_mapping(channel, *WINDOW)
         state.set_selected_channel("CD3")
+    # Step1 is on screen, as when these consumers run (block PA-1: a
+    # write into a step NOT on screen announces nothing)
+    state.set_scope(STEP1_SCOPE)
     return state
 
 

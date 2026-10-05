@@ -462,6 +462,75 @@ def test_a_step1_handoff_does_not_untick_step0(app):
         _close(w)
 
 
+def test_a_step0_save_handoff_leaves_step0_s_rows_ticked(app):
+    """Block PA-1 (acceptance 2026-10-05): tick CD45RA, Save -- no row ticked.
+
+    The STATE was right; the ROWS were not. Step1's handoff panel writes its
+    own "nucleus only" through `using_scope("step1")` while Step0 is on
+    screen, and the notice of that background write redrew Step0's rows.
+    Unlike `_window`, nothing has filled Step1's answers before the Save, so
+    the write is a real change and does announce something."""
+    from block01.ui.main_window import MainWindow
+    w = MainWindow()
+    w._schedule_step1_session_save = lambda: None
+    w._save_step1_session = lambda *a, **k: None
+    try:
+        loader = _Loader()
+        w.loader = loader
+        w._step0.loader = loader
+        w._step0.nucleus_channel = "DAPI"
+        w._step0._rebuild_channel_list()
+        _in(w, 0)
+        w._channel_dock.row("CD3").checkbox.setChecked(True)
+        QtWidgets.QApplication.processEvents()
+        assert w._display.state.display_visible("CD3") is True
+
+        # what the Save hands to Step1 (`_load_step0_roi_result`)
+        w.config.set_channels(loader.channel_names())
+        w.config.load_panel({"markers": {"CD3": 0.0, "CD8": 0.0, "CD20": 0.0}},
+                            "DAPI")
+        w.config.set_nucleus("DAPI", 1.0)
+        QtWidgets.QApplication.processEvents()
+
+        assert w._channel_dock.row("CD3").checkbox.isChecked() is True, \
+            "Step1's handoff unticked Step0's row"
+        assert w._channel_dock.row("DAPI").checkbox.isChecked() is True
+        assert w._display.state.display_visible("CD3") is True
+        _in(w, 1)                       # Step1 has its own "nucleus only"
+        assert w._channel_dock.row("CD3").checkbox.isChecked() is False
+        assert w._channel_dock.row("DAPI").checkbox.isChecked() is True
+        _in(w, 0)
+        assert w._channel_dock.row("CD3").checkbox.isChecked() is True
+    finally:
+        _close(w)
+
+
+def test_a_background_write_is_stored_but_announces_nothing(app):
+    """`using_scope` into another step: written and counted, no notice; into
+    the step on screen: an ordinary write, announced."""
+    w = _window(app)
+    try:
+        state = w._display.state
+        _in(w, 0)
+        heard = []
+        state.visibility_changed.connect(lambda c, v: heard.append(("vis", c, v)))
+        state.selection_changed.connect(lambda c: heard.append(("sel", c)))
+        with state.using_scope("step1"):
+            assert state.set_display_visible("CD8", True, origin="bg")
+            assert state.set_selected_channel("CD8", origin="bg")
+            with state.using_scope("step0"):         # back to the shown step
+                assert state.set_display_visible("CD20", True, origin="fg")
+        assert heard == [("vis", "CD20", True)], heard
+        with state.using_scope("step1"):
+            assert state.display_visible("CD8") is True
+            assert state.selected_channel() == "CD8"
+        with state.using_scope("step0"):             # the shown step itself
+            assert state.set_display_visible("CD8", True, origin="fg")
+        assert heard[-1] == ("vis", "CD8", True)
+    finally:
+        _close(w)
+
+
 def test_step1_still_shows_as_many_channels_as_the_user_ticks(app):
     """Step0's one-marker-at-a-time rule is Step0's alone."""
     w = _window(app)

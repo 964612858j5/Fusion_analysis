@@ -179,6 +179,9 @@ def _state(app, windows=CHANNELS):
                             else "#ff0000")
             if channel in windows:
                 state.set_mapping(channel, *WINDOW)
+    # Step1 is on screen, as when these consumers run (block PA-1: a
+    # write into a step NOT on screen announces nothing)
+    state.set_scope(draft_spec.STEP1_SCOPE)
     return state
 
 

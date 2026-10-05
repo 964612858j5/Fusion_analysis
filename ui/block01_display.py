@@ -147,6 +147,10 @@ class ChannelDisplayState(QObject):
         # step used to write; Step0 and Step1 have their own (user ruling,
         # 2026-09-16). See `set_scope`.
         self._scope = ""
+        # The scopes `using_scope` stepped away from, outermost first: its
+        # own `previous` values, kept so a setter can tell a background
+        # write from one to the step on screen (block PA-1).
+        self._scope_restore = []
         self._default_source = None
         # Two PORTS, and the difference between them is the whole point.
         # `_seed_port` computes a FIRST window for a channel nobody has set
@@ -961,10 +965,20 @@ class ChannelDisplayState(QObject):
             return
         self._scope = scope
         self._scope_store()
+        self._scope_restore.append(previous)
         try:
             yield
         finally:
+            self._scope_restore.pop()
             self._scope = previous
+
+    def _writing_shown_scope(self):
+        """False while `using_scope` has really stepped into ANOTHER step's
+        answers: such a write is stored and counted but announces nothing --
+        a row on screen is the shown step's, and the notice would redraw it
+        with the other step's answer (block PA-1: a Step0 Save unticked
+        Step0's rows through Step1's handoff panel)."""
+        return not self._scope_restore or self._scope == self._scope_restore[0]
 
     def set_scope(self, scope, origin=""):
         """Draw this step's display answers. Silent as a COMMAND.
@@ -1012,7 +1026,8 @@ class ChannelDisplayState(QObject):
             store["selection"] = channel
         self._ns.bump("selection")
         tissue_log.note("channel.selected", channel=channel, origin=origin)
-        self.selection_changed.emit(channel)
+        if self._writing_shown_scope():
+            self.selection_changed.emit(channel)
         return True
 
     # ── display visibility ────────────────────────────────────────────
@@ -1053,7 +1068,8 @@ class ChannelDisplayState(QObject):
         self._ns.bump("visibility")
         tissue_log.note("channel.visibility", channel=channel,
                         visible=bool(visible), origin=origin)
-        self.visibility_changed.emit(channel, visible)
+        if self._writing_shown_scope():
+            self.visibility_changed.emit(channel, visible)
         return True
 
     # ── channel identity, order and capabilities ──────────────────────

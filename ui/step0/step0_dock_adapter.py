@@ -235,10 +235,12 @@ class Step0ChannelDockAdapter(QObject):
                 "capabilities": caps,
                 "visibility": dict(visibility),
             }
+            # (block PA-1: the last branch named an undefined `visible_marker`)
+            shown = [ch for ch in order if visibility.get(ch)]
             selection = (current if current in set(order)
-                         else (page.nucleus_channel
-                               if page.nucleus_channel in set(order)
-                               else visible_marker))
+                         else page.nucleus_channel if page.nucleus_channel in set(order)
+                         else shown[0] if shown
+                         else order[0] if order else None)
             if selection:
                 payload["selection"] = selection
             display.state.install(payload)

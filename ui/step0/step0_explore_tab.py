@@ -49,8 +49,9 @@ import traceback
 
 from PyQt5 import QtCore, QtWidgets
 
-RAW_CACHE_BYTES = 512 * 1024 * 1024
-CORRECTED_CACHE_BYTES = 2 * 1024 * 1024 * 1024
+from ...core import resource_tiers as _tiers
+RAW_CACHE_BYTES = _tiers.STEP0_VIEWER_RAW_CACHE_BYTES  # (block A8 / A5: one place)
+CORRECTED_CACHE_BYTES = _tiers.STEP0_VIEWER_CORRECTED_CACHE_BYTES  # (block A8 / A5: one place)
 TILE_SIZE = 512
 
 # NOTE: there is no "released" placeholder. A production run SUSPENDS the

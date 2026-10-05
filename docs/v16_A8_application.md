@@ -143,3 +143,42 @@ run 迁移一组提交、A5 常量一组、A5 清单 / 记录一组，可分别 
 **两条实施约束**：
 - **C-a**：`_step3_mask_key` 降级为**纯显示缓存**。数据流只能是「用户选择 / Step2 完成 → `ProjectState.choose_segmentation_run()` → Step3 据此更新 `_step3_mask_key`」，不得反向由它推断当前 run；`_step4_choice()` 的旧回退链彻底删除。审计测试断言：`_step3_mask_key` 只服务 Step3 的 mask / 视图渲染，不被 Step4、RM 或「当前分割 run」判定读取。
 - **C-b**：Generate 对当前分割 run 的影响，**先**由特征测试在旧代码上测出（保留还是清空）并写入执行记录，**再**改生产代码，迁移必须复现这个明确答案。
+
+## 12. 执行记录
+
+### 12.1 迁移前测出的规则（C-b，特征测试 `tests/test_v16_a8_characterization.py`，在 A8 之前的代码 `ada3cc3` 上 10 项全过）
+
+| # | 情形 | 今天的答案 |
+|---|---|---|
+| C1 | Step2 跑完，未进 Step3 | Step4 用这次结果；Step2 完成**不写** `viewing` |
+| C2 | Step2 的「Open QC」指名某次结果进 Step3 | Step3 显示它并写入 `viewing`；Step4 用它 |
+| C3 | 在 Step3 选另一次 | Step4 跟随；`viewing` 跟随 |
+| C4 | Step3 `Load…` 外部结果 | 成为当前（Step4 用它）；`viewing` **不变** |
+| **C5** | **Generate（新的 fuse run 写入 `viewing`）** | **当前分割 run 保持不变**——进入 Step3 之前、之后都保持 |
+| C6 | 当前 run 被移走 | 落到本工作区的下一项 |
+| C7 | 重开工作区，`viewing` 是分割 run | Step3 恢复它；但**进 Step3 之前 Step4 拿不到**（§3.2 有意改为：重开即成为当前） |
+| C8 | 换到另一工作区 | 原选择作废，按列表规则选默认项 |
+| C9 | Step3 已有选择后，Step2 又跑完一次 | Step4 **仍用 Step3 的选择**；新结果要经「Open QC」指名才成为当前 |
+| C10 | 未进 Step3，Step2 连跑两次 | Step4 用最新的一次 |
+
+迁移必须复现 C1–C6、C8–C10；C7 按 §3.2 有意改变。另：A6 的工作区校验——Step2 的结果属于另一工作区时（运行期间用户换了工作区），不得成为当前（今天 `step2_output` 照样被覆盖，Step4 的回退链可能拿到旧工作区的结果；这是 codex 指出要守住的边界）。
+
+### 12.2 改动（最低档）
+
+- 新增 `core/project_state.py`：`ProjectState.active_segmentation_run`（不可变 `SegmentationRun(run_dir, region, origin)`），写入口 `choose_segmentation_run` / `clear_segmentation_run`；`origin`（step2 / step3 / restore）只用于一条规则：Step2 的结果不覆盖 Step3 的选择或恢复的 run（C9 / C10）。
+- `ui/main_window.py`（+79 / −22 行）：Step2 完成（只在属于当前工作区时，A6）、「Open QC」指名、Step3 显示 / 选择 / `Load…`、删除、数据集切换、工作区切换（只在真正切换时，codex）、打开工作区时由 `viewing` 恢复——全部经由写入口；`_step4_choice` 只读当前字段（回退链删除）；`_step3_requested_run` 删除；`_step3_mask_key` 只被赋值（C-a，静态检查：A8 之前 3 处读取 → 0）。
+- **偏离 §3.4 字面（需知悉）**：`_rm_step2_from_viewed`（RM 第 15 题）仍读 `viewing`。本工作区的 run 被选为当前时会同时写 `viewing`，二者相同；外部结果照旧不进入 Step2 的参数——即保持今天的行为。
+- A5 常量：新增 `core/resource_tiers.py`；11 个模块的上限常量改为从这里读，模块内名字与数值不变（测试逐个核对）。
+- A5 清单：`docs/v16_a5_boundedness_inventory.md`；采样脚本 `scripts/measure_a5.py`（不进产品）。
+- 测试：特征测试 10 项（`tests/test_v16_a8_characterization.py`）；`tests/test_v16_a8_project_state.py` 12 项；`tests/project_state_audit.py`；`tests/test_v16_a5_resource_tiers.py` 19 项；`test_step4_page::test_mainwindow_hands_step3s_choice_to_step4` 改为经由 ProjectState（回退链按 C-a 删除）。
+
+### 12.3 审核与回归
+
+- codex 代码审核：1 条（同一工作区的 Save 不应清掉来自别处的选择）——已修，补测试。
+- 聚焦回归 189 模块：失败均在以往基准中出现（`test_global_channel_dock`、`test_hq_marker_segmentation`、`test_preview_source_provider`、`test_seg_runner_engines`、`test_step0_channel_conditioning` 超时、`test_step0_floor_prefetch`、`test_step1_channel_panel`、`test_step1_montage_view` 崩溃、`test_step3_patch_strip`、`test_tissue_navigator_viewport_sync`），无新增失败。
+- 增长报告：`main_window.py` +79 / −22；`step0_page.py` 0。
+
+### 12.4 待办
+
+- A5 实测（§3.5，用户在 Windows 侧读数）。
+- 用户真机验收（§6）。

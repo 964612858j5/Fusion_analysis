@@ -28,7 +28,8 @@ from .fusion_engine import fuse_channels
 # 30-channel panel's working set is ~120 MiB and that is the most this may
 # hold. See `PreviewCache`.
 DEFAULT_MAX_ENTRIES = 64
-DEFAULT_MAX_BYTES = 160 * 1024 * 1024
+from . import resource_tiers as _tiers
+DEFAULT_MAX_BYTES = _tiers.PREVIEW_COMPOSE_MAX_BYTES  # (block A8 / A5: one place)
 
 
 class PreviewCache:

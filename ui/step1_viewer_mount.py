@@ -76,7 +76,8 @@ BACKEND_LEGACY = "legacy"
 #: budget, rather than dropping a channel, lowering precision, falling back
 #: to raw pixels or quietly asking for more VRAM. G4 is where a real-machine
 #: measurement may move it; nothing here raises it on its own.
-DEMO_GPU_RAW_TEXTURE_BYTES = 512 * 1024 * 1024
+from ..core import resource_tiers as _tiers
+DEMO_GPU_RAW_TEXTURE_BYTES = _tiers.GPU_RAW_TEXTURE_BYTES  # (block A8 / A5: one place)
 
 #: The per-channel supply limits handed to the G2 binding. A channel whose
 #: complete coarse or current fine does not fit is REFUSED and named in the
@@ -99,9 +100,9 @@ DEMO_GPU_RAW_TEXTURE_BYTES = 512 * 1024 * 1024
 #: of complete coarse each = 392 MiB, inside the fixed 512 MiB above. The
 #: total is still the hard one: it fails closed, it is not raised here.
 DEMO_GPU_COARSE_TILES_PER_CHANNEL = 1024
-DEMO_GPU_COARSE_BYTES_PER_CHANNEL = 32 * 1024 * 1024
+DEMO_GPU_COARSE_BYTES_PER_CHANNEL = _tiers.GPU_COARSE_BYTES_PER_CHANNEL  # (block A8 / A5: one place)
 DEMO_GPU_FINE_TILES_PER_VIEWPORT = 256
-DEMO_GPU_FINE_BYTES_PER_CHANNEL = 48 * 1024 * 1024
+DEMO_GPU_FINE_BYTES_PER_CHANNEL = _tiers.GPU_FINE_BYTES_PER_CHANNEL  # (block A8 / A5: one place)
 
 
 def demo_budgets():

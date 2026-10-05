@@ -122,14 +122,21 @@ def test_the_job_runs_from_the_page_into_a_new_quant_run(tmp_path):
 
 
 def test_mainwindow_hands_step3s_choice_to_step4():
+    """Block A8 (C-a): Step4 reads the ONE current segmentation run of the
+    project state -- the latest Step2 result until Step3 chooses one -- and
+    no longer guesses through the mask key / step3_output / step2_output."""
+    from block01.core.project_state import ProjectState
     from block01.ui.main_window import MainWindow
     choice = MainWindow._step4_choice
-    mw = types.SimpleNamespace(step2_output={"output_dir": "/runs/latest"}, step3_output=None)
+    mw = types.SimpleNamespace(_project_state=ProjectState())
+    mw._project_state.choose_segmentation_run("/runs/latest", origin="step2")
     assert choice(mw) == ("/runs/latest", None)
-    mw._step3_mask_key = "/runs/chosen\x1fROI 2"
+    mw._project_state.choose_segmentation_run("/runs/chosen", "ROI 2", origin="step3")
     assert choice(mw) == ("/runs/chosen", "ROI 2")
     assert choice(mw, "/runs/named") == ("/runs/named", None)
-    empty = types.SimpleNamespace(step2_output=None, step3_output=None)
+    mw._step3_mask_key = "/runs/elsewhere\x1fROI 9"       # display cache: not read
+    assert choice(mw) == ("/runs/chosen", "ROI 2")
+    empty = types.SimpleNamespace(_project_state=ProjectState())
     assert choice(empty) == ("", None)
 
 

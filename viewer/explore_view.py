@@ -984,7 +984,8 @@ def _box_downsample(arr: np.ndarray, k: int) -> np.ndarray:
 # very large WSI with few pyramid levels can have an overview level far
 # bigger than 13.3 MB, and a fixed count would silently blow the memory
 # budget there. At least one record is always kept, whatever its size.
-OVERVIEW_CACHE_BYTES = 256 * 1024 * 1024
+from ..core import resource_tiers as _tiers
+OVERVIEW_CACHE_BYTES = _tiers.VIEWER_OVERVIEW_CACHE_BYTES  # (block A8 / A5: one place)
 
 
 def _luts_equal(a, b) -> bool:

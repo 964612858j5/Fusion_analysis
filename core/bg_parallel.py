@@ -38,9 +38,10 @@ from typing import Callable, Iterable, Iterator, Optional
 #: free memory cannot be read.
 MAX_WORKERS = 16                   # a ceiling, not the usual answer
 MAX_WORKERS_MEMORY_UNKNOWN = 4
-MEM_RESERVE_BYTES = 1.0e9          # left free beside the in-flight tiles
-MEM_PER_TILE_BYTES = 0.75e9        # skimage TopHat fallback (measured 2.34 GB / 4 at n=4)
-MEM_PER_TILE_FAST_BYTES = 0.3e9    # OpenCV TopHat / scipy Gaussian (measured <= 0.2 GB)
+from . import resource_tiers as _tiers
+MEM_RESERVE_BYTES = _tiers.BG_MEM_RESERVE_BYTES  # left free beside the in-flight tiles  # (block A8 / A5: one place)
+MEM_PER_TILE_BYTES = _tiers.BG_MEM_PER_TILE_BYTES  # skimage TopHat fallback (measured 2.34 GB / 4 at n=4)  # (block A8 / A5: one place)
+MEM_PER_TILE_FAST_BYTES = _tiers.BG_MEM_PER_TILE_FAST_BYTES  # OpenCV TopHat / scipy Gaussian (measured <= 0.2 GB)  # (block A8 / A5: one place)
 
 
 def mem_available_bytes() -> Optional[int]:

@@ -89,7 +89,8 @@ from ..viewer.tile_types import RawKey, TileAddress, TileRequest
 #: What the composition cache may hold. One 512 tile is 1 MiB of RGBA plus
 #: 256 KiB of validity, so this is a few hundred composed tiles -- a screen
 #: and its neighbours, bounded for a whole-slide pan.
-DEFAULT_COMPOSE_CACHE_BYTES = 256 * 1024 * 1024
+from ..core import resource_tiers as _tiers
+DEFAULT_COMPOSE_CACHE_BYTES = _tiers.STEP1_COMPOSE_CACHE_BYTES  # (block A8 / A5: one place)
 
 
 class ComposedTile:

@@ -105,6 +105,7 @@ from .step0 import overview_panel
 from .step0.overview_panel import TileSelectDialog, FullFusionWorker
 from .step1_5_bg_page import Step15BackgroundCorrectionPage
 from .camera_owner import CameraOwner
+from ..core.project_state import ProjectState
 from .shared_camera import snapshot_from
 from .step1_viewer_mount import Step1WholeSlideMount
 from .step2_page import Step2Page
@@ -521,6 +522,9 @@ class MainWindow(QMainWindow):
         # user navigation or an explicit jump; applied to the step being
         # entered and never read back from a viewer.
         self._camera_owner = CameraOwner()
+        # THE CURRENT SEGMENTATION RUN (block A8): the one Step3 shows and
+        # Step4 quantifies, written only through its named writers.
+        self._project_state = ProjectState()
         # Remapped [0,1] channel images for the overlay, keyed by
         # (patch index, channel, display window).  This is what stops a tick
         # from re-running a percentile over every channel: the blend itself is
@@ -1921,7 +1925,7 @@ class MainWindow(QMainWindow):
         mount.restore_legacy()
         self._step3.set_viewer_notice(
             f"The whole-slide view could not open: {reason}")
-        self._step3_refresh_masks(self._step3_take_requested_run())
+        self._step3_refresh_masks()
         return False
 
     def _step3_follow_step(self, active):
@@ -1949,7 +1953,7 @@ class MainWindow(QMainWindow):
             if mount.host.stack is None:
                 return self._step3_viewer_failed(mount, path, "the source could not be reopened")
             self._step3_viewer_shown(mount)
-            self._step3_refresh_masks(self._step3_take_requested_run())
+            self._step3_refresh_masks()
             return True
         reason = "the slide could not be opened"
         try:
@@ -1962,16 +1966,10 @@ class MainWindow(QMainWindow):
         mount.set_mode(self._step1_preview_mode)
         self._step3_viewer_shown(mount)
         self._wire_step1_tissue_navigation()
-        self._step3_refresh_masks(self._step3_take_requested_run())
+        self._step3_refresh_masks()
         return True
 
     # ── Step3's masks (block 4c) ──────────────────────────────────────
-    def _step3_take_requested_run(self):
-        """The run named on the way in, once."""
-        requested = self.__dict__.get("_step3_requested_run")
-        self._step3_requested_run = None
-        return requested
-
     def _step3_mask_context(self):
         """(roi_dir, roi_name, roi_bbox) of the current ROI workspace."""
         roi_dir = str((self.step0_output or {}).get("roi_dir") or "")
@@ -2048,6 +2046,9 @@ class MainWindow(QMainWindow):
         current_ws = os.path.realpath(roi_dir) if roi_dir else ""
         if self.__dict__.get("_step3_mask_roi_dir") != roi_dir:
             self._step3_mask_key = None             # another workspace: no current choice
+            current = self._project_state.active_segmentation_run
+            if current is not None and not self._run_in_current_workspace(current.run_dir):
+                self._project_state.clear_segmentation_run()
         self._step3_mask_roi_dir = roi_dir
         self._step3_mask_refusal = None             # a new look at the list
         slide = self._step3_slide_path()
@@ -2061,10 +2062,27 @@ class MainWindow(QMainWindow):
         runs += [r for r in self.__dict__.get("_step3_loaded_runs") or []
                  if r.run_dir not in listed]
         items = step3_masks.entries(runs)
+        # Block A8 (C-a): what is current comes from the project state; the
+        # mask key below is only Step3's display cache of it.
+        current_key = None
+        current = self._project_state.active_segmentation_run
+        if requested_dir is None and current is not None:
+            if current.region:
+                current_key = f"{current.run_dir}\x1f{current.region}"
+            else:
+                requested_dir = current.run_dir
         entry = step3_masks.choose_entry(items, requested_dir=requested_dir,
-                                         current_key=self.__dict__.get("_step3_mask_key"),
+                                         current_key=current_key,
                                          workspace=current_ws, roi_name=roi_name)
         self._step3_mask_runs = runs
+        if entry is not None:
+            now = self._project_state.active_segmentation_run
+            if now is None or now.origin != "step3" or (now.run_dir, now.region) != (
+                    os.path.realpath(entry.run.run_dir), entry.roi_name):
+                self._project_state.choose_segmentation_run(
+                    entry.run.run_dir, entry.roi_name, origin="step3")
+        elif current is not None:
+            self._project_state.clear_segmentation_run()     # nothing of it is listed
         self._step3_mask_key = entry.key if entry is not None else None
         several = {r.run_dir: len(step3_masks.run_regions(r)) > 1 for r in runs}
         project = run_store.project_dir_of(roi_dir) if roi_dir else None
@@ -2115,7 +2133,7 @@ class MainWindow(QMainWindow):
         """A list choice: the entry's key (a plain run folder is taken too)."""
         run_dir, _sep, roi = str(key).partition("\x1f")
         if roi:
-            self._step3_mask_key = key
+            self._project_state.choose_segmentation_run(run_dir, roi, origin="step3")
             self._step3_refresh_masks()
         else:
             self._step3_refresh_masks(requested_dir=run_dir)
@@ -2167,6 +2185,7 @@ class MainWindow(QMainWindow):
         """The dataset moved: no list, no choice, no hint."""
         self._step3_mask_runs = []
         self._step3_mask_key = None
+        self._project_state.clear_segmentation_run()      # block A8
         self._step3_loaded_runs = []            # loaded for the old dataset's slide
         self._step3_mask_roi_dir = None
         self._step3_mask_problem = None
@@ -3031,6 +3050,8 @@ class MainWindow(QMainWindow):
         if accepted is True and self.step0_output.get("opened_workspace"):
             self._rm_step2_draft_pending = True        # §6: restored on first entry
             self._rm_step4_draft_pending = True
+        if accepted is True:
+            self._a8_follow_workspace(bool(self.step0_output.get("opened_workspace")))
         # SAVE-ONLY: stay in Step0; the user enters Step1 explicitly.
         self._update_next_button()
         self._log_step1_layout("Step0 complete (save-only, no auto-jump)")
@@ -4832,8 +4853,10 @@ class MainWindow(QMainWindow):
         if not self._step3_entry_ready(output_dir):
             return
         # Block 4c: a run named by the caller (Step2's finished dialog) is
-        # the one Step3 shows; the breadcrumb names none.
-        self._step3_requested_run = output_dir or None
+        # the one Step3 shows; the breadcrumb names none. Block A8: naming it
+        # makes it the current segmentation run.
+        if output_dir:
+            self._project_state.choose_segmentation_run(output_dir, origin="step3")
         if self._current_step == 1:
             self._stop_all_loaders()
         # Breadcrumb navigation passes no output_dir; fall back to the completed
@@ -4909,6 +4932,11 @@ class MainWindow(QMainWindow):
         self.step2_output = {
             "output_dir": output_dir,
         }
+        # Block A8: a finished run becomes current unless Step3 already holds a
+        # choice (C9 / C10) -- and only if it belongs to the workspace on
+        # screen: a run that finished after the user moved on is not (A6).
+        if self._run_in_current_workspace(output_dir):
+            self._project_state.choose_segmentation_run(output_dir, origin="step2")
         self._update_next_button()
         print(f"[MainWindow] Step2 complete output_dir={output_dir}")
         print(f"[MainWindow] step2_done={self.step2_done}")
@@ -4932,13 +4960,11 @@ class MainWindow(QMainWindow):
         result; ("", None) keeps the page's own choice."""
         if output_dir:
             return output_dir, None
-        key = self.__dict__.get("_step3_mask_key")
-        if key:
-            run_dir, _sep, roi_name = str(key).partition("\x1f")
-            return run_dir, (roi_name or None)
-        latest = ((self.step3_output or {}).get("output_dir")
-                  or (self.step2_output or {}).get("output_dir"))
-        return (latest or ""), None
+        # Block A8: the ONE current segmentation run -- no fallback chain.
+        current = self._project_state.active_segmentation_run
+        if current is None:
+            return "", None
+        return current.run_dir, (current.region or None)
 
     # (#11) _go_next_step removed — the "Next" button it served is gone; step
     # navigation is via the top-nav step names (_go_to_stepN).
@@ -10041,6 +10067,37 @@ class MainWindow(QMainWindow):
         run_store.discard(pending["run"])
         print(f"[Step1] no fuse run: {reason}; {os.path.basename(pending['run'])} removed")
 
+    def _a8_follow_workspace(self, opened):
+        """Block A8: the handoff names the workspace on screen. A current run
+        of another workspace is dropped; an OPENED workspace brings back the
+        segmentation run it was last looking at (`viewing`) as current at
+        once (§3.2 -- before A8 Step4 learnt it only once Step3 was shown)."""
+        state = self._project_state
+        roi = self._rm_roi_dir()
+        here = os.path.realpath(roi) if roi else ""
+        previous = self.__dict__.get("_a8_workspace")
+        self._a8_workspace = here
+        current = state.active_segmentation_run
+        # Only a REAL change of workspace drops it (codex A8): a Save in the
+        # same workspace keeps a run chosen from another one, or loaded.
+        moved = previous is not None and previous != here
+        if moved and current is not None and not self._run_in_current_workspace(current.run_dir):
+            state.clear_segmentation_run()
+        if not opened or state.active_segmentation_run is not None:
+            return
+        viewing = run_store.session_pointers(roi).get("viewing") if roi else ""
+        if viewing and run_store.kind_of(viewing) == "segment" and run_store.is_done(viewing):
+            state.choose_segmentation_run(viewing, origin="restore")
+
+    def _run_in_current_workspace(self, run_dir):
+        """Is `run_dir` a run of the workspace on screen? True outside any
+        workspace (nothing to compare)."""
+        roi = self._rm_roi_dir()
+        if not roi or not run_dir:
+            return bool(run_dir)
+        owner = run_store.roi_dir_of(run_dir)
+        return bool(owner) and os.path.realpath(owner) == os.path.realpath(roi)
+
     def _rm_note_viewing(self, run_dir):
         """session.json `viewing` (§6): the most downstream run being viewed."""
         roi = self._rm_roi_dir()
@@ -10066,8 +10123,8 @@ class MainWindow(QMainWindow):
             real = os.path.realpath(path)
             return any(real == r or real.startswith(r + os.sep) for r in roots)
         runs = {r.run_dir for r in self.__dict__.get("_step3_mask_runs") or []}
-        key = str(self.__dict__.get("_step3_mask_key") or "").partition("\x1f")[0]
-        if _inside(key) or any(_inside(r) for r in runs):
+        current = self._project_state.active_segmentation_run      # block A8 (C-a)
+        if (current is not None and _inside(current.run_dir)) or any(_inside(r) for r in runs):
             self._step3_clear_masks()
         step4 = self.__dict__.get("_step4")
         if step4 is not None and _inside(getattr(getattr(step4, "_job", None), "run_dir", "")):

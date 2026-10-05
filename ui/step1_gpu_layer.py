@@ -127,7 +127,8 @@ class ViewportSnapshot:
 
 #: Block 4b: the label textures' own GPU budget (user ruling 2026-09-26),
 #: beside -- never inside -- the raw textures' 512 MB.
-LABEL_TEXTURE_BYTES = 256 * 1024 * 1024
+from ..core import resource_tiers as _tiers
+LABEL_TEXTURE_BYTES = _tiers.GPU_LABEL_TEXTURE_BYTES  # (block A8 / A5: one place)
 #: The largest outline radius the draw pass loops over, in screen pixels.
 MAX_LABEL_RADIUS = 8
 LABEL_OUTLINE = "outline"

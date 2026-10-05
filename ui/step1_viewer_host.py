@@ -34,8 +34,9 @@ from ..viewer.tile_types import SourceIdentity
 TILE_SIZE = 512
 
 #: What the caches may hold before the least-recently-used goes.
-RAW_CACHE_BYTES = 512 * 1024 * 1024
-CORRECTED_CACHE_BYTES = 2 * 1024 * 1024 * 1024
+from ..core import resource_tiers as _tiers
+RAW_CACHE_BYTES = _tiers.STEP1_VIEWER_RAW_CACHE_BYTES  # (block A8 / A5: one place)
+CORRECTED_CACHE_BYTES = _tiers.STEP1_VIEWER_CORRECTED_CACHE_BYTES  # (block A8 / A5: one place)
 
 #: What the viewer has to say about where the camera is standing. Block B
 #: keeps the TEXT; the information layer that shows it is C's (B.4/B.5), and

@@ -42,7 +42,8 @@ BACKGROUND = "background"
 
 DEFAULT_MAX_READERS = 2
 DEFAULT_MAX_PENDING = 256
-DEFAULT_MAX_BYTES = 512 * 1024 * 1024
+from ..core import resource_tiers as _tiers
+DEFAULT_MAX_BYTES = _tiers.STEP0_PRELOAD_MAX_BYTES  # (block A8 / A5: one place)
 
 
 class PreloadScheduler(QObject):

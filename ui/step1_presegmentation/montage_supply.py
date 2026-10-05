@@ -43,8 +43,9 @@ from PyQt5 import QtCore
 from ...viewer import step1_compose as compose_core
 from ...core import config_hash
 
-CHANNEL_CACHE_BYTES = 1 << 30
-COMPOSED_CACHE_BYTES = 256 << 20
+from ...core import resource_tiers as _tiers
+CHANNEL_CACHE_BYTES = _tiers.MONTAGE_CHANNEL_CACHE_BYTES  # (block A8 / A5: one place)
+COMPOSED_CACHE_BYTES = _tiers.MONTAGE_COMPOSED_CACHE_BYTES  # (block A8 / A5: one place)
 WORKERS = 2          # authorised: two worker threads (user, 2026-09-25)
 
 

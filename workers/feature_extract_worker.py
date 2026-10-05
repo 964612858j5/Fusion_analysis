@@ -48,20 +48,23 @@ def output_base(file_prefix=None):
 
 
 #: the folder name that stands for "a new quant run" (block RM §5): Step4
-#: makes ``<workspace>/runs/quant_<stamp>/`` when it starts.
-NEW_QUANT_RUN = "quant_(new run)"
+#: makes ``<workspace>/runs/quant_<stamp>/`` when it starts -- the stamp is
+#: the moment Run is pressed, so it cannot be shown before (acceptance
+#: 2026-10-05: say so, and show the real folder once it exists).
+NEW_QUANT_RUN = "quant_<date_time of Run>"
 
 
 def default_output_dir(job_or_run_dir, roi_name=None, workspace=None, run_id=None):
-    """A segment run of a block-RM workspace: ``<workspace>/runs/quant_(new
-    run)/<region>/`` -- a new quant run, made when Step4 starts. Otherwise
+    """A published segment run of a block-RM workspace:
+    ``<workspace>/runs/quant_<date_time of Run>/<region>/`` -- a new quant
+    run, made when Step4 starts. Otherwise
     `<workspace>/step4/quantification_runs/<segmentation_run_id>/<region>/`."""
     run_dir = ""
     if isinstance(job_or_run_dir, qs.QuantJob):
         job = job_or_run_dir
         workspace, run_id, roi_name = job.workspace, job.run_id, job.roi_name
         run_dir = job.run_dir
-    if run_dir and run_store.kind_of(run_dir) == "segment":
+    if run_dir and run_store.kind_of(run_dir) == "segment" and run_store.is_done(run_dir):
         return os.path.join(workspace, run_store.RUNS_DIR, NEW_QUANT_RUN,
                             qs.region_folder(roi_name))
     return os.path.join(workspace, "step4", "quantification_runs", str(run_id),

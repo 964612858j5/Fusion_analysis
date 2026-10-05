@@ -112,9 +112,14 @@ class Step4Page(QWidget):
         # Block RM (§5): a result of a project is quantified into a new quant
         # run of its chain; the folder is not the user's to choose then.
         from ..utils import run_store
-        in_chain = run_store.kind_of(job.run_dir) == "segment"
+        # the same test run_extraction uses (codex: an unpublished segment_*
+        # folder is not re-routed, so the placeholder must not be offered)
+        in_chain = (run_store.kind_of(job.run_dir) == "segment"
+                    and run_store.is_done(job.run_dir))
         self._out_edit.setReadOnly(in_chain)
-        self._out_edit.setToolTip("A new quant run of this result's chain"
+        self._out_edit.setToolTip("A new quant run of this result's chain, named by "
+                                  "the date and time Run is pressed; the real folder "
+                                  "is shown here once it has been written"
                                   if in_chain else "")
         if set_output or in_chain:
             self._out_edit.setText(default_output_dir(job))
@@ -690,6 +695,9 @@ class Step4Page(QWidget):
         self._update_run_button()
         outs = (self._worker.outputs or {}) if self._worker is not None else {}
         files = [outs.get('h5ad') or os.path.join(out_dir, f'{base_name}.h5ad')]
+        # (acceptance 2026-10-05) the folder that was really written, not the
+        # "new quant run" placeholder
+        self._out_edit.setText(os.path.dirname(files[0]))
         if outs.get('csv'):
             files.append(outs['csv'])
         files.append(outs.get('provenance') or os.path.join(out_dir,

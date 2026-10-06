@@ -387,7 +387,7 @@ def build_step1_stack(dataset_path, channel, table, parent_widget=None, *,
     from ..viewer.caches import LRUByteCache
     from ..viewer.correction_compute import CorrectionCompute
     from ..viewer.explore_view import ExploreController, ExploreView
-    from ..viewer.raw_tile_provider import RawTileProvider
+    from ..viewer.source_tile_provider import open_viewer_source
     from ..viewer.scheduler import TileScheduler
     from ..viewer.tile_types import TileGridSpec
     from ..ui.step0.step0_explore_tab import ExploreStack
@@ -397,7 +397,7 @@ def build_step1_stack(dataset_path, channel, table, parent_widget=None, *,
     raw = provider = scheduler = controller = view = None
     try:
         with perf_trace.span("step1.entry.raw_provider"):
-            raw = RawTileProvider(dataset_path)
+            raw = open_viewer_source(dataset_path)   # through PixelSource (A9-P)
         if not channel or channel not in raw.channel_names:
             channel = raw.channel_names[0]
         provider = Step1TileProvider(raw, table)

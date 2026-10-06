@@ -206,7 +206,7 @@ def build_compare_stacks(path, channel, parent_widget=None, *,
     from ...viewer.correction_compute import CorrectionCompute
     from ...viewer.explore_view import (ExploreController, ExploreView,
                                         RawOverlayLayer, SharedOverviewStore)
-    from ...viewer.raw_tile_provider import RawTileProvider
+    from ...viewer.source_tile_provider import open_viewer_source
     from ...viewer.scheduler import TileScheduler
     from ...viewer.tile_types import TileGridSpec
     from .step0_explore_tab import (CORRECTED_CACHE_BYTES, RAW_CACHE_BYTES,
@@ -220,7 +220,7 @@ def build_compare_stacks(path, channel, parent_widget=None, *,
     store = None
     controllers, views, overlays = [], [], []
     try:
-        provider = RawTileProvider(path)
+        provider = open_viewer_source(path)        # through PixelSource (A9-P)
         if not channel or channel not in provider.channel_names:
             channel = provider.channel_names[0]
         # ONE of each -- BORROWED from the full image when it has them, so a

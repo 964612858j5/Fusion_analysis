@@ -1,0 +1,46 @@
+"""Block A9-M: `analyze_perf_log.py --a9` turns a scripted run into the
+A9 numbers -- presented latency only from the intended viewer's complete
+frame, settled latency apart, timeouts and self-settling actions counted."""
+
+import importlib.util
+import os
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+spec = importlib.util.spec_from_file_location(
+    "apl", os.path.join(HERE, "..", "docs", "perf_timeline", "analyze_perf_log.py"))
+apl = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(apl)
+
+
+def _log(tmp_path, lines):
+    p = tmp_path / "a9.log"
+    p.write_text("".join(f"PERF t={t:.6f} ev={ev} {extra}\n" for t, ev, extra in lines))
+    return apl.read(str(p))
+
+
+def test_presented_and_settled_are_kept_apart(tmp_path, capsys):
+    recs = _log(tmp_path, [
+        (1.000, "a9.begin", "actions=6"),
+        (1.000, "a9.action", "n=1 do=drag expect=gpu"),
+        (1.050, "a9.handled", "n=1 qt=5"),
+        (1.100, "coverage", "where=cpu frame=1 gap_cells=0 target_fraction=1.0 sampled=256"),
+        (1.200, "coverage", "where=gpu frame=2 gap_cells=0 target_fraction=1.0 sampled=256"),
+        (1.200, "a9.action", "n=2 do=settle expect=gpu"),
+        (1.700, "a9.settled", "n=2 timed_out=False reads=4 camera_user=1 camera_jump=0"),
+        (1.800, "a9.action", "n=3 do=window expect=gpu"),
+        (1.810, "a9.delivered", "n=3 kind=programmatic"),
+        (1.830, "coverage", "where=gpu frame=3 gap_cells=0 target_fraction=1.0 sampled=256"),
+        (2.200, "a9.settled", "n=3 timed_out=False reads=0 camera_user=0 camera_jump=0"),
+        (2.300, "a9.action", "n=4 do=wheel expect=gpu"),
+        (2.310, "a9.handled", "n=4 qt=31"),
+        (2.300, "a9.action", "n=5 do=settle expect=gpu"),
+        (9.000, "a9.settled", "n=5 timed_out=True reads=2 camera_user=1 camera_jump=1"),
+    ])
+    apl.report_a9(recs)
+    out = capsys.readouterr().out
+    pres = out.split("SETTLED")[0]
+    assert "drag     n=  1  p50=   150.0" in pres          # the GPU frame, not the CPU one
+    assert "window   n=  1  p50=    20.0" in pres          # self-settling action included
+    assert "timeouts=1" in out and "wheel" in out           # timeout-only kind printed
+    assert "window=0/0" in out and "drag=4/4" in out
+    assert "program camera jumps during drag/wheel: 1" in out

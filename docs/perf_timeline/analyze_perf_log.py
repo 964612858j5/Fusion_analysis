@@ -300,6 +300,118 @@ def report_at(records, when):
                                                _extra(r)))
 
 
+def _pct(values, q):
+    values = sorted(values)
+    if not values:
+        return None
+    k = max(0, min(len(values) - 1, int(round(q / 100.0 * (len(values) - 1)))))
+    return values[k]
+
+
+def report_a9(records, gap_ms=32.0):
+    """Block A9-M: the A9 numbers of a scripted run (scripts/a9_drive.py).
+
+    Two latencies per action kind, kept apart (codex A9-M):
+      * PRESENTED -- from the last input Qt actually handled for the action
+        (`a9.handled`; the delivery mark for a programmatic action) to the
+        first presented frame after it whose coverage is complete at its
+        target level (`coverage`, gap_cells 0, target_fraction >= 0.999);
+      * SETTLED -- to the driver's settled mark, which also waits for reads
+        and schedulers to go quiet (>= 300 ms of quiet is part of it).
+    Then the GUI stalls over `gap_ms`, frames with a gap after coverage was
+    first complete, reads and camera writes per action."""
+    acts, order = {}, []
+    for rec in records:
+        ev, n = rec.get("ev"), rec.get("n")
+        if ev == "a9.action":
+            acts[n] = {"do": rec.get("do"), "start": num(rec, "t"),
+                       "expect": rec.get("expect")}
+            order.append(n)
+        elif ev in ("a9.delivered", "a9.handled") and n in acts:
+            acts[n]["input"] = num(rec, "t")          # the LAST one wins
+        elif ev == "a9.settled":
+            target = n if acts.get(n, {}).get("do") != "settle" else n
+            if target in acts:
+                acts[target].update(settled=num(rec, "t"),
+                                    timed_out=rec.get("timed_out") == "True",
+                                    reads=num(rec, "reads", 0),
+                                    cam_user=num(rec, "camera_user", 0),
+                                    cam_jump=num(rec, "camera_jump", 0))
+    covers = [(num(r, "t"), r) for r in records if r.get("ev") == "coverage"]
+    presented = collections.defaultdict(list)
+    settled = collections.defaultdict(list)
+    timeouts = collections.Counter()
+    reads = collections.defaultdict(list)
+    jumps_in_gestures = 0
+    for i, n in enumerate(order):
+        a = acts[n]
+        if a.get("do") == "settle" and i > 0:
+            prev = acts[order[i - 1]]
+        elif a.get("do") not in ("settle", "mark", "pause") and a.get("settled") is not None:
+            prev = a                              # settles itself (an Intensity window)
+        else:
+            continue
+        if True:
+            kind, t_in = prev.get("do"), prev.get("input")
+            expect = prev.get("expect")
+            if kind in ("mark", "pause", "settle") or t_in is None:
+                continue
+            if a.get("timed_out"):
+                timeouts[kind] += 1
+            elif a.get("settled") is not None:
+                settled[kind].append((a["settled"] - t_in) * 1000.0)
+            first = next((t for t, r in covers if t >= t_in
+                          and (expect in (None, "None") or r.get("where") == expect)
+                          and (num(r, "gap_cells", 1) or 0) == 0
+                          and (num(r, "target_fraction", 0) or 0) >= 0.999), None)
+            if first is not None and (a.get("settled") is None or first <= a["settled"]):
+                presented[kind].append((first - t_in) * 1000.0)
+            reads[kind].append(a.get("reads", 0) or 0)
+            if kind in ("drag", "wheel"):
+                jumps_in_gestures += int(a.get("cam_jump", 0) or 0)
+
+    def line(name, vals):
+        if not vals:
+            return f"  {name:8s} n=  0"
+        return (f"  {name:8s} n={len(vals):3d}  p50={_pct(vals, 50):8.1f}  "
+                f"p95={_pct(vals, 95):8.1f}  max={max(vals):8.1f}")
+    kinds = sorted(set(presented) | set(settled) | set(timeouts))
+    print("A9 PRESENTED latency (handled input -> first complete frame), ms")
+    for k in kinds:
+        print(line(k, presented.get(k, [])))
+    print("A9 SETTLED latency (incl. >= 300 ms quiet), ms")
+    for k in kinds:
+        print(line(k, settled.get(k, [])) + f"  timeouts={timeouts.get(k, 0)}")
+    print("reads per action (sum / max):  " + "  ".join(
+        f"{k}={int(sum(v))}/{int(max(v))}" for k, v in sorted(reads.items()) if v))
+    print(f"program camera jumps during drag/wheel: {jumps_in_gestures}")
+    begin = [num(r, "t") for r in records if r.get("ev") == "a9.begin"]
+    t0 = begin[0] if begin else None
+    gaps = [num(r, "gap_ms") for r in records if r.get("ev") == "gui.gap"
+            and (t0 is None or (num(r, "t") or 0) >= t0)]
+    gaps = [g for g in gaps if g is not None]
+    over = [g for g in gaps if g > gap_ms]
+    print(f"GUI stalls > {gap_ms:.0f} ms: {len(over)}  (max {max(gaps) if gaps else 0:.0f} ms, "
+          f"p95 of stalls {_pct(over, 95) or 0:.0f} ms)")
+    seen_full, gap_frames = False, 0
+    for _t, r in covers:
+        cells = num(r, "gap_cells", 0) or 0
+        if cells == 0:
+            seen_full = True
+        elif seen_full:
+            gap_frames += 1
+    sampled = {r.get("sampled") for _t, r in covers}
+    print(f"frames {len(covers)} (coverage sampled at {sorted(x for x in sampled if x)}); "
+          f"frames with a gap after full coverage: {gap_frames}")
+    end = [r for r in records if r.get("ev") == "a9.end"]
+    if end:
+        print(f"camera writes in total: user={end[-1].get('camera_user')} "
+              f"jump={end[-1].get('camera_jump')}  reads={end[-1].get('reads_total')}")
+    errors = [r for r in records if r.get("ev") == "a9.error"]
+    if errors:
+        print(f"driver errors: {len(errors)} (first: {errors[0].get('_line')[:160]})")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("path")
@@ -309,6 +421,8 @@ def main(argv=None):
     ap.add_argument("--at", type=float, default=None,
                     help="reconstruct what was running at one monotonic time")
     ap.add_argument("--limit", type=int, default=20)
+    ap.add_argument("--a9", action="store_true",
+                    help="the A9 numbers of a scripted run (block A9-M)")
     ap.add_argument("--run", default="last",
                     help='which run in an appended log: "last" (default), '
                          '"all", or a 1-based index')
@@ -343,7 +457,9 @@ def main(argv=None):
             marker = [r for r in segment if r.get("ev") == "run.begin"]
             name = marker[0].get("run") if marker else "before run.begin"
             print(f"\n=== run {index}/{len(segments)}  ({name}) ===")
-        if args.at is not None:
+        if args.a9:
+            report_a9(segment)
+        elif args.at is not None:
             report_at(segment, args.at)
         elif args.gaps:
             report_gaps(segment, limit=args.limit)

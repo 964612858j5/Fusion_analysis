@@ -47,6 +47,8 @@ the emptiness outside it.
 
 import numpy as np
 
+from .array_pixel_source import ArrayRegionSource
+
 #: The two decisions that mean "a corrected product was published".
 CORRECTED_DECISIONS = ("tophat", "cucim")
 
@@ -138,6 +140,8 @@ class CoarsePlane:
         self.array = array
         self.stride = int(stride)
         self.origin = (int(origin[0]), int(origin[1]))
+        # block A9-P: its pixels through a PixelSource, the same array
+        self.source = ArrayRegionSource(array, self.origin, stage="coarse_plane")
 
     @property
     def shape(self):
@@ -162,7 +166,9 @@ class CoarsePlane:
         sx0, sx1 = max(x0 - bx0, 0), min(x1 - bx0, pw)
         if sy1 <= sy0 or sx1 <= sx0:
             return values, valid          # north or west of the region
-        block = np.asarray(self.array[sy0:sy1, sx0:sx1], dtype=np.float32)
+        block, _placed = self.source.read_region(
+            "", 0, sy0 + by0, sy1 + by0, sx0 + bx0, sx1 + bx0)
+        block = np.asarray(block, dtype=np.float32)
         oy, ox = sy0 + by0 - y0, sx0 + bx0 - x0
         values[oy:oy + block.shape[0], ox:ox + block.shape[1]] = block
         valid[oy:oy + block.shape[0], ox:ox + block.shape[1]] = True
@@ -197,6 +203,8 @@ class CorrectedRegion:
         self.array = array
         y0, y1, x0, x1 = (int(v) for v in bbox_fullres)
         self.bbox = (y0, y1, x0, x1)
+        # block A9-P: its pixels through a PixelSource, the same array
+        self.source = ArrayRegionSource(array, (y0, x0))
 
     def contains(self, y0, y1, x0, x1):
         by0, by1, bx0, bx1 = self.bbox
@@ -217,9 +225,8 @@ class CorrectedRegion:
         ox0, ox1 = max(x0, bx0), min(x1, bx1)
         if oy1 <= oy0 or ox1 <= ox0:
             return None, None
-        values = np.asarray(
-            self.array[oy0 - by0:oy1 - by0, ox0 - bx0:ox1 - bx0],
-            dtype=np.float32)
+        pixels, _placed = self.source.read_region("", 0, oy0, oy1, ox0, ox1)
+        values = np.asarray(pixels, dtype=np.float32)
         return values, (oy0, oy1, ox0, ox1)
 
 

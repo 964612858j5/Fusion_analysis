@@ -61,6 +61,7 @@ import threading
 import time
 
 from .tile_types import CorrectionKey, PixelBuffer, QualityLevel, RawKey, TileResult
+from ..utils import perf_trace
 
 
 # Measured 2026-08-31 (docs/benchmarks/2026-08-31_57ch_multichannel_prefetch.md,
@@ -529,6 +530,7 @@ class TileScheduler:
 
             self._run_raw(key)
 
+    @perf_trace.timed("sched.read")
     def _run_raw(self, key: RawKey):
         try:
             arr, io_ms = self.provider.read_tile(key.channel, key.tile)
@@ -684,6 +686,7 @@ class TileScheduler:
                 break                # assembler falls back to direct reads
         return len(missing), (time.perf_counter() - t0) * 1000.0
 
+    @perf_trace.timed("sched.compute")
     def _run_compute(self, key: CorrectionKey, entry: _Entry):
         staged_tiles, staging_wall_ms = self._stage_raw_for(key)
         try:

@@ -261,7 +261,7 @@ def build_default_stack(path, channel, parent_widget=None, *,
     from ...viewer.correction_compute import CorrectionCompute
     from ...viewer.explore_view import (ExploreController, ExploreView,
                                         RawOverlayLayer)
-    from ...viewer.raw_tile_provider import RawTileProvider
+    from ...viewer.source_tile_provider import open_viewer_source
     from ...viewer.scheduler import TileScheduler
     from ...viewer.tile_types import TileGridSpec
 
@@ -274,7 +274,7 @@ def build_default_stack(path, channel, parent_widget=None, *,
     view = None
     overlay = None
     try:
-        provider = RawTileProvider(path)
+        provider = open_viewer_source(path)        # through PixelSource (A9-P)
         if not channel or channel not in provider.channel_names:
             channel = provider.channel_names[0]
         raw_cache = LRUByteCache(RAW_CACHE_BYTES)

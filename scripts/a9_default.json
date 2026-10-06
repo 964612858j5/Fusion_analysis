@@ -1,0 +1,324 @@
+[
+ {
+  "do": "mark",
+  "label": "step0 navigation"
+ },
+ {
+  "do": "settle"
+ },
+ {
+  "do": "repeat",
+  "n": 10,
+  "body": [
+   {
+    "do": "drag",
+    "dx": 300,
+    "dy": 0,
+    "steps": 20,
+    "ms": 16
+   },
+   {
+    "do": "settle"
+   },
+   {
+    "do": "drag",
+    "dx": -300,
+    "dy": 120,
+    "steps": 20,
+    "ms": 16
+   },
+   {
+    "do": "settle"
+   },
+   {
+    "do": "wheel",
+    "notches": 2
+   },
+   {
+    "do": "settle"
+   },
+   {
+    "do": "wheel",
+    "notches": -2
+   },
+   {
+    "do": "settle"
+   }
+  ]
+ },
+ {
+  "do": "mark",
+  "label": "step switching"
+ },
+ {
+  "do": "repeat",
+  "n": 5,
+  "body": [
+   {
+    "do": "step",
+    "to": 1
+   },
+   {
+    "do": "settle"
+   },
+   {
+    "do": "step",
+    "to": 0
+   },
+   {
+    "do": "settle"
+   }
+  ]
+ },
+ {
+  "do": "step",
+  "to": 1
+ },
+ {
+  "do": "settle"
+ },
+ {
+  "do": "mark",
+  "label": "step1 overlay navigation"
+ },
+ {
+  "do": "mode",
+  "value": "overlay"
+ },
+ {
+  "do": "settle"
+ },
+ {
+  "do": "repeat",
+  "n": 20,
+  "body": [
+   {
+    "do": "drag",
+    "dx": 300,
+    "dy": 0,
+    "steps": 20,
+    "ms": 16
+   },
+   {
+    "do": "settle"
+   },
+   {
+    "do": "drag",
+    "dx": -300,
+    "dy": 120,
+    "steps": 20,
+    "ms": 16
+   },
+   {
+    "do": "settle"
+   },
+   {
+    "do": "wheel",
+    "notches": 2
+   },
+   {
+    "do": "settle"
+   },
+   {
+    "do": "wheel",
+    "notches": -2
+   },
+   {
+    "do": "settle"
+   }
+  ]
+ },
+ {
+  "do": "mark",
+  "label": "step1 fusion navigation (Tissue Preview composes fusion)"
+ },
+ {
+  "do": "mode",
+  "value": "fusion"
+ },
+ {
+  "do": "settle"
+ },
+ {
+  "do": "repeat",
+  "n": 10,
+  "body": [
+   {
+    "do": "drag",
+    "dx": 300,
+    "dy": 0,
+    "steps": 20,
+    "ms": 16
+   },
+   {
+    "do": "settle"
+   },
+   {
+    "do": "drag",
+    "dx": -300,
+    "dy": 120,
+    "steps": 20,
+    "ms": 16
+   },
+   {
+    "do": "settle"
+   },
+   {
+    "do": "wheel",
+    "notches": 2
+   },
+   {
+    "do": "settle"
+   },
+   {
+    "do": "wheel",
+    "notches": -2
+   },
+   {
+    "do": "settle"
+   }
+  ]
+ },
+ {
+  "do": "mode",
+  "value": "overlay"
+ },
+ {
+  "do": "settle"
+ },
+ {
+  "do": "mark",
+  "label": "step1 channel switch: cold, then resident"
+ },
+ {
+  "do": "repeat",
+  "n": 5,
+  "body": [
+   {
+    "do": "tick",
+    "channel": "CD3D",
+    "on": true
+   },
+   {
+    "do": "settle"
+   },
+   {
+    "do": "tick",
+    "channel": "CD3D",
+    "on": false
+   },
+   {
+    "do": "settle"
+   },
+   {
+    "do": "tick",
+    "channel": "CD3D",
+    "on": true
+   },
+   {
+    "do": "settle"
+   },
+   {
+    "do": "tick",
+    "channel": "CD3D",
+    "on": false
+   },
+   {
+    "do": "settle"
+   }
+  ]
+ },
+ {
+  "do": "mark",
+  "label": "step1 intensity"
+ },
+ {
+  "do": "repeat",
+  "n": 5,
+  "body": [
+   {
+    "do": "window",
+    "channel": "DAPI",
+    "min": 1,
+    "max": 120,
+    "gamma": 1.0
+   },
+   {
+    "do": "window",
+    "channel": "DAPI",
+    "min": 1,
+    "max": 175,
+    "gamma": 1.0
+   }
+  ]
+ },
+ {
+  "do": "mark",
+  "label": "step3"
+ },
+ {
+  "do": "step",
+  "to": 3
+ },
+ {
+  "do": "settle"
+ },
+ {
+  "do": "repeat",
+  "n": 5,
+  "body": [
+   {
+    "do": "drag",
+    "dx": 300,
+    "dy": 0,
+    "steps": 20,
+    "ms": 16
+   },
+   {
+    "do": "settle"
+   },
+   {
+    "do": "drag",
+    "dx": -300,
+    "dy": 120,
+    "steps": 20,
+    "ms": 16
+   },
+   {
+    "do": "settle"
+   },
+   {
+    "do": "wheel",
+    "notches": 2
+   },
+   {
+    "do": "settle"
+   },
+   {
+    "do": "wheel",
+    "notches": -2
+   },
+   {
+    "do": "settle"
+   }
+  ]
+ },
+ {
+  "do": "step",
+  "to": 1
+ },
+ {
+  "do": "settle"
+ },
+ {
+  "do": "step",
+  "to": 0
+ },
+ {
+  "do": "settle"
+ },
+ {
+  "do": "mark",
+  "label": "done"
+ }
+]

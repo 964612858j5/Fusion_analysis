@@ -105,7 +105,13 @@ MIGRATED = {os.path.join("core", "pixel_source.py"),
             os.path.join("core", "project_identity.py"),
             os.path.join("scripts", "diagnose_v16_a3a4_acceptance.py"),
             # block S2T: Step2's tissue plan reads the slide's ~16x level
-            os.path.join("core", "tile_tissue.py")}
+            os.path.join("core", "tile_tissue.py"),
+            # block A9-P (approved 2026-10-07): the viewers read through the
+            # contract -- the raw slide via SourceTileProvider/OmeTiffSource,
+            # Step1's corrected regions and coarse planes via ArrayRegionSource
+            os.path.join("viewer", "source_tile_provider.py"),
+            os.path.join("viewer", "array_pixel_source.py"),
+            os.path.join("viewer", "step1_source.py")}
 
 
 def test_only_the_migrated_consumers_use_the_contract():

@@ -782,6 +782,8 @@ from PyQt5.QtCore import QRectF
 # patch a rule and watch the controller's output follow -- the same
 # discipline `multichannel_prefetch` uses for `prefetch_policy`.
 from . import request_planning as planning
+from . import coverage_probe
+from ..utils import perf_trace
 from ..core.display_mapping import build_display_lut, seed_display_range
 from .tile_types import (
     CorrectionKey,
@@ -2171,6 +2173,55 @@ class RawOverlayLayer(QtCore.QObject):
 
 # ── ExploreController ────────────────────────────────────────────────────────
 
+class _A9PaintProbe(QtCore.QObject):
+    """Block A9-M: after each paint of the view, the coverage of what was
+    painted -- the visible, current pool items and the visible overview /
+    floor -- as a `coverage` mark (`viewer.coverage_probe.rect_frame`)."""
+
+    def __init__(self, controller):
+        super().__init__(controller)
+        self.controller = controller
+        self._queued = False
+        self._frame = 0
+        try:
+            controller.view.graphics.viewport().installEventFilter(self)
+        except Exception:                                   # noqa: BLE001 -- measuring only
+            pass
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        if event.type() == QtCore.QEvent.Paint and not self._queued:
+            self._queued = True
+            QtCore.QTimer.singleShot(0, self._evaluate)
+        return False
+
+    @staticmethod
+    def _rect(r):
+        return (r.left(), r.right(), r.top(), r.bottom())
+
+    def _evaluate(self):
+        self._queued = False
+        c = self.controller
+        try:
+            by_level = {}
+            for pool in (c._raw_pool, c._precise_pool):
+                for entry in pool.entries.values():
+                    if entry.item.isVisible() and entry.item.opacity() > 0:
+                        by_level.setdefault(entry.level, []).append(self._rect(entry.rect))
+            floors = []
+            for item in (c.view.overview_item, c.view.corrected_floor_item):
+                if item.isVisible() and item.image is not None:
+                    floors.append(self._rect(item.mapRectToParent(item.boundingRect())))
+            (vx0, vx1), (vy0, vy1) = c.view.view_box.viewRange()
+            h, w = c.provider.level_shape(0)
+            result = coverage_probe.rect_frame(by_level, c.level, (vx0, vx1, vy0, vy1),
+                                               floor_rects=floors,
+                                               slide_world=(0, w, 0, h))
+        except Exception as exc:                            # noqa: BLE001 -- measuring only
+            result = {"error": str(exc)[:120]}
+        self._frame += 1
+        coverage_probe.publish(result, "cpu", self._frame)
+
+
 class ExploreController(QtCore.QObject):
     """Drives an ExploreView from a provider/scheduler/compute stack.
 
@@ -2324,6 +2375,8 @@ class ExploreController(QtCore.QObject):
         num_levels = getattr(provider, "num_levels", 1)
         self._raw_pool = TileItemPool(view.view_box, RAW_BASE_Z, num_levels, item_budget)
         self._precise_pool = TileItemPool(view.view_box, PRECISE_BASE_Z, num_levels, item_budget)
+        # block A9-M: the coverage of each painted frame (tracing only)
+        self._a9_probe = _A9PaintProbe(self) if perf_trace.enabled() else None
 
         # ── provisional state ──
         self._provisional = False
@@ -3320,6 +3373,7 @@ class ExploreController(QtCore.QObject):
         self._overview_identity = None
         self.view.overview_item.setVisible(False)
 
+    @perf_trace.timed("explore.load_overview")
     def load_overview(self, ensure_floor: bool = True):
         """Read this channel's overview level SYNCHRONOUSLY and install it.
 

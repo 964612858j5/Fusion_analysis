@@ -128,6 +128,8 @@ class ViewportSnapshot:
 #: Block 4b: the label textures' own GPU budget (user ruling 2026-09-26),
 #: beside -- never inside -- the raw textures' 512 MB.
 from ..core import resource_tiers as _tiers
+from ..utils import perf_trace
+from ..viewer import coverage_probe
 LABEL_TEXTURE_BYTES = _tiers.GPU_LABEL_TEXTURE_BYTES  # (block A8 / A5: one place)
 #: The largest outline radius the draw pass loops over, in screen pixels.
 MAX_LABEL_RADIUS = 8
@@ -312,6 +314,7 @@ class _TextureLru:
         if plane.valid is not None and np.asarray(plane.valid).shape != values.shape:
             raise Step1GpuLayerError("raw plane valid mask shape must match values")
 
+    @perf_trace.timed("gpu.upload")
     def prepare(self, gl, planes: Sequence[RawPlane]) -> None:
         """Make a submitted active set resident or fail before issuing passes."""
         required: Dict[Hashable, RawPlane] = {}
@@ -512,6 +515,11 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                  max_label_texture_bytes: int = LABEL_TEXTURE_BYTES):
         super().__init__(parent)
         self._cache = _TextureLru(max_raw_texture_bytes)
+        # block A9-M: which submission the next presented frame shows
+        self._a9_frame = 0
+        self._a9_pending = None
+        if perf_trace.enabled():
+            self.frameSwapped.connect(self._a9_presented)
         #: Block 4b: the label layer, Step3 only. Off (the default), nothing
         #: below exists: no target, no program, no texture, and `paintGL`
         #: shows `final` exactly as before.
@@ -594,6 +602,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         view_adapter.view_box.sigResized.connect(self._sync_attached_geometry)
         self._sync_attached_geometry()
 
+    @perf_trace.timed("gpu.submit")
     def submit(self, source_descriptor: SourceDescriptor, display_snapshot: DisplaySnapshot,
                viewport_snapshot: ViewportSnapshot) -> Dict[str, Any]:
         """Synchronously render caller-provided snapshots; no I/O or CPU fallback."""
@@ -613,6 +622,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                 active, missing = self._overlay_active(by_channel, display_snapshot)
                 self._cache.prepare(gl, [plane for source in active.values() for plane in source.selected_planes()])
                 self._render_overlay(active, display_snapshot, viewport_snapshot)
+                composed = dict(active)
             elif mode == MODE_FUSION:
                 active_groups, active_nucleus, missing = self._fusion_active(by_channel, display_snapshot)
                 planes = []
@@ -623,8 +633,14 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                     planes.extend(active_nucleus.selected_planes())
                 self._cache.prepare(gl, planes)
                 self._render_fusion(active_groups, active_nucleus, display_snapshot, viewport_snapshot)
+                composed = {ch: src for sources in active_groups.values()
+                            for ch, src in sources.items()}
+                if active_nucleus is not None:
+                    composed[active_nucleus.channel] = active_nucleus
             else:
                 raise Step1GpuLayerError(f"unknown display mode {mode!r}")
+            if perf_trace.enabled():
+                self._a9_note_submission(composed, display_snapshot, viewport_snapshot)
             if self._labels_enabled:
                 # THE SAME SUBMISSION, THE SAME VIEW: the mask is drawn over
                 # the picture it belongs to, never a frame behind it.
@@ -841,6 +857,44 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         # Qt logical resize alone is deliberately not a source/camera owner.
         del width, height
 
+    @staticmethod
+    def _a9_expected(display) -> Tuple[str, ...]:
+        """Every channel this display should compose (weight > 0), whether
+        or not it has a source yet."""
+        if display.mode == MODE_FUSION:
+            out = {ch for group, members in display.groups.items()
+                   if float(display.group_weights.get(group, 1.0) or 0.0) > 0.0
+                   for ch, weight in members.items() if float(weight or 0.0) > 0.0}
+            nucleus, weight = display.nucleus
+            if nucleus and float(weight or 0.0) > 0.0:
+                out.add(nucleus)
+            return tuple(sorted(out))
+        return tuple(sorted(ch for ch, weight in display.weights.items()
+                            if float(weight or 0.0) > 0.0))
+
+    def _a9_note_submission(self, composed, display, viewport) -> None:
+        """Block A9-M: the coverage of THIS submission -- the planes actually
+        composed, against every channel it should compose, clipped to the
+        region's rectangle and polygon -- emitted when the frame showing it
+        is presented."""
+        try:
+            result = coverage_probe.gpu_frame(
+                composed, viewport.world_rect, roi_world=viewport.roi_world_rect,
+                polygon=viewport.roi_polygon_world, expected=self._a9_expected(display))
+        except Exception as exc:                            # noqa: BLE001 -- measuring only
+            result = {"error": str(exc)[:120]}
+        self._a9_frame += 1
+        self._a9_pending = (self._a9_frame, result)
+
+    def _a9_presented(self) -> None:
+        pending, self._a9_pending = self._a9_pending, None
+        if pending is None:
+            return
+        frame, result = pending
+        perf_trace.mark("gpu.present", frame=frame)
+        coverage_probe.publish(result, "gpu", frame)
+
+    @perf_trace.timed("gpu.paint")
     def paintGL(self) -> None:  # noqa: N802
         if not self._initialized or self._target_size is None:
             return

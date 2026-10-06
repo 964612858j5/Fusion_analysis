@@ -348,3 +348,52 @@ Step0 不使用 GPU 路径。
    - 可能需要调整环境搭建的现有测试：`test_step0_explore_tab.py`、`test_step0_floor_prefetch.py`、`test_step0_cache_sharing.py`、`test_step0_method_prefetch.py`、`test_step1_gpu_overview_skip.py`、`test_step0_original_after_cached_switch.py`、`test_step0_compare_tiles.py`、`test_step1_source*.py`（只改替身，不改断言）。
 
 §10.2 第 5 条（改用 `CorrectedZarrSource`）以本节第 1 条为准，原写法作废。
+- 补充（codex 审核 A9-P 代码）：白名单加入 `tests/test_v16_pixel_source.py`——只在 `MIGRATED` 名单里登记这次批准的三个新使用者，断言不变。
+
+## 11. 执行记录（2026-10-07）
+
+### 11.1 A9-P：视图改走 `PixelSource`
+- 新增 `viewer/source_tile_provider.py`：`SourceTileProvider`，以及工厂函数 `open_viewer_source`。
+  - 像素读取经 `OmeTiffSource.read_region`；切片读取经 `OmeTiffSource.read_provider_tile` 交给读取器自己的 `read_tile`，对 `RawTileProvider` 来说就是裁剪后的 `read_region`。
+  - 裁剪、空范围（包括起止颠倒的范围）、已关闭和非法通道的处理，都与 `RawTileProvider` 相同。
+- `sources/ome_tiff.py` 增加注入模式：`provider=` 参数；元数据延迟读取；通道原样交给读取器，由读取器按自己的规则解析。
+- 新增 `viewer/array_pixel_source.py` `ArrayRegionSource`：`CorrectedRegion.read` 和 `CoarsePlane.tile` 经它读取。选组规则、身份和粗层校验都不变。
+- 3 处视图构造改为调用 `open_viewer_source`。`tests/test_v16_pixel_source.py` 的 `MIGRATED` 名单登记这 3 个新使用者。
+- 逐位对照：
+  - 单元测试覆盖每一层、边缘、越界、空范围、颠倒范围、整数和名字通道、切片、校正区域和粗层；
+  - 真实数据（合成拼图、cropped_region）共 1200 个随机区域，0 处不同。修正通道传递和切片路由之后又重跑一次，仍是 0 处不同。
+- 回归中发现并修正（测试替身暴露的语义差异）：
+  1. 切片读取原本被转成了区域读取，测试替身分别统计这两种读取，因此计数对不上 → 改走读取器自己的 `read_tile`；
+  2. 通道原本先换算成整数再交给读取器，名字式的测试替身因此出错 → 改为原样传递。
+- codex：两轮。第一轮 2 条（颠倒范围、白名单登记），已修；第二轮无新意见。
+
+### 11.2 A9-M：测量工具
+- 新增：
+  - `viewer/read_ledger.py`：按来源累计读取次数，并统计正在进行中的读取；
+  - `viewer/coverage_probe.py`：抽样式覆盖判断（256×256 个采样点归到 64×64 个格子，判断范围裁到 ROI 的矩形和多边形；画面应合成却还没有数据源的通道算作未覆盖；目标层取当前选中的层）；
+  - `scripts/a9_drive.py` 和 `scripts/a9_default.json`：脚本驱动和默认场景；
+  - `docs/perf_timeline/analyze_perf_log.py --a9`：分析报告。
+- 接线（计时关闭时只多一次环境变量判断）：
+  - 读取计数挂在 `RawTileProvider.read_region` 和 `ArrayRegionSource.read_region`；
+  - GPU 层计时 `gpu.submit` / `gpu.upload` / `gpu.paint`，按每次提交实际合成的内容计算覆盖，在 `frameSwapped` 时连同帧号一起发出；
+  - GPU 绑定计时 `gpu.accept` / `gpu.publish` / `gpu.refresh`；调度器计时 `sched.read` / `sched.compute`；
+  - Step0 的 `ExploreController` 计时 `explore.load_overview`，绘制之后发覆盖标记；
+  - 心跳阈值可用 `BLOCK01_PERF_GAP_MS` 设置；主窗口在开启计时并设置了场景时加载驱动。
+- 驱动：
+  - 拖动和滚轮向视图中心下方的控件投递真实的鼠标、滚轮事件，并记录 Qt 实际处理的时刻；
+  - 判定"稳定"：没有正在进行的读取、300 ms 内没有新读取、所有视图的调度器空闲，并且这次动作之后，当前视图有一帧已经呈现、并在目标层完全覆盖；超时单独记为超时；
+  - 读取次数和相机写入次数都相对动作执行之前计算；
+  - 相机写入在类层面计数（`CameraOwner` 使用了 `__slots__`），只在驱动运行时这样做。
+- 分析报告把"呈现延迟"（最后一次被处理的输入 → 目标视图第一帧完整画面）和"稳定延迟"（含 300 ms 静默）分开给出，另外列出超时、每次动作的读取次数、手势过程中的程序跳转、超过阈值的卡顿，以及完全覆盖之后又出现缺块的帧数。
+- codex：两轮。第一轮 6 条（稳定判定、粗层目标、缺失通道、覆盖精度与裁剪、延迟口径、场景覆盖面），第二轮 4 条（调度器查找路径、基线时点、按视图过滤、亮度动作），全部已修。
+- **已知局限（如实记录）**：
+  1. 覆盖是抽样判断，窄于视口 1/256 的缺口可能漏掉；
+  2. Step1 和 Step3 的 GPU 帧都记为 `gpu`，要靠"只有屏幕上的那个视图在提交"来区分；
+  3. WSL 里不清操作系统的页缓存，所以"冷打开"指的是程序冷启动后第一次打开。
+
+### 11.3 基线测量（等用户执行）
+- 启动：`! ~/fusionflux/bench_a9/run_baseline.sh`；
+- 打开项目 `bench_rm/accept/a5`，选工作区 `full_wsi_20261005_163058_e65b`，然后不要再动鼠标和键盘；
+- 看到 `[A9] scenario finished` 后关闭程序；
+- 分析：`python3 docs/perf_timeline/analyze_perf_log.py bench_a9/baseline_<时间>.log --a9`；
+- 7 层拼图（需用户裁定）之后再测一次。

@@ -29,6 +29,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from . import read_ledger
 from .tile_types import SourceIdentity, TileAddress
 
 _OME_NS = {"ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"}
@@ -337,6 +338,7 @@ class RawTileProvider:
         io_ms = (time.perf_counter() - t0) * 1000.0
         return arr, io_ms
 
+    @read_ledger.in_flight_reads
     def read_region(
         self,
         channel,
@@ -399,4 +401,5 @@ class RawTileProvider:
         else:
             raise ValueError(f"unknown handle_mode: {self.handle_mode!r}")
 
+        read_ledger.note("raw", level, data.size, channel=channel)   # block A9-M
         return data, (cy0, cx0)

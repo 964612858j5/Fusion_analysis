@@ -666,10 +666,16 @@ class MainWindow(QMainWindow):
         # The GUI thread's own heartbeat, with the switch off it is None and
         # no timer exists. It is what turns "the window froze" into a number
         # with a callback beside it.
-        self._perf_heartbeat = perf_trace.start_heartbeat(self, label="main")
+        self._perf_heartbeat = perf_trace.start_heartbeat(
+            self, label="main", gap_ms=os.environ.get("BLOCK01_PERF_GAP_MS") or None)
         # A name for this run, so lines appended to a log that already holds
         # an older run can be told apart without anyone deleting evidence.
         perf_trace.announce_run(step="startup")
+        # Block A9-M: the scripted baseline run (tracing on and a scenario set)
+        self._a9_driver = None
+        if os.environ.get("BLOCK01_A9_SCRIPT") and perf_trace.enabled():
+            from ..scripts import a9_drive
+            self._a9_driver = a9_drive.attach(self)
         self._step1_session_timer = QTimer()
         self._step1_session_timer.setSingleShot(True)
         self._step1_session_timer.timeout.connect(self._save_step1_session)

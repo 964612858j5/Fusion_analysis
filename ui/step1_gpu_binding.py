@@ -37,6 +37,7 @@ import numpy as np
 from PyQt5 import QtCore
 
 from ..viewer.tile_types import RawKey, TileAddress, TileRequest
+from ..utils import perf_trace
 from .step1_gpu_layer import (
     MODE_FUSION,
     MODE_OVERLAY,
@@ -219,6 +220,7 @@ class Step1GpuBinding(QtCore.QObject):
         self._begin_fine_epoch(snapshot)
         self._publish_current()
 
+    @perf_trace.timed("gpu.refresh")
     def refresh_display(self) -> None:
         """Resubmit resident immutable planes; display-only changes issue no I/O.
 
@@ -727,6 +729,7 @@ class Step1GpuBinding(QtCore.QObject):
             inside_this_call[0] = False
 
     @QtCore.pyqtSlot(object)
+    @perf_trace.timed("gpu.accept")
     def _accept_result(self, payload) -> None:
         """The ONLY entry for a result that arrived through the queued signal."""
         self._apply_result(payload, publish=True)
@@ -797,6 +800,7 @@ class Step1GpuBinding(QtCore.QObject):
 
     # Publishing ----------------------------------------------------------
 
+    @perf_trace.timed("gpu.publish")
     def _publish_current(self) -> None:
         if self._disposed or self._source is None:
             return

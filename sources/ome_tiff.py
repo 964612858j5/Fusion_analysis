@@ -75,13 +75,32 @@ def physical_size_from_ome(xml) -> Optional[Tuple[float, float]]:
 class OmeTiffSource(PixelSource):
     """The raw slide: every channel, every pyramid level, native dtype."""
 
-    def __init__(self, path, handle_mode="per_thread", scan_threads=8):
-        import tifffile
-
+    def __init__(self, path, handle_mode="per_thread", scan_threads=8, provider=None):
+        """`provider` (block A9-P): the viewer's own `RawTileProvider`,
+        already open -- used as this source's reader instead of a second set
+        of handles. The TIFF's metadata is then read only when something
+        asks for it, and a channel is handed to the provider as given, to be
+        resolved by its own rule, so a viewer reading through this source
+        sees the channel naming it always had."""
+        self._scan_threads = int(scan_threads)
+        self._scan_reader = None
+        self._scan_lock = threading.Lock()
+        self._closed = False
+        self._injected = provider is not None
+        if self._injected:
+            self._provider = provider
+            self.path = getattr(provider, "path", path)
+            self._meta_loaded = False
+            return
         from ..viewer.raw_tile_provider import RawTileProvider
 
         self._provider = RawTileProvider(path, handle_mode=handle_mode)
         self.path = self._provider.path
+        self._load_meta()
+
+    def _load_meta(self):
+        import tifffile
+
         with tifffile.TiffFile(self.path) as tf:
             xml = tf.ome_metadata
             self._dtype = np.dtype(tf.series[0].dtype)
@@ -98,10 +117,11 @@ class OmeTiffSource(PixelSource):
         n = self._provider.num_channels
         self._names = channel_names_from_ome(xml, n)
         self._physical = physical_size_from_ome(xml)
-        self._scan_threads = int(scan_threads)
-        self._scan_reader = None
-        self._scan_lock = threading.Lock()
-        self._closed = False
+        self._meta_loaded = True
+
+    def _meta(self):
+        if not self._meta_loaded:
+            self._load_meta()
 
     # ── identity and metadata ────────────────────────────────────────
     def source_identity(self) -> PixelSourceIdentity:
@@ -111,9 +131,14 @@ class OmeTiffSource(PixelSource):
                                    stage="raw")
 
     def channel_names(self) -> List[str]:
+        self._meta()
         return list(self._names)
 
     def _index(self, channel) -> int:
+        if self._injected:
+            # the reader resolves the channel by its own rule (names,
+            # aliases, indices), exactly as when the viewer called it
+            return channel
         if isinstance(channel, (int, np.integer)):
             index = int(channel)
             if not 0 <= index < len(self._names):
@@ -126,6 +151,7 @@ class OmeTiffSource(PixelSource):
 
     def dtype(self, channel) -> np.dtype:
         self._index(channel)
+        self._meta()
         return self._dtype
 
     def level_count(self) -> int:
@@ -140,6 +166,7 @@ class OmeTiffSource(PixelSource):
 
     def native_tile_shape(self, level: int) -> Tuple[int, int]:
         """The TIFF tile of `level` (or its strip, for a stripped level)."""
+        self._meta()
         return self._native[int(level)]
 
     def legacy_level_downsample_rounded(self, level: int) -> float:
@@ -149,6 +176,7 @@ class OmeTiffSource(PixelSource):
         return self._provider.level_downsample(level)
 
     def physical_size(self) -> Optional[Tuple[float, float]]:
+        self._meta()
         return self._physical
 
     # ── reads ────────────────────────────────────────────────────────
@@ -162,6 +190,16 @@ class OmeTiffSource(PixelSource):
         cy0, cy1, cx0, cx1 = intersect((y0, y1, x0, x1), self.valid_bounds(level))
         arr, origin = self._provider.read_region(index, level, cy0, cy1, cx0, cx1)
         return arr, (int(origin[0]), int(origin[1]))
+
+    def read_provider_tile(self, channel, tile):
+        """Injected mode (block A9-P): one tile of the viewer's tile grid, by
+        the reader's own `read_tile` -- for `RawTileProvider` exactly the
+        clamped `read_region` of the tile's rectangle -- returning
+        `(array, io_ms)` as it does."""
+        self._check_open()
+        if not self._injected:
+            raise RuntimeError("read_provider_tile needs an injected provider")
+        return self._provider.read_tile(channel, tile)
 
     def read_regions(self, channels, level, y0, y1, x0, x1):
         """Level 0: Step4's `TiffTileReader` (tile-parallel decode, the fast

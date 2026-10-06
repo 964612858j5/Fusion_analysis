@@ -626,15 +626,33 @@ class Heartbeat:
                  where=self._label or None)
 
 
-def start_heartbeat(parent=None, label=""):
+def start_heartbeat(parent=None, label="", gap_ms=None):
     """A heartbeat if the switch is on, else None -- the caller keeps whatever
-    it gets and stops it if it is not None."""
+    it gets and stops it if it is not None. `gap_ms` (block A9-M) is the
+    stall worth reporting; default `HEARTBEAT_GAP_MS`."""
     if not enabled():
         return None
     try:
-        return Heartbeat(parent=parent, label=label).start()
+        kw = {"gap_ms": float(gap_ms)} if gap_ms else {}
+        return Heartbeat(parent=parent, label=label, **kw).start()
     except Exception:                                   # noqa: BLE001
         return None
+
+
+def timed(event):
+    """Block A9-M: time a method as `event` when tracing is on; otherwise a
+    plain call (one environment lookup)."""
+    import functools
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def timed_call(*args, **kwargs):
+            if not enabled():
+                return fn(*args, **kwargs)
+            with span(event):
+                return fn(*args, **kwargs)
+        return timed_call
+    return deco
 
 
 def run_id():

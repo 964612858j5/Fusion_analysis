@@ -184,6 +184,22 @@ _STEP1_TAB_QSS = FRAME_TAB_QSS
 _free_the_tab_bar = free_tab_bar
 
 
+
+def _perf(event):
+    """Block PA-5a: time a step-switch stage as `event` (perf_trace; off
+    unless BLOCK01_PERF=1 -- then a span, otherwise a plain call)."""
+    import functools
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def timed(*args, **kwargs):
+            if not perf_trace.enabled():
+                return fn(*args, **kwargs)
+            with perf_trace.span(event):
+                return fn(*args, **kwargs)
+        return timed
+    return deco
+
 class _HeightTwinBar(QtWidgets.QWidget):
     """A bar exactly as tall as another widget is drawn.
 
@@ -1486,6 +1502,7 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(0)
         self._set_step_active(0)
 
+    @_perf("switch.go_step0")
     def _go_to_step0(self):
         if self._current_step == 1:
             self._stop_all_loaders()
@@ -1829,6 +1846,7 @@ class MainWindow(QMainWindow):
             tabs.setCurrentWidget(tab)
             print(f"[Step1-Tabs] switched to Pre-segmentation due to {reason}")
 
+    @_perf("restore.log_step1_layout")
     def _log_step1_layout(self, where):
         try:
             print(f"[Layout] {where} main window size={self.size().width()}x{self.size().height()}")
@@ -1928,6 +1946,7 @@ class MainWindow(QMainWindow):
         self._step3_refresh_masks()
         return False
 
+    @_perf("switch.step3_follow")
     def _step3_follow_step(self, active):
         """Step3's viewer follows the step: paused unless Step3 is on screen."""
         mount = self.__dict__.get("_step3_mount")
@@ -2033,6 +2052,7 @@ class MainWindow(QMainWindow):
     def _step3_slide_path(self):
         return str(getattr(getattr(self, "loader", None), "filepath", "") or "")
 
+    @_perf("switch.step3_refresh_masks")
     def _step3_refresh_masks(self, requested_dir=None):
         """Step3 as a general result viewer (block B3): the runs of EVERY ROI
         workspace of the project made on the open slide, plus the ones loaded
@@ -2292,6 +2312,7 @@ class MainWindow(QMainWindow):
         self._step3_follow_step(active)
         return result
 
+    @_perf("switch.step1_follow")
     def _step1_follow_step(self, active):
         mount = getattr(self, "_step1_mount", None)
         if active != 1:
@@ -3056,6 +3077,7 @@ class MainWindow(QMainWindow):
         self._update_next_button()
         self._log_step1_layout("Step0 complete (save-only, no auto-jump)")
 
+    @_perf("restore.load_step0_handoff")
     def _load_step0_roi_result(self, _checked=False, auto=False):
         global OME_TIFF_FILE, OUTPUT_DIR
         print("[Step1] loading Step0 ROI result")
@@ -3985,6 +4007,7 @@ class MainWindow(QMainWindow):
         except Exception:
             print(f"[Step1] failed to autosave session:\n{traceback.format_exc()}")
 
+    @_perf("restore.scientific_state")
     def _restore_step1_scientific_state(self, sess, source_path=""):
         """Put back the scientific state of ANY session shape, in one go.
 
@@ -4178,6 +4201,7 @@ class MainWindow(QMainWindow):
                                         mode_moved=restored.mode_moved)
         return True, f"Loaded weights for {len(markers)} channel(s) from {os.path.basename(path)}."
 
+    @_perf("restore.display_state")
     def _apply_step1_display_state(self, sess, visibility=None,
                                    display_installed=False,
                                    restore_changed=True, mode_moved=None):
@@ -4263,6 +4287,7 @@ class MainWindow(QMainWindow):
         else:
             self._on_display_state_restored()
 
+    @_perf("restore.on_display_restored")
     def _on_display_state_restored(self, schedule_save=True,
                                    request_frame=False):
         """One load and one redraw after a bulk restore.
@@ -4279,6 +4304,7 @@ class MainWindow(QMainWindow):
         if schedule_save:
             self._schedule_step1_session_save()
 
+    @_perf("restore.session_fields")
     def _apply_step1_session_fields(self, sess, out_dir, raw_ome, roi_dir,
                                     step2_dir, roi_id=""):
         """Apply fields owned by Step1 after the Step0 handoff is loaded.
@@ -4350,6 +4376,7 @@ class MainWindow(QMainWindow):
         self._step1_context_ready = True
         return True
 
+    @_perf("restore.session_v2")
     def _restore_step1_session_v2(self, sess, manifest_path):
         """Restore Step1 state on top of the single authoritative v2 reader."""
         # A failed restore must never leave a previously accepted Step0/Step1
@@ -4424,6 +4451,7 @@ class MainWindow(QMainWindow):
                 "used_combo": (sel or {}).get("combo_id") if sel and run is not None
                 and sel["run"].get("run_id") == run.get("run_id") else ""}
 
+    @_perf("restore.preseg")
     def _rm_restore_preseg(self, state):
         """Put the pre-segmentation tab back: methods, ticks, the finished
         run's results from disk, and the result in use when it still can be
@@ -4509,6 +4537,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Step1", self._session_refusal)
         return ok
 
+    @_perf("restore.total")
     def _load_previous_step1_session(self, _checked=False, auto=False, path=None):
         global OME_TIFF_FILE, OUTPUT_DIR
         print("[Step1] searching previous session")
@@ -4595,6 +4624,7 @@ class MainWindow(QMainWindow):
         finally:
             self._step1_restore_active = False
 
+    @_perf("switch.go_step2")
     def _go_to_step2(self):
         if self._current_step == 1:
             self._stop_all_loaders()
@@ -4627,7 +4657,11 @@ class MainWindow(QMainWindow):
                               else self.step1_output.get("output_dir", OUTPUT_DIR))
             )
             zarr_path = self.step1_output.get("zarr_path")
-            if zarr_path and not self._step2._zarr_edit.text().strip():
+            # (block PA-5b fix 2b) in a workspace `_rm_bind_step2` below
+            # chooses the store from the run list; setting Step1's first only
+            # loaded a store that was then replaced
+            if (zarr_path and not self._step2._zarr_edit.text().strip()
+                    and not self._rm_roi_dir()):
                 self._step2.set_zarr_path(zarr_path)
             out_dir = self.step1_output.get("output_dir", OUTPUT_DIR)
             try:
@@ -4650,6 +4684,7 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(2)
         self._set_step_active(2)
 
+    @_perf("switch.rm_bind_step2")
     def _rm_bind_step2(self):
         """Entering Step2 (block RM §3, §5): its Input lists the fuse runs on
         the correct run of the chain being viewed (`session.viewing`; the one
@@ -4747,6 +4782,7 @@ class MainWindow(QMainWindow):
         return {"run": run_dir, "label": label, "tag": tag, "zarr": first, "regions": regions,
                 "rois": rois, "tooltip": label + (f"\n{source}" if source else "")}
 
+    @_perf("switch.go_step1")
     def _go_to_step1(self):
         # Step1 reads the handoff from DISK. While a patch edit is still being
         # written, the newest geometry is in Step0's memory and one revision
@@ -4844,6 +4880,7 @@ class MainWindow(QMainWindow):
         # shared navigator is read-only.
         self._apply_navigator_policy_for_step(2)
 
+    @_perf("switch.go_step3")
     def _go_to_step3(self, output_dir=None):
         """Enter Step3 -- Step1's picture with Step1's channel panel (block
         2c-1). Step3 draws what Step1 draws, so it needs what Step1 needs:
@@ -4942,6 +4979,7 @@ class MainWindow(QMainWindow):
         print(f"[MainWindow] step2_done={self.step2_done}")
         print(f"[MainWindow] next_enabled={self._btn_next.isEnabled()}")
 
+    @_perf("switch.go_step4")
     def _go_to_step4(self, output_dir=None):
         if self._current_step == 1:
             self._stop_all_loaders()
@@ -5167,6 +5205,7 @@ class MainWindow(QMainWindow):
             return True
         return scope() in ("", self._DISPLAY_SCOPES.get(1, ""))
 
+    @_perf("switch.resync_step1_display")
     def _resync_step1_display_from_state(self):
         """Redraw Step1 from ITS OWN display answers, once.
 
@@ -5294,6 +5333,7 @@ class MainWindow(QMainWindow):
             bar.setContentsMargins(max(0, inset), margins.top(), margins.right(),
                                    margins.bottom())
 
+    @_perf("switch.set_step_active")
     def _set_step_active(self, active):
         # After `_current_step` moves below, the sinks refuse the left
         # step's notices: a hidden viewer cannot write the camera owner.
@@ -5878,6 +5918,7 @@ class MainWindow(QMainWindow):
             self._on_montage_missing(missing)
         return True
 
+    @_perf("switch.close_montage_supply")
     def _close_montage_supply(self):
         supply = self.__dict__.get("_preseg_montage_supply")
         if supply is not None:
@@ -6594,6 +6635,7 @@ class MainWindow(QMainWindow):
             self._preload_debounce.start(400)
         self._schedule_step1_session_save()
 
+    @_perf("restore.select_preview_patch")
     def _select_preview_patch(self, idx):
         """User clicked a patch button — render from cache if ready, else show status."""
         if idx < 0 or idx >= len(self._all_patches):
@@ -6960,6 +7002,7 @@ class MainWindow(QMainWindow):
             return True
         return not thread.isRunning()
 
+    @_perf("switch.stop_all_loaders")
     def _stop_all_loaders(self):
         self._preload_debounce.stop()
         self._pending_channel_demand.clear()
@@ -6983,6 +7026,7 @@ class MainWindow(QMainWindow):
                 print(f"[Preview] loader {self._patch_label(idx)} still running after stop request; keeping reference")
         self._patch_loaders = survivors
 
+    @_perf("switch.rm_save_view")
     def _rm_save_view(self, step):
         """Block RM (§6): on a step change and on close, the Step0, Step2 and
         Step4 drafts and the step being shown go into the workspace's
@@ -7283,6 +7327,7 @@ class MainWindow(QMainWindow):
         self._overlay_display_cache.drop_patch(patch_idx)
         self._signal_cache.drop_patch(patch_idx)
 
+    @_perf("restore.refresh_patch_preview")
     def _refresh_patch_preview(self, reset_view=False):
         """Draw whichever preview the current mode asks for.
 
@@ -7593,6 +7638,7 @@ class MainWindow(QMainWindow):
             return
         self._display.state.set_color(channel, color, origin="step0")
 
+    @_perf("restore.ensure_channels_cached")
     def _ensure_channels_cached(self, idx):
         """Read what this patch is missing — only that, and only once.
 
@@ -8629,8 +8675,16 @@ class MainWindow(QMainWindow):
             "raw_ome_path": os.path.abspath(str(getattr(self.loader, "filepath", "") or "")),
         }
 
-    def _fusion_settings_draft(self):
+    def _fusion_settings_draft(self, computed_only=False):
         """What the panel and the Intensity window say RIGHT NOW.
+
+        `computed_only` (block PA-5b) is the "is anything unsaved?" question:
+        parameters only, no pixels. A channel nobody tuned has no number of
+        its own until its automatic window is worked out, and working it out
+        here read whole-slide pixels on the GUI thread -- 34.7 s at the first
+        Step1 entry on the A5 synthetic slide. Instead such a channel takes
+        the window the committed snapshot froze for it, when that snapshot
+        is bound to these same pixels (`_with_committed_auto_windows`).
 
         This is what the previews draw. It is not what a segmentation search
         runs on: a search that re-read the live panel would change subject
@@ -8641,13 +8695,40 @@ class MainWindow(QMainWindow):
         # live dictionary: a snapshot holding a reference to it would keep
         # changing under the job that was given it, which is the whole thing a
         # snapshot exists to prevent.
+        mapping = (self._with_committed_auto_windows(
+                       self._display_mapping(computed_only=True) or {})
+                   if computed_only else self._display_mapping())
         return {
             "fusion_config": copy.deepcopy(self._effective_fusion_config()),
-            "display_mapping": copy.deepcopy(self._display_mapping() or {}),
+            "display_mapping": copy.deepcopy(mapping or {}),
         }
 
+    def _with_committed_auto_windows(self, mapping):
+        """`mapping` plus, for each channel it lacks, the AUTOMATIC window the
+        committed snapshot froze -- only while the snapshot is bound to the
+        pixels on screen (same correct run, source and slide): an automatic
+        window is a function of those pixels, so it is the same number. A
+        tuned window is never filled in: it is in the draft or it differs."""
+        snap = self._committed_fusion_settings() or {}
+        saved = snap.get("display_mapping") or {}
+        missing = [ch for ch, p in saved.items()
+                   if ch not in mapping and isinstance(p, dict) and p.get("auto")]
+        if not missing:
+            return mapping
+        bound, current = snap.get("bound_to"), self._settings_binding()
+        if (not isinstance(bound, dict) or current is None
+                or any(bound.get(k) != current.get(k)
+                       for k in ("correct_run", "source_identity", "raw_ome_path"))):
+            return mapping
+        out = dict(mapping)
+        for ch in missing:
+            out[ch] = copy.deepcopy(saved[ch])
+        return out
+
     def _fusion_settings_hash(self, draft=None):
-        draft = self._fusion_settings_draft() if draft is None else draft
+        # No draft: the model asking "is it dirty?" (its only such call) --
+        # parameters only, never a pixel read (block PA-5b).
+        draft = self._fusion_settings_draft(computed_only=True) if draft is None else draft
         return self._step1_config_hash(draft)
 
     def _committed_fusion_settings(self):
@@ -8686,6 +8767,7 @@ class MainWindow(QMainWindow):
         self._update_fusion_settings_state()
         return True
 
+    @_perf("restore.fusion_settings")
     def _restore_fusion_settings(self):
         """Adopt the saved snapshot, but only if it is THIS handoff's.
 

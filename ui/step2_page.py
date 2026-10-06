@@ -155,6 +155,7 @@ class Step2Page(QWidget):
     # Block RM (§5, §9): the Input drop-down -- a fuse run chosen / its ×.
     fuse_chosen = pyqtSignal(str)
     fuse_delete_requested = pyqtSignal(str)
+    _overview_ready = pyqtSignal(object)   # (token, array or None, error)
 
     # Tile status colours
     _COL_IDLE    = (80,  80,  80)
@@ -164,6 +165,8 @@ class Step2Page(QWidget):
 
     def __init__(self, parent=None, metrics=None, title_bar=None):
         super().__init__(parent)
+        self._ov_token = None
+        self._overview_ready.connect(self._on_overview_ready, Qt.QueuedConnection)
         # The page frame (block A1b S3): the window hands over the one
         # `StepFrameMetrics` and a title bar built like Step3's; a page
         # standing on its own (the page-level tests) measures its own.
@@ -1247,6 +1250,7 @@ class Step2Page(QWidget):
             if self._zarr_edit.text().strip():
                 self._zarr_edit.setText('')
             self._zarr_path = None
+            self._forget_overview()
             self.set_region_inputs({})
             return
         item = self._fuse_items[index]
@@ -1685,42 +1689,60 @@ class Step2Page(QWidget):
             self._zarr_info.setText(f'⚠ Failed to open zarr: {e}')
 
     def _load_overview_from_zarr(self, z):
-        """Load nucleus channel (index 1) downsampled as overview."""
+        """The nucleus overview under the tile grid (block PA-5b fix 2b).
+
+        Its geometry follows from the store's shape and is set at once, so
+        the grid is drawn now. Its pixels are the overview Generate sampled
+        and saved beside the store (`core.nucleus_overview`), or -- for a
+        store saved before that -- the old strided read of the store; either
+        way loaded and contrast-stretched OFF the GUI thread (the strided
+        read froze Step2's entry for 4.7 s on the A5 synthetic slide). A
+        result for a store no longer shown is dropped."""
+        from ..core import nucleus_overview as nov
+        ds = nov.stride(z.shape)
+        self._ov_h, self._ov_w = nov.overview_shape(z.shape)
+        self._ov_ds = ds
+        self._ov_img.clear()
+        self._ov_vb.setRange(QRectF(0, 0, self._ov_w, self._ov_h), padding=0.01)
+        self._draw_tile_grid()
         self._ov_status.setText('Loading overview…')
-        try:
-            # Block S2T: long side at most 4096 px (was a fixed 1/32, a mosaic
-            # when zoomed). The read decodes the same chunks at any stride.
-            ds  = max(1, -(-max(int(z.shape[0]), int(z.shape[1])) // OVERVIEW_LONG_SIDE))
-            # Read as uint16 then normalise — avoids float setImage issue
-            arr_raw = z[::ds, ::ds, 1]
-            arr     = arr_raw.astype(np.float32)
-            nz      = arr[arr > 0]
-            if nz.size > 100:
-                lo, hi = np.percentile(nz, [1, 99.5])
-                if hi > lo:
-                    arr = np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
-                else:
-                    arr = np.zeros_like(arr)
-            else:
-                arr = np.zeros_like(arr)
+        path, shape = self._zarr_path, tuple(z.shape)
+        token = self._ov_token = object()
 
-            self._ov_h  = arr.shape[0]
-            self._ov_w  = arr.shape[1]
-            self._ov_ds = ds
+        def _work():
+            try:
+                arr = nov.load(path, shape)
+                if arr is None:
+                    arr = nov.read_from_store(z)
+                    nov.remember(path, arr)       # this session only; old runs stay as saved
+                result = (token, nov.normalised(arr), None)
+            except Exception as exc:              # noqa: BLE001 -- shown, not raised
+                result = (token, None, exc)
+            self._overview_ready.emit(result)
 
-            # pyqtgraph requires levels=[min,max] when dtype is float
-            self._ov_img.setImage(arr, autoLevels=False, levels=[0.0, 1.0])
-            self._ov_vb.setRange(
-                QRectF(0, 0, self._ov_w, self._ov_h), padding=0.01
-            )
-            self._ov_status.setText(
-                f'Overview {self._ov_h}×{self._ov_w} px (1/{ds})'
-            )
-            self._draw_tile_grid()
-        except Exception as e:
-            import traceback as _tb
-            self._ov_status.setText(f'Overview failed: {e}')
-            print(f'[Step2 overview error]\n{_tb.format_exc()}')
+        import threading
+        threading.Thread(target=_work, name="step2-overview", daemon=True).start()
+
+    def _forget_overview(self):
+        """No store any more: a pending overview is dropped and the old
+        picture goes (codex PA-5b)."""
+        self._ov_token = None
+        self._ov_img.clear()
+        self._ov_status.setText('')
+
+    def _on_overview_ready(self, result):
+        token, arr, exc = result
+        if token is not getattr(self, "_ov_token", None):
+            return                                 # another store is shown now
+        if exc is not None or arr is None:
+            self._ov_status.setText(f'Overview failed: {exc}')
+            print(f'[Step2 overview error] {exc}')
+            return
+        # pyqtgraph requires levels=[min,max] when dtype is float
+        self._ov_img.setImage(arr, autoLevels=False, levels=[0.0, 1.0])
+        self._ov_status.setText(
+            f'Overview {self._ov_h}×{self._ov_w} px (1/{self._ov_ds})'
+        )
 
     # ── tile grid overlay ─────────────────────────────────────────────
 
@@ -1781,15 +1803,45 @@ class Step2Page(QWidget):
                 self._overlap_spin.blockSignals(False)
             self._update_tile_info()
 
+    _vram_gb_cache = []          # (block PA-5b) asked once per process
+
     @staticmethod
     def _detect_vram_gb():
+        """The first GPU's memory in GiB, or None. Block PA-5b: `import torch`
+        on the GUI thread just to ask this froze the first Step2 entry for
+        7.4 s (measured), so torch is used only when something already loaded
+        it; otherwise `nvidia-smi` answers (MiB, the same number to within the
+        driver's rounding -- the tile rule compares it with 16 and 40 GB)."""
+        cache = Step2Page._vram_gb_cache
+        if cache:
+            return cache[0]
+        value = None
         try:
-            import torch
-            if torch.cuda.is_available():
-                return torch.cuda.get_device_properties(0).total_memory / (1024.0 ** 3)
+            import sys
+            torch = sys.modules.get("torch")
+            if torch is not None and torch.cuda.is_available():
+                value = torch.cuda.get_device_properties(0).total_memory / (1024.0 ** 3)
         except Exception:
-            pass
-        return None
+            value = None
+        if value is None:
+            # CUDA's device 0 is the first of CUDA_VISIBLE_DEVICES (an index
+            # or a UUID, both of which `nvidia-smi -i` takes); none visible ->
+            # no GPU (codex PA-5)
+            import os
+            import subprocess
+            visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+            first = "0" if visible is None else visible.split(",")[0].strip()
+            if first and first != "-1":
+                try:
+                    out = subprocess.run(
+                        ["nvidia-smi", "-i", first, "--query-gpu=memory.total",
+                         "--format=csv,noheader,nounits"],
+                        capture_output=True, text=True, timeout=3).stdout
+                    value = float(out.strip().splitlines()[0]) / 1024.0
+                except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+                    value = None
+        cache.append(value)
+        return value
 
     def _draw_tile_grid(self):
         """Overlay tile rectangles on the overview."""

@@ -664,8 +664,25 @@ class Step1WholeSlideMount(QtCore.QObject):
     def _on_gpu_color(self, _channel, _hexc):
         self._refresh_gpu("colour")
 
-    def _on_gpu_mapping(self, _channel):
+    def _on_gpu_mapping(self, channel):
+        # Block PA-5b fix 1b (user ruling 2026-10-06): a window moved on a
+        # channel the picture does not compose changes no pixel of it, so it
+        # redraws nothing. Restoring a session adopts all 29 windows one by
+        # one, and each one used to recompose the whole picture (3.3 s on the
+        # A5 synthetic slide). "Composes" is the composition's own answer --
+        # weight above 0 -- not "drawn now": a ticked channel whose window
+        # is only now arriving must be redrawn when it does.
+        if channel and not self._gpu_composes(channel):
+            return
         self._refresh_gpu("intensity")
+
+    def _gpu_composes(self, channel):
+        try:
+            spec = draft_spec.build_spec(self._domain, self._state, self._mode,
+                                         scope=STEP1_SCOPE)
+        except Exception:                                  # noqa: BLE001
+            return True                    # unsure: redraw, as before
+        return str(channel) in self._gpu_spec_channels(spec)
 
     def _on_gpu_visibility(self, _channel, _visible):
         self._refresh_gpu("visibility")

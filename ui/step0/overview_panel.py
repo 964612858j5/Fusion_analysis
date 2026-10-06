@@ -38,6 +38,7 @@ from ...core.fusion_engine import (
 from ...core.channel_remap import apply_channel_remap
 from ...core.provenance import write_json_atomic
 from ...core import bg_parallel
+from ...core import nucleus_overview
 from ...utils import dataset_trace
 from ...utils import tissue_log
 from ...utils import perf_trace
@@ -721,6 +722,9 @@ class FullFusionWorker(QThread):
                         tile, all_channels, region_sources, packed, ry0, rx0,
                         groups, group_weights, nucleus_ch, nucleus_w)
 
+                # Block PA-5b fix 2b: Step2's nucleus overview, sampled from
+                # the very pixels written here (no re-read of the store)
+                overview = nucleus_overview.Sampler((rh, rw))
                 t0 = time.time()
                 with contextlib.closing(bg_parallel.ordered_results(
                         _unit, tiles, n_workers,
@@ -731,6 +735,7 @@ class FullFusionWorker(QThread):
                             return
                         # Write to zarr (relative coords within this region)
                         out_zarr[ty0 - ry0:ty1 - ry0, tx0 - rx0:tx1 - rx0, :] = fused
+                        overview.add(fused, ty0 - ry0, tx0 - rx0)
                         del fused
 
                         done_s = time.time() - region_t0
@@ -758,8 +763,14 @@ class FullFusionWorker(QThread):
                 out_zarr.attrs["complete"] = True
                 del out_zarr
                 gc.collect()
+                nucleus_overview.forget(zarr_path)   # the old store's, if replaced
                 self._publish_store(tmp_path, zarr_path)
                 self._tmp_stores.remove(tmp_path)
+                try:
+                    nucleus_overview.save(zarr_path, overview.array)
+                except OSError as exc:          # auxiliary: Step2 reads the store instead
+                    print(f"[Fusion] nucleus overview not saved ({exc})")
+                del overview
                 if self.register_provenance:
                     self._register_fused(zarr_path, ome_path, rname, (ry0, ry1, rx0, rx1),
                                          all_channels)

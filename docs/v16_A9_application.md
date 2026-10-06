@@ -1,0 +1,350 @@
+# v16 A9 申请 v1.3：以性能门槛收敛视图
+
+日期：2026-10-06。依据：架构基准 v2.4 §20（A9）、§21 裁定（C1–C7，2026-09-30）；用户 2026-10-05 / 10-06 裁定（PA-5b：视图类卡顿交给 A9）。
+
+**本文件是 §20.3 工作顺序的第 1 步：写明判据、建议门槛和测量方法。** 之后按以下顺序进行：
+- 第 2 步：只读基线测量。只允许加测量工具，见 §3 的 A9-M 块。
+- 第 3 步：用户根据基线定下最终门槛并锁定。
+- 第 4 步：开始实现。优化的结果不能反过来修改门槛。
+
+用户批准之前不改任何代码。
+
+---
+
+## 0. 结论摘要
+
+1. **今天的视图已经具备工具箱里的大部分机制**（§1）。最粗层垫底、粗层常驻加内存核算、代际取消、GPU 着色器做亮度/伽马/合成，这些都已有。缺的主要是三样：
+   - 视图仍然绕过 `PixelSource`，直接读 `RawTileProvider`。基准 v2.4 §20.3 规定"视图显示的每个像素都经 `PixelSource`"，所以**这次迁移是 A9 的必做项**，不是可选优化，需要 P0 和 AGENTS.md 第 5 条两项批准（§6、§7）；
+   - 未激活通道的粗层没有后台预热；
+   - GPU 请求按光栅顺序发出，不是从中心向外。
+2. **冲突 C2 不存在**：Step1/Step3 的 GPU 片元着色器（`ui/shaders/step1_gpu.frag`）已经负责窗口、伽马和合成，不需要新增"仅显示"例外。
+3. **门槛目前无法测量**（§2）：
+   - 没有覆盖/驻留掩膜（A9-1/2/3 依赖它）；
+   - 读取器没有读取计数（A9-5/6 依赖它）；
+   - `viewer/` 里没有任何计时点；
+   - 合成拼图只有 3 层，A9-7 要求的 7 层拼图还不存在。
+   - 因此第 2 步之前先要做一个只加测量工具的小块 **A9-M**（§3），需要单独批准。
+4. **已有的真实测量**（PA-5a，合成图，2026-10-05）可以作为预览：
+   - 进入 Step3：0.5 s，之后约 1.5 s 无响应；
+   - 再次进入 Step1：0.7 s，之后约 2 s；
+   - 其余时间里另有 20 多次 200–500 ms 的界面卡顿。
+   - 这些都远超 A9-4 建议的 32 ms。
+
+## 1. 现状盘点：工具箱逐项（只读，2026-10-06）
+
+### 1.1 视图栈
+
+一共有 4 套栈，都由同一组类构成：`ExploreView` / `ExploreController`、`TileScheduler` 和 `RawTileProvider`。
+
+| 栈 | 建立位置 | 读取器 / 缓存 | 共享 |
+|---|---|---|---|
+| Step0 全图 | `ui/step0/step0_explore_tab.py:277` | 自己的 `RawTileProvider` + 原始 / 校正 LRU | 与 compare 共享缓存、概览和底图 |
+| Step0 compare（3 个面板） | `ui/step0/compare_strip.py:223` | 1 个新 `RawTileProvider` + 1 个调度器 | 借用全图的缓存 |
+| Step1 | `ui/step1_viewer_host.py:400`（`Step1TileProvider` 包装） | 自己的一整套 + GPU 层 | 无 |
+| Step3 | 同一个类的第二个实例（`labels=True`） | 又一整套 + GPU 层 | 无 |
+
+Step0 不使用 GPU 路径。
+
+### 1.2 工具箱逐项
+
+| # | 机制 | 现状 | 证据 | 若要做的代价 |
+|---|---|---|---|---|
+| 1 | 直接 TIFF 图块解码器作为 `OmeTiffSource.read_native_tile()`；视图经 `PixelSource` 读 | **部分**：契约已有（`core/pixel_source.py:160–167`，`OmeTiffSource.native_tile_shape` 在 `sources/ome_tiff.py:141`），但 `read_native_tile` 走默认的 `read_region`（zarr 切片），**视图全部直接读 `RawTileProvider`** | `explore_view.py:3231/3577/3599/4120`、`scheduler.py:534`、`step1_viewer_host.py:122/149` | 解码器移植属中等（来自探针 `scripts/probe_v16_a2b_ngff.py:234` `TifAdapted`，已验证逐位相等、约 2 倍速）；4 套栈改走 `PixelSource` 是**最大**的一项 |
+| 2 | 最粗层垫底 | **已有**：GPU 路径每通道有完整的最粗层平面集（`step1_gpu_binding.py:12–24, 463–470`）；Step0 用"上一层 + 概览底图" | | — |
+| 3 | 粗层常驻 + 内存核算 | **已有，但只覆盖激活通道**：GPU 粗层每通道 32 MB、细层 48 MB、纹理总量 512 MB（`core/resource_tiers.py:74–76`），超预算的通道拒绝绘制并在角标里提示；**未激活通道的粗层没有后台预热** | `step1_gpu_binding.py:459–475` | 后台预热属中等，可复用 `multichannel_prefetch` 的排序 |
+| 4 | 原生 dtype 的解码缓存；着色器做亮度和合成 | **部分**：着色器已做窗口、伽马和合成（**C2 不存在**）；Step0 缓存是原生 dtype，但 **Step1/Step3 的缓存和纹理都是 float32**（`step1_viewer_host.py:122–131`、`step1_gpu_layer.py:355–367` `GL_R32F`），用 NaN 表示"缺"，所以占用是原生数据的 4 倍（uint8 切片） | | 中等（约 1–2 天）：整数纹理加单独的有效掩膜，改上传代码和着色器读取，结果逐位不变 |
+| 5 | 视口外圈预取 | **部分**：Step0 有 1 圈原始预取和平移方向预取；GPU 路径没有 | `explore_view.py:1717–1719, 897–913` | 低到中 |
+| 6 | 预热更细一层 | **无** | | 低到中 |
+| 7 | 缩小时的层级下限 | **部分**：Step0 有校正底图；GPU 的最粗层覆盖整张切片 | `explore_view.py:3487, 840–841` | — |
+| 8 | 中心优先 + 过期与取消 | **部分**：Step0 和调度器已有中心优先和代际取消；**GPU 的 `_key_order` 按光栅顺序**（`step1_gpu_binding.py:935`） | | **低**（一个函数） |
+| 9 | 高通道数时自适应降级 | **部分**：超预算时拒绝绘制（失败即关闭），没有自适应 | `step1_gpu_binding.py:141, 564–572` | 低到中 |
+| 10 | 主线程从不等 IO | **部分**：建栈时同步读整层概览（`explore_view.py:3323`，文档实测 p95 293 ms）、compare 和全图建栈时的 `load_overview`、`RawTileProvider(...)` 在界面线程打开 TIFF 并解析 OME-XML（`step1.entry.raw_provider`），CPU 回退路径的 `_load_overview_for_the_cpu_picture` | | 低到中 |
+
+另外：`ui/step1_gpu_binding.py:1–4` 的文档仍写着"test-only adapter"，但生产代码已经在用（`step1_viewer_mount.py:56, 442`）。A9 会顺带改正这处文档。
+
+## 2. 测量工具：已有的和缺的
+
+| 判据 | 已有 | 缺 |
+|---|---|---|
+| A9-1 首个可用粗帧 | `step1.entry.*` 计时点（建栈、GPU 启动、GL 初始化） | 覆盖掩膜（"视口被激活通道的粗层完全覆盖"）；从打开命令到首个完全覆盖帧的计时；多次重复以求 p95 |
+| A9-2 无缺块 | Step0 的回退面积统计（`_visible_tiles`） | 每帧的覆盖/驻留掩膜（跨所有层级）、每次绘制时评估、缺块帧计数 |
+| A9-3 拖动 / 缩放后目标层到位 | 交互基准 `scripts/benchmark_step1_gpu_interaction.py`（离屏） | 最后一次输入的时间戳，以及掩膜报告"可见块全部到目标层" |
+| A9-4 无 > 32 ms 阻塞 | `perf_trace` 5 ms 心跳，阈值 25 ms，记为 `gui.gap`；分析器 `docs/perf_timeline/analyze_perf_log.py --gaps` | 视图代码里没有计时点，卡顿无法归因；`start_heartbeat` 不能设阈值；`[gui-watchdog]` 是 2 s 级，不适用 |
+| A9-5 调亮度 0 次读取 | `intensity.*` 计时点 | 读取器上的读取计数（`RawTileProvider.open_count` 只统计打开文件的次数） |
+| A9-6 切换通道 | 交互基准的 `new_channel_timeline`、缓存命中统计 | 同上的读取计数和掩膜；预热完成时间 |
+| A9-7 资源（12 GB 档） | `scripts/measure_a5.py`、GPU 纹理预算统计 | **7 层拼图**（`make_synthetic_mosaic.py` 没有金字塔倍率选项）；各缓存声明上限的汇总表（A5 清单已有大部分） |
+| A9-8 无镜头漂移 | `test_v16_zero_drift.py`（50 次步骤往返）、`test_v16_a7_camera_owner.py` | 50 次拖动 / 缩放 / 切换通道的脚本 |
+
+**测量方式**：
+- 离屏基准收不到真实的帧交换，所以 A9-1、A9-3、A9-4 必须在**真实显示**（WSLg）上测。
+- 合成图的 OME 金字塔目前是 3 层（L0 30874×32430、L1 7718×8107、L2 1929×2026，×4 倍率）。
+
+## 3. A9-M：测量工具块（需单独批准，不改视图行为）
+
+只加测量，视图的行为和像素不变。默认关闭，只有 `BLOCK01_PERF=1` 时生效。
+
+1. **覆盖掩膜**（新模块 `viewer/coverage_probe.py`）：判断**真正画出来的那一帧**，而不是"已驻留"（codex 意见 2）。
+   - 按激活通道分别判断，只算当前数据源、当前代际的块；过期或隐藏的块不算。
+   - GPU 路径要计入平面的有效掩膜（NaN 表示缺，`step1_gpu_binding.py:756`，着色器 :26–27）。
+   - CPU 路径把概览和底图的合法回退算作"已覆盖"。
+   - 只在切片 / ROI 的有效范围内判断。
+   - 时间戳取"呈现"：GPU 路径用 `frameSwapped`，CPU 路径用绘制完成，而不是上传或开始绘制的时刻。
+   - 输出每帧的 `coverage` 标记：粗层是否完全覆盖、是否全部在目标层、缺块数。
+   - 只读这些数据结构，不改动它们。
+2. **读取计数**：放在**真正的读取边界上**，不重复计数（codex 意见 3）。
+   - 原始图：只计在 `RawTileProvider.read_region`（`read_tile` 内部也调用它，:336）。
+   - 校正 / 派生产物：计在 `viewer/step1_source.py:593、632` 的读取处，以及 `CorrectedZarrSource` 的读取处。
+   - 每次读取标明来源（原始 / 校正、通道、层级）。
+   - 累计计数器只是整数；计时开启时另发 `read` 标记。读取本身不变。
+3. **视图计时点**：在建栈、概览读取、GPU 上传、首帧绘制和切换通道处加 `perf_trace.span`，方式与 PA-5a 相同，开启时才生效。
+4. **心跳阈值**：`start_heartbeat` 接受 `gap_ms` 参数，A9 测量时用 16 ms，以便看清 32 ms 附近的情况。
+5. **脚本化测量驱动**（`scripts/a9_drive.py`，加环境变量 `BLOCK01_A9_SCRIPT`）：
+   - 在真实程序、真实显示上，用 QTimer 按固定顺序执行：打开切片 → 首帧 → 平移 / 缩放序列 → 切换通道 → 调亮度 → 切换步骤；每组重复 N 次（建议 20 次）以求 p95。
+   - 每个阶段都打标记，结果写进 perf 日志。
+   - 用户只需启动一次，不必手动操作。
+   - 测量语义（codex 意见 4）：
+     - QTimer 会被卡顿推迟，所以计划时刻和实际送达时刻**分开记录**，延迟从实际送达算起；
+     - 冷打开指程序启动后第一次打开切片，热打开指再次打开（WSL 里不清操作系统页缓存，这一点写进报告）；
+     - 断言"0 次读取"之前，先等后台读取全部结束；
+     - A9-8 统计镜头的"回写"次数（复用 A7 的审计），不比较最终位置——拖动本身就会移动镜头。
+     - 现有的步骤切换不变量继续保留。
+6. **分析脚本**（扩展 `docs/perf_timeline/analyze_perf_log.py`）：直接输出 A9-1 到 A9-6 的 p50/p95、缺块帧数、读取次数和最大卡顿。
+7. **7 层拼图**：`make_synthetic_mosaic.py` 现在的层数取自源图（:136–139），所以只加倍率选项仍然只有 3 层（codex 意见 6）。
+   - 需要增加 `--pyramid-factor 2` 和层数规则：一直减半，直到最长边小于 512。
+   - `verify` 也要按新的层数检查。
+   - 层尺寸统一用 `(n + 1) // 2` 取整：30874×32430 → … 共 7 层以上，具体数值以生成器的输出为准。
+   - 新文件约 4.6 GB（原文件 3.7 GB，基准 C5 估算约多 1 GB）。生成前先检查 C: 的剩余空间。
+8. **A9-8 脚本**：并入第 5 项的驱动：50 次拖动、缩放和切换通道，之后检查 A1 / A7 的不变量（复用现有审计）。
+
+9. **测量本身的开销**（codex 意见 7）：
+   - 每帧的掩膜和每次读取的记录都限量、轻量；
+   - 日志丢弃的条数写进报告；
+   - 计时开 / 关的像素逐位比较之外，再比较一次耗时。
+
+**白名单（A9-M）**：
+- 新增：`viewer/coverage_probe.py`、`scripts/a9_drive.py`；测试 `tests/test_v16_a9m_coverage_probe.py`、`tests/test_v16_a9m_read_counters.py`、`tests/test_v16_a9m_neutral.py`。
+- 修改：
+  - `viewer/raw_tile_provider.py`、`viewer/step1_source.py`、`sources/corrected_zarr.py`（只加计数器）、`utils/perf_trace.py`（`gap_ms` 参数）；
+  - `viewer/explore_view.py`、`ui/step1_gpu_layer.py`、`ui/step1_gpu_binding.py`、`ui/step1_viewer_mount.py`（只加计时点和掩膜挂钩）；
+  - `docs/perf_timeline/analyze_perf_log.py`、`scripts/make_synthetic_mosaic.py`；
+  - `ui/main_window.py` / `ui/step0/step0_page.py` 只加接线行。
+
+**验收（A9-M）**：
+- 计时关闭时，所有现有测试结果不变。
+- 计时开启时，程序行为不变：视图的像素逐位相同（关 / 开对比），镜头测试全部通过。
+- 新的 7 层拼图通过 `make_synthetic_mosaic.py verify`。
+
+预计 1.5–2 天，计入 A9 的上限（开发 8 天 + 真机 2 天）。
+
+## 4. 基线测量（第 2 步）
+
+- **数据**：
+  - 3 层合成拼图（现有，代表真实产品）；
+  - 7 层合成拼图（新建，深金字塔压力测试）；
+  - `cropped_region` 作为真实组织内容。
+- **范围**（建议，请裁定）：
+  - Step1 / Step3 的 GPU 视图（A9 的主战场）；
+  - Step0 全图（CPU 路径）；
+  - Step0 compare 面板只记录，不设门槛。
+- **方式**：用户用 `BLOCK01_A9_SCRIPT` 启动一次，驱动自动跑完；我读日志，出基线报告。每份拼图大约 10–15 分钟。
+- **资源**：同时挂 `measure_a5.py`（A9-7）。
+
+## 5. 建议门槛（第 3 步由用户定稿锁定）
+
+| # | 判据 | 建议门槛（基准 v2.4 原值） | 说明 |
+|---|---|---|---|
+| A9-1 | 首个可用粗帧 | p95 ≤ 300 ms | 从打开切片到视口被激活通道的粗层完全覆盖 |
+| A9-2 | 导航中无缺块 | 0 帧 | 以覆盖掩膜判断，不看像素颜色 |
+| A9-3 | 拖动 / 缩放后目标层到位 | p95 ≤ 150 ms | |
+| A9-4 | 界面线程单次阻塞 | 从不 > 32 ms（若基线显示 < 16 ms 容易做到，就收紧） | **建议把步骤切换也纳入**：PA-5a 实测的进入 Step1/Step3 后 1.5–2 s 无响应，归在这一项 |
+| A9-5 | 调亮度 / 对比度 / 伽马 | 0 次磁盘读取 | 断言 |
+| A9-6 | 切换通道 | 已驻留时 0 次读取；界面线程不等待；预热完成后 0 缺块帧 | 另记录预热完成时间（29 通道），不设门槛 |
+| A9-7 | 资源（12 GB 档） | 不 OOM；每个缓存不超过声明的上限 | 两份拼图都测 |
+| A9-8 | 镜头漂移 | A1 零漂移、A7 零回写的不变量仍然成立 | 50 次拖动 / 缩放 / 切换通道 |
+
+## 6. 实施顺序（第 4 步）
+
+### 6.1 必做：视图改走 `PixelSource`（A9-P）
+- 基准 v2.4 §20.3 的"数据路径"一节要求视图显示的每个像素都经过 `PixelSource`（codex 意见 1）。这是必做项，与工具箱第 1 项的"直接解码器"优化分开。
+- 做法：新建一个提供方适配器，把 4 套栈的 `read_tile` / `read_region` / `level_shape` / `level_downsample` / `channel_names` / `warm_thread_handle` 接到 `OmeTiffSource`、`CorrectedZarrSource` 上。
+- 门槛：每一层的像素都与旧读取器逐位相等，旧路径作为对照（基准 §0.4 规则 2）。
+- 需要两项批准：
+  - v2.2 §5.2 规定的视图消费者迁移需单独批准（P0）；
+  - AGENTS.md 第 5 条：改视图的读取路径需要明确授权。
+  - 两项都在 §7 请用户裁定。
+- 放在优化之前做，后面的优化都建在它之上。
+
+### 6.2 工具箱：先便宜的，每做一项测一次，达标即停
+1. #10 把剩余的同步读取移出界面线程：建栈时的概览读取、`RawTileProvider` / 数据源的构造。
+2. #3 未激活通道粗层的后台预热（A9-6 要求"切换通道永不缺块"，基线若不达标就必做）。
+3. #4 原生 dtype 纹理（显存和内存约降到 1/4）。
+4. #5 / #6 外圈预取和预热更细一层：先测清它们的内存和 IO 代价再决定，不做投机预取（codex 意见 5）。
+5. #1 直接 TIFF 解码器，作为 `OmeTiffSource.read_native_tile()` 的实现（建在 6.1 之上）。
+6. #8 / #9（中心优先排序、按通道数自适应降级）：按裁定 C3，**只有前面各项不能达标时才做**。GPU 光栅顺序这一项虽然便宜，也一样遵守这条（codex 意见 5）。
+
+不做：
+- 换文件格式；
+- 改科学计算；
+- Rust（只能走停止规则 10）；
+- 拆分大文件；
+- 重写视图。
+
+## 7. 请用户裁定
+
+1. 批准 **A9-M 测量工具块**（§3）的范围和白名单。
+2. 基线范围：Step1/Step3 GPU 视图加 Step0 全图（建议）；compare 面板只记录。
+3. 基线方式：脚本驱动（建议），还是人工按固定顺序操作。
+4. 生成 7 层拼图（约 4.6 GB）。
+5. A9-4 把步骤切换纳入（建议）。
+6. 门槛在基线测完后再定（§20.3 规定的流程，不需要现在裁定）。
+7. 实施顺序（§6）是否同意。
+8. **批准视图改走 `PixelSource`**（§6.1）：v2.2 §5.2 的 P0 批准，以及 AGENTS.md 第 5 条对改视图读取路径的授权。实施前另交一份细化方案（适配器接口和逐位对照测试）。
+
+## 8. 审核记录
+
+- 2026-10-06 codex（gpt-6-astra low）审核 v1：结论 approve with changes。盘点结论核对无误（视图直读 `RawTileProvider`、`read_native_tile` 走默认实现、float32 / `GL_R32F`、着色器负责映射与合成、GPU 光栅顺序、建栈时同步读取）；把步骤切换纳入 A9-4 与 §20.3 一致；没有新增哈希。7 条意见已全部并入 v1.1：
+  1. 高：`PixelSource` 迁移是必做项 → §0、§6.1、§7 第 8 项。
+  2. 高：覆盖掩膜要判断真正画出的那一帧 → §3 第 1 项。
+  3. 读取计数要放在真正的读取边界上 → §3 第 2 项及白名单。
+  4. 驱动的测量语义 → §3 第 5 项。
+  5. 实施顺序要遵守 C3，不做投机预取 → §6.2。
+  6. 7 层拼图要改层数规则 → §3 第 7 项。
+  7. 测量开销 → §3 第 9 项，以及白名单中的测试文件名。
+
+
+## 9. 用户裁定（2026-10-07）
+
+- 批准 **A9-M 测量块**、**脚本驱动的基线**、**视图改走 `PixelSource`（A9-P，必做）**。这一条同时给出 v2.2 §5.2 的 P0 批准和 AGENTS.md 第 5 条对改视图读取路径的授权。
+- 本节的实施计划经 codex 审核、按意见修改后**直接执行**，不再交用户过目。
+- **尚未裁定**：7 层拼图（约 4.6 GB）、各判据的门槛、A9-4 是否纳入步骤切换。因此在用户跑完基线、锁定门槛之前，**不做任何工具箱优化**（§20.3 第 4 条）。
+- 用户最在意的是：进入 Step1 不够顺、拖动很卡。PA-5 交接过来的三个遗留点作为基线的头号场景：
+  1. 进入 Step1 后约 3 s 卡在 Qt 内部，没有任何 Python 调用；
+  2. 拖动时 GPU 绘制卡在 `glCheckError`，记录到一次 4.8 s；
+  3. 组织预览的融合合成每次 2.2–2.7 s，期间界面卡 1–2 s。
+
+## 10. 实施计划（v1.2）
+
+### 10.1 A9-M：测量工具（行为中立）
+
+所有新增内容只在 `BLOCK01_PERF=1` 时生效；关闭时不发事件，也不增加明显开销（计数器只是一次整数加一）。
+
+1. **读取计数**（新模块 `viewer/read_ledger.py`）：
+   - 进程内的累计计数，按来源分：原始图（`raw`）、校正产物（`corrected`）、整图概览（`overview`）；同时按通道和层级累计。
+   - 计数点只放在真正的读取边界：
+     - `RawTileProvider.read_region`（`read_tile` 会调用它，所以只计这里一次）；
+     - `CorrectedRegion.read`（`viewer/step1_source.py`）。
+   - 计时开启时另发 `read` 标记（来源、通道、层级、像素数、耗时）。
+   - 提供 `snapshot()` 和 `delta(before)`，供测试和驱动断言"0 次读取"。
+2. **视图计时点**（`perf_trace.span`，方式同 PA-5a）：
+   - `Step1GpuLayer`：`submit`、`_render_overlay` / `_render_fusion`、纹理上传（`_TextureLru.prepare`）、`paintGL`；并用 `frameSwapped` 发呈现标记 `gpu.present`；
+   - `Step1GpuBinding`：`_accept_result`、`_publish_current`、`refresh_display`；
+   - `ExploreController`（Step0 全图）：`load_overview`、图块上屏；
+   - `TissueComposeWorker`：一次合成的总耗时（在工作线程里）；
+   - `TileScheduler`：读取、计算。
+3. **心跳**：`start_heartbeat(parent, label, gap_ms=None)`，主窗口用环境变量 `BLOCK01_PERF_GAP_MS`（默认 25）。
+4. **覆盖探针**（新模块 `viewer/coverage_probe.py`）：
+   - 只读当前数据结构，判断**画出来的那一帧**：
+     - GPU 路径：每个参与合成的通道，用当前代际已发布的平面（粗层完整集和细层平面），对照视口（裁到切片 / ROI 范围），算出"粗层覆盖率"和"目标层覆盖率"。平面的有效掩膜（NaN 表示缺）计为未覆盖。
+     - CPU 路径：图元池中当前代际的块，加上概览和底图回退。
+   - 在每次 `gpu.present`（GPU）或绘制完成（CPU）时评估，发 `coverage` 标记（粗层是否全覆盖、目标层覆盖率、缺块数）。
+   - 评估成本有上限：视口块数 ≤ 几百，只做集合运算。
+5. **驱动**（`scripts/a9_drive.py`，由 `BLOCK01_A9_SCRIPT=<场景文件>` 在主窗口启动后加载）：
+   - 用 QTimer 按场景执行：等待打开项目、切换步骤、平移 / 缩放（直接调用视图的公开相机接口模拟拖动，每一步都是一次真实的相机变化）、切换通道、调亮度、在组织预览开着时拖动。
+   - 每个动作都记录计划时刻和实际送达时刻。
+   - 断言"0 次读取"之前，先等后台读取全部结束（调度器空闲，设上限）。
+   - 场景用 JSON 描述，自带默认场景 `a9_default.json`，覆盖 §5 的各项，每组重复 20 次。
+   - 驱动只在设置了环境变量时加载；没设置时完全不存在。
+6. **分析**：`docs/perf_timeline/analyze_perf_log.py` 加 `--a9`，输出：
+   - 各判据的 p50 / p95；
+   - 卡顿列表及每次卡顿当时在跑的计时段；
+   - 读取次数；
+   - 缺块帧数。
+7. **A9-8**：驱动里的 50 次拖动 / 缩放 / 切换通道，统计相机的写入次数，复用 A7 的审计计数：用户导航每次只写一次，程序的跳转只经跳转通道。
+8. **中立性检查**（测试 `tests/test_v16_a9m_neutral.py`）：
+   - 计时开 / 关两种情况下，视图读出的像素逐位相同（覆盖 Step0 和 Step1 的读取路径）；
+   - 计时关闭时不产生任何事件；
+   - 读取计数在开 / 关时都正确。
+
+不做：7 层拼图，等用户裁定。
+
+**白名单（A9-M）**：
+- 新增：`viewer/read_ledger.py`、`viewer/coverage_probe.py`、`scripts/a9_drive.py`、`scripts/a9_default.json`；测试 `tests/test_v16_a9m_read_ledger.py`、`tests/test_v16_a9m_coverage_probe.py`、`tests/test_v16_a9m_neutral.py`、`tests/test_v16_a9m_drive.py`。
+- 修改（只加计数、计时和挂钩，不改行为）：
+  - `viewer/raw_tile_provider.py`、`viewer/step1_source.py`、`viewer/explore_view.py`、`viewer/scheduler.py`；
+  - `ui/step1_gpu_layer.py`、`ui/step1_gpu_binding.py`、`ui/step1_viewer_mount.py`、`workers/tissue_compose_worker.py`；
+  - `utils/perf_trace.py`、`docs/perf_timeline/analyze_perf_log.py`；
+  - `ui/main_window.py`：只加启动驱动和心跳参数的接线行。
+
+### 10.2 A9-P：视图改走 `PixelSource`（必做，用户已批准）
+
+**原始图**：
+1. `OmeTiffSource` 增加可选参数 `provider`：传入时直接用这个读取器，不再自己打开第二套句柄。TIFF 的元数据（原生图块尺寸、OME 通道名、物理尺寸）改为第一次用到时才读。不传时行为不变。
+2. 新模块 `viewer/source_tile_provider.py`：`SourceTileProvider(source)`。
+   - 对视图提供与 `RawTileProvider` 相同的接口（`read_tile` / `read_region` / `level_shape` / `level_downsample(_yx)` / `num_levels` / `num_channels` / `channel_names` / `channel_index` / `source_identity` / `warm_thread_handle` / `close` / `path` / `open_count` / `describe`）。
+   - **像素一律经 `source.read_region`**。先按 `RawTileProvider` 完全相同的规则把请求裁到层级范围内（`raw_tile_provider.py:357–361`）；裁完为空时，返回同样形状和 dtype 的空数组，不去调用数据源（因为 `intersect` 遇到空范围会抛 `OutOfBounds`）；通道按 `RawTileProvider.channel_index` 换成整数后再交给数据源，保证通道命名规则不变。
+   - 元数据和句柄预热交给数据源内部的读取器（数据源自己的事，视图不再直接打开 TIFF）。
+3. 工厂函数 `open_viewer_source(path)`：
+   - `raw = raw_tile_provider.RawTileProvider(path)`，按模块属性查找，测试里对 `RawTileProvider` 的替换仍然生效；
+   - 返回 `SourceTileProvider(OmeTiffSource(path, provider=raw))`。
+4. 三处生产代码的构造改用这个工厂：
+   - `ui/step0/step0_explore_tab.py:277`
+   - `ui/step0/compare_strip.py:223`
+   - `ui/step1_viewer_host.py:400`
+
+**校正产物（Step1/Step3）**：
+5. `Step1SourceTable` 的默认打开方式改为 `CorrectedZarrSource`。
+   - `CorrectedRegion` 改为经 `source.read_region(channel, 0, …)` 读取，返回值保持 float32，读取范围的裁剪规则不变。
+   - **语义变化（记录在案）**：`CorrectedZarrSource` 按 Step4 的严格规则找组——只认这个 ROI 自己的组。原来的打开方式在找不到时会借用"第一个含有这个通道的组"。
+   - 改后，视图与 Generate、Step4 一致：在 A2c 之后它们都只认这个 ROI 的组。找不到时显示"缺少产物"的提示，而不是借用别的 ROI 的像素。
+   - 测试替身（`open_corrected` 参数）保留。
+
+**对照门槛（逐位）**：
+6. 新测试 `tests/test_v16_a9p_source_parity.py`：
+   - 在小型合成 OME-TIFF（3 层）上，`SourceTileProvider` 与 `RawTileProvider` 的 `read_region` / `read_tile` 结果（数组、dtype、原点）逐位相同。覆盖每一层、边缘、越界、空范围、整数通道和名字通道。
+   - 校正区域在新旧两种打开方式下逐位相同（ROI 自己的组存在时）。
+7. 真实数据：在合成拼图和 proj4 上，对随机 200 个区域做新旧逐位比较（脚本，结果写进执行记录）。
+8. `scripts/` 里的基准脚本不改，它们仍直接读 TIFF；它们不是视图。
+
+**白名单（A9-P）**：
+- 新增：`viewer/source_tile_provider.py`；测试 `tests/test_v16_a9p_source_parity.py`。
+- 修改：`sources/ome_tiff.py`（可选读取器参数、元数据延迟读取）、`viewer/step1_source.py`（校正产物的默认打开方式）、`ui/step0/step0_explore_tab.py`、`ui/step0/compare_strip.py`、`ui/step1_viewer_host.py`（各改一行构造）。
+- 若测试因构造方式的变化需要调整，只改环境搭建部分，不改断言。
+
+### 10.3 顺序、审核与回归
+
+1. 先做 A9-P，后做 A9-M，好让计数点落在最终的读取边界上。每一项都先过 codex 代码审核，再跑定向回归。
+2. 两项都完成后跑一次全量回归，与基线比较。
+3. 写执行记录和增长报告。
+4. 准备好用户的基线测量：一条启动命令，场景文件和预计时长写清楚。
+
+### 10.4 codex 审核计划 v1.2 → v1.3（2026-10-07，approve with changes，7 条全部采纳）
+
+1. **高：校正路径不止读文件**。`_open` 同时带出产品身份（attrs）和已保存的粗层；而 `CorrectedZarrSource` 选组的规则不同，粗层附属文件的几何也不同。
+   → **改为不切换到 `CorrectedZarrSource`**。新增派生数据源 `viewer/array_pixel_source.py` `ArrayRegionSource(PixelSource)`：
+   - 包住**已经打开的**那个数组（一个通道、一个层级、带它在切片上的原点）；
+   - `CorrectedRegion.read` 和 `CoarsePlane.tile` 都经它的 `read_region` 读像素；
+   - 选组规则、身份和粗层校验全部不变（**不做语义改变**）；
+   - 符合基准 §20.3 "校正或派生数据源"的写法。
+2. **中：注入读取器时，整数通道不能要求读 TIFF**。`OmeTiffSource(provider=…)` 时：
+   - 通道换算交给 `provider.channel_index`（读取器没有这个方法时原样传递），保留原始图的别名规则和整数通道行为；
+   - 不读 TIFF 元数据，除非真的用到原生图块尺寸 / OME 名称 / 物理尺寸；
+   - 关闭后即使是空范围的读取也照样拒绝。
+   - 测试替身若不完整，只补环境搭建部分，文件已列入白名单。
+3. **中：读取计数漏了粗层**。计数点改为放在 `ArrayRegionSource.read_region`，分别标 `corrected` / `coarse`，加上原始图的 `RawTileProvider.read_region`；每次读取只计一次。另加用途标记（例如 `overview`），但不重复计数。
+4. **高：覆盖要对应真正画出的那一帧**。
+   - GPU：在 `Step1GpuLayer.submit` 用**实际提交**的描述（每个通道选中的平面）计算覆盖；每个平面到达时一次性算一个 16×16 的有效格（NaN 算无效），之后不再重复算；视口按 64×64 的格子判断覆盖。每帧代价有上限：平面数 × 256。
+   - 帧编号随提交递增，下一次 `frameSwapped` 发呈现标记时带上这个编号，覆盖结果就对应到这一帧。
+   - CPU：只算可见、不透明、当前代际的图元，加上已载入的概览和底图，同样按 64×64 格判断；呈现时刻取视口的绘制事件之后。
+5. **中：驱动的拖动要走真实输入**。
+   - 拖动和滚轮场景向视图的视口**投递真实的鼠标和滚轮事件**，走用户手势的同一条路径；"程序直接设置相机"的场景单独标明。
+   - "画面稳定"的定义：调度器空闲，没有待送达的结果，最后一次提交之后已经呈现过一次，并且覆盖到了目标层（或超时）。仅仅调度器空闲不算稳定。
+6. **中：中立性检查要更全面**。
+   - CPU 视图在计时开 / 关时截屏逐像素比较；
+   - GPU 画面的截屏比较放进硬件开关测试（`BLOCK01_REQUIRE_STEP1_GPU=1`），由驱动在真机上再做一次；
+   - 镜头不变量照常测试；
+   - 计数和覆盖探针的单次开销用微基准测试断言有上限（每帧小于 1 ms）。
+7. **低：白名单封闭**：
+   - 新增：`viewer/array_pixel_source.py`、`scripts/a9p_parity.py`；
+   - 可能需要调整环境搭建的现有测试：`test_step0_explore_tab.py`、`test_step0_floor_prefetch.py`、`test_step0_cache_sharing.py`、`test_step0_method_prefetch.py`、`test_step1_gpu_overview_skip.py`、`test_step0_original_after_cached_switch.py`、`test_step0_compare_tiles.py`、`test_step1_source*.py`（只改替身，不改断言）。
+
+§10.2 第 5 条（改用 `CorrectedZarrSource`）以本节第 1 条为准，原写法作废。

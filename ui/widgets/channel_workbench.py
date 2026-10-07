@@ -1630,6 +1630,11 @@ class ChannelWorkbench(QtWidgets.QWidget):
         timer.start()
 
     def _on_progressive_tick(self):
+        # Block A9-O1: a canvas that went off screen stops loading for it
+        if self._preview_is_offscreen():
+            self._stop_progressive_load()
+            self._preview_dirty = True
+            return
         # Recheck visibility every tick: a channel unchecked since scheduling is
         # skipped (stale-load guard).
         pending = self._pending_progressive_channels()
@@ -1662,7 +1667,16 @@ class ChannelWorkbench(QtWidgets.QWidget):
         whole preview patch for that hidden canvas: 360 ms per slider step
         and 943 ms per channel switch on a real slide, for zero pixels on
         screen. Hosts that never detach are unaffected.
+
+        Block A9-O1 (user ruling 2026-10-07: remove the old multichannel
+        preview canvas): Step0's Intensity panel host NEVER shows its canvas
+        -- the page keeps it hidden -- so it is off screen whenever it is not
+        visible, detached inspector or not. Before the Intensity window was
+        first opened the old rule still composed it on every Step1 tick and
+        Intensity change (215-314 ms on the GUI thread, A9 baseline).
         """
+        if self._step0_intensity_panel and not self.isVisible():
+            return True
         return self._inspector_detached and not self.isVisible()
 
     def showEvent(self, event):

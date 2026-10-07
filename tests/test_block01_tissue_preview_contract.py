@@ -122,6 +122,9 @@ class _InlineTissueFrames:
         self._worker.cache = preview_compose.PreviewCache()
         self._compose = TissueComposeWorker._compose
         coordinator._dispatch = self._submit
+        # This rig reads its pixels off panels it never shows (`_thumb`); the
+        # A9-O1 hidden-panel hold is pinned by its own test below.
+        coordinator.hold_hidden_frames = False
 
     def _submit(self, snapshot):
         self.submitted.append(snapshot)
@@ -1889,5 +1892,37 @@ def test_two_ticked_markers_both_reach_the_fusion_picture(app):
                      or {}).values():
             used.update((data.get("channels") or {}).keys())
         assert {"CD3", "CD8"} <= used
+    finally:
+        w.close()
+
+
+# ── A9-O1: nothing composes for a Tissue Preview nobody can see ──────────
+
+def test_a_hidden_tissue_preview_owes_its_frame_until_a_panel_is_shown(app):
+    """User ruling 2026-10-07: hidden components stop working. In Step1 the
+    Step0 page's panel is off screen and the navigator closed, so a change
+    composes nothing -- and the owed frame is drawn the moment the
+    navigator is shown, with the state as it is then."""
+    w = _window(app)
+    co = w._display.coordinator
+    try:
+        _goto(w, 1)
+        co.hold_hidden_frames = True
+        frames = w._tissue_frames
+        before = len(frames.delivered)
+        published = co.frame_stats()["published"]
+
+        w.config.set_channel_visible("CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.7)
+        _pump(w)
+        assert len(frames.delivered) == before, "composed for hidden panels"
+        assert co.frame_stats()["published"] == published
+        assert co._owed_rev is not None
+
+        w._step0.show_tissue_navigator()
+        _pump(w)
+        assert len(frames.delivered) > before, "the owed frame never came"
+        assert co.last_published()["mode"] == tissue_compose.MODE_OVERLAY
+        assert co._owed_rev is None
     finally:
         w.close()

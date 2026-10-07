@@ -418,6 +418,7 @@ class Step0Page(QWidget):
         self._dataset_gen = 0
         # 预览结果缓存（供toggle复用）和zoom联动防循环flag
         self._last_payload = None
+        self._owed_own_redraws = set()     # A9-O1: replayed when Step0 is back
         # ── entering and leaving compare mode ────────────────────────
         #
         # The two modes hand a camera to each other and the trip has to be
@@ -7093,6 +7094,9 @@ class Step0Page(QWidget):
         # Invalidate this channel's cached composites, then redraw.
         for k in [k for k in self._preview_cache if k[0] == ch]:
             del self._preview_cache[k]
+        if self._owe_own_redraw(ch):
+            self.channel_color_changed.emit(ch, self._channel_color_hex(ch))
+            return
         if ch == self.current_channel and self._last_payload is not None:
             self._rebuild_payload_rgb(ch)
             self._refresh_preview_display(keep_zoom=True)
@@ -8693,6 +8697,8 @@ class Step0Page(QWidget):
             # the stale ones before anything else redraws from them.
             with perf_trace.span("step0.mapping_emit", channel=cid):
                 self.display_mapping_changed.emit(cid)
+            if self._owe_own_redraw(cid):
+                return
             if cid in (self.current_channel, self.nucleus_channel):
                 with perf_trace.span("step0.compare_setters", channel=cid):
                     self._refresh_preview_display(keep_zoom=True)
@@ -9789,6 +9795,47 @@ class Step0Page(QWidget):
             return True
         return scope() in ("", self.DISPLAY_SCOPE)
 
+    def _owe_own_redraw(self, ch):
+        """Block A9-O1 (user ruling 2026-10-07: nothing hidden keeps
+        working): while another step is up, this page's own views -- compare
+        panels, full image, its tint -- are off screen, so a mapping or a
+        colour moved there is remembered instead of redrawn, and replayed
+        once when Step0 comes back (`resync_display_from_state`). What other
+        steps listen to (the signals, the workbench) is never held back."""
+        if self._display_scope_is_mine():
+            return False
+        self._owed_own_redraws.add(ch)
+        return True
+
+    def _replay_owed_redraws(self):
+        owed, self._owed_own_redraws = self._owed_own_redraws, set()
+        explore_tab = getattr(self, "_explore_tab", None)
+        stack = explore_tab.stack if explore_tab is not None else None
+        for ch in owed:
+            if ch == self.current_channel and self._last_payload is not None:
+                self._rebuild_payload_rgb(ch)
+            self._push_channel_tint_to_compare(ch)
+            if stack is None or ch not in (self.current_channel,
+                                           self.nucleus_channel):
+                continue
+            if ch == self.current_channel:
+                controller = getattr(stack, "controller", None)
+                set_tint = getattr(controller, "set_tint", None)
+                if set_tint is not None:
+                    set_tint(self._full_image_tint(ch))
+                set_marker = getattr(controller, "set_display_mapping", None)
+                if set_marker is not None:
+                    lo, hi, gamma = self.display_window(ch)
+                    set_marker(lo, hi, gamma, channel=ch)
+            if ch == self.nucleus_channel:
+                set_nuc = getattr(getattr(stack, "overlay", None),
+                                  "set_display_mapping", None)
+                if set_nuc is not None:
+                    lo, hi, gamma = self.display_window(ch, nucleus=True)
+                    set_nuc(lo, hi, gamma)
+        if owed & {self.current_channel, self.nucleus_channel}:
+            self._refresh_preview_display(keep_zoom=True)
+
     def resync_display_from_state(self):
         """Redraw this page from ITS OWN display answers, once.
 
@@ -9808,6 +9855,7 @@ class Step0Page(QWidget):
         if selected:
             self._on_channel_selected_by_id(selected)
         if self._display_scope_is_mine():
+            self._replay_owed_redraws()
             self._start_preload()
 
     def _on_channel_selected_by_id(self, cid):

@@ -726,3 +726,65 @@ def test_a_first_patch_click_starts_no_loader_behind_the_slide_viewer(
             f"the rollback path stopped starting its loader: {built}"
     finally:
         _close(rig)
+
+
+def test_the_hidden_patch_picture_composes_nothing_and_is_repaid(
+        app, monkeypatch, tmp_path):
+    """Block A9-O1 (user ruling 2026-10-07): the old patch preview behind
+    the whole-slide viewer takes no snapshot and no worker compose; the
+    frame is owed, and drawn when the rollback puts the old view back."""
+    rig = _window(app, monkeypatch, tmp_path)
+    try:
+        _in(rig, 1)
+        assert rig.w._step1_whole_slide_active()
+        snaps = []
+        monkeypatch.setattr(rig.w, "_frame_snapshot",
+                            lambda rev: snaps.append(rev) or None)
+        monkeypatch.setattr(rig.w, "_frame_now", lambda: 0.0)
+        monkeypatch.setattr(rig.w, "_arm_frame_timer", lambda ms: None)
+        rig.w._frame_last_publish = -10.0
+
+        rig.w._schedule_preview_update()
+        rig.w._apply_pending_preview_update()
+        assert snaps == [], "a snapshot for a picture nobody can see"
+        assert rig.w._frame_pending_rev is None
+        assert rig.w.__dict__.get("_legacy_preview_owed") is True
+
+        rig.w._step1_mount.restore_legacy()
+        rig.w._repay_legacy_preview()
+        rig.w._apply_pending_preview_update()
+        assert snaps, "the owed frame was never drawn"
+        assert "_legacy_preview_owed" not in rig.w.__dict__
+    finally:
+        _close(rig)
+
+
+def test_step0_views_are_redrawn_once_when_step0_is_back(
+        app, monkeypatch, tmp_path):
+    """Block A9-O1: a mapping moved while Step1 is up still tells Step1
+    (the signal), but Step0's own off-screen views wait and are redrawn
+    once on return."""
+    rig = _window(app, monkeypatch, tmp_path)
+    try:
+        page = rig.w._step0
+        _in(rig, 1)
+        assert not page._display_scope_is_mine()
+        heard, redraws = [], []
+        page.display_mapping_changed.connect(heard.append)
+        monkeypatch.setattr(page, "_refresh_preview_display",
+                            lambda **k: redraws.append(k))
+        ch = page.current_channel or "CD3"
+        page.current_channel = ch
+
+        page._on_display_mapping_changed(ch)
+        page._on_display_mapping_changed(ch)
+        assert heard == [ch, ch], "Step1 stopped hearing about the mapping"
+        assert redraws == [], "Step0 redrew views nobody can see"
+        assert page._owed_own_redraws == {ch}
+
+        _in(rig, 0)
+        assert page._display_scope_is_mine()
+        assert len(redraws) == 1, redraws
+        assert page._owed_own_redraws == set()
+    finally:
+        _close(rig)

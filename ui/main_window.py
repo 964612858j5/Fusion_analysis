@@ -513,6 +513,8 @@ class MainWindow(QMainWindow):
         # in the same popup, and Step2/Step3 navigate in it. Every step is
         # handed this object and asks it -- no step reaches into another.
         self._display = Block01DisplayServices(self)
+        # A9-O1: no Tissue Preview compose for panels nobody can see
+        self._display.coordinator.hold_hidden_frames = True
         self.loader = None   # loaded on demand when user clicks "Load"
         self.fusion = FusionEngine()
         self.worker = None
@@ -2360,6 +2362,7 @@ class MainWindow(QMainWindow):
         if opened is None:
             self._step1_mount_refused_for = path
             mount.restore_legacy()
+            self._repay_legacy_preview()
             return False
         self._step1_mount_refused_for = None
         mount.set_mode(self._step1_preview_mode)
@@ -2461,6 +2464,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:                            # noqa: BLE001
             print(f"[Step1-Viewer] rebind failed: {exc}")
             mount.restore_legacy()
+            self._repay_legacy_preview()
             return False
 
     def _step3_sync_whole_slide_source(self, reason="handoff"):
@@ -2479,6 +2483,12 @@ class MainWindow(QMainWindow):
         except Exception as exc:                            # noqa: BLE001
             path = str(getattr(getattr(self, "loader", None), "filepath", "") or "")
             return self._step3_viewer_failed(mount, path, exc)
+
+    def _repay_legacy_preview(self):
+        """The old patch view is back on screen: draw the frame it was owed
+        while the whole-slide viewer covered it (block A9-O1)."""
+        if self.__dict__.pop("_legacy_preview_owed", False):
+            self._schedule_preview_update()
 
     def _step1_whole_slide_active(self):
         """Is the whole-slide viewer the picture Step1 is showing?
@@ -8082,6 +8092,19 @@ class MainWindow(QMainWindow):
         rev = self._frame_pending_rev
         if rev is None:
             self._preview_update_pending = False
+            return
+        if self._step1_whole_slide_active():
+            # Block A9-O1 (user ruling 2026-10-07: nothing hidden keeps
+            # working): the old patch picture is behind the whole-slide
+            # viewer, so no snapshot and no worker compose for it. The
+            # frame is owed and drawn if the old view ever comes back
+            # (`_repay_legacy_preview`); the Save button still follows.
+            self._frame_pending_rev = None
+            self._frame_coalesced = 0
+            self._preview_update_pending = False
+            self._legacy_preview_owed = True
+            perf_trace.mark("step1.defer", why="whole_slide", rev=rev)
+            self._update_fusion_settings_state()
             return
         coalesced, self._frame_coalesced = self._frame_coalesced, 0
         self._frame_pending_rev = None

@@ -1204,12 +1204,14 @@ def test_an_active_change_while_detached_recomposites_once_after_reattach(app, m
 
     wb.reattach_inspector()
 
-    assert len(calls) == 1, f"{len(calls)} composites on reattach, want 1"
-    assert not wb._preview_dirty
+    # Block A9-O1 (user ruling 2026-10-07): Step0's panel host never shows
+    # its old canvas, so reattaching the inspector replays nothing for it --
+    # the refresh stays owed until the canvas is actually on screen.
+    assert calls == [], f"{len(calls)} composites for a canvas nobody sees"
+    assert wb._preview_dirty
     assert not wb.inspector_is_detached()
-    # And it is paid back only once: a second reattach has nothing to replay.
     wb.reattach_inspector()
-    assert len(calls) == 1
+    assert calls == []
 
 
 def test_hidden_conditioning_host_never_replays_its_old_canvas(app, monkeypatch):

@@ -47,7 +47,7 @@ import time
 import weakref
 
 import numpy as np
-from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QVBoxLayout, QWidget
 
@@ -1127,6 +1127,11 @@ class TissuePreviewCoordinator(QObject):
         # a second view over the same ROI model, so "which panels" is a
         # question with a different answer at different times.
         self._panels_source = None
+        #: A9-O1: hold frames back from panels nobody sees. Off unless the
+        #: application turns it on: rigs drive panels they never show.
+        self.hold_hidden_frames = False
+        self._owed_rev = None          # a frame held back while hidden
+        self._watched_panels = weakref.WeakSet()
         self._panel_token_source = None
 
         self._timer = QTimer(self)
@@ -1432,6 +1437,21 @@ class TissuePreviewCoordinator(QObject):
             self._maybe_arm_next()
             return
 
+        if not self._any_panel_visible():
+            # Block A9-O1 (user ruling 2026-10-07: nothing hidden keeps
+            # working): the snapshot above has published the render spec
+            # other steps read; the pixels would only be drawn into panels
+            # nobody can see, so the compose is owed instead and paid the
+            # moment one of them is shown (`eventFilter`).
+            self._in_flight = False
+            self._owed_rev = rev
+            self._last_publish = self._now()
+            self._stats["deferred"] = self._stats.get("deferred", 0) + 1
+            perf_trace.mark("tissue.defer", why="hidden", rev=rev,
+                            owner=self._active)
+            return
+        self._owed_rev = None
+
         snapshot["coalesced"] = coalesced
         snapshot["input_rev"] = self._input_rev
         snapshot["input_at"] = self._input_at
@@ -1724,6 +1744,49 @@ class TissuePreviewCoordinator(QObject):
             return list(self._panels_source() or [])
         except Exception:                                   # noqa: BLE001
             return []
+
+    def _any_panel_visible(self):
+        """Is any panel a frame would be drawn into on screen? (A9-O1)
+
+        Only asked while a step OTHER than Step0 draws: Step0's own panel
+        lives on Step0's page, so then it is hidden by construction, and the
+        frame only matters if the floating navigator is open. While Step0
+        draws, its page is the one on screen and nothing is held back. No
+        panels registered, or a panel that cannot say, counts as visible.
+        Each panel is watched for its Show so an owed frame follows it.
+        """
+        if not self.hold_hidden_frames or self._active == STEP0:
+            return True
+        panels = self._panels()
+        if not panels:
+            return True
+        visible = False
+        for panel in panels:
+            probe = getattr(panel, "isVisible", None)
+            if not callable(probe):
+                return True
+            self._watch_panel(panel)
+            try:
+                visible = visible or bool(probe())
+            except RuntimeError:
+                continue
+        return visible
+
+    def _watch_panel(self, panel):
+        try:
+            if panel in self._watched_panels:
+                return
+            panel.installEventFilter(self)
+            self._watched_panels.add(panel)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+    def eventFilter(self, obj, event):                  # noqa: N802
+        if (event.type() == QEvent.Show and self._owed_rev is not None
+                and not self._closing):
+            self._owed_rev = None
+            self.request_frame(kind="shown")
+        return False
 
     # ── the worker ────────────────────────────────────────────────────
     def _worker_ready(self):

@@ -397,3 +397,7 @@ Step0 不使用 GPU 路径。
 - 看到 `[A9] scenario finished` 后关闭程序；
 - 分析：`python3 docs/perf_timeline/analyze_perf_log.py bench_a9/baseline_<时间>.log --a9`；
 - 7 层拼图（需用户裁定）之后再测一次。
+
+### 11.4 全量回归（2026-10-07，提交 `7fe0e93`，250 个模块，`bench_a9/full_reg/`）
+- 共 19 个失败用例，与 PA / RM / A7 / A8 回归的失败清单逐条比较，**没有新失败**。
+- `test_step0_channel_conditioning` 超时、`test_step1_montage_view` 崩溃，都与基线相同；GPU 硬件开关测试照例跳过。

@@ -92,6 +92,17 @@ def _viewer_widget():
     return top, top.mapFromGlobal(centre)
 
 
+def _mark_target(n, target):
+    """Which widget a gesture went to (A9 7-level run: a Step0 drag drew a
+    patch instead of panning) -- class, size and three ancestors."""
+    chain, w = [], target.parentWidget() if target is not None else None
+    while w is not None and len(chain) < 3:
+        chain.append(type(w).__name__)
+        w = w.parentWidget()
+    perf_trace.mark("a9.target", n=n, cls=type(target).__name__,
+                    w=target.width(), h=target.height(), up="/".join(chain))
+
+
 class Driver(QtCore.QObject):
     def __init__(self, window, actions):
         super().__init__(window)
@@ -277,6 +288,7 @@ class Driver(QtCore.QObject):
         target, pos = _viewer_widget()
         if target is None:
             raise RuntimeError("no viewer on screen")
+        _mark_target(self.i, target)
         handled = _Handled(target, self.i)
         notches = int(a.get("notches", 1))
         step = 1 if notches > 0 else -1
@@ -294,6 +306,7 @@ class Driver(QtCore.QObject):
         target, pos = _viewer_widget()
         if target is None:
             raise RuntimeError("no viewer on screen")
+        _mark_target(self.i, target)
         steps = max(1, int(a.get("steps", 20)))
         dx, dy = float(a.get("dx", 200)), float(a.get("dy", 0))
         ms = int(a.get("ms", 16))

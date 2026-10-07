@@ -4079,7 +4079,8 @@ class MainWindow(QMainWindow):
                       and mode != self._step1_preview_mode)
         previous_mode = self._step1_preview_mode
         if mode_moved:
-            self.set_preview_mode(mode, force=True, reconcile=False)
+            with perf_trace.span("restore.scientific_state.mode"):
+                self.set_preview_mode(mode, force=True, reconcile=False)
         # ...AND IT ROLLS BACK WITH THE REST. The mode is written before the
         # work that can fail -- the channel universe, the migration, the two
         # owners -- and it is not part of either owner's snapshot, so a
@@ -4089,8 +4090,9 @@ class MainWindow(QMainWindow):
         # rollback asks for no frame, no redraw and no save, and announces
         # nothing.
         try:
-            return self._restore_step1_session_owners(
-                sess, names, identity, mode_moved)
+            with perf_trace.span("restore.scientific_state.owners"):
+                return self._restore_step1_session_owners(
+                    sess, names, identity, mode_moved)
         except Exception:
             if mode_moved:
                 self.set_preview_mode(previous_mode, force=True,
@@ -8868,10 +8870,11 @@ class MainWindow(QMainWindow):
         # The stored hash is the file's own claim about itself; a file that was
         # edited would keep the old one. Recompute it from the content.
         stored = str(snapshot.get("hash") or "")
-        actual = self._fusion_settings_hash({
-            "fusion_config": snapshot.get("fusion_config"),
-            "display_mapping": snapshot.get("display_mapping"),
-        })
+        with perf_trace.span("restore.fusion_settings.hash"):
+            actual = self._fusion_settings_hash({
+                "fusion_config": snapshot.get("fusion_config"),
+                "display_mapping": snapshot.get("display_mapping"),
+            })
         if not stored or stored != actual:
             return _refuse("its contents do not match its hash")
         self._display.fusion.install_committed_snapshot(snapshot)
@@ -8883,10 +8886,12 @@ class MainWindow(QMainWindow):
         adopt = getattr(step0, "adopt_intensity", None)
         if adopt is not None and snapshot.get("display_mapping"):
             try:
-                adopt(snapshot["display_mapping"], origin="Step1's saved fusion settings")
+                with perf_trace.span("restore.fusion_settings.adopt_intensity"):
+                    adopt(snapshot["display_mapping"], origin="Step1's saved fusion settings")
             except Exception as exc:                        # noqa: BLE001
                 print(f"[Step1] saved windows not adopted: {exc}")
-        self._update_fusion_settings_state()
+        with perf_trace.span("restore.fusion_settings.update_state"):
+            self._update_fusion_settings_state()
         return snapshot
 
     def _on_save_fusion_settings_clicked(self, _checked=False):

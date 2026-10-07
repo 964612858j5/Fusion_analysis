@@ -6,7 +6,6 @@ import sys
 import multiprocessing as mp
 
 from PyQt5 import QtGui
-from PyQt5.QtWidgets import QApplication
 import pyqtgraph as pg
 
 pg.setConfigOptions(antialias=True, imageAxisOrder="row-major")
@@ -16,7 +15,10 @@ from .utils.gui_watchdog import start_gui_watchdog
 
 
 def main():
-    app = QApplication(sys.argv)
+    # Block A9: with BLOCK01_PERF_DISPATCH=1 (and BLOCK01_PERF=1) slow Qt
+    # event deliveries are traced; otherwise this is a plain QApplication.
+    from .utils import perf_dispatch
+    app = perf_dispatch.make_application(sys.argv)
     app.setStyle("Fusion")
 
     pal = QtGui.QPalette()

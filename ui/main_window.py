@@ -4501,12 +4501,16 @@ class MainWindow(QMainWindow):
             self._preseg_methods.set_progress(
                 "Restored: " + summary_line(self._preseg_records, len(run.get("tasks") or [])))
             used = str(state.get("used_combo") or "")
+            # Block A9-O3-6 (P3'): the pixel identity is worked out ONCE for
+            # this restore -- it opens the corrected arrays on disk, and the
+            # restore asked for it twice (~65 ms each on the A5 slide).
+            current = self._preseg_current()
             if used and self._params_source == PRESEG_SOURCE:
-                key, fhash = self._preseg_current()
+                key, fhash = current
                 ok, _why = preseg_run.selectable(run, self._preseg_records, used, key, fhash)
                 if ok:
                     self._preseg_selected = {"run": run, "combo_id": used}
-            self._refresh_preseg_results()
+            self._refresh_preseg_results(current=current)
             self._check_save_unlock()
             # every patch's result on the montage, as after a run
             self._show_montage_patches()
@@ -6076,10 +6080,12 @@ class MainWindow(QMainWindow):
         key, _, _ = self._preseg_source()
         return key, (self._committed_fusion_settings() or {}).get("hash")
 
-    def _refresh_preseg_results(self):
-        """Each row's state, and whether the chosen result is still valid."""
+    def _refresh_preseg_results(self, current=None):
+        """Each row's state, and whether the chosen result is still valid.
+        `current`: `_preseg_current()` already worked out by the caller in
+        the same handler (A9-O3-6, P3')."""
         run = self._preseg_run
-        key, fhash = self._preseg_current()
+        key, fhash = current if current is not None else self._preseg_current()
         supply = self.__dict__.get("_preseg_montage_supply")
         if supply is not None and key is not None:
             supply.set_pixel_key(key)             # other pixels: its caches go

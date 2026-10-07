@@ -832,3 +832,51 @@ codex 共 7 条意见，已逐条对照代码核实。第 1、2 条已确认：
 - a5 改动后有一次是 3.1 s，那次 GL 段卡了 889 ms，属于 WSL 唤醒。
 
 **诊断工具的已知问题**：打开 `BLOCK01_PERF_DISPATCH` 时，程序退出可能 SIGSEGV（6 次中 4 次）。关掉它的运行全部正常退出，包括含本次改动的 15 次。只影响诊断，不影响产品，也不影响测得的数据。
+
+### 21.7 O3-6 P3′、P4、P5′ 执行记录（2026-10-07 夜，用户批准）
+
+**先测量。** 用仓库外的 cProfile 包装测真实首次进入，并记录 GPU 层的几何（`bench_a9/prof/`）。
+
+- **P3′**：剖析时 `_rm_restore_preseg` 共 226 ms。
+  - 其中 134 ms 是 `_preseg_current` 被调用了两次，每次都打开校正产物的 zarr 数组来计算像素标识。
+  - 结果视图本身只有约 6 ms，推迟它不值得。
+  - 改法：恢复时只算一次，再通过 `_refresh_preseg_results(current=...)` 传给刷新。不改行为。
+- **P4**：剖析时两路状态安装约 250 ms，几乎都来自 `_announce_install` 的逐通道 `color_changed` / `mapping_changed` 信号。
+  - 调用链：`Step1WholeSlideMount._on_gpu_color` / `_on_gpu_mapping` → 33 次 `_refresh_gpu` → 462 次 `_request_gpu_seed` → 约 2 万次 `_overview_read_pending`。
+  - 改法：这两个回调在 `install_fanout_active()` 期间直接返回。安装时最先发出的是 `state_installed`，此时状态已经完整，由它刷新一次。Block01 的帧时钟已经用的是同一规则。
+- **P5′**：几何记录显示，矩形不变时 `setGeometry` 不会触发 QOpenGLWidget 改尺寸。再次进入时唯一一次 GL 改尺寸，是第一次再进入时宽度从 1018 真的变成了 979，温状态下只要 1.7 ms。之前测到的 375 ms，是撞上了 WSL 的 GPU 唤醒。**所以不改代码。**
+  - 遗留：首次进入时查看器宽 1018 px，之后都是 979 px，属于布局不一致。待用户决定是否处理。
+
+**改动**：
+- `ui/main_window.py` +11/−5（P3′）。
+- `ui/step1_viewer_mount.py` +16（P4）。
+- 新增测试 `tests/test_a9_o36_entry.py`，共 7 个，覆盖 P1′、P3′、P4。撤掉 P3′/P4 的改动后，对应的 2 个测试失败。
+- `tests/test_v16_rm2_chain.py:593`：替身改为接受关键字参数（只改环境搭建）。
+
+**审查**：codex 无发现，审查期间工作树未变。
+
+**定向回归**（42 个文件）：
+- 除下面这一个文件外全部通过。
+- `test_step1_montage_view.py` 在 `test_leaving_out_the_signal_or_the_nucleus_changes_only_the_montages_picture` 处整个进程崩溃（abort 或 SIGSEGV）。在 b5cfbea 和 14792cf 上同样崩溃，是旧问题。这个测试单独运行能通过；跳过它，其余 28 个也通过。
+
+**真机前后对比**：改动前 b5cfbea，与改动后交替运行，7 层和 a5 各 3 次。中位数：
+
+| | 7 层 改动前 → 改动后 | a5 改动前 → 改动后 |
+|---|---|---|
+| `restore.scientific_state.owners` | 123 → 35 | 118 → 39 |
+| `restore.preseg` | — | 196 → 109 |
+| `restore.session_fields` | 274 → 165 | 392 → 247 |
+| 首次进入 → 第一帧完整画面 | 1641 → 1157 | 2185 → 1853 |
+| 再次进入 | 199 → 195 | 280 → 334 |
+
+这一轮各次之间波动很大：改动前有一次跑出 5.7 s，改动后的 7 层是 0.9–1.7 s。所以首次进入的总时间只能看出方向，计时段上的节省（110–145 ms）是可靠的。
+
+**O3-6 合计**（相对 14792cf）：
+- `adopt_intensity`：约 245 / 290 → 70 / 107 ms；
+- 两路状态安装：约 230 → 35–40 ms；
+- 预分割恢复：约 200 → 109 ms；
+- 旧预览合成：60–90 → 0 ms。
+
+GUI 线程上合计省约 0.45 s（7 层）和 0.55 s（a5）。
+
+**3 层 ≤ 1 s**：等原生 Windows 实测后再定（用户裁定）。

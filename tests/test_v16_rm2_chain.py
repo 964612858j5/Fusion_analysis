@@ -590,7 +590,7 @@ def test_a_reopened_step1_gets_its_pre_segmentation_back(app, tmp_path, monkeypa
         from block01.ui import main_window as mw
         monkeypatch.setattr(mw.preseg_run, "selectable", lambda *a: (True, ""))
         monkeypatch.setattr(w, "_preseg_current", lambda: ("px", "fh"))
-        monkeypatch.setattr(w, "_refresh_preseg_results", lambda: None)
+        monkeypatch.setattr(w, "_refresh_preseg_results", lambda **_kw: None)
         w._params_source = mw.PRESEG_SOURCE
         assert w._rm_restore_preseg(state) is True
         assert w._preseg_run["run_id"] == os.path.basename(pre)

@@ -662,7 +662,21 @@ class Step1WholeSlideMount(QtCore.QObject):
         self._refresh_gpu("dataset")
 
     def _on_gpu_color(self, _channel, _hexc):
+        if self._install_fanout_active():
+            return          # the install's `state_installed` refreshed once
         self._refresh_gpu("colour")
+
+    def _install_fanout_active(self):
+        """Block A9-O3-6 (P4): a whole-state install is announcing its
+        fields. Its `state_installed` comes first, with every field already
+        written, and refreshes the GPU once; one refresh per colour and per
+        window after it was 33 rebuilds of the same snapshot on a restore
+        (~250 ms on the GUI thread). The frame clock follows the same rule."""
+        probe = getattr(self._state, "install_fanout_active", None)
+        try:
+            return bool(probe()) if probe is not None else False
+        except Exception:                                  # noqa: BLE001
+            return False
 
     def _on_gpu_mapping(self, channel):
         # Block PA-5b fix 1b (user ruling 2026-10-06): a window moved on a
@@ -673,6 +687,8 @@ class Step1WholeSlideMount(QtCore.QObject):
         # weight above 0 -- not "drawn now": a ticked channel whose window
         # is only now arriving must be redrawn when it does.
         if channel and not self._gpu_composes(channel):
+            return
+        if self._install_fanout_active():
             return
         self._refresh_gpu("intensity")
 

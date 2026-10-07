@@ -197,7 +197,8 @@ def gpu_frame(sources, viewport_world, roi_world=None, slide_world=None,
     `fine` planes and `selected_level`); `expected`: every channel the frame
     should compose -- one without a source is uncovered everywhere. Rects
     are (x0, x1, y0, y1) in level-0 world coordinates, like `world_rect`.
-    The TARGET level is the channel's selected one (coarse when zoomed out).
+    The TARGET level is the one the channel's viewport is owed
+    (`target_level`; the selected one when that is unset).
     """
     channels = dict(sources or {})
     for name in expected or ():
@@ -214,7 +215,11 @@ def gpu_frame(sources, viewport_world, roi_world=None, slide_world=None,
         fine = None
         if source is not None:
             _paint_planes(coarse, px, py, getattr(source, "coarse", ()))
-            if getattr(source, "selected_level", "coarse") == "fine":
+            # the level OWED, not the one drawn: coarse drawn first while
+            # the fine is on its way is not a complete frame (codex A9-O3-5)
+            wanted = (getattr(source, "target_level", "")
+                      or getattr(source, "selected_level", "coarse"))
+            if wanted == "fine":
                 fine = excluded.copy()
                 _paint_planes(fine, px, py, getattr(source, "fine", ()))
         coarse_cells = _cells(coarse)

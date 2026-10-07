@@ -868,18 +868,13 @@ class Step1GpuBinding(QtCore.QObject):
             coarse = self._published_coarse.get(channel)
             if not coarse:
                 continue
-            if (channel not in self._shown_channels
-                    and not self._viewport_fine_ready(channel)):
-                # FIRST APPEARANCE IS ALSO THE SHARP ONE. Its complete coarse
-                # is ready, but the current viewport's fine is not all in
-                # hand -- and it was asked for while the coarse was still
-                # loading, so it is normally close behind. Showing the
-                # channel now would put a blurry version of it on screen and
-                # then sharpen it in pieces, which is the two-step
-                # appearance this exists to remove. The picture that is up
-                # stays up until both are in hand; a channel ALREADY on
-                # screen is never held back.
-                continue
+            # COARSE FIRST, THEN SHARPER (block A9-O3-5, user ruling
+            # 2026-10-07: "follow Odon's design"). A channel appears the
+            # moment its complete coarse is in hand and sharpens tile by
+            # tile as its fine lands -- Odon draws coarse -> fine every
+            # frame with a per-channel fallback. This replaces G3.2b's
+            # hold-back until the viewport's fine was all in, which kept
+            # the first Step1 picture off the screen for ~2 s.
             shown.add(channel)
             # COARSEST FIRST, FINEST LAST. G1 draws a channel's planes in
             # the order given with blending off, so a finer plane overwrites
@@ -891,8 +886,13 @@ class Step1GpuBinding(QtCore.QObject):
                 resident.items(),
                 key=lambda item: (-int(item[0].tile.level),
                                   int(item[0].tile.ty), int(item[0].tile.tx))))
+            snapshot = self._latest_snapshot
+            wants_fine = bool(snapshot is not None
+                              and getattr(snapshot, "source", None) == self._source
+                              and self._visible_keys(channel, snapshot))
             channels.append(ChannelSource(channel, coarse=coarse, fine=fine,
-                                          selected_level="fine" if fine else "coarse"))
+                                          selected_level="fine" if fine else "coarse",
+                                          target_level="fine" if wants_fine else "coarse"))
         descriptor = SourceDescriptor(tuple(channels))
         try:
             stats = self.layer.submit(descriptor, display, viewport)

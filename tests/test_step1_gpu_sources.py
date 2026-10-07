@@ -433,19 +433,19 @@ def test_atomic_complete_coarse_uses_public_rawkeys_and_geometry(app):
             assert not any(any(source.channel == "A" for source in call[0].channels) for call in layer.calls)
         scheduler.deliver(requests[-1].key, array=np.full((4, 4), 0.2, np.float32))
         _events(app)
-        # G3.2b: the complete coarse is in, but this channel has never been
-        # drawn and its current viewport's fine is still on its way, so it
-        # is held back rather than shown blurry and then sharpened.
-        assert not any(any(source.channel == "A" for source in call[0].channels)
-                       for call in layer.calls)
+        # A9-O3-5 (user ruling 2026-10-07, Odon's design): the COMPLETE
+        # coarse appears at once, and the channel sharpens as its fine lands.
+        published = [call[0] for call in layer.calls if any(source.channel == "A" for source in call[0].channels)]
+        assert published, "a complete coarse is drawn at once"
+        first = next(source for source in published[0].channels if source.channel == "A")
+        assert len(first.coarse) == 4 and first.selected_level == "coarse"
         fine = _fine_requests(scheduler, "A")
         assert fine, "the viewport's fine must have been asked for"
         _deliver_all(app, scheduler, fine, value=np.full((4, 4), 0.5, np.float32))
         published = [call[0] for call in layer.calls if any(source.channel == "A" for source in call[0].channels)]
-        assert len(published) == 1, "the channel must appear exactly once"
-        a = next(source for source in published[0].channels if source.channel == "A")
+        a = next(source for source in published[-1].channels if source.channel == "A")
         assert len(a.coarse) == 4 and a.fine and a.selected_level == "fine", \
-            "the first appearance must already carry the viewport's fine"
+            "then it sharpens over the same complete coarse"
         assert {plane.identity for plane in a.coarse} == {request.key for request in requests}
         assert {plane.world_rect for plane in a.coarse} == {
             (0.0, 4.0, 0.0, 4.0), (4.0, 8.0, 0.0, 4.0),
@@ -1217,15 +1217,11 @@ def _drawn(layer):
     return set() if latest is None else {s.channel for s in latest.channels}
 
 
-def test_a_first_channel_over_the_fine_budget_stays_off_the_screen(app):
-    """G3.2b.1: a refused viewport is not 'ready'. Fail closed, stay hidden.
-
-    The complete coarse is in hand, but the current viewport's target level
-    does not fit the per-channel fine budget, so there is no plan in flight
-    and there never will be one. That must not be read as 'the fine is
-    ready' -- showing the coarse then would be exactly the blurry first
-    appearance this contract removes.
-    """
+def test_a_first_channel_over_the_fine_budget_shows_its_coarse_and_the_refusal(app):
+    """A refused viewport: the refusal is recorded and nothing is
+    half-requested, and -- A9-O3-5, user ruling 2026-10-07 (Odon's design:
+    coarse first, then sharper) -- the channel shows its complete coarse
+    rather than staying off the screen."""
     provider = _Provider(level_shape=(8, 8), levels=1)
     controller = _Controller(provider, visible_tiles=((0, 0), (1, 0)))
     scheduler = _Scheduler()
@@ -1256,20 +1252,23 @@ def test_a_first_channel_over_the_fine_budget_stays_off_the_screen(app):
         assert "target level needs" in str(stats["last_error"])
         assert not _fine_requests(scheduler, "B", marker), \
             "a refused viewport must not be half-requested"
-        assert _drawn(layer) == {"A"}, "B leaked its coarse onto the screen"
-
-        # An ordinary redraw must not let it out either.
+        assert _drawn(layer) == {"A", "B"}, "B's complete coarse is drawn"
+        latest = next(call[0] for call in reversed(layer.calls) if call[0].channels)
+        b = next(source for source in latest.channels if source.channel == "B")
+        assert b.selected_level == "coarse" and not b.fine
         for _ in range(3):
             binding.refresh_display()
             _events(app)
-            assert _drawn(layer) == {"A"}, "a refresh leaked the refused channel"
+            assert _drawn(layer) == {"A", "B"}
         assert "B" in binding.stats()["fine_budget_refused"]
     finally:
         binding.dispose()
 
 
-def test_a_first_channel_whose_fine_tile_fails_stays_off_the_screen(app):
-    """G3.2b.1: one failed tile is not 'ready' either."""
+def test_a_first_channel_whose_fine_tile_fails_keeps_what_it_has(app):
+    """One fine tile fails: the error is recorded, and -- A9-O3-5 (Odon's
+    design) -- the channel shows its complete coarse with the fine tile
+    that did land on top of it."""
     provider = _Provider(level_shape=(8, 8), levels=1)
     controller = _Controller(provider, visible_tiles=((0, 0), (1, 0)))
     scheduler = _Scheduler()
@@ -1301,18 +1300,17 @@ def test_a_first_channel_whose_fine_tile_fails_stays_off_the_screen(app):
 
         stats = binding.stats()
         assert "B" in stats["coarse_channels"]
-        # PARTIAL fine really is resident -- one tile landed, the other
-        # failed -- and the channel is STILL not on screen. That is the
-        # whole point: a partial viewport is not a reason to show it.
         assert stats["fine_tiles"].get("B") == 1, stats["fine_tiles"]
         assert "B" in stats["fine_channels"]
-        assert _drawn(layer) == {"A"}, "B leaked its coarse after a failed tile"
         assert "fine tile failed for B" in str(stats["last_error"])
-
+        assert _drawn(layer) == {"A", "B"}
+        latest = next(call[0] for call in reversed(layer.calls) if call[0].channels)
+        b = next(source for source in latest.channels if source.channel == "B")
+        assert len(b.coarse) and len(b.fine) == 1, "coarse, plus the tile that landed"
         for _ in range(3):
             binding.refresh_display()
             _events(app)
-            assert _drawn(layer) == {"A"}, "a refresh leaked the failed channel"
+            assert _drawn(layer) == {"A", "B"}
     finally:
         binding.dispose()
 

@@ -120,3 +120,18 @@ def test_a_sixteen_channel_frame_costs_a_few_milliseconds_at_most():
     for _ in range(20):
         cp.gpu_frame(srcs, (0, 8000, 0, 6000))
     assert (time.perf_counter() - t) / 20 < 0.005
+
+
+def test_a_coarse_picture_owed_its_fine_is_not_complete():
+    """Block A9-O3-5 (codex): with coarse drawn first, a frame that shows
+    only the coarse while the viewport is owed its fine is NOT complete."""
+    from types import SimpleNamespace
+    plane = SimpleNamespace(identity=("c",), world_rect=(0.0, 10.0, 0.0, 10.0),
+                            values=np.ones((4, 4), np.float32), valid=None)
+    drawn = SimpleNamespace(coarse=(plane,), fine=(), selected_level="coarse",
+                            target_level="fine")
+    owed = cp.gpu_frame({"A": drawn}, (0, 10, 0, 10))
+    assert owed["target_fraction"] == 0.0 and owed["gap_cells"] == 0
+    done = SimpleNamespace(coarse=(plane,), fine=(), selected_level="coarse",
+                           target_level="coarse")
+    assert cp.gpu_frame({"A": done}, (0, 10, 0, 10))["target_fraction"] == 1.0

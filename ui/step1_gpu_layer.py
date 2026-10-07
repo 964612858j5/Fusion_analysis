@@ -51,6 +51,10 @@ class ChannelSource:
     coarse: Tuple[RawPlane, ...] = ()
     fine: Tuple[RawPlane, ...] = ()
     selected_level: str = "coarse"
+    #: The level the viewport WANTS, for measurement only (block A9-O3-5,
+    #: codex): with coarse drawn first, what is drawn is not what is owed.
+    #: "" means the drawn level.
+    target_level: str = ""
 
     def selected_planes(self) -> Tuple[RawPlane, ...]:
         if self.selected_level == "coarse":

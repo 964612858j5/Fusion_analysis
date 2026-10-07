@@ -23,21 +23,27 @@ import collections
 import numpy as np
 
 GRID = 64          # reported viewport cells per side
-SAMPLES = 256      # sample points per side (SAMPLES // GRID per cell side)
+SAMPLES = 128      # sample points per side (SAMPLES // GRID per cell side)
 CELLS = 16         # validity cells per plane side
 _SUMMARY = collections.OrderedDict()      # plane identity -> CELLS x CELLS bool
 _SUMMARY_MAX = 4096
-#: The latest frame's result, and how many results have been published, for
-#: the A9 driver's "settled" test.
+_FULL = {}                                # plane identity -> fully valid?
+#: The latest frame's result per viewer kind ("cpu" Step0, "gpu" Step1/3,
+#: "cpu-step1" Step1's CPU view beneath its GPU layer -- not what is on
+#: screen), and how many results each has published, for the driver.
 LAST = None
+LAST_BY = {}
 PUBLISHED = 0
+PUBLISHED_BY = collections.Counter()
 
 
 def publish(result, where, frame=None):
     """Remember `result` as the latest frame's and emit it as a perf mark."""
     global LAST, PUBLISHED
     LAST = dict(result, where=where, frame=frame)
+    LAST_BY[where] = LAST
     PUBLISHED += 1
+    PUBLISHED_BY[where] += 1
     from ..utils import perf_trace
     perf_trace.mark("coverage", where=where, frame=frame, **result)
 
@@ -55,7 +61,9 @@ def _valid_cells(plane):
     valid = np.asarray(valid, bool)
     h, w = valid.shape[:2]
     out = np.zeros((CELLS, CELLS), bool)
-    if h and w:
+    if h and w and valid.all():
+        out[:] = True                     # the usual case, in one pass
+    elif h and w:
         ys = np.linspace(0, h, CELLS + 1).astype(int)
         xs = np.linspace(0, w, CELLS + 1).astype(int)
         for i in range(CELLS):
@@ -67,6 +75,41 @@ def _valid_cells(plane):
         while len(_SUMMARY) > _SUMMARY_MAX:
             _SUMMARY.popitem(last=False)
     return out
+
+
+def _summary(plane):
+    """(validity cells, fully valid?) -- both computed once per plane."""
+    key = getattr(plane, "identity", None)
+    full = _FULL.get(key) if key is not None else None
+    cells = _valid_cells(plane)
+    if full is None:
+        full = bool(cells.all())
+        if key is not None:
+            _FULL[key] = full
+            while len(_FULL) > _SUMMARY_MAX:
+                _FULL.pop(next(iter(_FULL)))
+    return cells, full
+
+
+def _paint_planes(covered, px, py, planes):
+    """`_paint` for many planes at once: one sorted search per edge for all
+    of them, then a slice write per fully valid plane (codex: neutrality --
+    the per-plane Python overhead was the probe's cost)."""
+    planes = [p for p in planes or ()]
+    if not planes:
+        return
+    rects = np.array([p.world_rect for p in planes], dtype=np.float64)
+    x0, x1, y0, y1 = rects[:, 0], rects[:, 1], rects[:, 2], rects[:, 3]
+    ix0, ix1 = np.searchsorted(px, x0, "left"), np.searchsorted(px, x1, "left")
+    iy0, iy1 = np.searchsorted(py, y0, "left"), np.searchsorted(py, y1, "left")
+    for k, plane in enumerate(planes):
+        if ix1[k] <= ix0[k] or iy1[k] <= iy0[k] or x1[k] <= x0[k] or y1[k] <= y0[k]:
+            continue
+        cells, full = _summary(plane)
+        if full:
+            covered[iy0[k]:iy1[k], ix0[k]:ix1[k]] = True
+        else:
+            _paint(covered, px, py, plane.world_rect, cells)
 
 
 def _clip(world, other):
@@ -106,13 +149,17 @@ def _paint(covered, px, py, rect, cells=None):
     rx0, rx1, ry0, ry1 = (float(v) for v in rect)
     if rx1 <= rx0 or ry1 <= ry0:
         return
-    ix = np.nonzero((px >= rx0) & (px < rx1))[0]
-    iy = np.nonzero((py >= ry0) & (py < ry1))[0]
-    if not ix.size or not iy.size:
+    # the sample points are sorted: a rectangle is a contiguous block of them
+    ix0, ix1 = np.searchsorted(px, rx0, "left"), np.searchsorted(px, rx1, "left")
+    iy0, iy1 = np.searchsorted(py, ry0, "left"), np.searchsorted(py, ry1, "left")
+    if ix1 <= ix0 or iy1 <= iy0:
         return
-    if cells is None:
-        covered[np.ix_(iy, ix)] = True
+    if cells is None or cells.all():
+        # fast path (codex/neutrality): a fully valid plane is a slice write
+        covered[iy0:iy1, ix0:ix1] = True
         return
+    ix = np.arange(ix0, ix1)
+    iy = np.arange(iy0, iy1)
     vx = np.minimum(((px[ix] - rx0) / (rx1 - rx0) * CELLS).astype(int), CELLS - 1)
     vy = np.minimum(((py[iy] - ry0) / (ry1 - ry0) * CELLS).astype(int), CELLS - 1)
     covered[np.ix_(iy, ix)] |= cells[np.ix_(vy, vx)]
@@ -121,6 +168,9 @@ def _paint(covered, px, py, rect, cells=None):
 def _cells(points_ok):
     """GRID x GRID: a cell is covered only if all its sample points are."""
     k = SAMPLES // GRID
+    if k == 2:                       # four strided ANDs: far cheaper than a reduce
+        return (points_ok[0::2, 0::2] & points_ok[1::2, 0::2]
+                & points_ok[0::2, 1::2] & points_ok[1::2, 1::2])
     return points_ok.reshape(GRID, k, GRID, k).all(axis=(1, 3))
 
 
@@ -161,21 +211,21 @@ def gpu_frame(sources, viewport_world, roi_world=None, slide_world=None,
     coarse_ok = True
     for source in channels.values():
         coarse = excluded.copy()
-        fine = excluded.copy()
+        fine = None
         if source is not None:
-            for plane in getattr(source, "coarse", ()) or ():
-                _paint(coarse, px, py, plane.world_rect, _valid_cells(plane))
-            level = getattr(source, "selected_level", "coarse")
-            if level == "fine":
-                for plane in getattr(source, "fine", ()) or ():
-                    _paint(fine, px, py, plane.world_rect, _valid_cells(plane))
-            target = fine if level == "fine" else coarse
+            _paint_planes(coarse, px, py, getattr(source, "coarse", ()))
+            if getattr(source, "selected_level", "coarse") == "fine":
+                fine = excluded.copy()
+                _paint_planes(fine, px, py, getattr(source, "fine", ()))
+        coarse_cells = _cells(coarse)
+        if fine is None:                  # the coarse level is the target
+            covered = target = coarse_cells
         else:
-            level, target = "coarse", coarse
-        covered = _cells(coarse | fine)
-        gap += int((~covered).sum())
-        coarse_ok = coarse_ok and bool(_cells(coarse).all())
-        target_cells += int(_cells(target).sum())
+            target = _cells(fine)
+            covered = _cells(coarse | fine)
+        gap += int(covered.size - np.count_nonzero(covered))
+        coarse_ok = coarse_ok and bool(coarse_cells.all())
+        target_cells += int(np.count_nonzero(target))
     return {"channels": len(channels), "coarse_complete": coarse_ok,
             "target_fraction": round(target_cells / (len(channels) * GRID * GRID), 4),
             "gap_cells": gap, "sampled": SAMPLES}

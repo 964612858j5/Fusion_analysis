@@ -361,7 +361,8 @@ def report_a9(records, gap_ms=32.0):
             elif a.get("settled") is not None:
                 settled[kind].append((a["settled"] - t_in) * 1000.0)
             first = next((t for t, r in covers if t >= t_in
-                          and (expect in (None, "None") or r.get("where") == expect)
+                          and (expect in (None, "None") or r.get("where") == expect
+                               or (expect == "gpu" and r.get("where") == "cpu-step1"))
                           and (num(r, "gap_cells", 1) or 0) == 0
                           and (num(r, "target_fraction", 0) or 0) >= 0.999), None)
             if first is not None and (a.get("settled") is None or first <= a["settled"]):
@@ -394,12 +395,19 @@ def report_a9(records, gap_ms=32.0):
     print(f"GUI stalls > {gap_ms:.0f} ms: {len(over)}  (max {max(gaps) if gaps else 0:.0f} ms, "
           f"p95 of stalls {_pct(over, 95) or 0:.0f} ms)")
     seen_full, gap_frames = False, 0
+    covers = [(t, r) for t, r in covers if r.get("where") in ("cpu", "gpu")]
     for _t, r in covers:
         cells = num(r, "gap_cells", 0) or 0
         if cells == 0:
             seen_full = True
         elif seen_full:
             gap_frames += 1
+    # every probe EXECUTION (several submissions can share one presented
+    # frame, and Step1's hidden CPU view is probed too) -- codex A9-M
+    probe = [num(r, "probe_ms", 0) or 0 for r in records if r.get("ev") == "coverage.probe"]
+    if probe:
+        print(f"coverage probe's own cost: total {sum(probe) / 1000:.2f} s, "
+              f"p95 {_pct(probe, 95):.2f} ms, max {max(probe):.2f} ms per frame")
     sampled = {r.get("sampled") for _t, r in covers}
     print(f"frames {len(covers)} (coverage sampled at {sorted(x for x in sampled if x)}); "
           f"frames with a gap after full coverage: {gap_frames}")

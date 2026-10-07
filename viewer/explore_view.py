@@ -2183,6 +2183,9 @@ class _A9PaintProbe(QtCore.QObject):
         self.controller = controller
         self._queued = False
         self._frame = 0
+        #: Step1's host relabels this "cpu-step1": that view is beneath the
+        #: GPU layer and its frames are not what is on screen.
+        self.where = "cpu"
         try:
             controller.view.graphics.viewport().installEventFilter(self)
         except Exception:                                   # noqa: BLE001 -- measuring only
@@ -2201,6 +2204,7 @@ class _A9PaintProbe(QtCore.QObject):
     def _evaluate(self):
         self._queued = False
         c = self.controller
+        started = time.perf_counter()
         try:
             by_level = {}
             for pool in (c._raw_pool, c._precise_pool):
@@ -2216,10 +2220,12 @@ class _A9PaintProbe(QtCore.QObject):
             result = coverage_probe.rect_frame(by_level, c.level, (vx0, vx1, vy0, vy1),
                                                floor_rects=floors,
                                                slide_world=(0, w, 0, h))
+            result["probe_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
+            perf_trace.mark("coverage.probe", where=self.where, probe_ms=result["probe_ms"])
         except Exception as exc:                            # noqa: BLE001 -- measuring only
             result = {"error": str(exc)[:120]}
         self._frame += 1
-        coverage_probe.publish(result, "cpu", self._frame)
+        coverage_probe.publish(result, self.where, self._frame)
 
 
 class ExploreController(QtCore.QObject):

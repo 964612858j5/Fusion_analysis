@@ -123,7 +123,30 @@ class Driver(QtCore.QObject):
             setattr(cls, name, counted)
 
     def start(self):
+        if self.actions and self.actions[0].get("do") == "open":
+            QtCore.QTimer.singleShot(1500, lambda: self._open(self.actions[0]))
+            self.i = 1
         self._wait_for_project()
+
+    def _open(self, a):
+        """Open a project as the user does: the three paths, Load, and the
+        named workspace in the chooser (answered here instead of clicked)."""
+        page = self.w._step0
+        page._ome_path_edit.setText(a["ome"])
+        page._out_path_edit.setText(a["out"])
+        page._panel_csv_edit.setText(a.get("panel", ""))
+        wanted = a.get("workspace")
+        real = page._choose_workspace
+
+        def choose(rows):
+            for row in rows:
+                ws = row[0] if isinstance(row, tuple) else row
+                if wanted is None or getattr(ws, "workspace_id", None) == wanted:
+                    return row
+            return real(rows)
+        page._choose_workspace = choose
+        perf_trace.mark("a9.open", workspace=wanted)
+        page._reload_from_paths()
 
     def _wait_for_project(self):
         ready = bool((getattr(self.w, "step0_output", None) or {}).get("step0_manifest_path"))
@@ -138,6 +161,8 @@ class Driver(QtCore.QObject):
 
     def _step(self):
         if self.i >= len(self.actions):
+            if os.environ.get("BLOCK01_A9_QUIT"):
+                QtCore.QTimer.singleShot(2000, QtWidgets.QApplication.quit)
             perf_trace.mark("a9.end", camera_user=self.camera["user"],
                             camera_jump=self.camera["jump"],
                             reads_total=read_ledger.snapshot().get("total", 0))
@@ -276,7 +301,7 @@ class Driver(QtCore.QObject):
         """Taken BEFORE the action runs (codex A9-M): what its settle is
         measured against -- frames published, reads, camera writes."""
         where = self._expected_where(action["to"] if action.get("do") == "step" else None)
-        self._base = {"published": coverage_probe.PUBLISHED,
+        self._base = {"published": dict(coverage_probe.PUBLISHED_BY),
                       "reads": read_ledger.snapshot(), "camera": dict(self.camera),
                       "where": where}
         return where
@@ -287,7 +312,7 @@ class Driver(QtCore.QObject):
         PRESENTED after this action began whose coverage is complete at its
         target level. A timeout is reported as such, never as settled."""
         deadline = time.monotonic() + timeout_s
-        base = self._base or {"published": coverage_probe.PUBLISHED,
+        base = self._base or {"published": dict(coverage_probe.PUBLISHED_BY),
                               "reads": read_ledger.snapshot(), "camera": dict(self.camera),
                               "where": self._expected_where()}
         start_published = base["published"]
@@ -302,9 +327,17 @@ class Driver(QtCore.QObject):
             reads = read_ledger.snapshot().get("total", 0)
             if reads != last["reads"] or read_ledger.in_flight():
                 last["reads"], last["since"] = reads, now
-            frame = coverage_probe.LAST or {}
-            presented = coverage_probe.PUBLISHED > start_published and (
-                where is None or frame.get("where") == where)
+            # Step1/3: the GPU layer's frames, or -- if the GPU could not start
+            # -- the host's own CPU view (hidden beneath a working GPU layer
+            # its frames are always empty, so they never qualify)
+            kinds = (("gpu", "cpu-step1") if where == "gpu" else (where,)) if where else ()
+            frame, presented = {}, False
+            for kind in kinds:
+                f = coverage_probe.LAST_BY.get(kind) or {}
+                if coverage_probe.PUBLISHED_BY[kind] > start_published.get(kind, 0):
+                    presented = True
+                    if f.get("gap_cells", 1) == 0 or not frame:
+                        frame = f
             covered = (frame.get("gap_cells", 1) == 0
                        and frame.get("target_fraction", 0.0) >= 0.999)
             idle = all(s.idle() for s in self._schedulers())

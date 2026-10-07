@@ -83,7 +83,7 @@ def test_every_channel_must_cover():
 
 
 def test_coverage_is_reported_as_sampled():
-    assert cp.gpu_frame({"A": _source([_plane("s", (0, 100, 0, 100))])}, VIEW)["sampled"] == cp.SAMPLES
+    assert cp.gpu_frame({"A": _source([_plane("s", (0, 100, 0, 100))])}, VIEW)["sampled"] == cp.SAMPLES == 128
 
 
 def test_cpu_frames_use_visible_tiles_and_the_floor():
@@ -102,3 +102,21 @@ def test_the_cost_per_frame_is_bounded():
     for _ in range(5):
         cp.gpu_frame(s, VIEW)
     assert (time.perf_counter() - t) / 5 < 0.05        # 800 planes, well under a frame budget
+
+
+def test_a_sixteen_channel_frame_costs_a_few_milliseconds_at_most():
+    """Neutrality (the first baseline measured 27 ms per frame inside
+    `gpu.submit` with 16 channels -- the probe was the stall)."""
+    def plane(i, rect):
+        return _plane(i, rect, shape=(512, 512))
+    srcs = {}
+    for c in range(16):
+        coarse = [plane((c, "c"), (0, 30000, 0, 30000))]
+        fine = [plane((c, k), (k % 4 * 2000, k % 4 * 2000 + 2000, k // 4 * 2000,
+                               k // 4 * 2000 + 2000)) for k in range(12)]
+        srcs[c] = _source(coarse, fine, "fine")
+    cp.gpu_frame(srcs, (0, 8000, 0, 6000))
+    t = time.perf_counter()
+    for _ in range(20):
+        cp.gpu_frame(srcs, (0, 8000, 0, 6000))
+    assert (time.perf_counter() - t) / 20 < 0.005

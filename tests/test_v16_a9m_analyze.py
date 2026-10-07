@@ -23,6 +23,8 @@ def test_presented_and_settled_are_kept_apart(tmp_path, capsys):
         (1.000, "a9.begin", "actions=6"),
         (1.000, "a9.action", "n=1 do=drag expect=gpu"),
         (1.050, "a9.handled", "n=1 qt=5"),
+        (1.090, "coverage.probe", "where=gpu probe_ms=1.5"),
+        (1.095, "coverage.probe", "where=cpu-step1 probe_ms=0.5"),
         (1.100, "coverage", "where=cpu frame=1 gap_cells=0 target_fraction=1.0 sampled=256"),
         (1.200, "coverage", "where=gpu frame=2 gap_cells=0 target_fraction=1.0 sampled=256"),
         (1.200, "a9.action", "n=2 do=settle expect=gpu"),
@@ -44,3 +46,4 @@ def test_presented_and_settled_are_kept_apart(tmp_path, capsys):
     assert "timeouts=1" in out and "wheel" in out           # timeout-only kind printed
     assert "window=0/0" in out and "drag=4/4" in out
     assert "program camera jumps during drag/wheel: 1" in out
+    assert "probe's own cost: total 0.00 s" in out and "max 1.50 ms" in out

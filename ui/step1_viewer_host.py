@@ -412,6 +412,8 @@ def build_step1_stack(dataset_path, channel, table, parent_widget=None, *,
             view = ExploreView(parent_widget)
             controller = ExploreController(provider, scheduler, compute, grid,
                                            view, channel)
+            if getattr(controller, "_a9_probe", None) is not None:   # block A9-M
+                controller._a9_probe.where = "cpu-step1"   # beneath the GPU layer
         if load_overview:
             with perf_trace.span("step1.entry.controller_overview"):
                 controller.load_overview()

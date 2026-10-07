@@ -34,6 +34,7 @@ def test_the_default_scenario_is_valid_json():
         actions = a9_drive._flatten(json.load(f))
     kinds = {a["do"] for a in actions}
     assert {"drag", "wheel", "step", "settle", "tick", "window"} <= kinds
+    assert all(hasattr(a9_drive.Driver, f"_do_{k}") for k in kinds - {"open"})
     assert all(hasattr(a9_drive.Driver, f"_do_{k}") for k in kinds)
 
 

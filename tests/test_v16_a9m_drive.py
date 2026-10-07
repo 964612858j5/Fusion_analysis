@@ -77,3 +77,39 @@ def test_a_scenario_plays_and_camera_writes_are_counted_not_changed(app):
     assert w.went == [1]
     assert d.camera == {"user": 0, "jump": 1}
     assert w._camera_owner.calls == ["jump"]             # the real method still ran
+
+
+class _Shown(_Window):
+    """A window that can say whether it is on screen."""
+
+    def __init__(self, minimized=False):
+        super().__init__()
+        self.minimized = minimized
+
+    def isMinimized(self):  # noqa: N802
+        return self.minimized
+
+    def windowHandle(self):  # noqa: N802
+        return None
+
+
+def test_a_run_whose_window_stopped_painting_is_stopped_as_invalid(app, monkeypatch):
+    """User ruling 2026-10-07: a run whose window stopped painting (WSLg
+    gives a minimised or covered window no frames) measures nothing -- three
+    settles in a row with no new frame stop it, as does a minimised window."""
+    monkeypatch.delenv("BLOCK01_A9_QUIT", raising=False)
+    d = a9_drive.Driver(_Shown(), [{"do": "mark", "label": str(i)} for i in range(9)])
+    d.i = 2
+    assert not d._run_is_blind("cpu", done=False, presented=False)
+    assert not d._run_is_blind("cpu", done=False, presented=False)
+    for _ in range(5):              # codex: a no-op mode/tick draws nothing
+        assert not d._run_is_blind("cpu", done=False, presented=False, prior="mode")
+    assert not d._run_is_blind("cpu", done=True, presented=True), "a frame resets it"
+    assert not d._run_is_blind("cpu", done=False, presented=False)
+    assert not d._run_is_blind("cpu", done=False, presented=False)
+    assert d._run_is_blind("cpu", done=False, presented=False)
+    assert d._invalid == "no_frames" and d.i == len(d.actions)
+
+    m = a9_drive.Driver(_Shown(minimized=True), [{"do": "mark", "label": "x"}])
+    assert m._run_is_blind("cpu", done=True, presented=True)
+    assert m._invalid == "minimized"

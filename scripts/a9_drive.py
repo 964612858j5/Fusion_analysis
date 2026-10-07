@@ -165,11 +165,50 @@ class Driver(QtCore.QObject):
             exposed = None
         perf_trace.mark("a9.window", exposed=exposed, minimized=self.w.isMinimized(),
                         active=self.w.isActiveWindow())
+        perf_trace.mark("a9.platform", wsl=_on_wsl())
         perf_trace.mark("a9.begin", actions=len(self.actions))
         QtCore.QTimer.singleShot(3000, self._step)
 
     def _next(self, delay_ms=0):
         self._timer.start(int(max(0, delay_ms)))
+
+    #: settles in a row that timed out with NO new frame of the expected
+    #: viewer -- a run whose window stopped painting (minimised or covered:
+    #: WSLg then gives it no frames) measures nothing and is stopped
+    BLIND_LIMIT = 3
+
+    #: actions that always change the picture: a settle after one with no
+    #: new frame is evidence of a blind window (codex: a mode or channel set
+    #: to what it already was legitimately draws nothing)
+    MUST_DRAW = ("drag", "wheel", "step")
+
+    def _run_is_blind(self, where, done, presented, prior="drag"):
+        """Is this run no longer measuring the screen? If so, say so and stop."""
+        reason = None
+        try:
+            handle = self.w.windowHandle()
+            if self.w.isMinimized():
+                reason = "minimized"
+            elif handle is not None and not handle.isExposed():
+                reason = "not_exposed"
+        except Exception:                                    # noqa: BLE001
+            pass
+        if reason is None and prior in self.MUST_DRAW:
+            if where and not done and not presented:
+                self._blind = getattr(self, "_blind", 0) + 1
+                if self._blind >= self.BLIND_LIMIT:
+                    reason = "no_frames"
+            else:
+                self._blind = 0
+        if reason is None:
+            return False
+        perf_trace.mark("a9.invalid", n=self.i, reason=reason)
+        print(f"[A9] RUN INVALID at action {self.i}: {reason} -- stopping")
+        self.i = len(self.actions)
+        self._invalid = reason
+        if os.environ.get("BLOCK01_A9_QUIT"):
+            QtCore.QTimer.singleShot(500, QtWidgets.QApplication.quit)
+        return True
 
     def _step(self):
         if self.i >= len(self.actions):
@@ -356,6 +395,10 @@ class Driver(QtCore.QObject):
             done = (now - last["since"] >= 0.3 and idle
                     and (where is None or (presented and covered)))
             if done or now >= deadline:
+                prior = (self.actions[n - 2].get("do")
+                         if 2 <= n <= len(self.actions) else None)
+                if self._run_is_blind(where, done, presented, prior):
+                    return
                 perf_trace.mark("a9.settled", n=n, timed_out=not done,
                                 gap_cells=frame.get("gap_cells"),
                                 target_fraction=frame.get("target_fraction"),
@@ -367,6 +410,15 @@ class Driver(QtCore.QObject):
                 return
             QtCore.QTimer.singleShot(20, poll)
         QtCore.QTimer.singleShot(20, poll)
+
+
+def _on_wsl():
+    """Is this WSL? Its GPU wake-up stall is classified only there."""
+    try:
+        with open("/proc/version") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
 
 
 def attach(window):

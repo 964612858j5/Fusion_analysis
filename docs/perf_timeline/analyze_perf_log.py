@@ -308,6 +308,47 @@ def _pct(values, q):
     return values[k]
 
 
+#: WSL-only (user ruling 2026-10-07: deployment is native Windows): a GPU
+#: touched 250-1000 ms after its last frame blocks the first GL sync ~500 ms
+WAKE_MIN_MS, WAKE_IDLE_MS = 400.0, (250.0, 1000.0)
+
+
+def wsl_gpu_wakes(records):
+    """(start, end) of GL work that waited on WSL's GPU wake-up: a paint ->
+    present, or ONE submit (its first GL call is where the wait lands),
+    taking >= WAKE_MIN_MS when the GPU's last work ended 250-1000 ms before.
+
+    A paint's idle is counted from the previous PRESENT, not from the submit
+    just before it (codex suggested the latter; measured against it: a
+    submit only records commands -- in the A9 logs an 8 ms submit is followed
+    by a 496 ms paint -> present, so the wait lands at the swap, and the
+    submit baseline found 2 of the 55 wakes). SUSPECTED, not proven: the raw
+    tables are always printed beside the ones without them."""
+    out, last_present, last_submit, paint = [], None, None, None
+
+    def waited(t0, t1, since):
+        idle = None if since is None else (t0 - since) * 1000.0
+        return ((t1 - t0) * 1000.0 >= WAKE_MIN_MS and idle is not None
+                and WAKE_IDLE_MS[0] <= idle <= WAKE_IDLE_MS[1])
+    for r in records:
+        ev = r.get("ev")
+        if ev == "gpu.paint" and paint is None:
+            paint = num(r, "t")
+        elif ev == "gpu.submit" and num(r, "t_begin") is not None:
+            t0, t1 = num(r, "t_begin"), num(r, "t")
+            since = max([t for t in (last_present, last_submit) if t is not None],
+                        default=None)
+            if waited(t0, t1, since):
+                out.append((t0, t1))
+            last_submit = t1
+        elif ev == "gpu.present":
+            t = num(r, "t")
+            if paint is not None and waited(paint, t, last_present):
+                out.append((paint, t))
+            last_present, paint = t, None
+    return out
+
+
 def report_a9(records, gap_ms=32.0):
     """Block A9-M: the A9 numbers of a scripted run (scripts/a9_drive.py).
 
@@ -320,6 +361,10 @@ def report_a9(records, gap_ms=32.0):
         and schedulers to go quiet (>= 300 ms of quiet is part of it).
     Then the GUI stalls over `gap_ms`, frames with a gap after coverage was
     first complete, reads and camera writes per action."""
+    for rec in records:
+        if rec.get("ev") == "a9.invalid":
+            print(f"INVALID RUN: stopped at action {rec.get('n')} "
+                  f"({rec.get('reason')}) -- the numbers below measure nothing")
     acts, order = {}, []
     for rec in records:
         ev, n = rec.get("ev"), rec.get("n")
@@ -338,6 +383,12 @@ def report_a9(records, gap_ms=32.0):
                                     cam_user=num(rec, "camera_user", 0),
                                     cam_jump=num(rec, "camera_jump", 0))
     covers = [(num(r, "t"), r) for r in records if r.get("ev") == "coverage"]
+    platform = [r for r in records if r.get("ev") == "a9.platform"]
+    # codex: timing alone does not prove a wake -- classified only on a log
+    # that says it is WSL (logs from before the mark were all WSL runs)
+    on_wsl = (not platform) or platform[-1].get("wsl") == "True"
+    wakes = wsl_gpu_wakes(records) if on_wsl else []
+    presented_clean = collections.defaultdict(list)
     presented = collections.defaultdict(list)
     settled = collections.defaultdict(list)
     timeouts = collections.Counter()
@@ -367,6 +418,8 @@ def report_a9(records, gap_ms=32.0):
                           and (num(r, "target_fraction", 0) or 0) >= 0.999), None)
             if first is not None and (a.get("settled") is None or first <= a["settled"]):
                 presented[kind].append((first - t_in) * 1000.0)
+                if not any(t_in <= p1 and p0 <= first for p0, p1 in wakes):
+                    presented_clean[kind].append((first - t_in) * 1000.0)
             reads[kind].append(a.get("reads", 0) or 0)
             if kind in ("drag", "wheel"):
                 jumps_in_gestures += int(a.get("cam_jump", 0) or 0)
@@ -380,6 +433,10 @@ def report_a9(records, gap_ms=32.0):
     print("A9 PRESENTED latency (handled input -> first complete frame), ms")
     for k in kinds:
         print(line(k, presented.get(k, [])))
+    print(f"A9 PRESENTED latency without the {len(wakes)} suspected WSL GPU-wake frame(s) "
+          "(actions whose frame waited on one left out), ms")
+    for k in kinds:
+        print(line(k, presented_clean.get(k, [])))
     print("A9 SETTLED latency (incl. >= 300 ms quiet), ms")
     for k in kinds:
         print(line(k, settled.get(k, [])) + f"  timeouts={timeouts.get(k, 0)}")
@@ -388,12 +445,17 @@ def report_a9(records, gap_ms=32.0):
     print(f"program camera jumps during drag/wheel: {jumps_in_gestures}")
     begin = [num(r, "t") for r in records if r.get("ev") == "a9.begin"]
     t0 = begin[0] if begin else None
-    gaps = [num(r, "gap_ms") for r in records if r.get("ev") == "gui.gap"
-            and (t0 is None or (num(r, "t") or 0) >= t0)]
-    gaps = [g for g in gaps if g is not None]
+    gap_recs = [r for r in records if r.get("ev") == "gui.gap"
+                and (t0 is None or (num(r, "t") or 0) >= t0)
+                and num(r, "gap_ms") is not None]
+    gaps = [num(r, "gap_ms") for r in gap_recs]
     over = [g for g in gaps if g > gap_ms]
     print(f"GUI stalls > {gap_ms:.0f} ms: {len(over)}  (max {max(gaps) if gaps else 0:.0f} ms, "
           f"p95 of stalls {_pct(over, 95) or 0:.0f} ms)")
+    own = [num(r, "gap_ms") for r in gap_recs if num(r, "gap_ms") > gap_ms
+           and not any((num(r, "t_begin") or 0) <= p1 and p0 <= num(r, "t") for p0, p1 in wakes)]
+    print(f"GUI stalls > {gap_ms:.0f} ms not overlapping a suspected WSL GPU wake: {len(own)}  "
+          f"(max {max(own) if own else 0:.0f} ms, p95 {_pct(own, 95) or 0:.0f} ms)")
     seen_full, gap_frames = False, 0
     covers = [(t, r) for t, r in covers if r.get("where") in ("cpu", "gpu")]
     for _t, r in covers:

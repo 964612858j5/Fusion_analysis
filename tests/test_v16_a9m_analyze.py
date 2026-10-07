@@ -47,3 +47,33 @@ def test_presented_and_settled_are_kept_apart(tmp_path, capsys):
     assert "window=0/0" in out and "drag=4/4" in out
     assert "program camera jumps during drag/wheel: 1" in out
     assert "probe's own cost: total 0.00 s" in out and "max 1.50 ms" in out
+
+
+def test_wsl_gpu_wakes_are_told_apart_from_slow_frames():
+    """User ruling 2026-10-07 (deployment is native Windows): GL work that
+    waited ~500 ms on WSL's GPU wake-up -- 250-1000 ms after the GPU's last
+    work -- is counted apart; a slow frame right after another is not."""
+    a = apl
+
+    def rec(ev, t, **kw):
+        return dict(ev=ev, t=str(t), **{k: str(v) for k, v in kw.items()})
+    records = [
+        rec("gpu.present", 1.0),
+        rec("gpu.paint", 1.5), rec("gpu.present", 2.0),            # wake at swap
+        rec("gpu.submit", 3.0, t_begin=2.5),                       # wake in a submit
+        rec("gpu.paint", 3.01), rec("gpu.present", 3.02),
+        rec("gpu.paint", 3.05), rec("gpu.present", 3.55),          # slow, NOT after idle
+        rec("gpu.paint", 6.0), rec("gpu.present", 6.05),           # long idle: fast wake
+    ]
+    assert a.wsl_gpu_wakes(records) == [(1.5, 2.0), (2.5, 3.0)]
+
+
+def test_wakes_are_only_suspected_on_a_wsl_log(capsys):
+    """codex: timing alone proves nothing -- a native log keeps them all."""
+    def rec(ev, t, **kw):
+        return dict(ev=ev, t=str(t), **{k: str(v) for k, v in kw.items()})
+    base = [rec("gpu.present", 1.0), rec("gpu.paint", 1.5), rec("gpu.present", 2.0)]
+    apl.report_a9([rec("a9.platform", 0.5, wsl=False)] + base)
+    assert "without the 0 suspected" in capsys.readouterr().out
+    apl.report_a9([rec("a9.platform", 0.5, wsl=True)] + base)
+    assert "without the 1 suspected" in capsys.readouterr().out

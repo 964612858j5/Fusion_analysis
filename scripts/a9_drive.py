@@ -153,6 +153,18 @@ class Driver(QtCore.QObject):
         if not ready:
             QtCore.QTimer.singleShot(500, self._wait_for_project)
             return
+        # an unexposed window paints nothing and presents no frame: bring it
+        # to the front, and record whether Qt considers it exposed
+        try:
+            self.w.showNormal()
+            self.w.raise_()
+            self.w.activateWindow()
+            handle = self.w.windowHandle()
+            exposed = bool(handle.isExposed()) if handle is not None else None
+        except Exception:                                    # noqa: BLE001
+            exposed = None
+        perf_trace.mark("a9.window", exposed=exposed, minimized=self.w.isMinimized(),
+                        active=self.w.isActiveWindow())
         perf_trace.mark("a9.begin", actions=len(self.actions))
         QtCore.QTimer.singleShot(3000, self._step)
 

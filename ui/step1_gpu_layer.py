@@ -620,8 +620,10 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             mode = display_snapshot.mode
             if mode == MODE_OVERLAY:
                 active, missing = self._overlay_active(by_channel, display_snapshot)
-                self._cache.prepare(gl, [plane for source in active.values() for plane in source.selected_planes()])
-                self._render_overlay(active, display_snapshot, viewport_snapshot)
+                with perf_trace.span("gpu.prepare"):
+                    self._cache.prepare(gl, [plane for source in active.values() for plane in source.selected_planes()])
+                with perf_trace.span("gpu.render", mode="overlay", channels=len(active)):
+                    self._render_overlay(active, display_snapshot, viewport_snapshot)
                 composed = dict(active)
             elif mode == MODE_FUSION:
                 active_groups, active_nucleus, missing = self._fusion_active(by_channel, display_snapshot)
@@ -631,8 +633,10 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                         planes.extend(source.selected_planes())
                 if active_nucleus is not None:
                     planes.extend(active_nucleus.selected_planes())
-                self._cache.prepare(gl, planes)
-                self._render_fusion(active_groups, active_nucleus, display_snapshot, viewport_snapshot)
+                with perf_trace.span("gpu.prepare"):
+                    self._cache.prepare(gl, planes)
+                with perf_trace.span("gpu.render", mode="fusion", planes=len(planes)):
+                    self._render_fusion(active_groups, active_nucleus, display_snapshot, viewport_snapshot)
                 composed = {ch: src for sources in active_groups.values()
                             for ch, src in sources.items()}
                 if active_nucleus is not None:

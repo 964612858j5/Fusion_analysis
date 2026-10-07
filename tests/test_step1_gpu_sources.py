@@ -284,6 +284,15 @@ def app():
 def _events(app, cycles=8):
     for _ in range(cycles):
         app.processEvents()
+    # Block A9-O2: landed results are published on the binding's frame
+    # slot, so the pump runs past one slot as well.
+    import time
+    from block01.ui.step1_gpu_binding import PUBLISH_FRAME_MS
+    deadline = time.monotonic() + (PUBLISH_FRAME_MS + 4.0) / 1000.0
+    while time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.001)
+    app.processEvents()
 
 
 def _display(active=("A", "B")):
@@ -1304,5 +1313,35 @@ def test_a_first_channel_whose_fine_tile_fails_stays_off_the_screen(app):
             binding.refresh_display()
             _events(app)
             assert _drawn(layer) == {"A"}, "a refresh leaked the failed channel"
+    finally:
+        binding.dispose()
+
+
+def test_a_burst_of_landed_tiles_is_published_once_per_frame(app):
+    """Block A9-O2 (Odon's update loop): every result that lands before
+    the frame slot is applied at once and drawn by ONE submit, instead of
+    one full submit per tile back to back on the GUI thread."""
+    provider = _Provider(level_shape=(8, 8), levels=1)
+    controller = _Controller(provider, visible_tiles=((0, 0), (1, 0), (0, 1), (1, 1)),
+                             epoch=1)
+    scheduler = _Scheduler()
+    layer = _RecordingLayer()
+    binding, _ = _binding(provider, scheduler, controller, layer)
+    try:
+        binding.source_changed()
+        _deliver_all(app, scheduler, list(scheduler.requests),
+                     value=np.full((4, 4), 0.2, np.float32))
+        fine = _fine_requests(scheduler, "A") + _fine_requests(scheduler, "B")
+        assert len(fine) >= 4, "the burst needs several tiles"
+        before = len(layer.calls)
+        for request in fine:
+            scheduler.deliver_request(request, array=np.full((4, 4), 0.5, np.float32))
+        _events(app)
+        assert len(layer.calls) == before + 1, "the burst was not ONE submit"
+        assert binding.stats()["fine_channels"] == ("A", "B")
+        # A camera move draws AT ONCE and takes what is due with it.
+        controller.set_snapshot(visible_tiles=((0, 0),), epoch=2)
+        binding.update_viewport()
+        assert len(layer.calls) == before + 2
     finally:
         binding.dispose()

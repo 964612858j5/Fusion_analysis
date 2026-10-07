@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Hashable, Mapping, Optional, Sequence, Set, Tuple
 
@@ -48,6 +49,9 @@ from .step1_gpu_layer import (
     Step1GpuLayerError,
     ViewportSnapshot,
 )
+
+#: Block A9-O2: the frame slot landed results are published on (~60 Hz).
+PUBLISH_FRAME_MS = 16.0
 
 
 #: The whole G2.1 fairness policy, expressed only in the priority numbers
@@ -172,6 +176,14 @@ class Step1GpuBinding(QtCore.QObject):
         self._motion_timer = QtCore.QTimer(self)
         self._motion_timer.setSingleShot(True)
         self._motion_timer.timeout.connect(self._flush_motion)
+        # Block A9-O2 (Odon's update loop): tiles that land are applied at
+        # once but PUBLISHED at most once per frame -- a burst of 50 results
+        # is one submit, not 50 back-to-back ones on the GUI thread.
+        self._publish_due = False
+        self._last_publish_at = -1.0
+        self._publish_timer = QtCore.QTimer(self)
+        self._publish_timer.setSingleShot(True)
+        self._publish_timer.timeout.connect(self._flush_publish)
         self._connect_controller()
 
     # Public lifecycle ----------------------------------------------------
@@ -324,6 +336,8 @@ class Step1GpuBinding(QtCore.QObject):
             return {"already_disposed": True, "published_channels": 0, "generations": 0}
         self._disposed = True
         self._motion_timer.stop()
+        self._publish_timer.stop()
+        self._publish_due = False
         self._disconnect_controller()
         self._cancel_all()
         self._coarse.clear()
@@ -731,10 +745,26 @@ class Step1GpuBinding(QtCore.QObject):
     @QtCore.pyqtSlot(object)
     @perf_trace.timed("gpu.accept")
     def _accept_result(self, payload) -> None:
-        """The ONLY entry for a result that arrived through the queued signal."""
-        self._apply_result(payload, publish=True)
+        """The ONLY entry for a result that arrived through the queued signal.
 
-    def _apply_result(self, payload, *, publish: bool) -> None:
+        Applied now, drawn on the next frame slot (`_schedule_publish`)."""
+        self._apply_result(payload, publish=True, deferred=True)
+
+    def _schedule_publish(self) -> None:
+        """One publish per FRAME_MS for results; a slot already armed takes
+        every result that lands before it fires."""
+        self._publish_due = True
+        if self._publish_timer.isActive():
+            return
+        since = (time.monotonic() - self._last_publish_at) * 1000.0
+        self._publish_timer.start(int(math.ceil(max(0.0, PUBLISH_FRAME_MS - since))))
+
+    def _flush_publish(self) -> None:
+        if self._publish_due and not self._disposed:
+            perf_trace.mark("gpu.batch")
+            self._publish_current()
+
+    def _apply_result(self, payload, *, publish: bool, deferred: bool = False) -> None:
         if self._disposed:
             return
         captured, result = payload
@@ -785,7 +815,9 @@ class Step1GpuBinding(QtCore.QObject):
             self._published_fine.setdefault(channel, {})[key] = plane
             if plan.complete:
                 self._fine.pop(channel, None)
-        if publish:
+        if publish and deferred:
+            self._schedule_publish()
+        elif publish:
             self._publish_current()
 
     def _is_current_delivery(self, plan, source, revision, generation, viewport_epoch, key, result) -> bool:
@@ -804,6 +836,10 @@ class Step1GpuBinding(QtCore.QObject):
     def _publish_current(self) -> None:
         if self._disposed or self._source is None:
             return
+        # Whatever is due rides this publish: it reads every applied plane.
+        self._publish_due = False
+        self._publish_timer.stop()
+        self._last_publish_at = time.monotonic()
         display = self._build_display_snapshot()
         viewport = self._build_viewport_snapshot()
         active = self._active_channels(display)

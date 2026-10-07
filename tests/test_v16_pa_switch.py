@@ -36,8 +36,12 @@ def test_the_gpu_size_is_asked_once(monkeypatch):
 
 def test_the_gpu_asked_is_cuda_s_first_visible_one(monkeypatch):
     """codex PA-5: CUDA's device 0 is the first of CUDA_VISIBLE_DEVICES."""
+    import sys
     from block01.ui.step2_page import Step2Page
     seen = []
+    # An earlier test in the same run may have imported torch, which this
+    # function asks first -- the real card would answer, not nvidia-smi.
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
 
     class _Out:
         stdout = "6144\n"

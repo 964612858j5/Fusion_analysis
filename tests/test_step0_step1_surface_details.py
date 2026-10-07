@@ -430,34 +430,32 @@ def _fully_shown(widget, panel):
     return shown.contains(rect)
 
 
-def test_step1_channel_column_is_never_covered(many):
-    """The column's frame, scroll bar and Save Fusion Settings are never
-    covered. A ROW may be (block A1b S2, user ruling 2, 2026-09-30): the
-    column's floor is the Channels column's own content, not the widest row,
-    so a row wider than the column is covered from its RIGHT edge -- the
-    weight box first -- and its left end (tick, swatch, name) stays shown."""
+def test_step1_channel_column_is_covered_not_squeezed(many):
+    """Dragged far left, the column stops at the hard floor and its content
+    keeps its own layout, covered from the column's right edge -- frame and
+    scroll bar included (user ruling 2026-10-08, block A9-W1, replacing ruling
+    2 of 2026-09-30). The rows' left end (tick, swatch, name) stays shown,
+    and Save Fusion Settings, in the page's bottom bar, is whole."""
+    from block01.ui.step_frame import CHANNEL_COLUMN_HARD_FLOOR as floor
     w = many
     _show_step(w, 1)
     w._step1_main_split.setSizes([40, 1440])        # drag the handle far left
     _pump(10)
+    column = w._step1_main_split.widget(0)
     panel = w._step1_left_panel
     lst = w._channel_dock.list_widget
-    assert lst.verticalScrollBar().isVisible()
-    for widget in (w._step1_channels_box, lst.verticalScrollBar()):
-        assert _fully_shown(widget, panel), widget
-    # Save Fusion Settings lives in the page's bottom bar since the fifth
-    # round; it must be whole there, whatever the handle does.
+    assert floor <= column.width() <= floor + 2
+    # not squeezed: the content keeps the width its layout needs ...
+    assert panel.width() >= panel.minimumSizeHint().width()
+    # ... and is covered: its frame runs past the column's right edge
+    box = w._step1_channels_box
+    right = box.mapTo(column, QtCore.QPoint(box.width(), 0)).x()
+    assert right > column.width()
     assert _fully_shown(w._btn_save_fusion_settings, w._step1_page_widget)
-    # The floor is the framed columns' own minimum, the same on every page.
-    floor = max(p.minimumSizeHint().width() for p in (
-        w._step0.left_panel(), panel, w._step3.left_panel()))
-    # (the tab widget's own frame hint adds a pixel or two, on every page alike)
-    assert floor <= panel.width() <= floor + 2
     for cid in ("DAPI", "CH00", "CH38"):
         row = w._channel_dock.row(cid)
-        tick = QtCore.QRect(row.checkbox.mapTo(lst.viewport(), QtCore.QPoint(0, 0)),
-                            row.checkbox.size())
-        assert 0 <= tick.left() and tick.right() < lst.viewport().width(), cid
+        tick = row.checkbox.mapTo(column, QtCore.QPoint(0, 0))
+        assert 0 <= tick.x() and tick.x() + row.checkbox.width() <= column.width(), cid
 
 
 _LONG = ["DAPI", "A-VERY-LONG-CHANNEL-NAME-FOR-TESTING", "CD3", "CD8"]

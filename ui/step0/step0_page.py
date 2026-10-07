@@ -3626,7 +3626,11 @@ class Step0Page(QWidget):
         # v15 user feedback: the BG Channels column starts at 4/3 of the old
         # default. It remains draggable; the hidden peer is only kept in sync
         # because it owns the detached Intensity inspector's original layout.
-        self._left_col_width = self.opening_channel_column_width()
+        # A width the window already gave this column (its one fixed opening
+        # share, user ruling 2026-10-08, block A9-W1) is kept; Step0's own
+        # opening rule only stands in when nothing set one yet.
+        self._left_col_width = (getattr(self, "_left_col_width", None)
+                                or self.opening_channel_column_width())
         a.splitterMoved.connect(lambda _p, _i: self._on_left_split_dragged(a))
         b.splitterMoved.connect(lambda _p, _i: self._on_left_split_dragged(b))
         self._apply_left_col_width(a)
@@ -3667,15 +3671,8 @@ class Step0Page(QWidget):
         for split in (a, b):
             if split is not None:
                 self._apply_left_col_width(split)
-        # The same reconcile a drag does: one of the two may have clamped at
-        # its own minimum, and leaving them apart is exactly what this
-        # mechanism exists to prevent.
-        if a is not None and b is not None:
-            actual = max(a.sizes()[0], b.sizes()[0])
-            if actual != self._left_col_width:
-                self._left_col_width = actual
-                self._apply_left_col_width(a)
-                self._apply_left_col_width(b)
+        # The hidden peer follows and may clamp at its own minimum; that no
+        # longer widens the visible column (user ruling 2026-10-08, A9-W1).
 
     def _on_left_split_dragged(self, src):
         if getattr(self, "_syncing_left_cols", False):
@@ -3688,14 +3685,9 @@ class Step0Page(QWidget):
         self._left_col_width = s[0]
         self._apply_left_col_width(a)
         self._apply_left_col_width(b)
-        # Reconcile: if the drag went below the other column's minimum it clamped and
-        # they diverged — pin BOTH to the larger actual width so they always match.
-        if a is not None and b is not None:
-            actual = max(a.sizes()[0], b.sizes()[0])
-            if actual != self._left_col_width:
-                self._left_col_width = actual
-                self._apply_left_col_width(a)
-                self._apply_left_col_width(b)
+        # No reconcile to the wider of the two (user ruling 2026-10-08, block
+        # A9-W1): the hidden peer may clamp at its own minimum, and that no
+        # longer widens the visible column -- its content is covered instead.
 
     def _apply_left_col_width(self, split):
         w = getattr(self, "_left_col_width", None)

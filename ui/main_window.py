@@ -84,6 +84,7 @@ from .block01_display import (
 )
 from .step0.config_panel import ConfigPanel
 from .step_frame import FRAME_TAB_QSS, StepFrame, StepFrameMetrics, free_tab_bar
+from . import step_frame
 from .widgets.channel_dock import template as channel_template
 from .step0.search_ctrl import SearchCtrlPanel
 from .step0.result_grid import ResultGridPanel
@@ -1554,11 +1555,10 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         self._fix_step1_split_ratio()
 
-    #: Where the channel column starts before either page has been laid out:
-    #: Step0's own opening rule -- `4 * (minimum + 4) // 3` for the column
-    #: against the rest -- works out at this share (measured 0.278 at
-    #: 1280/1600/1920/2560). A fallback only; a real measurement replaces it.
-    _CHANNEL_COLUMN_FRACTION_FALLBACK = 0.278
+    #: Where the channel column starts on every framed page until the user
+    #: drags it (user ruling 2026-10-08, block A9-W1: one fixed share, the
+    #: value Step0's old opening rule measured at 1280/1600/1920/2560).
+    _CHANNEL_COLUMN_FRACTION_FALLBACK = step_frame.CHANNEL_COLUMN_OPENING_FRACTION
 
     # ── Step3 (block 2c-1) ────────────────────────────────────────────
     def _frame_title_bar(self, text):
@@ -1701,39 +1701,22 @@ class MainWindow(QMainWindow):
         return sizes[0] / float(total)
 
     def channel_column_fraction(self):
-        """ONE share of the width for the channel column, in both steps.
+        """ONE share of the width for the channel column, in every framed step.
 
         Step0 and Step1 show the same picture side by side, so the handle is
-        one product control with two places to grab it: dragging either page's
-        moves both. The number lives here, normalised, so a window resize
-        cannot make the two drift apart -- pixels would.
+        one product control with several places to grab it: dragging any
+        page's moves all. The number lives here, normalised, so a window
+        resize cannot make the pages drift apart -- pixels would.
 
-        Until a page has been laid out the answer is measured from whichever
-        one has been (Step0 first, because its own rule sets the opening
-        width), and only then does the fallback constant apply.
+        Until the user drags, it is ONE FIXED SHARE (user ruling 2026-10-08,
+        block A9-W1). It used to be measured from Step0's opening width when
+        the window first showed -- before a slide was loaded, so the column
+        content grew afterwards and widened the column once, on the first
+        return to Step0, after Step1 had already been laid out narrower.
         """
         remembered = getattr(self, "_channel_column_fraction", None)
         if remembered is not None:
             return remembered
-        # THE OPENING WIDTH (block A1b S2, ruling 1): every framed page opens
-        # at Step0's rule, 4/3 of the Channels column's own minimum. Taken
-        # from a frame ON SCREEN only -- a splitter not yet laid out has Qt's
-        # default sizes, and a share measured there perpetuates itself (a
-        # window that shows Step1 first opened every column at 862 px of
-        # 1600, `test_a_drag_reaches_step0_s_hidden_peer_too`) -- and
-        # remembered, so it is set once.
-        opening = getattr(getattr(self, "_step0", None),
-                          "opening_channel_column_width", None)
-        for split in self._channel_column_frame_splitters():
-            if (opening is not None and split is not None and split.count() == 2
-                    and split.isVisible() and split.width() > 10):
-                usable = max(1, split.width() - split.handleWidth())
-                self._channel_column_fraction = opening() / float(usable)
-                return self._channel_column_fraction
-        for split in self._channel_column_splitters():
-            measured = self._fraction_of(split)
-            if measured is not None:
-                return measured
         return self._CHANNEL_COLUMN_FRACTION_FALLBACK
 
     def _wire_channel_column_sync(self):
@@ -1770,11 +1753,9 @@ class MainWindow(QMainWindow):
         self._syncing_channel_column = True
         try:
             # THE PAGE FRAMES (block A1b: Step0, Step1, Step2, Step3) get ONE PIXEL
-            # WIDTH. All hold the same floor, so all clamp alike; the widest
-            # clamp is what every frame shows. A clamp that widened the
-            # column is written back into the share, so a floor that later
-            # drops does not narrow it again (W = max(W_user, floor) and the
-            # widened W becomes W_user).
+            # WIDTH. Every column narrows to the same hard floor and no
+            # content widens it (user ruling 2026-10-08, block A9-W1), so
+            # every frame shows the share the user dragged.
             #
             # STEP0 IS WRITTEN THROUGH ITS OWN MECHANISM. Its splitter has a
             # hidden peer -- the conditioning workbench's -- that
@@ -1803,9 +1784,9 @@ class MainWindow(QMainWindow):
                         split.setSizes([wanted, max(1, usable - wanted)])
                 else:
                     split.setSizes([wanted, max(1, usable - wanted)])
-                if split in shown and split.sizes()[0] > wanted:
-                    fraction = split.sizes()[0] / float(usable)
-                    self._channel_column_fraction = fraction
+                # No write-back (user ruling 2026-10-08, block A9-W1): a
+                # page whose content is wider than the column is covered
+                # from the column's right edge; it never widens the share.
         finally:
             self._syncing_channel_column = False
 
@@ -5306,39 +5287,28 @@ class MainWindow(QMainWindow):
     def _hold_step1_channel_floor(self):
         """ONE floor for every framed page's channel column (block A1b S2).
 
-        The floor is the widest of the framed pages' Channels columns' OWN
-        minimum -- what the column's content needs: the header row (Step0's
-        `Method ▾` + `Intensity…` + the room its hidden `Show all` keeps),
-        the frame, the dock's own chrome. The list's ROWS are not part of it
-        (user ruling 2, 2026-09-30): a row wider than the column is covered
-        from its right edge -- the weight box or the method box first -- and
-        widening the column shows it again.
-
-        That is what makes the floor the same whichever page is on screen.
-        The rows take the shape of the page the one dock is mounted in, so a
-        floor read from them could only be read where the dock is -- and a
-        page the user had not visited yet widened the column the first time
-        it was entered. Every column's own minimum is known from its layout
-        whether or not the page has ever been shown.
+        The hard floor (`step_frame.CHANNEL_COLUMN_HARD_FLOOR`), the same on
+        every page and nothing else (user ruling 2026-10-08, block A9-W1):
+        a column narrower than its content keeps its content's layout and is
+        cut at its right edge -- header row, rows, scroll bar and bottom
+        button alike -- and widening the column shows it again. The floor
+        used to be the widest page's content minimum, so a page could not be
+        dragged narrower than another page's content.
         """
+        for split in self._channel_column_frame_splitters():
+            step_frame.release_column_floor(split)
+        # ...and the content keeps its layout: every page's panel holds ONE
+        # content width (the widest of their own minimums), so a column
+        # narrower than it covers it from the right edge instead of
+        # squeezing it, and the covered layout is the same on every page.
         step0 = getattr(self, "_step0", None)
         step2 = getattr(self, "_step2", None)
         step3 = getattr(self, "_step3", None)
-        # Step2's parameter panel too (block A1b S3, ruling 3): its content's
-        # minimum takes part, so at the floor the panel still fits.
-        panels = [p for p in (getattr(step0, "left_panel", lambda: None)(),
-                              getattr(self, "_step1_left_panel", None),
-                              getattr(step2, "left_panel", lambda: None)(),
-                              getattr(step3, "left_panel", lambda: None)())
-                  if p is not None]
-        if not panels:
-            return
-        for panel in panels:
-            panel.ensurePolished()
-        floor = max(p.minimumSizeHint().width() for p in panels)
-        for each in panels:
-            if each.minimumWidth() != floor:
-                each.setMinimumWidth(floor)
+        step_frame.hold_content_width(
+            (getattr(step0, "left_panel", lambda: None)(),
+             getattr(self, "_step1_left_panel", None),
+             getattr(step2, "left_panel", lambda: None)(),
+             getattr(step3, "left_panel", lambda: None)()))
 
     def _match_step1_bottom_bar(self):
         """The save slot as tall as Step0's Per-Channel Decision frame, and

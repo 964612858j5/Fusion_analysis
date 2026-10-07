@@ -297,8 +297,9 @@ def test_a_drag_below_step0_s_minimum_still_leaves_the_pages_together(app):
         step0_split = w._step0._bg_c_split
         step0 = _left_fraction(step0_split.sizes())
 
-        # Step0 clamped -- that is its own rule -- and Step1 followed it there.
-        assert step0_split.sizes()[0] >= step0_split.widget(0).minimumSizeHint().width()
+        # Step0 followed Step1 below its content's minimum (user ruling
+        # 2026-10-08, block A9-W1): its content is covered, not widened.
+        assert step0_split.sizes()[0] < step0_split.widget(0).minimumSizeHint().width()
         assert abs(step1 - step0) <= 0.02, (step0, step1)
         assert abs(w.channel_column_fraction() - step0) <= 0.02
     finally:

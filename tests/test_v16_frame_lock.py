@@ -205,15 +205,17 @@ def test_a_drag_on_step2_moves_every_column_page(rig):
 
 
 def test_step2_holds_the_one_floor(rig):
+    """User ruling 2026-10-08 (block A9-W1): the one floor is the hard floor,
+    and Step2's column takes it like every other page's."""
+    from block01.ui.step_frame import CHANNEL_COLUMN_HARD_FLOOR as floor
     _enter(rig, 2)
     _drag(rig, _split(rig, 2), 40)
-    floor = max(p.minimumSizeHint().width() for p in _panels(rig))
     widths = set()
     for step in (0, 1, 2, 3):
         _enter(rig, step)
         widths.add(_split(rig, step).sizes()[0])
     assert len(widths) == 1 and floor <= widths.pop() <= floor + 4
-    assert rig.w._step2.left_panel().minimumWidth() == floor
+    assert _split(rig, 2).widget(0).minimumWidth() == floor
 
 
 @pytest.mark.parametrize("step", STEPS)
@@ -228,30 +230,26 @@ def test_a_drag_on_any_page_moves_all(rig, step):
 @pytest.mark.parametrize("step", STEPS)
 def test_the_narrowest_column_is_the_same_on_every_page(rig, step):
     """Dragged to nothing on ANY page: every page holds the same floor --
-    the Channels columns' own minimum, not the widest row (user ruling 2,
-    2026-09-30) -- and the Channels header is whole."""
+    the hard floor, not any page's content (user ruling 2026-10-08, block
+    A9-W1, replacing ruling 2 of 2026-09-30) -- and content wider than the
+    column is covered from its right edge rather than widening it."""
+    from block01.ui.step_frame import CHANNEL_COLUMN_HARD_FLOOR as floor
     _enter(rig, step)
     _drag(rig, _split(rig, step), 40)
     parts = _assert_same(rig)
-    floor = max(p.minimumSizeHint().width() for p in _panels(rig))
-    assert floor > 40
     assert floor <= parts["left column"][2] <= floor + 4
-    header = rig.w._step0._btn_intensity_window
-    _enter(rig, 0)
-    box = rig.w._step0._channels_box
-    edge = header.mapTo(box, QtCore.QPoint(header.width(), 0)).x()
-    assert edge <= box.width()
+    content = max(p.minimumSizeHint().width() for p in _panels(rig))
+    assert content > parts["left column"][2], "nothing was left to cover"
 
 
 def test_every_page_holds_one_floor(rig):
-    """One floor on all three columns, whichever page shows the dock."""
-    seen = set()
+    """One floor on every framed column, whichever page shows the dock: the
+    hard floor (user ruling 2026-10-08, block A9-W1)."""
+    from block01.ui.step_frame import CHANNEL_COLUMN_HARD_FLOOR as floor
     for step in STEPS:
         _enter(rig, step)
-        floors = {p.minimumWidth() for p in _panels(rig)}
-        assert len(floors) == 1 and min(floors) > 0, step
-        seen |= floors
-    assert len(seen) == 1
+        floors = {_split(rig, s).widget(0).minimumWidth() for s in (0, 1, 2, 3)}
+        assert floors == {floor}, step
 
 
 def test_a_page_not_visited_yet_does_not_widen_the_column(rig):
@@ -266,13 +264,15 @@ def test_a_page_not_visited_yet_does_not_widen_the_column(rig):
         assert _parts(rig, step)["left column"] == before, step
 
 
-def test_every_page_opens_at_step0_s_rule(rig):
-    """Ruling 1: every framed page opens at 4/3 of the Channels column's
-    own minimum."""
-    opening = rig.w._step0.opening_channel_column_width()
+def test_every_page_opens_at_the_one_fixed_share(rig):
+    """User ruling 2026-10-08 (block A9-W1): every framed page opens at one
+    fixed share of its width, not one measured from any page's content."""
+    from block01.ui.step_frame import CHANNEL_COLUMN_OPENING_FRACTION as share
     for step in STEPS:
         _enter(rig, step)
-        assert abs(_split(rig, step).sizes()[0] - opening) <= 1, step
+        split = _split(rig, step)
+        usable = split.width() - split.handleWidth()
+        assert abs(split.sizes()[0] - round(usable * share)) <= 2, step
 
 
 def test_step0_compare_mode_moves_neither_tool_row_nor_view_area(rig):
@@ -288,25 +288,20 @@ def test_step0_compare_mode_moves_neither_tool_row_nor_view_area(rig):
     assert (_rect(rig.w, tool), _rect(rig.w, page._view_area)) == before
 
 
-def test_a_floor_that_drops_does_not_narrow_the_column(rig, monkeypatch):
-    """W = max(W_user, floor), and a floor that widened the column becomes
-    W_user -- so a lower floor later leaves the width where it is."""
+def test_content_wider_than_the_column_never_widens_it(rig):
+    """User ruling 2026-10-08 (block A9-W1): content that needs more than the
+    user's width is covered from the column's right edge; neither the
+    column nor the shared share moves."""
     _enter(rig, 1)
     split = rig.w._step1_main_split
     _drag(rig, split, 250)
-    usable = split.width() - split.handleWidth()
-    monkeypatch.setattr(type(rig.w), "_hold_step1_channel_floor", lambda self: None)
-    panels = _panels(rig)
-    for panel in panels:                       # a floor that widens the column
+    share = rig.w.channel_column_fraction()
+    for panel in _panels(rig):                 # content that needs 380 px
         panel.setMinimumWidth(380)
     rig.w._apply_channel_column_fraction()
     _pump()
-    widened = split.sizes()[0]
-    assert widened > 250
-    assert abs(rig.w.channel_column_fraction() * usable - widened) <= 1   # written back
-    for panel in panels:                       # ...and the floor drops again
-        panel.setMinimumWidth(200)
-    rig.w._apply_channel_column_fraction()
-    _pump()
-    # Exactly (block A1b S2): Step0 takes the one pixel width too.
-    assert split.sizes()[0] == widened
+    assert abs(split.sizes()[0] - 250) <= 2
+    assert rig.w.channel_column_fraction() == share
+    for step in (0, 2, 3):
+        _enter(rig, step)
+        assert abs(_split(rig, step).sizes()[0] - 250) <= 2, step

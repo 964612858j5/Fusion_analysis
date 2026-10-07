@@ -56,6 +56,47 @@ def free_tab_bar(tabs):
     tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
 
 
+#: The channel column's share of a framed page's width until the user drags
+#: it (user ruling 2026-10-08, block A9-W1): one fixed number, not measured
+#: from any page's content -- a share measured at start-up was measured
+#: before a slide was loaded and moved the column once that content grew.
+CHANNEL_COLUMN_OPENING_FRACTION = 0.278
+
+#: The narrowest a channel column may be dragged, on every framed page (user
+#: ruling 2026-10-08): the column follows the user's width and its content is
+#: covered from its right edge, it never widens the column. Only this floor
+#: keeps the column from vanishing.
+CHANNEL_COLUMN_HARD_FLOOR = 120
+
+
+def release_column_floor(splitter):
+    """Let a framed page's channel column narrow to the hard floor, whatever
+    its content needs: the column's own minimum is set, so its pages keep
+    their layout and are cut at its right edge (user ruling 2026-10-08)."""
+    if splitter is None or splitter.count() != 2:
+        return
+    column = splitter.widget(0)
+    if column is not None and column.minimumWidth() != CHANNEL_COLUMN_HARD_FLOOR:
+        column.setMinimumWidth(CHANNEL_COLUMN_HARD_FLOOR)
+
+
+def hold_content_width(panels):
+    """Every framed column's content keeps ONE width -- the widest of the
+    panels' own minimums -- so a column narrower than it is cut at its right
+    edge rather than squeezing it, and the covered layout is the same on every
+    page (user ruling 2026-10-08). It bounds the CONTENT only; the column
+    itself narrows to `CHANNEL_COLUMN_HARD_FLOOR`."""
+    panels = [p for p in panels if p is not None]
+    if not panels:
+        return
+    for panel in panels:
+        panel.ensurePolished()
+    width = max(p.minimumSizeHint().width() for p in panels)
+    for panel in panels:
+        if panel.minimumWidth() != width:
+            panel.setMinimumWidth(width)
+
+
 @dataclass(frozen=True)
 class StepFrameMetrics:
     """The frame's geometry, in one place (block A1b S1).

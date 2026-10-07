@@ -880,3 +880,101 @@ codex 共 7 条意见，已逐条对照代码核实。第 1、2 条已确认：
 GUI 线程上合计省约 0.45 s（7 层）和 0.55 s（a5）。
 
 **3 层 ≤ 1 s**：等原生 Windows 实测后再定（用户裁定）。
+
+## 22. 首次进入 Step1 的查看器宽度与以后不一致（W1，方案草稿，待 codex 审、用户批准）
+
+### 22.1 现象与测量
+记录方式：仓库外包装 `bench_a9/prof/run_prof.py`，开 `PROF_LAYOUT=1`；日志 `run_lay_7lv.log`。
+
+- 第一次进入 Step1：共享列宽比例为 0.25，Step1 分栏 346 / 1038，GPU 层 1018 px。
+- 第一次回到 Step0：`_apply_channel_column_fraction` 在 Step0 可见时测到它的列被撑到 385 px，按"撑宽即写回"把比例写成 0.2782。
+- 之后每次进入 Step1：385 / 999，GPU 层 979 px。
+- 后果：
+  - 第一次再进入时画面缩放一下，GL 层改尺寸（温状态 1.7 ms；撞上 WSL 唤醒约 375 ms）；
+  - 第一次访问 Step1 时，通道列比 Step0 窄 39 px，违背"各页一个列宽"的裁定。
+
+### 22.2 根因
+- Step0 的 `apply_channel_column_width` 同时设置可见分栏 `_bg_c_split` 和隐藏同伴 `_cond_workbench._h_split`，然后取两者实际宽度的较大值（`step0_page.py:3670` 起）。
+- 隐藏工作台的左栏里装着尚未分离的 Intensity 检查器，最小宽度约 383 px。
+- `opening_channel_column_width` 本来就把隐藏同伴的最小宽度算进去了（"never under the hidden peer's"）。但全局统一下限 `_hold_step1_channel_floor` 只取各页 `left_panel()` 的 `minimumSizeHint`，约 256 px。
+- 所以 Step0 的真实下限（约 383）只有在 Step0 可见、按比例应用一次时才写进共享比例，而 Step1 的第一次访问早于这一刻。
+
+### 22.3 方案
+- **A（推荐）统一下限包含 Step0 的隐藏同伴**
+  - `_hold_step1_channel_floor` 取下限时，再加上 Step0 隐藏同伴左栏的 `minimumSizeHint().width()`，用 Step0 已有的取值方式，与 `opening_channel_column_width` 一致。
+  - `_apply_channel_column_fraction` 已经保证 `W = max(W_user, floor)`，所以从第一次进入起各页都是同一列宽，等于现在的稳态（约 385 px）。
+  - 行为变化：Step1 / Step2 / Step3 的通道列最窄从 256 px 变成约 383 px。现状下，在这些页面拖窄后，一回到 Step0 也会被撑回去，所以实际可保持的最窄值本来就是 383。
+  - 改动：`ui/main_window.py` 约 +6 行，加测试。
+- **B 隐藏同伴不再撑宽 Step0**
+  - 把隐藏同伴从取较大值的那一步、以及开场宽度里去掉。
+  - 各页下限统一为 256，Step0 开场和稳态都会变窄约 37 px。
+  - 这会改变 v15 用户确认过的 Step0 开场宽度规则，而且检查器重新放回工作台时，同伴的布局会被压窄。所以不推荐。
+- **C 只让共享比例提前收敛**：Step0 第一次以全尺寸可见时补一次应用。只修启动这一段；如果 Intensity 检查器分离或放回会改变同伴的最小宽度，仍可能再次不一致。不推荐。
+
+**门槛**：
+- 7 层、a5 的首次进入、第二次、第三次，GPU 层宽度都相同。
+- Step0 与 Step1 的通道列宽相同。
+- 拖动任一页的分隔条，各页一起变。
+- 现有布局测试不变（`test_step1_layout_block_a.py`、`test_global_channel_dock.py`、`test_ui_surface_contract.py` 等）。
+
+**白名单**：`ui/main_window.py`、新测试，必要时 `ui/step0/step0_page.py`（只读同伴最小宽度的访问器）。
+
+### 22.4 codex 审查与修订（W1 方案 v2，待用户批准）
+
+**codex 意见**（6 条，已核实）：
+- 根因成立。
+- A 改变了统一下限的定义，与 `UI_SURFACE_RULES.md:108` 的规则冲突（下限只取 Channels 列自身的内容），`test_v16_frame_lock.py:230` 也会被打破。
+- B 是更大的行为变化。
+- 关键追问：初始的 0.25 从哪来？
+
+**追查结果**（`run_frac_7lv.log`，记录每次写入共享比例时的调用栈）：
+- 窗口第一次 `showEvent` 时还没加载数据集，`channel_column_fraction()` 按 `opening_channel_column_width()` 算出 0.25 并记住。那时隐藏工作台是空的，最小宽度小。
+- 加载数据后，工作台检查器装上了内容，最小宽度长到约 383 px。可共享比例只在"可见分栏被撑宽"时才会更新，Step0 在场时没有再应用过一次，所以一直停在 0.25。
+- 直到第一次从 Step1 回到 Step0（`_go_to_step0` → `_fix_step1_split_ratio`），才写回 0.2782。
+
+**推荐方案 C′：把 Step0 的实际下限当作"撑宽"规则的一部分，Step0 不在屏时也算。**
+- `Step0Page` 加一个只读访问器 `channel_column_minimum()`，返回 Step0 自己的取宽规则实际会撑到的宽度：`max(可见列最小宽度, 隐藏同伴左栏最小宽度)`，与 `apply_channel_column_width` 的取较大值一致。
+- `_apply_channel_column_fraction`：`wanted = max(wanted, step0.channel_column_minimum())`，撑宽了就写回共享比例。这和现有"可见分栏被撑宽即写回"是同一条规则，只是不再要求 Step0 在屏。
+- **不改**统一下限：各面板的 `minimumWidth` 不变，`test_v16_frame_lock` 不受影响，Step1 的拖动下限仍是 256 px。现状下拖窄后一回到 Step0 就会被撑回，这一点也照旧。
+- 效果：第一次进入 Step1 就是稳态列宽，约 385 px，各次进入的 GPU 层宽度相同。
+- 检查器分离后，隐藏同伴的最小宽度会变小。已写回的比例不会自动变窄，与现有"撑宽即写回"的语义一致。
+- 改动：`ui/main_window.py` 约 +5 行，`ui/step0/step0_page.py` 约 +8 行（访问器），加测试。
+
+### 22.5 W1 执行记录（2026-10-08，用户裁定，取代 22.3 / 22.4 的方案）
+
+**用户裁定**：
+1. 各页通道栏开场取一个固定比例 0.278，不再在启动时按控件内容计算。如果内容需要更宽，栏的右边界直接盖住内容的右侧。
+2. 宽度只跟随用户的拖动。任何一页的内容都不撑宽栏，也不写回共享比例。在任一页拖窄，各页一起变；内容从栏的右边界被盖住。这条适用于所有有通道栏的步骤（Step0、Step1、Step2、Step3）。
+
+用户确认：开场比例 0.278；硬下限 120 px；Step2 的参数面板同样适用；`ui/step_frame.py` 加入白名单。
+
+**改动**：
+- `ui/step_frame.py`：
+  - 常量 `CHANNEL_COLUMN_OPENING_FRACTION = 0.278`、`CHANNEL_COLUMN_HARD_FLOOR = 120`；
+  - `release_column_floor(splitter)`：栏本身的最小宽度设为 120；
+  - `hold_content_width(panels)`：各页面板取同一个内容宽度（各页自身最小宽度中的最大值）。它只约束内容不被挤压，被盖住的布局在各页都一样，不约束栏宽。
+- `ui/main_window.py`：
+  - `channel_column_fraction()`：返回已记住的比例；用户还没拖动过时，返回固定值；
+  - `_apply_channel_column_fraction()`：去掉"撑宽即写回"；
+  - `_hold_step1_channel_floor()`：改为调用上面两个函数。
+- `ui/step0/step0_page.py`：
+  - `apply_channel_column_width`、`_on_left_split_dragged`：去掉"取两者较大值"，隐藏同伴仍然跟随，但不再撑宽 Step0；
+  - `_wire_left_column_sync`：主窗口已设过宽度时，不再用旧的开场规则覆盖。
+- `UI_SURFACE_RULES.md`：两处规则改为新裁定（框边、滚动条、`Save Fusion Settings` 都可被盖住）；Step1 页面的比例说明同步更新。
+- 测试（按新裁定改写期望值，场景不变）：
+  - `test_v16_frame_lock` 6 个：统一下限 = 硬下限；开场 = 固定比例；内容比栏宽时栏和比例都不变；
+  - `test_step1_layout_block_a` 1 个：拖到 Step0 内容以下，Step0 跟随并被盖住；
+  - `test_step0_step1_surface_details` 1 个：`..._is_never_covered` 改为 `..._is_covered_not_squeezed`。
+
+**审查**：
+- codex 第一次审查：只提了白名单（用户已同意）。
+- 回归查出 Step1 面板被挤压到 118 px（违反"盖住"），已用 `hold_content_width` 修复。
+- codex 复审：无发现。两次审查期间工作树都未变。
+
+**定向回归**（26 个布局 / 界面 / 页面 / 停靠栏相关文件）：583 个通过，4 个失败：
+- 3 个是已知旧失败：`global_channel_dock` baseline panel、`step1_channel_panel` look、`tissue_navigator_viewport_sync` mapping；
+- `test_step0_step1_display_isolation::test_step0_work_does_not_make_step1_load_or_redraw` 一次偶发失败：上一轮通过，单独连跑 3 次都通过。原因与时序有关，进入 Step1 时排队的重画落在了 Step0 的事件处理里。
+
+**真机**（`run_w1_7lv.log`，7 层，进入 Step1 三次）：
+- 比例始终 0.278，Step1 分栏每次都是 385 / 999；
+- GPU 层第一次就是 979 px，再次进入不改尺寸。

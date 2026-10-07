@@ -51,11 +51,10 @@ row, and the duplicate Tissue Preview button in the step bar.
   weight back to zero is an explicit zero, and the tick is the one gesture
   that removes a channel.
 * **Step1's page** (user ruling, 2026-09-16; `docs/step1_rework_plan.md`
-  block A) -- TWO columns, holding STEP0'S OWN SHARE of the width for the
-  channel column, measured from Step0 at runtime rather than copied as a
-  number. (Step0's share is not one-to-two: its column starts at 4/3 of its
-  minimum and works out near 0.28 of the work area. A hard 1:2 looked wider
-  than Step0 and was rejected on the real machine.) The left column is two tabs, `Fusion` and `Pre-segmentation` (named `Channels` and `Method & Parameters` until 2026-09-24; the FRAME inside `Fusion` is still titled `Channels`, as in Step0);
+  block A) -- TWO columns, holding the ONE channel-column share of every
+  framed page (since block A9-W1 a fixed 0.278 until the user drags; it was
+  Step0's 4/3-of-minimum rule, which works out near 0.28. A hard 1:2 looked
+  wider than Step0 and was rejected on the real machine.) The left column is two tabs, `Fusion` and `Pre-segmentation` (named `Channels` and `Method & Parameters` until 2026-09-24; the FRAME inside `Fusion` is still titled `Channels`, as in Step0);
   the right column is two tabs on screen, `Viewer` and
   `Pre-seg Results` (the montage of a pre-segmentation run, plan block D,
   user ruling 2026-09-24). The old `Patch Results` tab is kept but not
@@ -102,13 +101,13 @@ row, and the duplicate Tissue Preview button in the step bar.
   hidden and its place is kept, so nothing below moves. The Channels frame
   takes the column's height, and the two steps' Channels frames start and
   end on the same lines.
-  The column behaves as Step0's (fourth round): the same scroll bar, and
-  the frame's right edge, the scroll bar and `Save Fusion Settings` are
-  never covered by the viewer. A ROW may be (block A1b S2, user ruling
-  2026-09-30, for every step's Channels): the column's floor is the Channels
-  columns' own content, not the widest row, so a row wider than the column
-  keeps its own layout and is cut at the list's right edge -- the weight box
-  (Step0: the method box) first; widening the column shows it again. The weight box sits at the row's right edge
+  The column behaves as Step0's (fourth round): the same scroll bar. The
+  column follows the user's width ALONE (block A9-W1, user ruling
+  2026-10-08, for every step with a channel column, replacing ruling 2 of
+  2026-09-30): content wider than the column keeps its own layout and is
+  covered from the column's right edge -- rows, header row, the frame's
+  right edge, the scroll bar and `Save Fusion Settings` alike -- and
+  widening the column shows it again. The weight box sits at the row's right edge
   and the slider takes the spare width; a read-only weight (the nucleus) is
   centred in its box. The Viewer tab's Patch row carries the
   `Overlay` / `Fusion` mode buttons and then `Load Step0 ROI Result`,
@@ -228,14 +227,16 @@ row, and the duplicate Tissue Preview button in the step bar.
   together because the share is normalised. Step0 is written through its own
   left-column mechanism so its hidden peer splitter stays at the same width.
   Block A1b S1-S3 (user rulings 2026-09-30): the pages built on the page
-  frame with columns (Step0, Step1, Step2, Step3) show ONE PIXEL WIDTH -- the widest clamp of the
-  page on screen, written back into the share, so a floor that drops never
-  narrows the column -- and hold ONE floor: the widest of the left columns'
-  own minimum (the three Channels columns and Step2's parameter panel;
-  today Step2's panel or Step0's header row, a pixel apart). It does not depend on the
-  rows, on which page shows the dock or on a page having been visited, so
-  entering a page never widens the column. Every framed page opens at
-  Step0's rule, 4/3 of the Channels column's minimum.
+  frame with columns (Step0, Step1, Step2, Step3) show ONE PIXEL WIDTH.
+  Block A9-W1 (user ruling 2026-10-08): that width is the user's share and
+  nothing else -- no page's content widens it or is written back into it
+  (Step0's hidden peer splitter follows the width but never widens Step0) --
+  and every column holds ONE floor, the hard floor of 120 px
+  (`step_frame.CHANNEL_COLUMN_HARD_FLOOR`), below which content is covered,
+  not avoided. Every framed page opens at ONE FIXED SHARE, 0.278 of its
+  width (`step_frame.CHANNEL_COLUMN_OPENING_FRACTION`, the value Step0's old
+  4/3 rule measured), until the user drags; so entering a page, loading a
+  slide or visiting Step0 never moves the column.
 * **The page frame** (block A1b, user ruling 2026-09-30;
   `docs/v16_A1b_application.md`, `ui/step_frame.py`) -- every step page is
   one `StepFrame`: a title slot, one tab row (left tabs over the left

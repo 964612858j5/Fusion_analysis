@@ -788,3 +788,27 @@ def test_step0_views_are_redrawn_once_when_step0_is_back(
         assert page._owed_own_redraws == set()
     finally:
         _close(rig)
+
+
+def test_a_burst_behind_the_slide_viewer_checks_the_settings_once(
+        app, monkeypatch, tmp_path):
+    """Block A9-O3: a restore moves ~30 channel windows in one handler;
+    behind the whole-slide viewer each one used to recompute the fusion
+    settings state (a settings hash, ~11 ms). Now once, after the turn."""
+    rig = _window(app, monkeypatch, tmp_path)
+    try:
+        _in(rig, 1)
+        assert rig.w._step1_whole_slide_active()
+        checks = []
+        monkeypatch.setattr(rig.w, "_update_fusion_settings_state",
+                            lambda: checks.append(1))
+        monkeypatch.setattr(rig.w, "_arm_frame_timer", lambda ms: None)
+        for _ in range(30):
+            rig.w._schedule_preview_update()
+            rig.w._apply_pending_preview_update()
+        assert checks == [], "checked inside the burst"
+        for _ in range(5):
+            app.processEvents()
+        assert checks == [1]
+    finally:
+        _close(rig)

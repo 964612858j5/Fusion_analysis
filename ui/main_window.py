@@ -2484,6 +2484,17 @@ class MainWindow(QMainWindow):
             path = str(getattr(getattr(self, "loader", None), "filepath", "") or "")
             return self._step3_viewer_failed(mount, path, exc)
 
+    def _queue_fusion_settings_state(self):
+        """`_update_fusion_settings_state`, once, right after this turn."""
+        if self.__dict__.get("_fusion_state_queued"):
+            return
+        self._fusion_state_queued = True
+
+        def run():
+            self._fusion_state_queued = False
+            self._update_fusion_settings_state()
+        QTimer.singleShot(0, run)
+
     def _repay_legacy_preview(self):
         """The old patch view is back on screen: draw the frame it was owed
         while the whole-slide viewer covered it (block A9-O1)."""
@@ -7888,9 +7899,13 @@ class MainWindow(QMainWindow):
                         wait_ms=wait, armed=armed,
                         in_flight=self._frame_in_flight,
                         coalesced=self._frame_coalesced)
-        # Said immediately, not after the redraw: the moment the settings differ
-        # from the snapshot, a search must not look startable.
-        self._update_fusion_settings_state()
+        # Said before the redraw: the moment the settings differ from the
+        # snapshot, a search must not look startable. Once per event-loop
+        # turn (A9-O3): a click to start one can only come in a later turn,
+        # `_require_committed_fusion_settings` checks again anyway, and a
+        # restore moving ~30 windows in one handler paid a settings hash
+        # (~11 ms) for each.
+        self._queue_fusion_settings_state()
         if self._frame_in_flight or armed:
             return          # a frame is already due; this input rides it
         if wait <= 0.0:
@@ -8104,7 +8119,9 @@ class MainWindow(QMainWindow):
             self._preview_update_pending = False
             self._legacy_preview_owed = True
             perf_trace.mark("step1.defer", why="whole_slide", rev=rev)
-            self._update_fusion_settings_state()
+            # Once per event-loop turn (A9-O3): a restore moves ~30 channel
+            # windows in one handler, and each answer costs a settings hash.
+            self._queue_fusion_settings_state()
             return
         coalesced, self._frame_coalesced = self._frame_coalesced, 0
         self._frame_pending_rev = None

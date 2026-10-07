@@ -180,6 +180,7 @@ class Step1GpuBinding(QtCore.QObject):
         # once but PUBLISHED at most once per frame -- a burst of 50 results
         # is one submit, not 50 back-to-back ones on the GUI thread.
         self._publish_due = False
+        self._turn_published = False
         self._last_publish_at = -1.0
         self._publish_timer = QtCore.QTimer(self)
         self._publish_timer.setSingleShot(True)
@@ -269,7 +270,25 @@ class Step1GpuBinding(QtCore.QObject):
                     # brand new one starts its fine when that coarse lands.
                     self._plan_fine_for_channel(channel, self._latest_snapshot,
                                                 priority)
+        self._publish_once_per_turn()
+
+    def _publish_once_per_turn(self) -> None:
+        """Block A9-O3-2: the first display refresh of an event-loop turn
+        draws AT ONCE; any further one in the same turn -- a session restore
+        installs ~30 channels' settings back to back in one handler, and
+        nobody can see the frames in between -- is folded into ONE publish
+        right after the turn (codex: by turn, not by elapsed time, which a
+        20 ms refresh would outrun)."""
+        if self._turn_published:
+            self._publish_due = True
+            self._publish_timer.start(0)
+            return
         self._publish_current()
+        self._turn_published = True
+        QtCore.QTimer.singleShot(0, self._end_turn)
+
+    def _end_turn(self) -> None:
+        self._turn_published = False
 
     def _release_inactive_fine(self, active) -> int:
         """Give back the fine of every channel that is no longer drawn."""

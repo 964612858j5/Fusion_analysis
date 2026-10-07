@@ -816,14 +816,16 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
 
     # Qt lifecycle -------------------------------------------------------
 
+    @perf_trace.timed("gpu.init")
     def initializeGL(self) -> None:  # noqa: N802
         context = self.context()
         if context is None or not context.isValid():
             self._init_error = Step1GpuLayerError("Qt did not create a valid G1 OpenGL context")
             return
         try:
-            from OpenGL import GL
-            import OpenGL
+            with perf_trace.span("gpu.init.import"):
+                from OpenGL import GL
+                import OpenGL
             self._gl = GL
             actual = context.format()
             renderer = _decode(GL.glGetString(GL.GL_RENDERER))
@@ -848,7 +850,8 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                 raise Step1GpuLayerError("G1 requires an OpenGL 3.3 Core-capable Qt context")
             if self._require_hardware and self._capabilities["software_renderer"]:
                 raise Step1GpuLayerError(f"G1 requires hardware renderer, got {renderer!r}")
-            self._compile_programs()
+            with perf_trace.span("gpu.init.compile"):
+                self._compile_programs()
             self._vao = _as_name(GL.glGenVertexArrays(1))
             _check_gl(GL, "G1 shader setup")
             self._initialized = True

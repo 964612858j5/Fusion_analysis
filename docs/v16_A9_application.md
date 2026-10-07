@@ -591,3 +591,36 @@ Step2 有 4 个测试在 `sync` 卡死期间超时，WSL 重启后单独重跑�
 - 合成过程本身不占用 GIL，所以只影响 Tissue Preview 自身的刷新速度，不影响主视图。
 
 **7 层拼图**：还没有能打开的 Step1 项目，需要先跑完 Step0 + Step1。是否搭建由用户决定。
+
+## 19. O3 记录（2026-10-07）
+
+**方案**：与 codex 协商后定稿，codex 提出 6 条修改，均已采纳。
+
+**改动**：
+- O3-1 GPU 预热（用户裁定：程序一开始就启动 GPU）：`ui/gpu_warmup.py`，在窗口显示后由后台线程导入 PyOpenGL。
+  - 也试过一个 1×1 GL 预热控件，实测后撤掉。它带来的收益与只导入相同；而且会让整个窗口改走 GL 合成，WSL 下 Step0 滚轮从 6 ms 恶化到 403 ms。
+- O3-2：`refresh_display` 在同一事件循环轮次内，第一次立即发布，其余合并为该轮结束后的一次发布。按轮次而不是按时间判断，这是 codex 第 1 条意见。
+- `_schedule_preview_update` 和 O1 的 whole-slide 让路路径中，融合设置状态（一次设置哈希，约 11 ms）每轮只算一次。
+  - 不影响安全保证：开始搜索的点击只可能发生在之后的轮次，开始搜索时 `_require_committed_fusion_settings` 还会再检查一遍。
+- 细粒度计时：`gpu.init` / `gpu.init.import` / `gpu.init.compile`。
+
+**审查**：codex 无发现，工作树未变。
+
+**定向回归**：526 过，0 失败。
+
+**真机实测**（3 层，`run_o3c_3lv.log`）：
+
+| 首次进入 Step1 的 GUI 时间 | O2 | O3 |
+|---|---|---|
+| `switch.go_step1` | 1708 ms | 1063 ms |
+| `gl_show` | 653 ms | 132 ms |
+| 恢复会话字段 | 742 ms | 468 ms |
+
+- Step0 滚轮 p95 38 ms，没有恶化。
+- 剔除 WSL 后：GUI 卡顿 p95 64 ms，Intensity p95 68 ms。
+- 再次进入 Step1 时 `show_page` 仍为 404 ms。疑似 WSL，需在原生 Windows 上确认。
+
+**待用户决定**：
+1. 粗层交接（codex 提出）：首次显示时先显示粗层，还是保持"清晰后再显示"（G3.2b）。
+2. 7 层拼图的项目怎么搭建。
+3. Tissue Preview 合成改为矩阵乘法（约 650 → 150 ms）。

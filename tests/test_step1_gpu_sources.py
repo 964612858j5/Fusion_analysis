@@ -1345,3 +1345,32 @@ def test_a_burst_of_landed_tiles_is_published_once_per_frame(app):
         assert len(layer.calls) == before + 2
     finally:
         binding.dispose()
+
+
+def test_a_burst_of_display_refreshes_in_one_handler_draws_twice(app):
+    """Block A9-O3-2: a session restore installs every channel's settings
+    back to back in one handler. The first refresh draws at once; the rest
+    of that turn is ONE publish right after it, from the final state."""
+    provider = _Provider(level_shape=(8, 8), levels=1)
+    controller = _Controller(provider, visible_tiles=((0, 0),), epoch=1)
+    scheduler = _Scheduler()
+    layer = _RecordingLayer()
+    binding, _ = _binding(provider, scheduler, controller, layer)
+    try:
+        binding.source_changed()
+        _deliver_all(app, scheduler, list(scheduler.requests),
+                     value=np.full((4, 4), 0.2, np.float32))
+        for channel in ("A", "B"):
+            _deliver_all(app, scheduler, _fine_requests(scheduler, channel),
+                         value=np.full((4, 4), 0.2, np.float32))
+        before = len(layer.calls)
+        for _ in range(30):
+            binding.refresh_display()
+        assert len(layer.calls) == before + 1, "the first refresh draws at once"
+        _events(app)
+        assert len(layer.calls) == before + 2, "the rest is ONE publish"
+        # A later turn draws at once again.
+        binding.refresh_display()
+        assert len(layer.calls) == before + 3
+    finally:
+        binding.dispose()

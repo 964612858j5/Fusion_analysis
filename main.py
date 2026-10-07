@@ -39,6 +39,9 @@ def main():
 
     win = MainWindow()
     win.show()
+    # Block A9-O3-1: the GPU display path is warmed while Step0 is up
+    from .ui import gpu_warmup
+    win._gpu_warmup = gpu_warmup.start(win)
     try:
         sys.exit(app.exec_())
     finally:

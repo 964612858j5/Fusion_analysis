@@ -662,3 +662,173 @@ Step2 有 4 个测试在 `sync` 卡死期间超时，WSL 重启后单独重跑�
 - 1.9 s 时粗层数据早已就绪，随即发出首次重画。
 - 2.4 s 时画面上屏，中间约 0.5 s 疑似 WSL 的 GPU 唤醒。
 - 结论：瓶颈是 GUI 线程忙，不是数据慢。下一步要拆分那 0.72 s 和恢复会话的 0.47 s。
+
+## 21. 7 层项目、7 层基线、首次进入细粒度计时（A9-T1），以及 O3-6 方案草稿（2026-10-07）
+
+### 21.1 7 层项目（用户授权）
+- 脚本 `bench_a9/build_7lv_project.py`，不在仓库内，全部调用产品函数。项目 `bench_rm/accept/a9_7lv`，工作区 `full_wsi_20261007_211227_de37`，约 70 s 建成。
+- 内容：真实 Step0 校正（CD4 cucim 50、CD45RA tophat 15，同 a5）、`write_handoff`、Step1 融合设置与草稿取自 a5 并改绑。
+- 不含预分割、融合、分割，所以场景 `a9_7lv.json` 去掉了 Step3 段。
+- 真机核对：工作区能打开；融合设置被采用（`fusion settings restored`）。
+
+### 21.2 7 层基线（`bench_a9/run_7lv_base2.log`，剔除 WSL 后）
+
+| 项目 | 7 层 | 3 层（O3-5） |
+|---|---|---|
+| 拖动 p95 | 36 ms | 40 ms |
+| 滚轮 p95 | 27 ms | 33 ms |
+| Intensity p95 | 31 ms | 75 ms |
+| 勾选通道 | 20 次全部撞上 WSL 唤醒，无数据 | 79 ms |
+| GUI 卡顿 p95 | 220 ms | 68 ms |
+
+A9-7 资源（`measure_a5`）：内存峰值 7.2 GB，最低可用 2.9 GB，交换区约 0，显存峰值 0.9 GB，没有 OOM。
+
+第一次运行无效：Step0 的一次拖动画出了 patch P14。项目已重建；驱动改为记录每次手势落点（`a9.target`）。重跑没有复现，原因未查明。
+
+### 21.3 A9-T1 细粒度计时（14792cf，本地）
+
+**改动**：
+- `utils/perf_dispatch.py`：同时设置 `BLOCK01_PERF=1` 和 `BLOCK01_PERF_DISPATCH=1` 时，应用的 `notify` 记录慢的事件分发（接收者、事件类型、嵌套深度）。
+- 恢复会话的子计时段。
+- 驱动的 `a9.target` 标记。
+
+**审查与回归**：codex 无发现；定向回归 224 个全部通过。首次诊断运行在退出时出现 SIGSEGV，已在退出前停止计时并关闭 `setdestroyonexit`，复测正常退出。
+
+**首次进入 Step1 的拆分**（`run_entry_7lv_b.log` 未碰上 WSL 唤醒；a5 见 `run_entry_a5.log`；单位 ms）：
+
+| 段 | 7 层 | a5 | 性质 |
+|---|---|---|---|
+| `restore.scientific_state.owners` | 233 | 217 | 我们的代码 |
+| `restore.fusion_settings.adopt_intensity`（Step0 工作台同步 29 通道，Step0 不在屏） | 174 | 351 | 我们的代码，对屏幕无用 |
+| `restore.preseg`（只有 a5 有预分割） | — | 170 | 我们的代码，视图不在屏 |
+| `restore.select_preview_patch` + 进入时的旧 patch 预览合成 | 95 + 59–92 | 93 + 59 | 我们的代码，旧视图随后被整片查看器遮住 |
+| GPU 层第一次 Resize（Qt 建上下文 / FBO） | 139–286 | 159 | Qt / 驱动 |
+| `grabFramebuffer` | 40；碰上 WSL 时 602 | 54 | Qt / 驱动 |
+| 处理函数返回后的整窗重绘 `UpdateRequest` | 188–297 | 256–699 | Qt / 驱动，疑似 WSL |
+| 第一次整幅上传 | 122–168 | 392 | 粗层大小决定 |
+| **到第一帧完整画面** | **1.53 s（无 WSL）** / 2.6 s | 3.0 s | 门槛 1 s |
+
+未被覆盖的时间：20–70 ms。
+
+**再次进入**：`show_page` 约 380 ms。原因是页面重新显示时，Resize 逐级传到 `Step1GpuLayer`（QOpenGLWidget），每次都重建 FBO。之后还有一次整窗重绘，约 100–330 ms。
+
+### 21.4 O3-6 方案草稿（待 codex 审、用户批准）
+
+两个根因：
+1. 不在屏幕上的组件在进入时被立即做了全套工作。
+2. "整片查看器就是画面"的判断（`_step1_whole_slide_active`，`main_window.py:2504`）在恢复期间为假，因为挂载在恢复之后才打开。于是旧 patch 预览被合成 2–3 次。
+
+措施按收益与风险排序，每项独立、可单独回退，每项之后重测，首次进入达标即停。
+
+- **P1 Step0 工作台不在屏时不同步**
+  - 不在屏的判断：当前步骤不是 Step0，且 Intensity 窗口不存在或不可见。此时 `adopt_intensity` 只把窗口存入 `_workspace_intensity`（已有的延迟路径），不调用 `_engage_conditioning_workbench`。
+  - 29 个映射用 `DisplayState.adopt_mappings` 一次事务写入共享状态，扇出一次，而不是逐通道 `set_mapping` 29 次。
+  - 回到 Step0 或打开 Intensity 时，由已有的 `_engage_conditioning_workbench` → `_apply_workspace_intensity` 补上。
+  - 实现前先核实：Step1 只从共享状态读映射，不从工作台的 `_params` 读。
+  - 预计省 170–350 ms。
+- **P2 旧 patch 预览在整片挂载"在开或将开"时不合成**
+  - 进入 Step1、准备挂载整片查看器时置一个标记；`_refresh_patch_preview`、`_select_preview_patch` 的合成部分、`_ensure_channels_cached` 遵守这个标记，只记欠账。
+  - 挂载被拒绝、退回旧视图时，由已有的 `_repay_legacy_preview` 补画。
+  - 预计省 150–180 ms。
+- **P3 预分割恢复拆成"状态"和"视图"两部分**
+  - 状态部分照旧在进入时完成：`read_run`、记录、选中项、`_check_save_unlock`。
+  - 视图部分（结果网格、montage）推迟到对应标签页第一次显示时，沿用 `_request_montage_images` 已有的"montage 不在屏就不画"规则。
+  - 预计省约 170 ms（只在有预分割时）。
+- **P4（先测再定）两路状态安装**
+  - 先给 `config.set_channels`、`prepare_restore`（深拷贝回滚快照）、提交 / `_announce_install`（逐通道信号）、`sync_after_restore` 加子计时段。
+  - 候选做法：通道列表不变时不重建 29 行；逐通道信号合并成一次扇出（已有 `install_fanout_active`）。
+  - 测量之后再定，不预先改。
+- **P5 再次进入时 GPU 层不重复 Resize**
+  - `_sync_attached_geometry`：矩形不变就不调 `setGeometry`。
+  - Step1 页面不可见时不同步几何，显示后同步一次。
+  - `_apply_channel_column_fraction` 只在尺寸真的变化时调 `setSizes`。
+  - 目标：再次进入 `show_page` 从 380 ms 降到 < 100 ms。
+
+**不做**：
+- Qt 内部的上下文 / FBO 创建、`grabFramebuffer` 的同步、整窗 GL 合成重绘。它们受 WSL 影响，按裁定分开报告，留给原生 Windows 确认。
+- 预建 GL 控件：O3 已实测，会让整窗改走 GL 合成，Step0 变慢。
+
+**门槛**（剔除 WSL 唤醒）：
+- 冷启动后首次进入到第一帧完整画面 ≤ 1 s（3 层和 7 层都要达标）。
+- 再次进入 p95 ≤ 300 ms。
+- 像素不变。
+- 回到 Step0 时，Intensity 与工作台显示正确的窗口。
+- 预分割标签页显示正确。
+- GPU 不可用时旧视图仍能正确显示。
+
+**白名单**：
+- 新模块 `ui/step1_entry_defer.py`（标记和欠账），放置推迟逻辑。
+- 接线：`ui/main_window.py`、`ui/step0/step0_page.py`、`ui/step1_gpu_layer.py`、`ui/step1_viewer_mount.py`，必要时 `ui/block01_display.py`。
+- 对应测试。
+- 两个大文件只加接线。预计 `main_window.py` 约 +40 行、`step0_page.py` 约 +15 行。
+
+### 21.5 codex 审查（方案草稿）与修订（方案 v2，待用户批准）
+
+codex 共 7 条意见，已逐条对照代码核实。第 1、2 条已确认：
+- `display_mapping_draft()`（`step0_page.py:4861`）读的是工作台的 `_params`；
+- `adopt_mappings`（`block01_display.py:812`）仍逐通道发 `mapping_changed`。
+
+**修订后的措施**：
+
+- **P1′ 参数照装，展示推迟**
+  - `adopt_intensity` 照常把参数和"已确定"标记同步写入工作台的 `_params`，保证 Save、脏检查、Step0 草稿、融合设置读到的都是新值。
+  - 只推迟展示部分，包括 29 行列表重建、直方图、控件装载。推迟到 Step0 或 Intensity 窗口可见时再做；工作台已有数据时也要显式补上。
+  - 核通道的映射角色和"已确定"标记的行为保持不变（`_adopt_workbench_window`）。
+  - 先加子计时段，分清 174–351 ms 里有多少是展示、多少是逐通道映射扇出，再决定扇出要不要动。
+- **P2′ 只推迟像素工作**
+  - patch 选择和会话更新照常进行，只推迟旧预览的合成和读取。
+  - 欠账在挂载被拒绝、出异常、进入中途被打断时补上；补上时要包括跳过的 patch / 通道加载，不只是安排重画。整片查看器挂载成功时清掉欠账。
+  - CPU 整片挂载成功也算成功，不算退回旧视图。
+- **P3′ 状态照装，视图先测再推迟**
+  - 照常在进入时安装：方法、选中的 patch、run 和记录、可选性校验、`_preseg_selected`、`_check_save_unlock`。
+  - 结果网格、montage 图像、轮廓先测出各自的耗时，再决定是否推迟。
+  - 结果标签页已经可见时必须立即填好。
+- **P4** 不变：先测再定，单独一项。
+- **P5′ 先记录再改**
+  - 先记录每次几何同步前后的矩形，确认矩形不变时是否真会重建 FBO，再决定是否跳过。
+  - 不可见时如果推迟同步，必须在第一次可见提交之前显式同步一次。视口的 Show / Move / Resize 处理和 ViewBox 的 resize 处理都保留。
+  - 分栏尺寸要先比较实际值，没变才跳过写入，并保持跨步骤的列对齐。
+
+**顺序**：先做 P1′ 和 P2′ 并重测，再测 P3′ 和 P4，最后评估 P5′。
+
+**能否达标**：按现有测量，P1–P3 全部生效后，7 层约 1.0–1.2 s，a5（3 层）约 2.3 s。a5 里剩下的大头是：
+- 整窗重绘 256 + 443 ms；
+- 第一次整幅上传 392 ms（3 层的最粗层 1929×2026，比 7 层的大 16 倍）；
+- GPU 层第一次 Resize 159 ms。
+
+所以只靠这一块，首次进入 ≤ 1 s 在 3 层上达不到。另外，这些 Qt / GL 开销不能只因为疑似 WSL 就全部剔除，要在原生 Windows 上确认。
+
+### 21.6 O3-6 P1′ + P2′ 执行记录（2026-10-07，用户批准 v2，先做 P1′、P2′）
+
+**改动**：
+- **P2′**（`ui/main_window.py` +23/−2）：进入 Step1 时，`_resync_step1_display_from_state` 只先做"采用共享选择"那一半；读通道、合成旧 patch 预览的那一半（`_resync_step1_pixels`）挪到整片查看器跟随步骤之后。
+  - 查看器打开时，已有的 `_step1_whole_slide_active` 判断会让旧预览不再合成。
+  - 查看器被拒绝时，这一半照原样执行。
+  - 没有另建新模块。用户同意了这一偏差。
+- **P1′**（`ui/widgets/channel_workbench.py` +48/−3，用户同意加入白名单）：
+  - 剖析结果：`adopt_intensity` 的 68% 花在 29 行 `ChannelLayerList` 的构造上，约 15% 是直方图。Step0 的工作台本身从不上屏，只有分离出去的检查器会上屏。
+  - Step0 宿主下：工作台不可见时不建列表，`showEvent` 时补建；检查器不可见时不画直方图，检查器 Show 时补画。
+  - 参数、"已确定"标记、用户调过的标记照旧立即写入。其他宿主不受影响。
+
+**审查**：codex 只提了白名单这一条（用户已同意），无正确性问题；审查期间工作树未变。
+
+**定向回归**：51 个文件，1240 个通过，10 个失败。10 个全部在已知旧失败里：4 个在 `full_reg/failed.txt`，6 个是 `step0_channel_conditioning` 的旧失败（原来 7 个，少了 1 个）。没有新失败。
+
+**真机前后对比**：改动前的代码（14792cf，单独的 git 工作树）与改动后交替运行，7 层和 a5 各 3 次，不开分发计时。中位数：
+
+| | 7 层 改动前 → 改动后 | a5 改动前 → 改动后 |
+|---|---|---|
+| 首次进入 → 第一帧完整画面 | 1619 → **990 ms** | 2246 → **1659 ms** |
+| `adopt_intensity` | 244 → 77 | 291 → 100 |
+| `restore.session_fields` | 464 → 237 | 584 → 365 |
+| 再次进入 | 233 → 232 | 341 → 289 |
+
+- 7 层首次进入已在 1 s 门槛内，但只差 10 ms，余量很小。
+- a5 仍是 1.66 s。剩下的大头有：
+  - 第一次整幅上传约 0.4 s：3 层的最粗层 1929×2026；
+  - 整窗重绘约 0.25–0.45 s；
+  - 预分割恢复 0.17–0.26 s；
+  - 两路状态安装约 0.22–0.27 s。
+- a5 改动后有一次是 3.1 s，那次 GL 段卡了 889 ms，属于 WSL 唤醒。
+
+**诊断工具的已知问题**：打开 `BLOCK01_PERF_DISPATCH` 时，程序退出可能 SIGSEGV（6 次中 4 次）。关掉它的运行全部正常退出，包括含本次改动的 15 次。只影响诊断，不影响产品，也不影响测得的数据。

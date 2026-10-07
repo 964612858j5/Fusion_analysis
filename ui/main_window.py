@@ -5235,13 +5235,18 @@ class MainWindow(QMainWindow):
         return scope() in ("", self._DISPLAY_SCOPES.get(1, ""))
 
     @_perf("switch.resync_step1_display")
-    def _resync_step1_display_from_state(self):
+    def _resync_step1_display_from_state(self, pixels=True):
         """Redraw Step1 from ITS OWN display answers, once.
 
         The mirror image of `Step0Page.resync_display_from_state`: while
         another step was up, Step1 ignored every tick and selection notice on
         purpose, so entering it replays its own -- the panel's rows, the
         channels the picture needs, and one redraw. Reads only.
+
+        `pixels=False` (block A9-O3-6, P2'): the panel's rows only; the step
+        change replays the pixel half (`_resync_step1_pixels`) AFTER the
+        whole-slide viewer has followed the step, so a viewer that opens
+        covers the old patch picture before it is composed for nobody.
         """
         state = getattr(self._display, "state", None)
         if state is None or self.loader is None:
@@ -5251,6 +5256,15 @@ class MainWindow(QMainWindow):
             adopt = getattr(panel, "_adopt_shared_selection", None)
             if adopt is not None:
                 adopt(state.selected_channel(), force=True)
+        if pixels:
+            self._resync_step1_pixels()
+
+    def _resync_step1_pixels(self):
+        """The pixel half of the Step1 catch-up: the channels the old patch
+        picture needs, and its one redraw. Both refuse on their own while
+        the whole-slide viewer is the picture."""
+        if getattr(self._display, "state", None) is None or self.loader is None:
+            return
         self._ensure_channels_cached(self._preview_patch_idx)
         self._refresh_patch_preview(reset_view=False)
 
@@ -5377,6 +5391,7 @@ class MainWindow(QMainWindow):
         # `ChannelDisplayState.set_scope`.
         state = getattr(self._display, "state", None)
         scope_moved = False
+        resync_step1_pixels = False
         if state is not None and hasattr(state, "set_scope"):
             scope_moved = state.set_scope(self._DISPLAY_SCOPES.get(active, ""),
                                           origin=f"step{active}")
@@ -5397,12 +5412,18 @@ class MainWindow(QMainWindow):
                 # Step1 OR Step3 (block 2b): whichever of them brings Step1's
                 # scope back, Step1's consumers catch up with what moved
                 # while another scope was on screen.
-                self._resync_step1_display_from_state()
+                self._resync_step1_display_from_state(pixels=False)
+                resync_step1_pixels = True
         # THE WHOLE-SLIDE VIEWER follows the step whether or not the scope
         # moved: a return to Step1 with the same scope still has to compose
         # what changed while it was away.
         with perf_trace.span("step1.entry.viewer", step=active):
             self._step1_whole_slide_step_changed(active)
+        if resync_step1_pixels:
+            # Block A9-O3-6 (P2'): after the viewer followed the step. Open,
+            # it is the picture and this composes nothing; refused, the old
+            # patch view is back and is drawn exactly as before.
+            self._resync_step1_pixels()
         if active == 1 and perf_trace.enabled():
             # A successful mount is not proof that a visible channel reached
             # the GPU. Sample after the event loop has had time to deliver

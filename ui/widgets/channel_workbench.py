@@ -25,7 +25,7 @@ import os
 
 import numpy as np
 from PyQt5 import QtWidgets
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor
 
 from ...core.channel_remap import (
@@ -158,6 +158,13 @@ class ChannelWorkbench(QtWidgets.QWidget):
         # "Intensity" window). The composite is replayed once, on the next
         # showEvent / reattach -- see `_refresh_preview`.
         self._preview_dirty = False
+        # Block A9-O3-6 (P1'): Step0's panel host never shows this widget,
+        # only the detached inspector. Its 29-row channel list is built when
+        # the widget is first on screen, and the inspector's histogram when
+        # the inspector is (`_pay_owed_layer_list`, `eventFilter`); the
+        # params behind both are installed immediately as before.
+        self._layer_list_owed = False
+        self._histogram_owed = False
 
         self._build_ui()
         self._set_controls_enabled(False)
@@ -278,6 +285,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
         # Kept as an attribute so a host can take the whole panel out of this
         # widget and re-parent it (Step0's floating "Intensity" window).
         self._inspector = inspector
+        if self._step0_intensity_panel:
+            inspector.installEventFilter(self)      # its Show pays the histogram
 
         if self._step0_intensity_panel:
             # (#1) Stack Intensity BELOW Channels in a left column (vertical
@@ -971,6 +980,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._active = None
         self._channel_meta = {}
         self._source_policy = default_source_policy()
+        self._layer_list_owed = False
+        self._histogram_owed = False
         self._layer_list.set_channels([])
         self._canvas.clear()
         self._histogram.set_data(np.zeros((1, 1), np.float32))
@@ -1165,6 +1176,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
 
     # ── layer list / active channel ───────────────────────────────────
     def _refresh_layer_list(self):
+        if self._step0_intensity_panel and not self.isVisible():
+            self._layer_list_owed = True        # built on the next showEvent
+            return
+        self._layer_list_owed = False
         rows = []
         for n in self._names:
             rows.append({
@@ -1412,7 +1427,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
             hist_src = self._raw.get(name)
             if hist_src is None:
                 hist_src = np.zeros((1, 1), np.float32)
-            if rebuild_histogram:
+            if rebuild_histogram and self._inspector_offscreen():
+                self._histogram_owed = True     # drawn when the inspector shows
+            elif rebuild_histogram:
+                self._histogram_owed = False
                 self._histogram.set_data(hist_src, p["min"], p["max"],
                                          color=self._colors.get(name))
             else:
@@ -1683,7 +1701,35 @@ class ChannelWorkbench(QtWidgets.QWidget):
         """Pay back a preview deferred while this widget was off screen, so
         returning to the Channel Remap tab shows the CURRENT parameters."""
         super().showEvent(event)
+        self._pay_owed_layer_list()
         self.flush_pending_preview()
+
+    def _inspector_offscreen(self):
+        """Block A9-O3-6 (P1'): Step0's inspector is not on screen -- not yet
+        detached into the Intensity window, or that window is closed."""
+        box = self._inspector
+        return bool(self._step0_intensity_panel and box is not None
+                    and not box.isVisible())
+
+    def _pay_owed_layer_list(self):
+        """Build the channel list skipped while off screen, on the current
+        model: rows, active row and the All checkbox."""
+        if not self._layer_list_owed or not self._names:
+            return
+        self._layer_list.blockSignals(True)
+        try:
+            self._refresh_layer_list()
+            if self._active in self._params:
+                self._layer_list.set_active(self._active)
+        finally:
+            self._layer_list.blockSignals(False)
+        self._sync_all_checkbox()
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        if (watched is self._inspector and event.type() == QEvent.Show
+                and self._histogram_owed and self._active in self._params):
+            self._load_params_into_controls(self._active)
+        return super().eventFilter(watched, event)
 
     def flush_pending_preview(self):
         """Recomposite once if refreshes were skipped while off screen."""

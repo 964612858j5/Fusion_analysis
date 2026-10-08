@@ -375,6 +375,12 @@ def _screen_reference(rig, mode=None, coarse_only=False):
             if plane.valid is not None:
                 sampled = np.where(np.asarray(plane.valid, bool)[row, col],
                                    sampled, np.nan)
+            rect = getattr(plane, "valid_rect", None)
+            if rect is not None:
+                # block A9 S2c: an integer plane's validity is its rectangle
+                ry0, ry1, rx0, rx1 = rect
+                ok = (row >= ry0) & (row < ry1) & (col >= rx0) & (col < rx1)
+                sampled = np.where(ok, sampled, np.nan)
             # A later plane overwrites an earlier one where it has pixels;
             # where it has none the shader discards and the earlier stays.
             target = values[inside]
@@ -903,10 +909,14 @@ def test_a_moved_source_rebuilds_the_backend_and_refuses_the_old_pixels(app):
         assert new_source != old_source
         assert _wait(app, lambda: rig.mount.gpu_binding.stats()
                      ["coarse_channels"] == ("CD3",))
+        # block A9 S2c: tile keys carry the provider's native namespace --
+        # the same slide and source-table token, stage "step1-native"
+        new_keys = rig.mount.host.stack.provider.native_source_identity()
+        assert new_keys.corrected_artifact == new_source.corrected_artifact
         for descriptor, _d, _v, _s in rig.mount.gpu_binding.descriptor_history:
             for source in descriptor.channels:
                 for plane in source.coarse + source.fine:
-                    assert plane.identity.source == new_source, \
+                    assert plane.identity.source == new_keys, \
                         "an old source's pixels reached the new picture"
         after = rig.mount.current_camera()
         if camera is not None and after is not None:

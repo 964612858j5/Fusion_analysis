@@ -36,6 +36,45 @@ void main() {
 }
 #endif
 
+#ifdef PASS_SOURCE_UINT
+// Block A9 S2c: a raw channel kept in its own integers (R8UI / R16UI). The
+// value is the pyramid's integer, exactly; validity is the plane's valid
+// rectangle (outside it the texels are 0 = absent, never black). The
+// mapping is the same arithmetic as PASS_SOURCE, on the same raw units.
+uniform usampler2D u_raw;
+uniform vec4 u_view_rect;
+uniform vec4 u_plane_rect;
+uniform vec4 u_valid_rect;
+uniform vec3 u_mapping;
+
+void main() {
+    vec2 view_size = vec2(u_view_rect.y - u_view_rect.x,
+                          u_view_rect.w - u_view_rect.z);
+    vec2 world = vec2(u_view_rect.x + v_screen_uv.x * view_size.x,
+                      u_view_rect.w - v_screen_uv.y * view_size.y);
+    if (world.x < u_plane_rect.x || world.x >= u_plane_rect.y ||
+        world.y < u_plane_rect.z || world.y >= u_plane_rect.w) {
+        discard;
+    }
+    if (world.x < u_valid_rect.x || world.x >= u_valid_rect.y ||
+        world.y < u_valid_rect.z || world.y >= u_valid_rect.w) {
+        discard;
+    }
+    vec2 plane_size = vec2(u_plane_rect.y - u_plane_rect.x,
+                           u_plane_rect.w - u_plane_rect.z);
+    vec2 uv = vec2((world.x - u_plane_rect.x) / plane_size.x,
+                   (world.y - u_plane_rect.z) / plane_size.y);
+    float raw = float(texture(u_raw, uv).r);
+    float denominator = u_mapping.y - u_mapping.x;
+    float signal = 0.0;
+    if (denominator > 0.0) {
+        signal = pow(clamp((raw - u_mapping.x) / denominator, 0.0, 1.0),
+                     max(u_mapping.z, 0.000001));
+    }
+    out_rgba = vec4(clamp(signal, 0.0, 1.0), 0.0, 0.0, 1.0);
+}
+#endif
+
 #ifdef PASS_CONTRIBUTION
 uniform sampler2D u_input;
 uniform vec3 u_color;

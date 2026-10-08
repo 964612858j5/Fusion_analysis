@@ -160,6 +160,12 @@ class Step1GpuBinding(QtCore.QObject):
         self._source_pending = False
         self._revision = 0
         self._source = None
+        #: Block A9 S2c: the identity tile KEYS carry -- the provider's
+        #: native namespace when it has one (uint8/uint16 raw tiles), else
+        #: the display source itself. Snapshots are still compared with
+        #: `_source`; keys, retention and deliveries use this.
+        self._key_source = None
+        self._native_pixel_bytes = 4
         self._serial = 0
         self._latest_snapshot = None
         self._fine_epoch = 0
@@ -248,6 +254,9 @@ class Step1GpuBinding(QtCore.QObject):
         self._unavailable.clear()
         self._last_error = None
         self._source = self.provider.source_identity()
+        self._key_source = self._native_identity()
+        stored = str(getattr(self.provider, "_dtype", "") or "")
+        self._native_pixel_bytes = {"uint8": 1, "uint16": 2}.get(stored, 4)
         self._latest_snapshot = self.controller.snapshot()
         self._consumed_viewport = None
         self._clear_layer_output()
@@ -575,7 +584,7 @@ class Step1GpuBinding(QtCore.QObject):
         for ty in range(math.ceil(height / tile_size)):
             for tx in range(math.ceil(width / tile_size)):
                 address = TileAddress(grid=self.controller.grid, level=level, tx=tx, ty=ty)
-                keys.add(RawKey(source=self._source, channel=channel, tile=address))
+                keys.add(RawKey(source=self._key_source, channel=channel, tile=address))
         return keys
 
     # Fine planning -------------------------------------------------------
@@ -804,7 +813,7 @@ class Step1GpuBinding(QtCore.QObject):
             from ..viewer import request_planning as planning
             coords = planning.visible_tiles_for_viewport(
                 tuple(bbox_l0), self._level_ds(level), tile)
-            return {RawKey(source=self._source, channel=channel,
+            return {RawKey(source=self._key_source, channel=channel,
                            tile=TileAddress(grid=self.controller.grid, level=level,
                                             tx=int(tx), ty=int(ty)))
                     for tx, ty in coords}
@@ -818,7 +827,7 @@ class Step1GpuBinding(QtCore.QObject):
             for cx in range(int(x0 // (tile * ds_l)), min(nx - 1, int((x1 - 1) // (tile * ds_l))) + 1):
                 for cy in range(int(y0 // (tile * ds_l)), min(ny - 1, int((y1 - 1) // (tile * ds_l))) + 1):
                     coords.add((cx, cy))
-        return {RawKey(source=self._source, channel=channel,
+        return {RawKey(source=self._key_source, channel=channel,
                        tile=TileAddress(grid=self.controller.grid, level=level, tx=cx, ty=cy))
                 for cx, cy in coords}
 
@@ -854,7 +863,7 @@ class Step1GpuBinding(QtCore.QObject):
             return 0
         kept, carried = {}, []
         for key, plane in planes.items():
-            if key.source != self._source:
+            if key.source != self._key_source:
                 continue
             if key in target_keys:
                 kept[key] = plane
@@ -911,7 +920,7 @@ class Step1GpuBinding(QtCore.QObject):
             return set()
         level = int(snapshot.level)
         return {
-            RawKey(source=self._source, channel=channel,
+            RawKey(source=self._key_source, channel=channel,
                    tile=TileAddress(grid=self.controller.grid, level=level, tx=int(tx), ty=int(ty)))
             for tx, ty in snapshot.visible_tiles
         }
@@ -995,14 +1004,24 @@ class Step1GpuBinding(QtCore.QObject):
             if tier == "fine":
                 self._fine.pop(channel, None)
             return
-        array = np.asarray(result.pixels.handle)
+        handle = result.pixels.handle
+        native = getattr(handle, "kind", None)
+        array = np.asarray(handle.values if native is not None else handle)
         if array.ndim != 2:
             plan.failed = True
             self._last_error = f"{tier} tile has unsupported shape {array.shape!r}"
             return
         try:
-            plane = RawPlane(identity=key, world_rect=self._world_rect(key, array.shape),
-                             values=np.asarray(array, dtype=np.float32), valid=np.isfinite(array))
+            if native == "raw":
+                # block A9 S2c: the pyramid's own integers; validity is the
+                # tile's ROI rectangle (zero outside = absent, not black)
+                rect = handle.valid_rect if handle.valid_rect is not None else (0, 0, 0, 0)
+                plane = RawPlane(identity=key, world_rect=self._world_rect(key, array.shape),
+                                 values=array, valid=None, valid_rect=tuple(rect))
+            else:
+                plane = RawPlane(identity=key, world_rect=self._world_rect(key, array.shape),
+                                 values=np.asarray(array, dtype=np.float32),
+                                 valid=np.isfinite(array))
         except Exception as exc:
             plan.failed = True
             self._last_error = f"{tier} tile conversion failed: {exc}"
@@ -1255,12 +1274,31 @@ class Step1GpuBinding(QtCore.QObject):
             tile_size = key.tile.grid.tile_size
             tile_h = max(0, min(tile_size, height - key.tile.ty * tile_size))
             tile_w = max(0, min(tile_size, width - key.tile.tx * tile_size))
-            total += tile_h * tile_w * np.dtype(np.float32).itemsize
+            total += tile_h * tile_w * self._pixel_bytes(key)
         return int(total)
+
+    def _native_identity(self):
+        """Block A9 S2c: the provider's native namespace, or the source."""
+        native = getattr(self.provider, "native_source_identity", None)
+        return native() if callable(native) else self._source
+
+    def _pixel_bytes(self, key: RawKey) -> int:
+        """The texture bytes per pixel a key will cost: a raw channel read
+        natively costs its stored integer size; everything else float32.
+        An estimate for admission -- the submission itself is checked on
+        the actual planes (`_fit_total_budget`)."""
+        if key.source != self._key_source or self._key_source == self._source:
+            return 4
+        table = getattr(self.provider, "source_table", None)
+        if table is None or table.source_of(key.channel) != "raw":
+            return 4
+        return self._native_pixel_bytes
 
     @staticmethod
     def _plane_bytes(plane: RawPlane) -> int:
-        return int(np.asarray(plane.values).size * np.dtype(np.float32).itemsize)
+        values = np.asarray(plane.values)
+        itemsize = values.dtype.itemsize if values.dtype in (np.uint8, np.uint16) else 4
+        return int(values.size * itemsize)
 
     @staticmethod
     def _key_order(key: RawKey):

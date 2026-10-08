@@ -2100,3 +2100,54 @@ codex 的意见已逐条对照代码核实，采纳如下：
 2. 补齐测试：校正直通、原始数据中的 NaN / ±Inf、截断的边缘块、非整数下采样与不规则 ROI、两种块并存的缓存计费、level-1 的矩形值。
 
 **测试**：新增 `tests/test_a9_s2d_native_tile.py`，25 项全部通过。新旧对照的 11 个文件结果一致：scheduler、viewer_host、gpu_sources、compose、mount、pause、explore、compare_tiles、quant_sources、pixel_source、scheduler_idle。
+
+### 28.7 S2c 执行记录（2026-10-09）
+
+**改动**：
+- `ui/shaders/step1_gpu.frag`：新增 `PASS_SOURCE_UINT`。
+  - 用 `usampler2D` 取整数，`float()` 转换后套用与 `PASS_SOURCE` 完全相同的窗口和伽马。
+  - `u_valid_rect` 以外的像素丢弃；原有的平面矩形判断照旧。
+- `ui/step1_gpu_layer.py`：
+  - `RawPlane.valid_rect`；`INTEGER_PLANE_DTYPES`。
+  - `plane_bytes` 按 dtype 计费：uint8 为 1，uint16 为 2，其余为 4。
+  - uint8 / uint16 上传为 R8UI / R16UI（`GL_RED_INTEGER`、NEAREST）。
+  - `_TextureRecord.integer`、`is_integer`。
+  - `_render_signal` 逐平面切换程序，绘制顺序不变。
+  - `_valid_world_rect` 支持各向异性，空矩形不画。
+  - 校验：整数平面不接受逐像素掩膜，`valid_rect` 必须在值的范围内。
+  - float 平面若带 `valid_rect`，矩形外置为 NaN。
+- `viewer/coverage_probe.py`：`_valid_cells` 支持 `valid_rect`，零填充的部分不算覆盖。
+- `ui/step1_gpu_binding.py`：
+  - `_key_source` 取 provider 的原生命名空间（没有时就用源身份本身）。所有 `RawKey` 和替身保留都用它；快照、计划、统计仍用显示用的 `_source`。
+  - `_native_pixel_bytes` 在 `source_changed` 时确定一次，`_pixel_bytes` 用于准入估算：原始通道按存储的整数大小，校正通道和原始 float 按 4 字节。
+  - `_plane_bytes` 按实际 dtype 计算。
+  - `_apply_result` 收到 `kind=="raw"` 的 `NativeTile` 时，生成整数 `RawPlane`（有效区为 `valid_rect`，`None` 视为空矩形）；其他情况仍生成 float 平面，有效区按有限值判断。
+- 测试：
+  - 新增 `tests/test_a9_s2c_integer_textures.py`（真实 GPU，12 项）：uint8 / uint16 在多种窗口和伽马下，整数路径与 float 路径的读回**逐位相同**；有效矩形；空矩形；原始与校正混排的叠加和融合；ROI 多边形；各向异性加截断的边缘块；校验与计费。
+  - `test_step1_gpu_takeover.py`：源身份断言改为原生命名空间；读回的参考结果考虑 `valid_rect`（codex 建议）。
+
+**审查**：codex 无必须修；两条建议（takeover 参考结果、各向异性和边缘块测试）已补上。
+
+**回归**：
+- 无界面：24 个相关文件全部通过。
+- 真实 GPU（`BLOCK01_REQUIRE_STEP1_GPU=1`）：layer、roi_clip、roi_polygon_clip、overview_skip、step3 label render / mount / viewer 新旧一致。takeover 和 gpu_sources 各有 1 个失败，在旧代码上同样失败，是既有问题。
+
+**确认**：用产品的读取路径对合成 OME 和 Kevin qptiff 各读一块，都是 `NativeTile kind=raw uint8`，存储 dtype 解析为 uint8，准入按 1 字节估算。
+
+**服务器实测**（`run_s2cz2a5 / s2cz27 / s2cm0a5 / s2cm07`）：四次运行 `fine_refused` = 0、`submit_failed` = 0、`base_overflow` = 0，都没有判为无效。
+
+**Kevin TMA3 69 通道验收**（`run_k69b.log`，项目 `bench_rm/accept/kevin_tma3`，由 `bench_a9/build_kevin_project.py` 用产品函数搭建，不做校正，原始 qptiff 只读；60 Hz，窗口最大化）：
+- **功能（第一层验收）通过**：
+  - 69 个通道从全片一路缩放到第 0 层再缩回，经过第 5 → 0 层的每一层；
+  - `fine_refused` = 0、`submit_failed` = 0、`base_overflow` = 0，不丢通道，不冻结；
+  - 1536 MiB 以内一次也没有降层；原始纹理驻留峰值约 1047 MiB。
+- **2 个通道**：每格到准入层完整 p50 26–30 ms，p95 30–55 ms；拖动帧间隔 p50 47 ms。
+- **69 个通道的性能（第二层）未达标**：
+  - 放大时每格到准入层完整 p50 217 ms、p95 457 ms；
+  - 缩小时 p50 465 ms、p95 1.5 s，最长 3.6–3.8 s（冷读取）；
+  - 手势中帧间隔 250–450 ms，拖动 p50 276 ms（约 3–4 fps）。
+- **主要原因**：
+  - 每帧绘制的平面 p50 1239、p95 4071、最多 4899，其中替身层平面 p50 559、p95 3312；
+  - 粗层没有裁剪；
+  - 每个平面一遍全屏绘制。
+- 这是下一块的工作：Z3 可见裁剪加 scissor、替身绘制预算、Z4 每帧一次提交，按 §27.3 另行报批。

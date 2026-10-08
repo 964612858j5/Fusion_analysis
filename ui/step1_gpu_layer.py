@@ -41,6 +41,32 @@ class RawPlane:
     world_rect: Tuple[float, float, float, float]
     values: np.ndarray
     valid: Optional[np.ndarray] = None
+    #: Block A9 S2c: the valid pixels as one rectangle `(y0, y1, x0, x1)` in
+    #: the plane's own pixels -- how a uint8/uint16 plane carries validity
+    #: (its values have no NaN). None: every pixel valid (or `valid` says).
+    valid_rect: Optional[Tuple[int, int, int, int]] = None
+
+
+def _valid_world_rect(plane) -> Optional[Tuple[float, float, float, float]]:
+    """Block A9 S2c: `plane.valid_rect` as a world rectangle (the whole
+    plane when it has none), or None when it holds no valid pixel."""
+    x0, x1, y0, y1 = plane.world_rect
+    if plane.valid_rect is None:
+        return (x0, x1, y0, y1)
+    h, w = np.asarray(plane.values).shape
+    vy0, vy1, vx0, vx1 = plane.valid_rect
+    if vy1 <= vy0 or vx1 <= vx0:
+        return None
+    sx, sy = (x1 - x0) / w, (y1 - y0) / h
+    return (x0 + vx0 * sx, x0 + vx1 * sx, y0 + vy0 * sy, y0 + vy1 * sy)
+
+
+#: Block A9 S2c: the integer formats a raw plane is uploaded in unchanged.
+INTEGER_PLANE_DTYPES = (np.dtype(np.uint8), np.dtype(np.uint16))
+
+
+def _is_integer_plane(plane) -> bool:
+    return np.asarray(plane.values).dtype in INTEGER_PLANE_DTYPES
 
 
 @dataclass(frozen=True)
@@ -278,6 +304,8 @@ class _TextureRecord:
     height: int
     byte_count: int
     world_rect: Tuple[float, float, float, float]
+    #: block A9 S2c: an R8UI / R16UI texture, drawn by the integer program
+    integer: bool = False
 
 
 class _TextureLru:
@@ -302,7 +330,11 @@ class _TextureLru:
         values = np.asarray(plane.values)
         if values.ndim != 2:
             raise Step1GpuLayerError("raw plane values must be two dimensional")
-        return int(values.shape[0] * values.shape[1] * np.dtype(np.float32).itemsize)
+        # block A9 S2c: an integer plane costs its own bytes; anything else
+        # is uploaded as float32
+        itemsize = (values.dtype.itemsize if values.dtype in INTEGER_PLANE_DTYPES
+                    else np.dtype(np.float32).itemsize)
+        return int(values.shape[0] * values.shape[1] * itemsize)
 
     def _validate_identity(self, plane: RawPlane) -> None:
         try:
@@ -317,6 +349,12 @@ class _TextureLru:
             raise Step1GpuLayerError("raw plane values must be a nonempty HxW array")
         if plane.valid is not None and np.asarray(plane.valid).shape != values.shape:
             raise Step1GpuLayerError("raw plane valid mask shape must match values")
+        if values.dtype in INTEGER_PLANE_DTYPES and plane.valid is not None:
+            raise Step1GpuLayerError("an integer raw plane carries its validity as valid_rect")
+        if plane.valid_rect is not None:
+            y0, y1, x0, x1 = plane.valid_rect
+            if not (0 <= y0 <= y1 <= values.shape[0] and 0 <= x0 <= x1 <= values.shape[1]):
+                raise Step1GpuLayerError("raw plane valid_rect must lie inside its values")
 
     @perf_trace.timed("gpu.upload")
     def prepare(self, gl, planes: Sequence[RawPlane]) -> None:
@@ -359,9 +397,18 @@ class _TextureLru:
                 self.hits += 1
                 continue
             self.misses += 1
-            values = np.ascontiguousarray(np.asarray(plane.values), dtype=np.float32).copy()
-            if plane.valid is not None:
-                values[~np.asarray(plane.valid, dtype=bool)] = np.nan
+            integer = _is_integer_plane(plane)
+            if integer:
+                values = np.ascontiguousarray(np.asarray(plane.values))
+            else:
+                values = np.ascontiguousarray(np.asarray(plane.values), dtype=np.float32).copy()
+                if plane.valid is not None:
+                    values[~np.asarray(plane.valid, dtype=bool)] = np.nan
+                if plane.valid_rect is not None:
+                    y0, y1, x0, x1 = plane.valid_rect
+                    keep = np.zeros(values.shape, bool)
+                    keep[y0:y1, x0:x1] = True
+                    values[~keep] = np.nan
             upload_started = time.perf_counter()
             texture = _as_name(gl.glGenTextures(1))
             gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
@@ -370,13 +417,20 @@ class _TextureLru:
             gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
             gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
             gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
-            gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_R32F, values.shape[1], values.shape[0],
-                            0, gl.GL_RED, gl.GL_FLOAT, values)
+            if not integer:
+                gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_R32F, values.shape[1], values.shape[0],
+                                0, gl.GL_RED, gl.GL_FLOAT, values)
+            elif values.dtype == np.uint8:
+                gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_R8UI, values.shape[1], values.shape[0],
+                                0, gl.GL_RED_INTEGER, gl.GL_UNSIGNED_BYTE, values)
+            else:
+                gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_R16UI, values.shape[1], values.shape[0],
+                                0, gl.GL_RED_INTEGER, gl.GL_UNSIGNED_SHORT, values)
             self.upload_submit_ms.append((time.perf_counter() - upload_started) * 1000.0)
             byte_count = self.plane_bytes(plane)
             self.records[identity] = _TextureRecord(
                 texture=texture, width=values.shape[1], height=values.shape[0],
-                byte_count=byte_count, world_rect=plane.world_rect,
+                byte_count=byte_count, world_rect=plane.world_rect, integer=integer,
             )
             self.bytes += byte_count
             self.peak_bytes = max(self.peak_bytes, self.bytes)
@@ -390,6 +444,10 @@ class _TextureLru:
             raise Step1GpuLayerError("submitted raw plane is not resident")
         self.records.move_to_end(plane.identity)
         return record.texture
+
+    def is_integer(self, plane: RawPlane) -> bool:
+        record = self.records.get(plane.identity)
+        return bool(record is not None and record.integer)
 
     def clear(self, gl) -> int:
         count = len(self.records)
@@ -1029,14 +1087,26 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         self._clear_target("signal")
         self._bind_target("signal")
         gl.glDisable(gl.GL_BLEND)
-        gl.glUseProgram(self._programs["source"])
-        self._uniform4("source", "u_view_rect", viewport.world_rect)
-        self._uniform3("source", "u_mapping", mapping)
+        current = None
+        # Planes in order (coarsest first, finest last: a finer plane
+        # overwrites); block A9 S2c switches the program per plane between
+        # the float one and the integer one.
         for plane in source.selected_planes():
+            program = "source_uint" if self._cache.is_integer(plane) else "source"
+            if program != current:
+                gl.glUseProgram(self._programs[program])
+                self._uniform4(program, "u_view_rect", viewport.world_rect)
+                self._uniform3(program, "u_mapping", mapping)
+                current = program
+            if program == "source_uint":
+                valid = _valid_world_rect(plane)
+                if valid is None:
+                    continue                      # no valid pixel to draw
+                self._uniform4(program, "u_valid_rect", valid)
             gl.glActiveTexture(gl.GL_TEXTURE0)
             gl.glBindTexture(gl.GL_TEXTURE_2D, self._cache.texture_for(plane))
-            self._uniform1i("source", "u_raw", 0)
-            self._uniform4("source", "u_plane_rect", plane.world_rect)
+            self._uniform1i(program, "u_raw", 0)
+            self._uniform4(program, "u_plane_rect", plane.world_rect)
             self._draw()
         gl.glUseProgram(0)
 
@@ -1247,6 +1317,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         fragment = (_SHADER_DIR / "step1_gpu.frag").read_text(encoding="utf-8")
         for name, define in {
             "source": "PASS_SOURCE",
+            "source_uint": "PASS_SOURCE_UINT",
             "contribution": "PASS_CONTRIBUTION",
             "group_resolve": "PASS_GROUP_RESOLVE",
             "final_overlay": "PASS_FINAL_OVERLAY",

@@ -58,6 +58,14 @@ def _valid_cells(plane):
     if valid is None:
         values = np.asarray(plane.values)
         valid = ~np.isnan(values) if values.dtype.kind == "f" else np.ones(values.shape, bool)
+        rect = getattr(plane, "valid_rect", None)
+        if rect is not None:
+            # block A9 S2c: an integer plane's validity is its rectangle --
+            # the zero-filled rest is absent, not covered
+            y0, y1, x0, x1 = rect
+            inside = np.zeros(values.shape, bool)
+            inside[y0:y1, x0:x1] = True
+            valid = valid & inside
     valid = np.asarray(valid, bool)
     h, w = valid.shape[:2]
     out = np.zeros((CELLS, CELLS), bool)

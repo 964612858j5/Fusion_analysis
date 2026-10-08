@@ -71,7 +71,9 @@ MONTAGE_CHANNEL_CACHE_BYTES = 1 * GB
 MONTAGE_COMPOSED_CACHE_BYTES = 256 * MB
 
 # GPU textures (ui/step1_viewer_mount.py, ui/step1_gpu_layer.py)
-GPU_RAW_TEXTURE_BYTES = 512 * MB
+#: block A9 S2b (user-approved ~1.5 GB per viewer, brought forward by the
+#: delegated decision of 2026-10-09; target-machine validation pending)
+GPU_RAW_TEXTURE_BYTES = 1536 * MB
 GPU_COARSE_BYTES_PER_CHANNEL = 32 * MB
 GPU_FINE_BYTES_PER_CHANNEL = 48 * MB
 GPU_LABEL_TEXTURE_BYTES = 256 * MB

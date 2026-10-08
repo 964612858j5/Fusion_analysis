@@ -1014,14 +1014,15 @@ def test_the_cpu_composition_is_never_built_beside_the_gpu_backend(app):
 
 
 def test_the_demo_texture_budget_is_the_fixed_g3_one(app):
-    assert DEMO_GPU_RAW_TEXTURE_BYTES == 512 * 1024 * 1024
+    # block A9 S2b: raised to the approved ~1.5 GB per viewer
+    assert DEMO_GPU_RAW_TEXTURE_BYTES == 1536 * 1024 * 1024
     rig = _mount(app, visible=("CD3",))
     try:
         _require_gpu(rig)
         status = rig.mount.gpu_status()
-        assert status["raw_texture_budget_bytes"] == 512 * 1024 * 1024
-        assert status["cache"]["budget_bytes"] == 512 * 1024 * 1024
-        assert status["cache"]["peak_bytes"] <= 512 * 1024 * 1024
+        assert status["raw_texture_budget_bytes"] == 1536 * 1024 * 1024
+        assert status["cache"]["budget_bytes"] == 1536 * 1024 * 1024
+        assert status["cache"]["peak_bytes"] <= 1536 * 1024 * 1024
     finally:
         _close(rig)
 

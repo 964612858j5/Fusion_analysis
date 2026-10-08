@@ -101,6 +101,35 @@ class BindingBudgets:
     max_fine_tiles_per_viewport: int
     max_fine_plane_bytes_per_channel: int
     motion_interval_ms: int = 33
+    #: Block A9 S2b: the GPU layer's total raw-texture budget. When set,
+    #: every plan is ADMITTED against it (complete coarse of every active
+    #: channel + the admitted target + carried stand-ins), so a submission
+    #: never exceeds it. None keeps the per-channel limits alone.
+    max_raw_texture_bytes: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class _Admission:
+    """Block A9 S2b: one viewport's admitted fine target (immutable).
+
+    `ideal` is the level the controller asked for; `level` the finest level
+    from there towards coarse whose fine, for EVERY active channel, fits
+    the per-channel limits and -- together with the complete coarse of
+    every active channel -- the total raw-texture budget. `keys` is that
+    level's visible tile set per channel (empty: coarse only), `carry` what
+    each channel may keep of stand-ins carried from another zoom."""
+
+    token: Hashable
+    ideal: int
+    level: int
+    keys: Mapping[str, frozenset]
+    carry: Mapping[str, int]
+    #: no level's fine fits at all: the complete coarse alone is drawn
+    coarse_only: bool = False
+
+    @property
+    def limited(self) -> bool:
+        return self.level != self.ideal or self.coarse_only
 
 
 class Step1GpuBinding(QtCore.QObject):
@@ -144,6 +173,14 @@ class Step1GpuBinding(QtCore.QObject):
         #: resident at once while a zoom settles.
         self._published_fine: Dict[str, Dict[RawKey, RawPlane]] = {}
         self._fine_budget_refused: Set[str] = set()
+        #: Block A9 S2b: the last admission (see `_Admission`) and an
+        #: optional owner hook called when "resolution limited" changes.
+        self._admission: Optional[_Admission] = None
+        #: Block A9 S2b (delegated decision 2026-10-09): how many active
+        #: channels' base layers alone exceed the total budget, 0 when they
+        #: fit. Then nothing is submitted and the last frame stays.
+        self._base_overflow = 0
+        self.on_status_changed: Optional[Callable[[], None]] = None
         #: The channels the fine tier is currently planned for. One small
         #: tuple, so an untick can release that channel's planes at once
         #: instead of waiting for the next camera move -- and so a colour,
@@ -204,6 +241,8 @@ class Step1GpuBinding(QtCore.QObject):
         self._published_coarse.clear()
         self._published_fine.clear()
         self._fine_budget_refused.clear()
+        self._admission = None
+        self._base_overflow = 0
         self._active_fine_channels = ()
         self._shown_channels = set()
         self._unavailable.clear()
@@ -262,12 +301,20 @@ class Step1GpuBinding(QtCore.QObject):
             self._active_fine_channels = active
             if self._latest_snapshot is not None:
                 priority = self._fine_priority()
+                before = self._admission
+                admission = self._admit(self._latest_snapshot)
+                changed = (before is None or before.level != admission.level
+                           or any(admission.carry.get(c, 0) < before.carry.get(c, 0)
+                                  for c in active))
                 for channel in active:
-                    if channel in previous:
+                    if channel in previous and not changed:
                         continue
-                    # ONLY the channel that just came back is planned, and
-                    # only if its complete coarse is already published; a
-                    # brand new one starts its fine when that coarse lands.
+                    # The channel that just came back is planned (if its
+                    # complete coarse is already published; a brand new one
+                    # starts its fine when that coarse lands). Block A9 S2b:
+                    # when the new active set changes the ADMISSION, every
+                    # active channel is re-planned against it -- a plan that
+                    # is still the same is kept, not re-requested.
                     self._plan_fine_for_channel(channel, self._latest_snapshot,
                                                 priority)
         self._publish_once_per_turn()
@@ -387,6 +434,11 @@ class Step1GpuBinding(QtCore.QObject):
             "retained_fine_last_epoch": self._retained_fine_last_epoch,
             "requested_fine_last_epoch": self._requested_fine_last_epoch,
             "fine_budget_refused": tuple(sorted(self._fine_budget_refused)),
+            # block A9 S2b
+            "ideal_level": None if self._admission is None else self._admission.ideal,
+            "admitted_level": None if self._admission is None else self._admission.level,
+            "resolution_limited": bool(self._admission is not None and self._admission.limited),
+            "base_overflow_channels": self._base_overflow,
             "requests": self._request_count,
             "coarse_pending": self.coarse_pending_channels(),
             "fine_requests_by_priority": dict(self._fine_requests_by_priority),
@@ -588,9 +640,14 @@ class Step1GpuBinding(QtCore.QObject):
         if getattr(snapshot, "source", None) != self._source:
             return 0, 0
         budget = self.budgets.max_fine_plane_bytes_per_channel
-        target_level = int(snapshot.level)
-        keys = self._visible_keys(channel, snapshot)
-        viewport = self._keys_world_rect(keys)
+        # Block A9 S2b: the ADMITTED level and tiles, not the requested ones
+        # -- a viewport that does not fit is drawn one level coarser (and
+        # says so), never refused and left unresolved.
+        admission = self._admit(snapshot, channel)
+        target_level = admission.level
+        keys = set(admission.keys.get(channel, frozenset()))
+        viewport = self._keys_world_rect(keys) or self._keys_world_rect(
+            self._visible_keys(channel, snapshot))
         # THE CURRENT TARGET LEVEL IS RESERVED FIRST. A layer carried over
         # from another zoom is a stand-in until the target arrives; it must
         # never be the reason the target itself does not fit, which would
@@ -611,11 +668,27 @@ class Step1GpuBinding(QtCore.QObject):
                                      budget), 0
         self._fine_budget_refused.discard(channel)
         retained = self._retain_fine(channel, keys, viewport, target_level,
-                                     budget - target_bytes)
+                                     min(budget - target_bytes,
+                                         admission.carry.get(channel, budget)))
         resident = self._published_fine.get(channel) or {}
         missing = [key for key in sorted(keys, key=self._key_order)
                    if key not in resident]
         if not missing:
+            # The admitted target is all resident. A request still under way
+            # for this channel belongs to another target (e.g. the finer
+            # level before a re-admission moved it back): cancel it, so its
+            # late tiles cannot land outside the carry allowance (codex).
+            leftover = self._fine.pop(channel, None)
+            if leftover is not None:
+                self.scheduler.cancel_generation(leftover.generation)
+                self._generations.discard(leftover.generation)
+            return retained, 0
+        current = self._fine.get(channel)
+        if (current is not None and not current.failed
+                and current.viewport_epoch == self._fine_epoch
+                and set(current.expected) - set(current.planes) == set(missing)):
+            # Block A9 S2b: re-planned against an unchanged admission -- the
+            # same request is already under way; keep it.
             return retained, 0
         stale = self._fine.pop(channel, None)
         if stale is not None:
@@ -640,6 +713,128 @@ class Step1GpuBinding(QtCore.QObject):
         for payload in immediate:
             self._apply_result(payload, publish=False)
         return retained, len(missing)
+
+    # Admission (block A9 S2b) ---------------------------------------------
+
+    def _admit(self, snapshot, channel: Optional[str] = None) -> _Admission:
+        """The admitted fine target for `snapshot` and the active channels.
+
+        Memoised per (revision, viewport, active set, coarse state): the
+        three planning paths (a camera move, a channel ticked, a complete
+        coarse landing) all read the same answer for the same situation."""
+        # the planned channels, plus the one being planned now (a complete
+        # coarse can land before the first viewport epoch recorded them)
+        named = set(self._active_fine_channels)
+        if not named:
+            # nothing planned yet (a complete coarse landing before the
+            # first viewport epoch): the display's whole active set, so the
+            # channels are admitted together, not one by one (codex)
+            named = set(self._active_channels(self._build_display_snapshot()))
+        if channel is not None:
+            named.add(channel)
+        active = tuple(sorted(c for c in named if c not in self._unavailable))
+        coarse_state = tuple((c, id(self._coarse.get(c))) for c in active)
+        token = (self._revision, self._viewport_token(snapshot), active, coarse_state)
+        previous = self._admission
+        if previous is not None and previous.token == token:
+            return previous
+        ideal = int(getattr(snapshot, "level", 0) or 0)
+        coarsest = int(self.provider.num_levels) - 1
+        fine_budget = self.budgets.max_fine_plane_bytes_per_channel
+        max_tiles = self.budgets.max_fine_tiles_per_viewport
+        total = self.budgets.max_raw_texture_bytes
+        coarse_keys: Set[RawKey] = set()
+        for channel in active:
+            plan = self._coarse.get(channel)
+            # the COMPLETE expected coarse, delivered or not (codex)
+            coarse_keys |= (set(plan.expected) if plan is not None
+                            else self._full_level_keys(channel, coarsest))
+        chosen = None
+        for level in range(max(0, ideal), coarsest + 1):
+            fine = {c: frozenset(self._candidate_keys(c, snapshot, level)) for c in active}
+            if any(len(k) > max_tiles or self._planned_bytes(k) > fine_budget
+                   for k in fine.values()):
+                continue
+            union = set(coarse_keys)
+            for k in fine.values():
+                union |= k
+            used = self._planned_bytes(union)
+            if total is None or used <= total:
+                chosen = (level, fine, used)
+                break
+        coarse_only = chosen is None
+        if coarse_only:
+            # nothing finer fits: the complete coarse alone is the picture
+            chosen = (coarsest, {c: frozenset() for c in active},
+                      self._planned_bytes(coarse_keys))
+        level, fine, used = chosen
+        share = (None if total is None
+                 else max(0, total - used) // max(1, len(active)))
+        carry = {c: max(0, fine_budget - self._planned_bytes(fine[c])) if share is None
+                 else min(share, max(0, fine_budget - self._planned_bytes(fine[c])))
+                 for c in active}
+        admission = _Admission(token=token, ideal=ideal, level=level, keys=fine, carry=carry,
+                               coarse_only=coarse_only)
+        self._admission = admission
+        if admission.limited:
+            perf_trace.mark("gpu.fine_admitted", ideal=ideal, level=level,
+                            channels=len(active), bytes=used, budget=total)
+        def shown(a):
+            return None if a is None or not a.limited else (a.ideal, a.level, a.coarse_only)
+        if shown(previous) != shown(admission):
+            hook = self.on_status_changed
+            if hook is not None:
+                QtCore.QTimer.singleShot(0, hook)
+        return admission
+
+    def _candidate_keys(self, channel: str, snapshot, level: int) -> Set[RawKey]:
+        """The visible tiles at `level`: the requested level's own visible
+        set, or the same area mapped onto a coarser level with the rounded
+        downsamples the controller plans with."""
+        ideal = int(getattr(snapshot, "level", 0) or 0)
+        if level == ideal:
+            return self._visible_keys(channel, snapshot)
+        if snapshot.source != self._source:
+            return set()
+        tile = self.controller.grid.tile_size
+        bbox_l0 = getattr(snapshot, "bbox_l0", None)
+        if bbox_l0 is not None:
+            # exactly the controller's own computation for that level
+            # (`_on_range_changed`: clamp, convert, cover)
+            from ..viewer import request_planning as planning
+            coords = planning.visible_tiles_for_viewport(
+                tuple(bbox_l0), self._level_ds(level), tile)
+            return {RawKey(source=self._source, channel=channel,
+                           tile=TileAddress(grid=self.controller.grid, level=level,
+                                            tx=int(tx), ty=int(ty)))
+                    for tx, ty in coords}
+        ds_i, ds_l = self._level_ds(ideal), self._level_ds(level)
+        height, width = self.provider.level_shape(level)
+        nx, ny = math.ceil(width / tile), math.ceil(height / tile)
+        coords = set()
+        for tx, ty in snapshot.visible_tiles:
+            x0, x1 = tx * tile * ds_i, (tx + 1) * tile * ds_i
+            y0, y1 = ty * tile * ds_i, (ty + 1) * tile * ds_i
+            for cx in range(int(x0 // (tile * ds_l)), min(nx - 1, int((x1 - 1) // (tile * ds_l))) + 1):
+                for cy in range(int(y0 // (tile * ds_l)), min(ny - 1, int((y1 - 1) // (tile * ds_l))) + 1):
+                    coords.add((cx, cy))
+        return {RawKey(source=self._source, channel=channel,
+                       tile=TileAddress(grid=self.controller.grid, level=level, tx=cx, ty=cy))
+                for cx, cy in coords}
+
+    def _level_ds(self, level: int) -> float:
+        """The downsample the controller plans `level` with (its rounded
+        `level_downsample`; the exact x one where a provider has no other)."""
+        rounded = getattr(self.provider, "level_downsample", None)
+        if rounded is not None:
+            return float(rounded(level))
+        return float(self.provider.level_downsample_yx(level)[1])
+
+    def _target_keys(self, channel: str, snapshot) -> Set[RawKey]:
+        """The admitted target tiles of `channel` for `snapshot`."""
+        if getattr(snapshot, "source", None) != self._source:
+            return set()
+        return set(self._admit(snapshot, channel).keys.get(channel, frozenset()))
 
     def _retain_fine(self, channel: str, target_keys: Set[RawKey],
                      viewport: Optional[Tuple[float, float, float, float]],
@@ -891,17 +1086,33 @@ class Step1GpuBinding(QtCore.QObject):
             snapshot = self._latest_snapshot
             wants_fine = bool(snapshot is not None
                               and getattr(snapshot, "source", None) == self._source
-                              and self._visible_keys(channel, snapshot))
+                              and self._target_keys(channel, snapshot))
             channels.append(ChannelSource(channel, coarse=coarse, fine=fine,
                                           selected_level="fine" if fine else "coarse",
                                           target_level="fine" if wants_fine else "coarse"))
+        fitted = self._fit_total_budget(channels)
+        overflow = 0 if fitted is not None else len(channels)
+        if overflow != self._base_overflow:
+            self._base_overflow = overflow
+            hook = self.on_status_changed
+            if hook is not None:
+                QtCore.QTimer.singleShot(0, hook)
+        if fitted is None:
+            # the base layers alone do not fit: never omit a channel, never
+            # hand the layer a set it must refuse -- keep the last frame
+            perf_trace.mark("gpu.base_overflow", channels=len(channels))
+            return
+        channels = fitted
         descriptor = SourceDescriptor(tuple(channels))
         tracing = perf_trace.enabled()
         if tracing:
-            # A9 M0, measurement only: the numeric level this frame owes
+            # A9 M0, measurement only: the numeric level this frame owes --
+            # since S2b the ADMITTED one (the ideal is in gpu.frame)
             snapshot = self._latest_snapshot
-            target_index = (int(snapshot.level) if snapshot is not None
-                            and getattr(snapshot, "source", None) == self._source else None)
+            on_source = (snapshot is not None
+                         and getattr(snapshot, "source", None) == self._source)
+            ideal_index = int(snapshot.level) if on_source else None
+            target_index = self._admit(snapshot).level if on_source else None
             self.layer._a9_target_index = target_index
         try:
             stats = self.layer.submit(descriptor, display, viewport)
@@ -914,6 +1125,7 @@ class Step1GpuBinding(QtCore.QObject):
             uploads = int(cache.get("uploads", 0) or 0)
             perf_trace.mark(
                 "gpu.frame", frame=getattr(self.layer, "_a9_frame", 0), level=target_index,
+                ideal=ideal_index,
                 channels=len(channels),
                 planes=sum(len(c.coarse) + len(c.fine) for c in channels),
                 fine=sum(len(c.fine) for c in channels),
@@ -926,6 +1138,41 @@ class Step1GpuBinding(QtCore.QObject):
             self._a9_uploads_seen = uploads
         self._shown_channels = shown
         self._descriptor_history.append((descriptor, display, viewport, stats))
+
+    def _fit_total_budget(self, channels):
+        """Block A9 S2b safety net: the submitted planes, counted once per
+        identity, must fit the total raw-texture budget. Admission already
+        guarantees it for coarse + target; if carried stand-ins still push
+        it over (a channel's admission changed while they were resident),
+        the stand-ins go first -- never a target plane, never a coarse one."""
+        total = self.budgets.max_raw_texture_bytes
+        if total is None:
+            return channels
+
+        def used(items):
+            seen = {}
+            for source in items:
+                for plane in tuple(source.coarse) + tuple(source.fine):
+                    seen[plane.identity] = self._plane_bytes(plane)
+            return sum(seen.values())
+        if used(channels) <= total:
+            return channels
+        snapshot = self._latest_snapshot
+        admitted = (self._admit(snapshot).keys if snapshot is not None
+                    and getattr(snapshot, "source", None) == self._source else {})
+        trimmed = []
+        for source in channels:
+            keep = admitted.get(source.channel, frozenset())
+            fine = tuple(plane for plane in source.fine if plane.identity in keep)
+            trimmed.append(ChannelSource(source.channel, coarse=source.coarse, fine=fine,
+                                         selected_level="fine" if fine else "coarse",
+                                         target_level=source.target_level))
+        after = used(trimmed)
+        perf_trace.mark("gpu.admission_trim", before=used(channels), after=after,
+                        budget=total)
+        if after > total:
+            return None
+        return trimmed
 
     def _viewport_fine_ready(self, channel: str) -> bool:
         """Is this channel's CURRENT viewport complete at its target level?
@@ -943,7 +1190,7 @@ class Step1GpuBinding(QtCore.QObject):
             return True
         if getattr(snapshot, "source", None) != self._source:
             return False
-        keys = self._visible_keys(channel, snapshot)
+        keys = self._target_keys(channel, snapshot)
         if not keys:
             return True
         return keys <= set(self._published_fine.get(channel) or {})

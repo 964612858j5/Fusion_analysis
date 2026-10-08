@@ -996,8 +996,11 @@ def test_a_carried_layer_never_pushes_the_current_target_out_of_budget(app):
         binding.dispose()
 
 
-def test_a_target_level_that_does_not_fit_by_itself_fails_closed(app):
-    """The refusal that IS legitimate: this viewport's own target is too big."""
+def test_a_target_level_that_does_not_fit_by_itself_is_drawn_one_level_coarser(app):
+    """Block A9 S2b (user ruling 2026-10-09, replaces the fail-closed
+    refusal that left the picture unresolved): a target level that does not
+    fit is never half-requested; the next level that DOES fit is admitted,
+    requested as usual and reported as resolution-limited."""
     provider = _Provider(level_shape=(8, 8), levels=2)
     controller = _Controller(provider, visible_tiles=((0, 0),), level=1)
     scheduler = _Scheduler()
@@ -1011,13 +1014,20 @@ def test_a_target_level_that_does_not_fit_by_itself_fails_closed(app):
         _settle_coarse(app, scheduler, binding)
         controller.set_snapshot(visible_tiles=((0, 0), (1, 0), (2, 0), (3, 0)),
                                 level=0, epoch=2)
+        # the level-0 area those four tiles cover, as a real controller's
+        # snapshot carries it (y0, x0, y1, x1)
+        controller.snapshot().bbox_l0 = (0, 0, 4, 16)
         marker = len(scheduler.requests)
         binding.update_viewport(controller.snapshot())
-        assert scheduler.requests[marker:] == [], \
+        asked = scheduler.requests[marker:]
+        assert not [r for r in asked if int(r.key.tile.level) == 0], \
             "a target set that cannot fit must not be half-requested"
+        assert asked and all(int(r.key.tile.level) == 1 for r in asked), \
+            "the admitted coarser level is requested as usual"
         stats = binding.stats()
-        assert stats["fine_budget_refused"] == ("A",)
-        assert "target level needs" in str(stats["last_error"])
+        assert stats["fine_budget_refused"] == ()
+        assert (stats["ideal_level"], stats["admitted_level"]) == (0, 1)
+        assert stats["resolution_limited"] is True
     finally:
         binding.dispose()
 
@@ -1217,11 +1227,11 @@ def _drawn(layer):
     return set() if latest is None else {s.channel for s in latest.channels}
 
 
-def test_a_first_channel_over_the_fine_budget_shows_its_coarse_and_the_refusal(app):
-    """A refused viewport: the refusal is recorded and nothing is
-    half-requested, and -- A9-O3-5, user ruling 2026-10-07 (Odon's design:
-    coarse first, then sharper) -- the channel shows its complete coarse
-    rather than staying off the screen."""
+def test_a_first_channel_over_the_fine_budget_shows_its_coarse_and_the_limit(app):
+    """A viewport whose fine fits no level: nothing is half-requested, the
+    channel shows its complete coarse (A9-O3-5, Odon: coarse first) and --
+    block A9 S2b, replacing the refusal -- the frame is reported as
+    resolution-limited, coarse only."""
     provider = _Provider(level_shape=(8, 8), levels=1)
     controller = _Controller(provider, visible_tiles=((0, 0), (1, 0)))
     scheduler = _Scheduler()
@@ -1248,8 +1258,8 @@ def test_a_first_channel_over_the_fine_budget_shows_its_coarse_and_the_refusal(a
         _enable_second_channel(app, binding, display_holder, scheduler)
         stats = binding.stats()
         assert "B" in stats["coarse_channels"], "B's complete coarse is in hand"
-        assert "B" in stats["fine_budget_refused"], "the refusal must be recorded"
-        assert "target level needs" in str(stats["last_error"])
+        assert stats["resolution_limited"] is True, "the limit must be reported"
+        assert stats["fine_budget_refused"] == ()
         assert not _fine_requests(scheduler, "B", marker), \
             "a refused viewport must not be half-requested"
         assert _drawn(layer) == {"A", "B"}, "B's complete coarse is drawn"
@@ -1260,7 +1270,7 @@ def test_a_first_channel_over_the_fine_budget_shows_its_coarse_and_the_refusal(a
             binding.refresh_display()
             _events(app)
             assert _drawn(layer) == {"A", "B"}
-        assert "B" in binding.stats()["fine_budget_refused"]
+        assert binding.stats()["resolution_limited"] is True
     finally:
         binding.dispose()
 

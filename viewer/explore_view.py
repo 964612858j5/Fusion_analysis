@@ -2593,6 +2593,10 @@ class ExploreController(QtCore.QObject):
         # Level-switch hysteresis threshold (fraction) -- avoids z-order /
         # request thrash when the zoom sits right at a level boundary.
         self.LEVEL_HYSTERESIS = 0.2
+        #: Block A9 S2a: which level choice this controller uses. The
+        #: default is the one every viewer has always used; the Step1/Step3
+        #: factory switches its own controller to the log-nearest policy.
+        self.level_policy = planning.LEVEL_POLICY_NEAREST_BELOW
 
         self._raw_delivered.connect(self._handle_raw_result, QtCore.Qt.QueuedConnection)
         self._precise_delivered.connect(self._handle_precise_result, QtCore.Qt.QueuedConnection)
@@ -4365,6 +4369,14 @@ class ExploreController(QtCore.QObject):
     # ── level selection ───────────────────────────────────────────────────
 
     def _pick_display_level_with_hysteresis(self, screen_px_per_world_px: float) -> int:
+        if self.level_policy == planning.LEVEL_POLICY_NEAREST_LOG:
+            downsamples = [self.provider.level_downsample(level)
+                           for level in range(self.provider.num_levels)]
+            return planning.apply_level_hysteresis_log(
+                ideal_level=planning.pick_display_level_nearest(
+                    downsamples, screen_px_per_world_px),
+                current_level=self.level, downsamples=downsamples,
+                screen_px_per_world_px=screen_px_per_world_px)
         return planning.apply_level_hysteresis(
             ideal_level=self._pick_display_level(screen_px_per_world_px),
             current_level=self.level,

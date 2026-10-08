@@ -112,6 +112,8 @@ def demo_budgets():
         max_coarse_plane_bytes_per_channel=DEMO_GPU_COARSE_BYTES_PER_CHANNEL,
         max_fine_tiles_per_viewport=DEMO_GPU_FINE_TILES_PER_VIEWPORT,
         max_fine_plane_bytes_per_channel=DEMO_GPU_FINE_BYTES_PER_CHANNEL,
+        # block A9 S2b: plans are admitted against the layer's total budget
+        max_raw_texture_bytes=DEMO_GPU_RAW_TEXTURE_BYTES,
     )
 
 
@@ -445,6 +447,8 @@ class Step1WholeSlideMount(QtCore.QObject):
             build_display_snapshot=self._gpu_display_snapshot,
             build_viewport_snapshot=self._gpu_viewport_snapshot,
             budgets=demo_budgets(), parent=self)
+        # block A9 S2b: the badge follows "resolution limited" as it changes
+        self.gpu_binding.on_status_changed = self._refresh_notice
         # The same switch the CPU composed layer uses: a composition is on
         # screen, so the single-channel layers this controller owns stop
         # painting under it. Visibility only -- no request is cancelled and
@@ -1381,6 +1385,17 @@ class Step1WholeSlideMount(QtCore.QObject):
         error = str(stats.get("last_error") or "")
         if "budget" in error or "working set" in error:
             lines.append(f"The display could not be composed: {error}")
+        if stats.get("base_overflow_channels"):
+            # block A9 S2b, delegated decision 2026-10-09 (codex astra high)
+            lines.append(
+                f"GPU memory budget exceeded by the base layers of "
+                f"{stats['base_overflow_channels']} channels. View not updated.")
+        if stats.get("resolution_limited"):
+            # block A9 S2b (user ruling 2026-10-09): drawn one or more levels
+            # coarser than the zoom asks for, because the GPU budget is full
+            lines.append(
+                f"Resolution limited by GPU memory: showing pyramid level "
+                f"{stats.get('admitted_level')} instead of {stats.get('ideal_level')}.")
         return "\n".join(lines)
 
     def _refresh_notice(self):

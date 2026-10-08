@@ -481,8 +481,10 @@ class Driver(QtCore.QObject):
                     presented = True
                     if f.get("gap_cells", 1) == 0 or not frame:
                         frame = f
-            covered = (frame.get("gap_cells", 1) == 0
-                       and frame.get("target_fraction", 0.0) >= 0.999)
+            # A9 S2b: where the probe knows the ADMITTED level, a frame is
+            # complete only at that level (a stand-in of another one is not)
+            owed = frame.get("exact_fraction", frame.get("target_fraction", 0.0))
+            covered = (frame.get("gap_cells", 1) == 0 and float(owed or 0.0) >= 0.999)
             idle = all(s.idle() for s in self._schedulers())
             done = (now - last["since"] >= 0.3 and idle
                     and (where is None or (presented and covered)))

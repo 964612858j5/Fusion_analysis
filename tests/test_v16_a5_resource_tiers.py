@@ -22,7 +22,7 @@ READERS = [
     ("block01.viewer.explore_view", "OVERVIEW_CACHE_BYTES", "VIEWER_OVERVIEW_CACHE_BYTES", 256 << 20),
     ("block01.ui.step1_presegmentation.montage_supply", "CHANNEL_CACHE_BYTES", "MONTAGE_CHANNEL_CACHE_BYTES", 1 << 30),
     ("block01.ui.step1_presegmentation.montage_supply", "COMPOSED_CACHE_BYTES", "MONTAGE_COMPOSED_CACHE_BYTES", 256 << 20),
-    ("block01.ui.step1_viewer_mount", "DEMO_GPU_RAW_TEXTURE_BYTES", "GPU_RAW_TEXTURE_BYTES", 512 << 20),
+    ("block01.ui.step1_viewer_mount", "DEMO_GPU_RAW_TEXTURE_BYTES", "GPU_RAW_TEXTURE_BYTES", 1536 << 20),
     ("block01.ui.step1_viewer_mount", "DEMO_GPU_COARSE_BYTES_PER_CHANNEL", "GPU_COARSE_BYTES_PER_CHANNEL", 32 << 20),
     ("block01.ui.step1_viewer_mount", "DEMO_GPU_FINE_BYTES_PER_CHANNEL", "GPU_FINE_BYTES_PER_CHANNEL", 48 << 20),
     ("block01.ui.step1_gpu_layer", "LABEL_TEXTURE_BYTES", "GPU_LABEL_TEXTURE_BYTES", 256 << 20),

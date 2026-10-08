@@ -73,6 +73,60 @@ def pick_display_level(downsamples: Sequence[float],
     return best_level
 
 
+#: Block A9 S2a (Odon `imaging/tiling.rs`): the Step1/Step3 viewers pick the
+#: level CLOSEST to 1:1 in log scale instead of the nearest-below one.
+LEVEL_POLICY_NEAREST_BELOW = "nearest_below"
+LEVEL_POLICY_NEAREST_LOG = "nearest_log"
+#: How much better (natural-log units) the nearest level must be before a
+#: displayed level is left: on a regular pyramid a +-0.075 band around the
+#: geometric midpoint between two levels.
+LOG_LEVEL_MARGIN = 0.15
+
+
+def _log_error(downsample: float, screen_px_per_world_px: float) -> float:
+    import math
+    return abs(math.log(max(1e-12, float(downsample) * screen_px_per_world_px)))
+
+
+def pick_display_level_nearest(downsamples: Sequence[float],
+                               screen_px_per_world_px: float) -> int:
+    """The level whose pixels come closest to one screen pixel each.
+
+    Minimises ``|ln(screen_px_per_world_px * downsample)|``. On a tie the
+    COARSER level wins (it needs fewer pixels); among levels with the same
+    downsample the lowest index wins. A non-positive zoom returns 0, as
+    `pick_display_level` does."""
+    if screen_px_per_world_px <= 0 or not downsamples:
+        return 0
+    best_level, best_err, best_ds = 0, None, None
+    for level, ds in enumerate(downsamples):
+        err = _log_error(ds, screen_px_per_world_px)
+        if (best_err is None or err < best_err - 1e-12
+                or (abs(err - best_err) <= 1e-12 and ds > best_ds)):
+            best_level, best_err, best_ds = level, err, ds
+    return best_level
+
+
+def apply_level_hysteresis_log(ideal_level: int, current_level: int,
+                               downsamples: Sequence[float],
+                               screen_px_per_world_px: float,
+                               margin: float = LOG_LEVEL_MARGIN) -> int:
+    """Keep `current_level` unless `ideal_level` is better by `margin`.
+
+    Both are compared by their log error from 1:1; a jump of several levels
+    goes straight to `ideal_level`. A current level outside the pyramid, or
+    a non-positive zoom, yields `ideal_level`."""
+    if ideal_level == current_level or screen_px_per_world_px <= 0:
+        return ideal_level
+    if not 0 <= int(current_level) < len(downsamples):
+        return ideal_level
+    current_err = _log_error(downsamples[current_level], screen_px_per_world_px)
+    ideal_err = _log_error(downsamples[ideal_level], screen_px_per_world_px)
+    if ideal_err + margin < current_err:
+        return ideal_level
+    return current_level
+
+
 def apply_level_hysteresis(ideal_level: int, current_level: int,
                            current_downsample: float,
                            screen_px_per_world_px: float,

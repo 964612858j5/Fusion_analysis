@@ -414,6 +414,9 @@ def build_step1_stack(dataset_path, channel, table, parent_widget=None, *,
                                            view, channel)
             if getattr(controller, "_a9_probe", None) is not None:   # block A9-M
                 controller._a9_probe.where = "cpu-step1"   # beneath the GPU layer
+            # Block A9 S2a (Odon): Step1/Step3 draw the level closest to 1:1
+            from ..viewer import request_planning as _planning
+            controller.level_policy = _planning.LEVEL_POLICY_NEAREST_LOG
         if load_overview:
             with perf_trace.span("step1.entry.controller_overview"):
                 controller.load_overview()

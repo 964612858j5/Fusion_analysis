@@ -92,7 +92,7 @@ class Step15BackgroundCorrectionPage(QWidget):
             btn.setCheckable(True)
             btn.setStyleSheet(
                 f'QPushButton{{background:#1a1a1a;color:{color};border:1px solid {color};'
-                'border-radius:4px;padding:6px 16px;font-weight:bold;}}'
+                'border-radius:4px;padding:6px 16px;font-weight:bold;}'
                 f'QPushButton:checked{{background:{color};color:#111;}}'
             )
             choice_row.addWidget(btn)

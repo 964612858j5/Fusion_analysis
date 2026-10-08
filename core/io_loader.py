@@ -39,10 +39,16 @@ class OMETIFFLoader:
         self._parse()
 
     def _parse(self):
+        from .qpi_metadata import is_qpi, qpi_channel_names
         with tifffile.TiffFile(self.filepath) as tif:
-            root = ET.fromstring(tif.ome_metadata)
             p    = tif.pages[0]
             self.shape = (p.imagelength, p.imagewidth)
+            if is_qpi(tif):
+                for i, raw in enumerate(qpi_channel_names(tif)):
+                    self.ch_map[self.name_map.get(raw, raw)] = i
+                print(f"[Loader] {self.shape[0]}×{self.shape[1]} px  {len(self.ch_map)} channels (QPTIFF)")
+                return
+            root = ET.fromstring(tif.ome_metadata)
         ns = {"ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"}
         for i, ch in enumerate(root.findall(".//ome:Channel", ns)):
             raw  = ch.get("Name", f"ch_{i:02d}")

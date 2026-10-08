@@ -175,9 +175,12 @@ def _nuclei_of(store, compartment, shape, run_dir):
 
 def _slide_channels(slide):
     import tifffile
+    from .qpi_metadata import is_qpi, qpi_channel_names
     with tifffile.TiffFile(slide) as tif:
         xml = tif.ome_metadata
         shape = (tif.pages[0].imagelength, tif.pages[0].imagewidth)
+        if is_qpi(tif):
+            return qpi_channel_names(tif), shape
     if not xml:
         raise QuantSourceError(f"{os.path.basename(slide)} has no OME channel names")
     ns = {"ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"}

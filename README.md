@@ -94,7 +94,7 @@ Default input/output paths can be preset in [`config.py`](config.py) (`OME_TIFF_
 
 ## Inputs & outputs
 
-- **Input:** multi-channel OME-TIFF whole-slide image (lazily read per-ROI/per-tile via the `zarr` interface
+- **Input:** multi-channel OME-TIFF or native PhenoCycler Fusion QPTIFF whole-slide image (lazily read per-ROI/per-tile via the `zarr` interface
   to bound I/O and memory).
 - **Output:**
   - `global_mask` — whole-ROI instance label image (`uint32`, one ID per cell, 0 = background).

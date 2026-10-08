@@ -100,9 +100,14 @@ class OmeTiffSource(PixelSource):
 
     def _load_meta(self):
         import tifffile
+        from ..core.qpi_metadata import is_qpi, qpi_channel_names, qpi_physical_size_um
 
         with tifffile.TiffFile(self.path) as tf:
             xml = tf.ome_metadata
+            qpi = is_qpi(tf)
+            if qpi:
+                qpi_names = qpi_channel_names(tf)
+                qpi_physical = qpi_physical_size_um(tf)
             self._dtype = np.dtype(tf.series[0].dtype)
             self._native = []
             for lv in tf.series[0].levels:
@@ -115,9 +120,20 @@ class OmeTiffSource(PixelSource):
                     self._native.append((min(rows, int(page.imagelength)),
                                          int(page.imagewidth)))
         n = self._provider.num_channels
-        self._names = channel_names_from_ome(xml, n)
-        self._physical = physical_size_from_ome(xml)
+        if qpi:
+            self._format = "qptiff"
+            self._names = qpi_names
+            self._physical = qpi_physical
+        else:
+            self._format = "ome_tiff"
+            self._names = channel_names_from_ome(xml, n)
+            self._physical = physical_size_from_ome(xml)
         self._meta_loaded = True
+
+    def source_format(self) -> str:
+        """The file format behind this source: ``"ome_tiff"`` or ``"qptiff"``."""
+        self._meta()
+        return self._format
 
     def _meta(self):
         if not self._meta_loaded:

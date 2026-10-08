@@ -113,7 +113,7 @@ Read in the raw big image, **circle the region you actually care about (ROI)**, 
 
 **How to operate:**
 
-1. **Load the image**: enter the path to the raw `.ome.tif` and the output folder, click load, and the software shows a **downsampled overview**.
+1. **Load the image**: enter the path to the raw `.ome.tif`, or the native PhenoCycler Fusion `.qptiff` (channel names come from each channel's Biomarker; a qptiff and an ome.tif converted from it are two different sources, with separate workspaces), and the output folder, click load, and the software shows a **downsampled overview**.
 2. **Draw an ROI**: frame the region to analyze on the overview (you can draw several, named ROI_1, ROI_2…). Processing only the ROI **saves a lot of time and memory**.
 3. **Set channel groups and the nucleus channel**:
    - In the **Channels** panel, categorize each channel (epithelial / immune / vascular…) and set weights;

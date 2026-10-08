@@ -6022,7 +6022,7 @@ class Step0Page(QWidget):
             self,
             "Select OME-TIFF",
             os.path.dirname(self._ome_path_edit.text()) or os.getcwd(),
-            "OME-TIFF (*.tif *.tiff)",
+            "OME-TIFF / QPTIFF (*.tif *.tiff *.qptiff)",
         )
         if path:
             self._ome_path_edit.setText(path)

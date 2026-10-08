@@ -138,11 +138,11 @@ def slide_signature(path, level_shapes: Sequence[Sequence[int]], dtype) -> str:
 
 
 def source_kind(source) -> str:
-    """The raw-source kind. Today only ``"ome_tiff"``; an unknown source is
-    an error, never a default."""
+    """The raw-source kind: ``"ome_tiff"`` or ``"qptiff"`` (block v16 QP);
+    an unknown source is an error, never a default."""
     from ..sources.ome_tiff import OmeTiffSource
     if isinstance(source, OmeTiffSource):
-        return "ome_tiff"
+        return source.source_format()
     raise ValueError(f"no raw-source kind for {type(source).__name__}")
 
 
@@ -325,11 +325,13 @@ def transforms_entry(desc: Dict) -> Dict:
     """One slide's entry of ``transforms.json``."""
     frames = SlideFrames.from_description(desc)
     phys = desc.get("physical_size_yx_um")
+    phys_source = ("QPI XResolution/YResolution" if desc.get("kind") == "qptiff"
+                   else "OME PhysicalSizeY/X")
     return {
         "global_pixel": {"shape_yx": list(frames.level_shapes[0]),
                          "center_convention": "integer index = pixel centre"},
         "physical_um": ({"available": True, "size_yx_um": list(phys),
-                         "source": "OME PhysicalSizeY/X"} if phys else
+                         "source": phys_source} if phys else
                         {"available": False, "size_yx_um": None,
                          "source": "not recorded by the source"}),
         "pyramid_levels": [{"level": lv, "shape_yx": list(shape), "scale_yx": list(scale)}

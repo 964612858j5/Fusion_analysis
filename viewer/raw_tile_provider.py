@@ -97,6 +97,9 @@ class RawTileProvider:
 
     @staticmethod
     def _parse_channel_names(tf, num_channels: int) -> List[str]:
+        from ..core.qpi_metadata import is_qpi, qpi_channel_names
+        if is_qpi(tf):              # outside the catch: a bad QPTIFF is an error
+            return qpi_channel_names(tf)
         names: List[str] = []
         try:
             xml = tf.ome_metadata

@@ -272,6 +272,7 @@ def main():
                       (QtGui.QPalette.HighlightedText, (0, 0, 0))):
         pal.setColor(role, QtGui.QColor(*rgb))
     app.setPalette(pal)
+    os.environ.setdefault("BLOCK01_GUI_WATCHDOG", "1")   # this observer wants it
     start_gui_watchdog()
 
     win = MainWindow()

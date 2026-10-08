@@ -16,8 +16,9 @@ point: it names the function the GUI thread was stuck in, which is what the
 report from the desk could not tell us.
 
 Cost when nothing is wrong: one timer tick per `beat_ms` and one wake-up per
-`check_ms` on a thread that compares two floats. Disabled by setting the
-environment variable `BLOCK01_GUI_WATCHDOG=0`.
+`check_ms` on a thread that compares two floats. Off by default (user
+ruling 2026-10-09: a diagnostic, not start-up output); enabled by setting the
+environment variable `BLOCK01_GUI_WATCHDOG=1`.
 """
 
 import os
@@ -28,7 +29,7 @@ import traceback
 
 from PyQt5 import QtCore
 
-ENV_DISABLE = "BLOCK01_GUI_WATCHDOG"
+ENV_SWITCH = "BLOCK01_GUI_WATCHDOG"
 
 
 class GuiWatchdog:
@@ -103,9 +104,9 @@ class GuiWatchdog:
 
 
 def start_gui_watchdog(**kwargs):
-    """Start a watchdog for the running QApplication unless disabled by
-    `BLOCK01_GUI_WATCHDOG=0`. Returns it, or None when disabled. Call on
-    the GUI thread, after the QApplication exists."""
-    if os.environ.get(ENV_DISABLE, "1").strip().lower() in {"0", "false", "no", "off"}:
+    """Start a watchdog for the running QApplication when enabled by
+    `BLOCK01_GUI_WATCHDOG=1`. Returns it, or None when off (the default).
+    Call on the GUI thread, after the QApplication exists."""
+    if os.environ.get(ENV_SWITCH, "0").strip().lower() not in {"1", "true", "yes", "on"}:
         return None
     return GuiWatchdog(**kwargs).start()

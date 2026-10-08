@@ -85,11 +85,13 @@ def test_two_stalls_are_two_reports_each(app):
         dog.stop()
 
 
-def test_the_environment_variable_disables_it(app, monkeypatch):
-    monkeypatch.setenv(gw.ENV_DISABLE, "0")
+def test_it_is_off_unless_the_environment_variable_enables_it(app, monkeypatch):
+    monkeypatch.delenv(gw.ENV_SWITCH, raising=False)
+    assert gw.start_gui_watchdog() is None                  # the default
+    monkeypatch.setenv(gw.ENV_SWITCH, "0")
     assert gw.start_gui_watchdog() is None
 
-    monkeypatch.setenv(gw.ENV_DISABLE, "1")
+    monkeypatch.setenv(gw.ENV_SWITCH, "1")
     dog = gw.start_gui_watchdog(stall_seconds=5)
     try:
         assert dog is not None

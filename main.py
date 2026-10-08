@@ -34,9 +34,8 @@ def main():
     app.setPalette(pal)
 
     # Reports, with the GUI thread's stack, whenever the event loop stops
-    # for 2 s or more -- see utils/gui_watchdog.py. Kept for the freeze on
-    # the first Save that manual testing reported and offscreen runs could
-    # not reproduce. Set BLOCK01_GUI_WATCHDOG=0 to disable.
+    # for 2 s or more -- see utils/gui_watchdog.py. A diagnostic for freezes
+    # that offscreen runs cannot reproduce; off unless BLOCK01_GUI_WATCHDOG=1.
     watchdog = start_gui_watchdog()
 
     win = MainWindow()

@@ -220,8 +220,17 @@ class TileScheduler:
         string is `MultiChannelPrefetchController`, which buckets anything
         else as a failure -- acceptable, since these arrive only while the
         stack is being destroyed.
+
+        The one exception (block A9 S2d) is a programming error, raised at
+        once and before any shutdown handling: a `CorrectionKey` in the
+        `step1-native` namespace, which no correction may be staged from.
         """
         key = req.key
+        if isinstance(key, CorrectionKey) and getattr(key.source, "stage", None) == "step1-native":
+            # block A9 S2d: native tiles are a GPU-only representation; a
+            # correction staged from them would read integers (or wrappers)
+            # where it expects float arrays (codex)
+            raise ValueError("a native (step1-native) identity cannot be corrected")
         # The cache is consulted OUTSIDE the lock (it has its own), but the
         # DECISION -- refuse / serve the hit / join an existing entry /
         # enqueue -- is taken in one `_cv` critical section, together with
@@ -533,7 +542,13 @@ class TileScheduler:
     @perf_trace.timed("sched.read")
     def _run_raw(self, key: RawKey):
         try:
-            arr, io_ms = self.provider.read_tile(key.channel, key.tile)
+            # block A9 S2d: a provider that reads by key (Step1's, for its
+            # native namespace) is handed the key; any other is read as before
+            read_key = getattr(self.provider, "read_tile_key", None)
+            if read_key is not None:
+                arr, io_ms = read_key(key)
+            else:
+                arr, io_ms = self.provider.read_tile(key.channel, key.tile)
             error = None
         except Exception as exc:  # pragma: no cover - defensive
             arr, io_ms, error = None, None, str(exc)

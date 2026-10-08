@@ -90,6 +90,19 @@ class Step1TileProvider:
             stage="step1",
             corrected_artifact=self._table.identity_token())
 
+    def native_source_identity(self):
+        """Block A9 S2d: the cache namespace of `read_tile_key`'s native
+        tiles -- the same slide and the same source-table token as
+        `source_identity()` (so a decision, ROI, product or revision change
+        retires both), a different stage so a native and a float tile never
+        share a key. `source_identity()` itself is unchanged."""
+        from ..viewer.native_tile import NATIVE_STAGE
+        base = self.source_identity()
+        return SourceIdentity(dataset_path=base.dataset_path,
+                              dataset_fingerprint=base.dataset_fingerprint,
+                              stage=NATIVE_STAGE,
+                              corrected_artifact=base.corrected_artifact)
+
     @property
     def source_table(self):
         return self._table
@@ -145,6 +158,60 @@ class Step1TileProvider:
         out = np.array(values, np.float32, copy=True)
         out[~valid] = np.nan
         return out, io_ms
+
+    def read_tile_key(self, key):
+        """Block A9 S2d: the scheduler's read, by key. A `step1-native` key
+        gets a `NativeTile`; any other key gets `read_tile`, unchanged."""
+        from ..viewer.native_tile import is_native
+        if is_native(key.source):
+            return self.read_tile_native(key.channel, key.tile)
+        return self.read_tile(key.channel, key.tile)
+
+    def read_tile_native(self, channel, tile):
+        """`(NativeTile, io_ms)`: `read_tile`'s pixels in their own format.
+
+        A RAW channel stored as uint8/uint16 is read from its pyramid level
+        exactly as `read_tile` reads it -- the same ROI clip, the same level
+        coordinates -- but kept as integers, zero outside the clipped
+        rectangle, which is its validity. Everything else -- a corrected
+        channel, a raw channel stored otherwise, a channel with no source --
+        is `read_tile`'s float32 tile, valid where finite. A channel with no
+        source never reads raw pixels in its place.
+        """
+        import time
+
+        from ..viewer import native_tile as nt
+
+        start = time.perf_counter()
+        source = self._table.source_of(channel)
+        if source == sources.SOURCE_RAW:
+            rect, stride = self._level_rect(tile)
+            y0, y1, x0, x1 = rect
+            clipped = self._table.clip_to_roi(rect, stride=stride)
+            if clipped is not None:
+                cy0, cy1, cx0, cx1 = clipped
+                pixels, _offset = self._raw.read_region(channel, tile.level,
+                                                        cy0, cy1, cx0, cx1)
+                pixels = np.asarray(pixels)
+                if pixels.dtype in nt.INTEGER_DTYPES:
+                    values = np.zeros((y1 - y0, x1 - x0), pixels.dtype)
+                    values[cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0] = pixels
+                    io_ms = (time.perf_counter() - start) * 1000.0
+                    return nt.NativeTile(values, (cy0 - y0, cy1 - y0, cx0 - x0, cx1 - x0),
+                                         nt.KIND_RAW), io_ms
+                # not stored as uint8/uint16: the float tile, as read_tile has it
+                values = np.full((y1 - y0, x1 - x0), np.nan, np.float32)
+                values[cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0] = np.asarray(pixels, np.float32)
+                io_ms = (time.perf_counter() - start) * 1000.0
+                return nt.NativeTile(values, nt.FINITE, nt.KIND_RAW_FLOAT), io_ms
+            io_ms = (time.perf_counter() - start) * 1000.0
+            return nt.NativeTile(np.zeros((y1 - y0, x1 - x0), np.uint8), None,
+                                 nt.KIND_RAW), io_ms
+        values, io_ms = self.read_tile(channel, tile)
+        if source == sources.SOURCE_MISSING:
+            # absent everywhere (contract §28.5): wholly invalid
+            return nt.NativeTile(np.asarray(values, np.float32), None, nt.KIND_MISSING), io_ms
+        return nt.NativeTile(np.asarray(values, np.float32), nt.FINITE, nt.KIND_CORRECTED), io_ms
 
     def read_region(self, channel, level, y0, y1, x0, x1):
         """The same rule, for the callers that read a rectangle directly.

@@ -2078,3 +2078,25 @@ codex 的意见已逐条对照代码核实，采纳如下：
 - 7 层 29 个通道：原始纹理驻留峰值从 511 MiB 降到 62 MiB（最接近 1:1 的选层需要的块少得多）；每格首帧 15–33 ms。
 - 结算超时只出现在切换步骤或模式之后的那次 settle，与改动前相同，与缩放无关。
 - 还未达标（留给后续块）：拖动帧间隔 p50 47–78 ms（3 层 29 个通道最差，p95 135 ms）；本轮没有测到降层（数据量在新预算以内）。
+
+### 28.6 S2d 执行记录（2026-10-09）
+
+**改动**（只加接口，没有任何使用方改动，产品行为、像素、内存都不变）：
+- 新模块 `viewer/native_tile.py`：
+  - `NativeTile` 数据类：值只读；提供 `dtype`、`shape`、`nbytes` 属性，以及 `valid_mask()` 和 `to_float()`；
+  - 常量 `NATIVE_STAGE="step1-native"`、`FINITE`、各种 kind，以及 `is_native()`。
+- `ui/step1_viewer_host.py`：
+  - `native_source_identity()`；
+  - `read_tile_key(key)`：原生键走原生读取，其余键走原 `read_tile`；
+  - `read_tile_native()`：
+    - 原始通道是 uint8 / uint16 时：取金字塔整数值，有效矩形与 `clip_to_roi` 一致，矩形外为 0 并视为无效；
+    - 原始通道是其他 dtype 时：用 `read_tile` 的 float 结果，按有限值判断有效；
+    - 校正通道：照搬 `read_tile` 的结果；
+    - 缺失来源：整块无效，不读原始数据。
+- `viewer/scheduler.py`：`_run_raw` 优先按 key 读取；`request()` 遇到原生身份的 `CorrectionKey` 时抛 `ValueError`，docstring 中已注明这一例外。
+
+**审查**：codex 提出两条必须修，都已修复。
+1. 缺失来源原先返回 `FINITE`，按契约应为 `valid_rect=None`；
+2. 补齐测试：校正直通、原始数据中的 NaN / ±Inf、截断的边缘块、非整数下采样与不规则 ROI、两种块并存的缓存计费、level-1 的矩形值。
+
+**测试**：新增 `tests/test_a9_s2d_native_tile.py`，25 项全部通过。新旧对照的 11 个文件结果一致：scheduler、viewer_host、gpu_sources、compose、mount、pause、explore、compare_tiles、quant_sources、pixel_source、scheduler_idle。

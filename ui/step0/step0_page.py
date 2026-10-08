@@ -3305,6 +3305,9 @@ class Step0Page(QWidget):
             return
         if self._compare_mode():
             self._full_image_channel_stale = True
+            # The toolbar label stays on screen while comparing: name the new
+            # channel now (text only; the viewer itself still waits).
+            self._update_full_source_label(*self._full_image_selection())
             return
         self._full_image_channel_stale = False
         self._show_full_image()

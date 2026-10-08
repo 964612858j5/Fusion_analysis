@@ -1726,6 +1726,25 @@ def test_a_channel_click_in_compare_mode_leaves_the_full_image_alone(app):
     assert page._full_image_channel_stale is True
 
 
+def test_a_channel_click_in_compare_mode_renames_the_toolbar_label(app):
+    """The label right of Marker / DAPI is on screen while comparing: it
+    follows the channel at once, while the full image itself still waits."""
+    page = _page(app)
+    _enter(page)
+    tab = page._explore_tab
+    before = len(tab.calls)
+    page._btn_full_nucleus.setChecked(False)          # a hidden-layer hint too
+
+    page._on_channel_row_changed(page._channel_order.index("CD20"))
+
+    source, method, params = page._full_image_selection()
+    text = page._full_source_lbl.text()
+    assert text.startswith(page._describe_full_source(source, method, params))
+    assert text.startswith("CD20 · ")
+    assert "hidden" in text                           # the hint survives the rename
+    assert len(tab.calls) == before and page._full_image_channel_stale is True
+
+
 def test_leaving_compare_mode_syncs_the_full_image_once(app):
     """Five channels tried while comparing cost the full image ONE
     selection change, to the last of them."""

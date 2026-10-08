@@ -482,6 +482,170 @@ def report_a9(records, gap_ms=32.0):
         print(f"driver errors: {len(errors)} (first: {errors[0].get('_line')[:160]})")
 
 
+def _label(rec):
+    """A mark's full label (it may contain spaces, which the field split loses)."""
+    line = rec.get("_line", "")
+    i = line.find(" label=")
+    return line[i + 7:].strip() if i >= 0 else rec.get("label", "")
+
+
+def report_m0(records, gap_ms=32.0):
+    """Block A9 M0 (application §25.7/§25.8): the measurement-first numbers.
+
+    Kept apart from `report_a9`, whose output is pinned by tests. Per input
+    event: post -> handled (queue), driver timer lateness; per wheel notch:
+    handled -> first frame, -> complete as `--a9` counts it (any fine level),
+    -> complete AT THE OWED LEVEL (`exact_fraction`, Step1/Step3 only);
+    frame intervals during gestures; GUI stalls with and without the driver's
+    own work; Step1 fine-budget refusals and per-frame plane / upload counts.
+    `gpu.render` is CPU submission time, not GPU execution time."""
+    t = lambda r: num(r, "t")                                      # noqa: E731
+    begin = [t(r) for r in records if r.get("ev") == "a9.begin"]
+    t0 = begin[0] if begin else float("-inf")
+    marks = [(t(r), _label(r)) for r in records
+             if r.get("ev") == "a9.action" and r.get("do") == "mark"
+             and not _label(r).startswith("repeat")]
+
+    def section(when):
+        name = "(before)"
+        for mt, lab in marks:
+            if mt <= when:
+                name = lab
+        return name
+
+    def stats(vals):
+        if not vals:
+            return "n=  0"
+        return (f"n={len(vals):4d}  p50={_pct(vals, 50):7.1f}  p95={_pct(vals, 95):7.1f}  "
+                f"max={max(vals):7.1f}")
+
+    # -- the driver's own work -------------------------------------------
+    driver = [(num(r, "t_begin") or t(r), t(r), num(r, "dur_ms", 0) or 0, r.get("cached"))
+              for r in records if r.get("ev") == "a9.driver"]
+    print("driver viewer lookups (ms): cached " +
+          stats([d for _a, _b, d, c in driver if c == "True"]) + " | scanned " +
+          stats([d for _a, _b, d, c in driver if c != "True"]))
+    # -- GUI stalls, by section, raw and without the driver ----------------
+    gaps = [(num(r, "t_begin") or t(r), t(r), num(r, "gap_ms"))
+            for r in records if r.get("ev") == "gui.gap" and (t(r) or 0) >= t0
+            and num(r, "gap_ms") is not None and num(r, "gap_ms") > gap_ms]
+    by_sec = collections.defaultdict(lambda: ([], []))
+    for b, e, g in gaps:
+        raw, own = by_sec[section(e)]
+        raw.append(g)
+        if not any(db <= e and b <= de for db, de, _d, _c in driver):
+            own.append(g)
+    print(f"GUI stalls > {gap_ms:.0f} ms by section (all | without driver lookups)")
+    for name, (raw, own) in by_sec.items():
+        print(f"  {name[:44]:44s} {stats(raw)} | {stats(own)}")
+    # -- per input event: queue time and timer lateness --------------------
+    acts = {r.get("n"): r.get("do") for r in records if r.get("ev") == "a9.action"}
+    expects = {r.get("n"): r.get("expect") for r in records if r.get("ev") == "a9.action"}
+    end_marks = [t(r) for r in records if r.get("ev") == "a9.end"]
+    t_end = end_marks[-1] if end_marks else max((t(r) or 0) for r in records)
+    posts = {(r.get("n"), r.get("k")): t(r) for r in records if r.get("ev") == "a9.post"}
+    queue = collections.defaultdict(list)
+    handled = collections.defaultdict(list)       # (n) -> [(seq, t)]
+    for r in records:
+        if r.get("ev") == "a9.handled" and r.get("seq") is not None:
+            handled[r.get("n")].append((int(float(r["seq"])), t(r)))
+            tp = posts.get((r.get("n"), r.get("seq")))
+            if tp is not None:
+                queue[acts.get(r.get("n"))].append((t(r) - tp) * 1000.0)
+    late = [num(r, "late_ms") for r in records
+            if r.get("ev") == "a9.delivered" and num(r, "late_ms") is not None]
+    for kind, vals in sorted(queue.items()):
+        print(f"input queue (post -> handled) {str(kind):6s} ms: {stats(vals)}")
+    print(f"drag timer lateness ms: {stats(late)}")
+    # -- per wheel notch: first frame, complete, complete at owed level -----
+    covers = [(t(r), r) for r in records if r.get("ev") == "coverage"]
+    # a notch's window ends at the next handled input of ANY action, or at
+    # the next action that is not a settle / pause, whichever is first
+    action_starts = sorted(t(r) for r in records if r.get("ev") == "a9.action"
+                           and r.get("do") not in ("settle", "pause", "mark"))
+    all_handled = sorted(th for evs in handled.values() for _s, th in evs)
+    # a GPU frame counts for a notch only if it was SUBMITTED after the notch
+    # was handled (codex: timestamps alone credit an older pending frame)
+    submits = sorted((t(r), num(r, "frame", 0) or 0) for r in records
+                     if r.get("ev") == "gpu.frame")
+    first, done_any, done_exact = (collections.defaultdict(list) for _ in range(3))
+    unfinished = collections.Counter()
+    for n, events in handled.items():
+        if acts.get(n) != "wheel":
+            continue
+        where = expects.get(n)
+        events.sort()
+        for _seq, th in events:
+            nxt = [x for x in all_handled if x > th] + [x for x in action_starts if x > th]
+            until = min(nxt) if nxt else t_end
+            sec = section(th)
+            floor = max((f for ts, f in submits if ts <= th), default=-1)
+            seen = [(tc, r) for tc, r in covers if th <= tc <= until
+                    and r.get("where") == where
+                    and (where != "gpu" or (num(r, "frame", 0) or 0) > floor)]
+            if seen:
+                first[sec].append((seen[0][0] - th) * 1000.0)
+            ok = next((tc for tc, r in seen if (num(r, "gap_cells", 1) or 0) == 0
+                       and (num(r, "target_fraction", 0) or 0) >= 0.999), None)
+            if ok is not None:
+                done_any[sec].append((ok - th) * 1000.0)
+            ex = next((tc for tc, r in seen if (num(r, "gap_cells", 1) or 0) == 0
+                       and (num(r, "exact_fraction", 0) or 0) >= 0.999), None)
+            if ex is not None:
+                done_exact[sec].append((ex - th) * 1000.0)
+            if ok is None:
+                unfinished[sec] += 1
+    print("wheel notch latency by section, ms (first frame | complete, any fine level"
+          " | complete at the owed level, Step1/3)")
+    for sec in sorted(set(first) | set(done_any) | set(unfinished)):
+        print(f"  {sec[:44]:44s} first {stats(first[sec])}")
+        print(f"  {'':44s} any   {stats(done_any[sec])}  not complete before the next input: "
+              f"{unfinished[sec]}")
+        print(f"  {'':44s} owed  {stats(done_exact[sec])}")
+    # -- frame intervals during gestures ----------------------------------
+    # a gesture run: drag / wheel actions with only `pause` between them (a
+    # `settle` ends it -- idle time is not a frame interval)
+    order = [(t(r), r.get("do")) for r in records if r.get("ev") == "a9.action"]
+    windows, start = [], None
+    for i, (ts, do) in enumerate(order):
+        if do in ("drag", "wheel"):
+            if start is None:
+                start = ts
+        elif do != "pause" and start is not None:
+            windows.append((start, ts, section(start)))
+            start = None
+    if start is not None:
+        windows.append((start, t_end, section(start)))
+    presents = [t(r) for r in records if r.get("ev") == "gpu.present"]
+    cpu_frames = [tc for tc, r in covers if r.get("where") == "cpu"]
+    ivals = collections.defaultdict(list)
+    for a, b, sec in windows:
+        for series in (presents, cpu_frames):
+            inside = [x for x in series if a <= x <= b]
+            ivals[sec].extend((y - x) * 1000.0 for x, y in zip(inside, inside[1:]))
+    print("frame intervals during gestures, ms (presented GPU frames / CPU frames)")
+    for sec, vals in ivals.items():
+        print(f"  {sec[:44]:44s} {stats(vals)}")
+    # -- Step1 refusals and per-frame cost ---------------------------------
+    refused = collections.Counter((r.get("channel"), r.get("level")) for r in records
+                                  if r.get("ev") == "gpu.fine_refused")
+    print(f"fine-budget refusals: {sum(refused.values())} "
+          + ", ".join(f"{c}@L{lv}x{k}" for (c, lv), k in refused.most_common(8)))
+    failed = collections.Counter(r.get("error", "")[:90] for r in records
+                                 if r.get("ev") == "gpu.submit_failed")
+    print(f"GPU submissions failed: {sum(failed.values())} "
+          + "; ".join(f"{k} x{v}" for k, v in failed.most_common(3)))
+    frames = [r for r in records if r.get("ev") == "gpu.frame"]
+    if frames:
+        def col(key):
+            return [num(r, key, 0) or 0 for r in frames]
+        print(f"gpu frames {len(frames)}: planes {stats(col('planes'))}")
+        print(f"  passes {stats(col('passes'))}")
+        print(f"  uploads/frame {stats(col('uploads'))}")
+        print(f"  fine planes off the owed level {stats(col('fine_off_target'))}")
+        print(f"  resident raw texture MiB max {max(col('resident')) / 2**20:.0f}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("path")
@@ -493,6 +657,8 @@ def main(argv=None):
     ap.add_argument("--limit", type=int, default=20)
     ap.add_argument("--a9", action="store_true",
                     help="the A9 numbers of a scripted run (block A9-M)")
+    ap.add_argument("--m0", action="store_true",
+                    help="the measurement-first numbers of block A9 M0")
     ap.add_argument("--run", default="last",
                     help='which run in an appended log: "last" (default), '
                          '"all", or a 1-based index')
@@ -527,7 +693,9 @@ def main(argv=None):
             marker = [r for r in segment if r.get("ev") == "run.begin"]
             name = marker[0].get("run") if marker else "before run.begin"
             print(f"\n=== run {index}/{len(segments)}  ({name}) ===")
-        if args.a9:
+        if args.m0:
+            report_m0(segment)
+        elif args.a9:
             report_a9(segment)
         elif args.at is not None:
             report_at(segment, args.at)

@@ -189,8 +189,13 @@ def _empty_result(n):
             "gap_cells": 0, "sampled": SAMPLES}
 
 
+def _level_of(plane):
+    """A plane's numeric pyramid level, from its tile identity (or None)."""
+    return getattr(getattr(getattr(plane, "identity", None), "tile", None), "level", None)
+
+
 def gpu_frame(sources, viewport_world, roi_world=None, slide_world=None,
-              polygon=None, expected=()):
+              polygon=None, expected=(), target_index=None):
     """Coverage of one GPU submission.
 
     `sources`: {channel: ChannelSource} actually composed (their `coarse` /
@@ -199,6 +204,12 @@ def gpu_frame(sources, viewport_world, roi_world=None, slide_world=None,
     are (x0, x1, y0, y1) in level-0 world coordinates, like `world_rect`.
     The TARGET level is the one the channel's viewport is owed
     (`target_level`; the selected one when that is unset).
+
+    `target_index` (block A9 M0, measurement only): the numeric pyramid
+    level the viewport is owed. When given, the result also carries
+    `exact_fraction` -- target cells covered by fine planes OF THAT LEVEL,
+    a carried stand-in of another level not counting -- and `fine_levels`.
+    The existing fields keep their meaning exactly.
     """
     channels = dict(sources or {})
     for name in expected or ():
@@ -209,10 +220,12 @@ def gpu_frame(sources, viewport_world, roi_world=None, slide_world=None,
     px, py, excluded = geom
     gap = 0
     target_cells = 0
+    exact_cells = 0
+    levels = set()
     coarse_ok = True
     for source in channels.values():
         coarse = excluded.copy()
-        fine = None
+        fine = other = None
         if source is not None:
             _paint_planes(coarse, px, py, getattr(source, "coarse", ()))
             # the level OWED, not the one drawn: coarse drawn first while
@@ -220,20 +233,40 @@ def gpu_frame(sources, viewport_world, roi_world=None, slide_world=None,
             wanted = (getattr(source, "target_level", "")
                       or getattr(source, "selected_level", "coarse"))
             if wanted == "fine":
+                planes = tuple(getattr(source, "fine", ()))
                 fine = excluded.copy()
-                _paint_planes(fine, px, py, getattr(source, "fine", ()))
+                if target_index is None:
+                    _paint_planes(fine, px, py, planes)
+                else:
+                    levels.update(_level_of(p) for p in planes)
+                    _paint_planes(fine, px, py, [p for p in planes
+                                                 if _level_of(p) == target_index])
+                    rest = [p for p in planes if _level_of(p) != target_index]
+                    if rest:
+                        other = excluded.copy()
+                        _paint_planes(other, px, py, rest)
         coarse_cells = _cells(coarse)
         if fine is None:                  # the coarse level is the target
-            covered = target = coarse_cells
-        else:
-            target = _cells(fine)
+            covered = target = exact = coarse_cells
+        elif other is None:
+            target = exact = _cells(fine)
             covered = _cells(coarse | fine)
+        else:
+            exact = _cells(fine)
+            target = _cells(fine | other)
+            covered = _cells(coarse | fine | other)
         gap += int(covered.size - np.count_nonzero(covered))
         coarse_ok = coarse_ok and bool(coarse_cells.all())
         target_cells += int(np.count_nonzero(target))
-    return {"channels": len(channels), "coarse_complete": coarse_ok,
-            "target_fraction": round(target_cells / (len(channels) * GRID * GRID), 4),
-            "gap_cells": gap, "sampled": SAMPLES}
+        exact_cells += int(np.count_nonzero(exact))
+    out = {"channels": len(channels), "coarse_complete": coarse_ok,
+           "target_fraction": round(target_cells / (len(channels) * GRID * GRID), 4),
+           "gap_cells": gap, "sampled": SAMPLES}
+    if target_index is not None:
+        out["target_index"] = int(target_index)
+        out["exact_fraction"] = round(exact_cells / (len(channels) * GRID * GRID), 4)
+        out["fine_levels"] = ",".join(str(v) for v in sorted(x for x in levels if x is not None))
+    return out
 
 
 def rect_frame(rects_by_level, current_level, viewport_world, floor_rects=(),

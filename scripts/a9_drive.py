@@ -18,6 +18,7 @@ Scenario: a JSON list of actions --
   {"do": "tick", "channel": "CD3D", "on": true}
   {"do": "window", "channel": "CD3D", "min": 0, "max": 120, "gamma": 1.0}
   {"do": "pause", "ms": 500}
+  {"do": "winstate", "value": "max"}        (or "normal"; A9 M0)
   {"do": "mark", "label": "..."}
   {"do": "repeat", "n": 20, "body": [ ... ]}
 """
@@ -57,11 +58,15 @@ class _Handled(QtCore.QObject):
     def __init__(self, target, n):
         super().__init__(target)
         self.n = n
+        self.seq = 0
         target.installEventFilter(self)
 
     def eventFilter(self, watched, event):  # noqa: N802
         if event.type() in self.KINDS:
-            perf_trace.mark("a9.handled", n=self.n, qt=int(event.type()))
+            # `seq` pairs this with the k-th `a9.post` of the action (M0):
+            # post -> handled is the event's own queue time
+            self.seq += 1
+            perf_trace.mark("a9.handled", n=self.n, qt=int(event.type()), seq=self.seq)
         return False
 
     def done(self):
@@ -72,19 +77,47 @@ class _Handled(QtCore.QObject):
         self.deleteLater()
 
 
-def _viewer_widget():
+#: A9 M0: the last viewer found, per `key` (the step and the driver's view
+#: epoch). Scanning every widget cost ~18 ms per gesture (up to 180 ms) and
+#: was counted as a product stall; the scan now runs only when the key
+#: changes or the remembered viewer is gone or hidden.
+_VIEWER_CACHE = {"key": None, "best": None}
+
+
+def _alive_visible(w):
+    try:
+        from PyQt5 import sip
+        if w is None or sip.isdeleted(w):
+            return False
+        return bool(w.isVisible() and w.window().isVisible())
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
+def _viewer_widget(key=None, main=None):
     """The largest visible viewer on screen (a pyqtgraph view or the GPU
-    layer), then whatever widget is on top at its centre."""
+    layer), then whatever widget is on top at its centre. A viewer inside
+    `main` (the main window) wins over one in a popup such as the Tissue
+    Navigator; only such a viewer is remembered (M0: a popup found while the
+    main viewer was still being built was otherwise kept for the run)."""
     import pyqtgraph as pg
-    best, area = None, 0
-    for w in QtWidgets.QApplication.allWidgets():
-        if not isinstance(w, (pg.GraphicsView, QtWidgets.QOpenGLWidget)):
-            continue
-        if not w.isVisible() or not w.window().isVisible():
-            continue
-        a = w.width() * w.height()
-        if a > area:
-            best, area = w, a
+    cached = (key is not None and _VIEWER_CACHE["key"] == key
+              and _alive_visible(_VIEWER_CACHE["best"]))
+    with perf_trace.span("a9.driver", what="viewer", cached=cached):
+        if cached:
+            best = _VIEWER_CACHE["best"]
+        else:
+            best, area, inside = None, 0, False
+            for w in QtWidgets.QApplication.allWidgets():
+                if not isinstance(w, (pg.GraphicsView, QtWidgets.QOpenGLWidget)):
+                    continue
+                if not w.isVisible() or not w.window().isVisible():
+                    continue
+                a = w.width() * w.height()
+                mine = main is not None and w.window() is main
+                if (mine, a) > (inside, area):
+                    best, area, inside = w, a, mine
+            _VIEWER_CACHE.update(key=key if (inside or main is None) else None, best=best)
     if best is None:
         return None, None
     centre = best.mapToGlobal(best.rect().center())
@@ -116,6 +149,12 @@ class Driver(QtCore.QObject):
         self._timer.timeout.connect(self._step)
         self._started = False
         self._base = None
+        #: bumped by every action that can change which viewer is on screen
+        self._view_epoch = 0
+
+    def _viewer(self):
+        return _viewer_widget((int(getattr(self.w, "_current_step", 0) or 0),
+                               self._view_epoch), main=self.w)
 
     # ── camera writes (A9-8): counted, not changed ──────────────────────
     def _wrap_camera(self):
@@ -130,6 +169,14 @@ class Driver(QtCore.QObject):
 
             def counted(owner_self, *a, _real=real, _key=key, **k):
                 self.camera[_key] += 1
+                # A9 M0: where the camera went -- whether a zoom actually
+                # changed the scale, apart from whether the picture followed
+                shot = a[1] if len(a) > 1 else None
+                if shot is not None:
+                    perf_trace.mark("a9.camera", kind=_key, step=a[0],
+                                    scale=round(float(getattr(shot, "scale", 0.0)), 6),
+                                    cx=round(float(getattr(shot, "cx", 0.0)), 1),
+                                    cy=round(float(getattr(shot, "cy", 0.0)), 1))
                 return _real(owner_self, *a, **k)
             setattr(cls, name, counted)
 
@@ -256,6 +303,7 @@ class Driver(QtCore.QObject):
         go = {0: "_go_to_step0", 1: "_go_to_step1", 2: "_go_to_step2",
               3: "_go_to_step3", 4: "_go_to_step4"}[to]
         perf_trace.mark("a9.delivered", n=self.i, kind="programmatic")
+        self._view_epoch += 1
         getattr(self.w, go)()
         self._next(0)
 
@@ -263,8 +311,29 @@ class Driver(QtCore.QObject):
         """Overlay / Fusion, by the button the user clicks."""
         name = "_btn_mode_fusion" if a.get("value") == "fusion" else "_btn_mode_overlay"
         perf_trace.mark("a9.delivered", n=self.i, kind="programmatic")
+        self._view_epoch += 1
         getattr(self.w, name).click()
         self._next(0)
+
+    def _do_winstate(self, a, _t):
+        """A9 M0: the window maximised ("max") or normal ("normal"), then its
+        and the viewer's real size and device pixel ratio recorded."""
+        self._view_epoch += 1
+        if a.get("value") == "max":
+            self.w.showMaximized()
+        else:
+            self.w.showNormal()
+
+        def record():
+            target, _pos = self._viewer()
+            handle = self.w.windowHandle()
+            perf_trace.mark("a9.winstate", value=a.get("value"),
+                            win_w=self.w.width(), win_h=self.w.height(),
+                            view_w=target.width() if target is not None else None,
+                            view_h=target.height() if target is not None else None,
+                            dpr=handle.devicePixelRatio() if handle is not None else None)
+            self._next(0)
+        QtCore.QTimer.singleShot(int(a.get("wait_ms", 1500)), record)
 
     def _do_tick(self, a, _t):
         dock = getattr(self.w, "_channel_dock", None)
@@ -285,14 +354,15 @@ class Driver(QtCore.QObject):
             "a9.window_reads", n=self.i, reads=read_ledger.delta(before).get("total", 0)))
 
     def _do_wheel(self, a, _t):
-        target, pos = _viewer_widget()
+        target, pos = self._viewer()
         if target is None:
             raise RuntimeError("no viewer on screen")
         _mark_target(self.i, target)
         handled = _Handled(target, self.i)
         notches = int(a.get("notches", 1))
         step = 1 if notches > 0 else -1
-        for _ in range(abs(notches)):
+        for k in range(abs(notches)):
+            perf_trace.mark("a9.post", n=self.i, k=k + 1)
             ev = QtGui.QWheelEvent(QtCore.QPointF(pos), QtCore.QPointF(target.mapToGlobal(pos)),
                                    QtCore.QPoint(0, 0), QtCore.QPoint(0, 120 * step),
                                    QtCore.Qt.NoButton, QtCore.Qt.NoModifier,
@@ -303,7 +373,7 @@ class Driver(QtCore.QObject):
         self._next(0)
 
     def _do_drag(self, a, _t):
-        target, pos = _viewer_widget()
+        target, pos = self._viewer()
         if target is None:
             raise RuntimeError("no viewer on screen")
         _mark_target(self.i, target)
@@ -312,7 +382,11 @@ class Driver(QtCore.QObject):
         ms = int(a.get("ms", 16))
         btn = QtCore.Qt.LeftButton
 
+        posted = {"k": 0}
+
         def send(kind, p, buttons):
+            posted["k"] += 1
+            perf_trace.mark("a9.post", n=self.i, k=posted["k"])
             ev = QtGui.QMouseEvent(kind, QtCore.QPointF(p), QtCore.QPointF(target.mapToGlobal(p)),
                                    btn if kind != QtCore.QEvent.MouseMove else QtCore.Qt.NoButton,
                                    buttons, QtCore.Qt.NoModifier)
@@ -320,15 +394,20 @@ class Driver(QtCore.QObject):
 
         handled = _Handled(target, self.i)
         send(QtCore.QEvent.MouseButtonPress, pos, btn)
-        state = {"k": 0}
+        state = {"k": 0, "due": time.monotonic() + ms / 1000.0}
 
         def move():
+            # how late the GUI timer fired this step (M0): timer lateness,
+            # kept apart from the posted event's own queue time
+            late_ms = (time.monotonic() - state["due"]) * 1000.0
             state["k"] += 1
             k = state["k"]
             p = QtCore.QPoint(int(pos.x() + dx * k / steps), int(pos.y() + dy * k / steps))
             send(QtCore.QEvent.MouseMove, p, btn)
-            perf_trace.mark("a9.delivered", n=self.i, kind="gesture", step=k)
+            perf_trace.mark("a9.delivered", n=self.i, kind="gesture", step=k,
+                            late_ms=round(late_ms, 2))
             if k < steps:
+                state["due"] = time.monotonic() + ms / 1000.0
                 QtCore.QTimer.singleShot(ms, move)
             else:
                 send(QtCore.QEvent.MouseButtonRelease, p, QtCore.Qt.NoButton)

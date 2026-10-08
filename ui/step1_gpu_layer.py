@@ -892,7 +892,9 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         try:
             result = coverage_probe.gpu_frame(
                 composed, viewport.world_rect, roi_world=viewport.roi_world_rect,
-                polygon=viewport.roi_polygon_world, expected=self._a9_expected(display))
+                polygon=viewport.roi_polygon_world, expected=self._a9_expected(display),
+                # A9 M0: the numeric level owed, set by the binding while tracing
+                target_index=getattr(self, "_a9_target_index", None))
             result["probe_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
             perf_trace.mark("coverage.probe", where="gpu", probe_ms=result["probe_ms"])
         except Exception as exc:                            # noqa: BLE001 -- measuring only

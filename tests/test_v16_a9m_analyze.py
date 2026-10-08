@@ -77,3 +77,51 @@ def test_wakes_are_only_suspected_on_a_wsl_log(capsys):
     assert "without the 0 suspected" in capsys.readouterr().out
     apl.report_a9([rec("a9.platform", 0.5, wsl=True)] + base)
     assert "without the 1 suspected" in capsys.readouterr().out
+
+
+def test_m0_pairs_each_posted_input_with_its_handling_and_finds_the_owed_level(tmp_path, capsys):
+    recs = _log(tmp_path, [
+        (1.000, "a9.begin", "actions=4"),
+        (1.000, "a9.action", "n=1 do=mark expect=gpu label=step1 zoom in"),
+        (1.100, "a9.action", "n=2 do=wheel expect=gpu notches=1"),
+        (1.101, "a9.driver", "dur_ms=0.5 t_begin=1.1005 what=viewer cached=True"),
+        (1.102, "a9.post", "n=2 k=1"),
+        (1.112, "a9.handled", "n=2 qt=31 seq=1"),
+        (1.130, "coverage", "where=gpu frame=1 gap_cells=0 target_fraction=1.0 "
+                            "exact_fraction=0.4 target_index=2 sampled=128"),
+        (1.250, "coverage", "where=gpu frame=2 gap_cells=0 target_fraction=1.0 "
+                            "exact_fraction=1.0 target_index=2 sampled=128"),
+        (1.260, "gpu.fine_refused", "channel=CD3 level=1 tiles=150 bytes=1 budget=1"),
+        (1.300, "a9.action", "n=3 do=settle expect=gpu"),
+        (1.700, "a9.settled", "n=3 timed_out=False reads=0 camera_user=1 camera_jump=0"),
+    ])
+    apl.report_m0(recs)
+    out = capsys.readouterr().out
+    assert "input queue (post -> handled) wheel  ms: n=   1  p50=   10.0" in out
+    assert "first n=   1  p50=   18.0" in out          # handled -> first frame
+    assert "any   n=   1  p50=   18.0" in out          # complete, any fine level
+    assert "owed  n=   1  p50=  138.0" in out          # complete at the owed level
+    assert "fine-budget refusals: 1 CD3@L1x1" in out
+
+
+def test_m0_a_notch_is_credited_only_its_own_viewer_and_frames(tmp_path, capsys):
+    recs = _log(tmp_path, [
+        (1.000, "a9.begin", "actions=5"),
+        (1.000, "a9.action", "n=1 do=mark expect=gpu label=zoom"),
+        (1.100, "gpu.frame", "frame=7 level=2"),           # submitted BEFORE the notch
+        (1.200, "a9.action", "n=2 do=wheel expect=gpu notches=1"),
+        (1.210, "a9.handled", "n=2 qt=31 seq=1"),
+        (1.220, "coverage", "where=gpu frame=7 gap_cells=0 target_fraction=1.0"),
+        (1.230, "coverage", "where=cpu frame=3 gap_cells=0 target_fraction=1.0"),
+        (1.300, "a9.action", "n=3 do=wheel expect=gpu notches=1"),
+        (1.310, "a9.handled", "n=3 qt=31 seq=1"),
+        (1.320, "gpu.frame", "frame=8 level=2"),
+        (1.340, "coverage", "where=gpu frame=8 gap_cells=0 target_fraction=1.0"),
+        (1.400, "a9.end", "camera_user=0 camera_jump=0 reads_total=0"),
+    ])
+    apl.report_m0(recs)
+    out = capsys.readouterr().out
+    # notch 1: the old pending frame 7 and the CPU frame do not count, and
+    # its window closes at notch 2 -- so it is reported as not complete
+    assert "any   n=   1  p50=   30.0" in out
+    assert "not complete before the next input: 1" in out

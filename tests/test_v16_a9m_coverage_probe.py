@@ -1,6 +1,7 @@
 """Block A9-M: the coverage probe judges the frame by the planes that were
 submitted and where their pixels are valid -- never by colour."""
 
+import collections
 import time
 from types import SimpleNamespace
 
@@ -135,3 +136,37 @@ def test_a_coarse_picture_owed_its_fine_is_not_complete():
     done = SimpleNamespace(coarse=(plane,), fine=(), selected_level="coarse",
                            target_level="coarse")
     assert cp.gpu_frame({"A": done}, (0, 10, 0, 10))["target_fraction"] == 1.0
+
+
+# ── A9 M0: completion at the OWED numeric level ─────────────────────────
+
+_Tile = collections.namedtuple("_Tile", "level")
+_Key = collections.namedtuple("_Key", "name tile")
+
+
+def _lv(name, level):
+    """A hashable plane identity carrying a numeric level, like RawKey."""
+    return _Key(name, _Tile(level))
+
+
+def test_a_stand_in_of_another_level_is_not_completion_at_the_owed_level():
+    coarse = [_plane(_lv("c", 6), (0, 100, 0, 100))]
+    owed = [_plane(_lv("f0", 2), (0, 50, 0, 100))]
+    stand_in = [_plane(_lv("f1", 3), (50, 100, 0, 100))]
+    source = _source(coarse, owed + stand_in, "fine")
+    old = cp.gpu_frame({"A": source}, VIEW)
+    new = cp.gpu_frame({"A": source}, VIEW, target_index=2)
+    # the existing fields keep their meaning exactly ...
+    assert {k: new[k] for k in old} == old and old["target_fraction"] == 1.0
+    # ... and only the owed level's planes count as owed-level completion
+    assert new["exact_fraction"] == 0.5 and new["fine_levels"] == "2,3"
+    assert new["target_index"] == 2
+    whole = cp.gpu_frame({"A": _source(coarse, owed + [_plane(_lv("f2", 2), (50, 100, 0, 100))],
+                                       "fine")}, VIEW, target_index=2)
+    assert whole["exact_fraction"] == 1.0 and whole["gap_cells"] == 0
+
+
+def test_without_a_target_index_the_result_is_unchanged():
+    source = _source([_plane(_lv("c", 6), (0, 100, 0, 100))], (), "coarse")
+    r = cp.gpu_frame({"A": source}, VIEW)
+    assert "exact_fraction" not in r and "fine_levels" not in r

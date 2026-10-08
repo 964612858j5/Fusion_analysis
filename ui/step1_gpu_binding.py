@@ -602,6 +602,8 @@ class Step1GpuBinding(QtCore.QObject):
             # not fit. No partial precision, no extra budget, and what is
             # already on screen stays.
             self._fine_budget_refused.add(channel)
+            perf_trace.mark("gpu.fine_refused", channel=channel, level=target_level,
+                            tiles=len(keys), bytes=target_bytes, budget=budget)
             self._last_error = (
                 f"fine budget refused for {channel}: the current viewport's "
                 f"own target level needs {target_bytes} bytes, over {budget}")
@@ -894,11 +896,34 @@ class Step1GpuBinding(QtCore.QObject):
                                           selected_level="fine" if fine else "coarse",
                                           target_level="fine" if wants_fine else "coarse"))
         descriptor = SourceDescriptor(tuple(channels))
+        tracing = perf_trace.enabled()
+        if tracing:
+            # A9 M0, measurement only: the numeric level this frame owes
+            snapshot = self._latest_snapshot
+            target_index = (int(snapshot.level) if snapshot is not None
+                            and getattr(snapshot, "source", None) == self._source else None)
+            self.layer._a9_target_index = target_index
         try:
             stats = self.layer.submit(descriptor, display, viewport)
         except Step1GpuLayerError as exc:
             self._last_error = f"G1 submission failed: {exc}"
+            perf_trace.mark("gpu.submit_failed", error=str(exc)[:160].replace(" ", "_"))
             return
+        if tracing:
+            cache = stats.get("cache") or {}
+            uploads = int(cache.get("uploads", 0) or 0)
+            perf_trace.mark(
+                "gpu.frame", frame=getattr(self.layer, "_a9_frame", 0), level=target_index,
+                channels=len(channels),
+                planes=sum(len(c.coarse) + len(c.fine) for c in channels),
+                fine=sum(len(c.fine) for c in channels),
+                fine_off_target=(-1 if target_index is None else sum(
+                    1 for c in channels for p in c.fine
+                    if int(p.identity.tile.level) != target_index)),
+                passes=stats.get("pass_count"),
+                uploads=uploads - getattr(self, "_a9_uploads_seen", 0),
+                resident=cache.get("bytes"), refused=len(self._fine_budget_refused))
+            self._a9_uploads_seen = uploads
         self._shown_channels = shown
         self._descriptor_history.append((descriptor, display, viewport, stats))
 

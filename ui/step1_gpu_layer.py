@@ -16,6 +16,7 @@ import collections
 import dataclasses
 import math
 import pathlib
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Hashable, Mapping, Optional, Sequence, Tuple
@@ -946,6 +947,13 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         composed, against every channel it should compose, clipped to the
         region's rectangle and polygon -- emitted when the frame showing it
         is presented."""
+        if os.environ.get("BLOCK01_A9_PROBE", "1") == "0":
+            # A9 P3-M, measurement only: frames are still numbered and their
+            # presentation marked, but not probed -- the probe's own cost
+            # grows with the plane count and dominated 69-channel frames
+            self._a9_frame += 1
+            self._a9_pending = (self._a9_frame, {"probe": "off"})
+            return
         started = time.perf_counter()
         try:
             result = coverage_probe.gpu_frame(

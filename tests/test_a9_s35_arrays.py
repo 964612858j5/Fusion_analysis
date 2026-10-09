@@ -264,3 +264,65 @@ def test_a_visible_layer_is_never_released(app):
         assert layer.gpu_bytes() == held
     finally:
         layer.deleteLater()
+
+
+def test_the_same_planes_back_in_other_slots_are_drawn_right(app):
+    """codex §36 #1: after a release the SAME plane objects come back in
+    other slots; the page entries must follow them."""
+    from block01.ui import gpu_memory
+    layer = _layer(app, True)
+    try:
+        viewport = ViewportSnapshot((0.0, 1300.0, 0.0, 900.0), SIZE, 1.0)
+        scene = _scene(False)
+        layer.submit(scene, _overlay(), viewport)
+        before = layer.readback_rgba_for_test()
+        layer.hidden = True
+        gpu_memory.release_hidden("test")
+        layer.hidden = False
+        # other planes take the freed slots first, then the scene returns
+        layer.submit(g._source(g._channel("Z", coarse=_grid(1.0, (900, 1300), np.uint8, 99, "Z"))),
+                     DisplaySnapshot(MODE_OVERLAY, {"Z": (0.0, 255.0, 1.0)}, {"Z": 1.0},
+                                     {"Z": (1.0, 1.0, 1.0)}), viewport)
+        layer.submit(scene, _overlay(), viewport)
+        assert np.array_equal(before, layer.readback_rgba_for_test())
+    finally:
+        layer.deleteLater()
+
+
+def test_a_block_number_beyond_the_samplers_falls_back(app):
+    """codex §36 #2: block numbers survive deletions; a surviving block
+    whose number has no sampler is drawn per channel, never indexed."""
+    from block01.ui.step1_gpu_vt import VirtualCompositor
+
+    class Block:
+        fmt, vt_index = "f32", 4
+
+    class Store:
+        blocks = [Block()]
+        slots = {}
+
+        def is_resident(self, _plane):
+            return False
+    vt = VirtualCompositor()
+    vt.u_blocks, vt.f_blocks = 6, 4
+    assert vt.plan(Store(), [], False) is None and vt.why == "blocks"
+
+
+def test_tiles_nobody_needs_give_their_block_to_another_format(app):
+    """codex §36 #3: a store full of unneeded integer tiles still takes a
+    float tile (the integer block goes)."""
+    budget = 64 * T * T * 4
+    layer = _layer(app, True, budget=budget)
+    try:
+        viewport = ViewportSnapshot((0.0, 1300.0, 0.0, 900.0), SIZE, 1.0)
+        for seed in range(12):                    # fill with u8 tiles
+            layer.submit(g._source(g._channel("A", coarse=_grid(1.0, (900, 1300), np.uint8,
+                                                                  20 + seed, f"U{seed}"))),
+                         _overlay(), viewport)
+        fmts = {b.fmt for b in layer._arrays.blocks}
+        assert fmts == {"u8"}
+        floats = g._source(g._channel("C", coarse=_grid(2.0, (450, 650), np.float32, 4, "C", nan=True)))
+        layer.submit(floats, _overlay(), viewport)            # must not raise
+        assert any(b.fmt == "f32" for b in layer._arrays.blocks)
+    finally:
+        layer.deleteLater()

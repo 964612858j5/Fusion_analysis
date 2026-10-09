@@ -102,8 +102,8 @@ class VirtualCompositor:
         self.known_resident = ObjectCache()
         #: channel -> the cells its page layer was last written from
         self._written = {}
-        #: id(plane) -> the (block, layer) its page entry points at
-        self._slot_of = {}
+        #: plane -> the (block, layer) its page entry points at
+        self._slot_of = ObjectCache()
         #: id(plane) -> (plane, ds_x, level key, tx, ty, x1, y1): its grid cell
         self._geometry = ObjectCache()
         self.frames = 0
@@ -120,7 +120,10 @@ class VirtualCompositor:
         blocks = {0: 0, 1: 0}
         for block in store.blocks:
             blocks[_family(block.fmt)] += 1
-        if blocks[0] > self.u_blocks or blocks[1] > self.f_blocks:
+        if blocks[0] > self.u_blocks or blocks[1] > self.f_blocks or any(
+                block.vt_index >= (self.f_blocks if _family(block.fmt) else self.u_blocks)
+                for block in store.blocks):
+            # block numbers survive deletions: the NUMBER must fit a sampler
             self.why = "blocks"
             return None
         cells: Dict[str, Dict[Tuple[int, int, int], object]] = {}
@@ -192,6 +195,9 @@ class VirtualCompositor:
             used_levels = tuple((level, levels[level]) for level in {cell[0] for cell in mine})
             self._channel_cells[channel] = (sig, mine, used_levels, own_extent)
         self._extent_next = (extent_w, extent_h)
+        drawn = {channel for channel, _source, _params in composed_rows}
+        for channel in [c for c in self._channel_cells if c not in drawn]:
+            del self._channel_cells[channel]          # no plane kept for a channel not drawn
         return VtPlan(composed_rows, levels, cells, fusion)
 
     # ── GL ──────────────────────────────────────────────────────────────
@@ -284,6 +290,7 @@ class VirtualCompositor:
                 block, layer = store.slot(plane)
                 layer_pages[ty, self.level_offset[level] + tx] = (
                     (_family(block.fmt) << 24) | (block.vt_index << 16) | layer)
+                self._slot_of.set(plane, (block, layer))     # what this entry points at
                 touched_rows.append(ty)
             if touched_rows:
                 changed_layers.append((slot, min(touched_rows), max(touched_rows) + 1))
@@ -301,10 +308,7 @@ class VirtualCompositor:
     def _moved(self, store, plane) -> bool:
         """Did this plane's slot change since its cell was written (an
         eviction and a re-upload put it elsewhere)?"""
-        now = store.slots.get(plane.identity)
-        was = self._slot_of.get(id(plane))
-        self._slot_of[id(plane)] = now
-        return was is not None and was != now
+        return self._slot_of.get(plane) != store.slots.get(plane.identity)
 
     def _upload_pages(self, gl, pages, full, changed=None) -> None:
         layers, height, width = pages.shape
@@ -420,6 +424,15 @@ class VirtualCompositor:
             a[index] = (TILE * ds_x, TILE * ds_y, self.level_offset[index], 0.0)
             b[index] = (gw, gh)
         return a, b
+
+    def forget_pages(self) -> None:
+        """Rewrite every page entry on the next sync (A9 §36: after a
+        release, tiles come back in other slots)."""
+        self.pages = None
+        self._written = {}
+        self._slot_of = ObjectCache()
+        self.synced = None
+        self.last_key = None
 
     def clear(self, gl) -> None:
         names = [n for n in (self.pages_tex, self.meta_tex, self.params_tex) if n]

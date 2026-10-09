@@ -759,6 +759,8 @@ class Step1GpuBinding(QtCore.QObject):
         started = time.perf_counter()
         while pending:
             channel = pending.pop(0)
+            if sliced and channel not in self._active_fine_channels:
+                continue                      # unticked since this epoch began
             kept, asked = self._plan_fine_for_channel(channel, snapshot, priority)
             self._retained_fine_last_epoch += kept
             self._requested_fine_last_epoch += asked
@@ -1375,6 +1377,8 @@ class Step1GpuBinding(QtCore.QObject):
             self._source_cache[channel] = (base, source, cost, finer, residency)
             channels.append(source)
             costs.append(cost)
+        for gone in [c for c in self._source_cache if c not in active]:
+            del self._source_cache[gone]      # no plane kept for a channel not drawn
         fitted = self._fit_total_budget(channels, used_now=sum(costs))
         overflow = 0 if fitted is not None else len(channels)
         if overflow != self._base_overflow:

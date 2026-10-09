@@ -808,11 +808,18 @@ class _TileArrayStore:
         for block in preferred + others:
             return block, block.free.pop()
         block_bytes = ARRAY_TILE * ARRAY_TILE * _FORMAT_BYTES[fmt] * self._layers(fmt)
-        # room for a new block: delete EMPTY blocks of any format first
+        # room for a new block: delete EMPTY blocks of any format first, then
+        # blocks (of any format) none of whose tiles this submission needs
         while self.allocated_bytes + self.external_bytes() + block_bytes > self.max_bytes:
             empty = next((b for b in self.blocks if not b.owners), None)
             if empty is None:
-                break
+                spare = next((b for b in self.blocks if b.fmt != fmt and b.owners
+                              and not any(i in required for i in b.owners.values())), None)
+                if spare is None:
+                    break
+                for identity in list(spare.owners.values()):
+                    self._evict(identity)
+                empty = spare
             self._drop_block(gl, empty)
         if self.allocated_bytes + self.external_bytes() + block_bytes <= self.max_bytes:
             if not getattr(self, "_may_grow", True):
@@ -1233,6 +1240,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         #: A9 §35: id(plane) -> plane for planes known to be in the arrays
         self._known_resident = ObjectCache()
         self._known_evictions = -1
+        self._blocks_seen = 0
         fmt = QtGui.QSurfaceFormat()
         fmt.setRenderableType(QtGui.QSurfaceFormat.OpenGL)
         fmt.setVersion(3, 3)
@@ -1369,8 +1377,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                 self._cache.evictions += 1
             self._known_resident.clear()
             if self._vt is not None:
-                self._vt.synced = None
-                self._vt.last_key = None
+                self._vt.forget_pages()
             self._destroy_targets()
             self._camera_dirty = self._scene is not None
         finally:
@@ -1498,6 +1505,11 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                 if plane.identity in slots:
                     known.set(plane)
             deferred = int(arrays.deferred) + (int(getattr(self._cache, "deferred", 0)) if legacy else 0)
+            if len(arrays.blocks) > self._blocks_seen:
+                # A9 §36: the viewers grew -- hidden ones give back if over target
+                from . import gpu_memory
+                gpu_memory.on_layer_active(self)
+            self._blocks_seen = len(arrays.blocks)
 
         if mode == MODE_OVERLAY:
             active, missing = self._overlay_active(by_channel, display_snapshot)

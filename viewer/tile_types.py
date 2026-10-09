@@ -9,6 +9,7 @@ cache identity). PixelBuffer/TileResult carry live payloads (numpy arrays,
 error strings) and are plain (non-frozen) dataclasses.
 """
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Optional, Set, Tuple, Union
 
@@ -33,9 +34,46 @@ class QualityLevel:
 
 # ── Identity types ───────────────────────────────────────────────────────────
 
+def _cached_hash(self):
+    """Block A9 §35: a key's hash, computed ONCE. The generated dataclass
+    hash re-hashes every nested field on every dict/set lookup -- 17 % of
+    the GUI thread with 29 channels drawn (py-spy). Equal keys still hash
+    equal (the same field tuple); the value is per process and is never
+    pickled (`_without_cached_hash`)."""
+    try:
+        return self.__dict__["_hash"]
+    except KeyError:
+        value = hash(tuple(getattr(self, f.name) for f in dataclasses.fields(self)))
+        object.__setattr__(self, "_hash", value)
+        return value
+
+
+def _fast_eq(self, other):
+    """Block A9 §35: the same object, or a different hash, decides at once;
+    only a real candidate compares field by field (as the generated eq)."""
+    if self is other:
+        return True
+    if other.__class__ is not self.__class__:
+        return NotImplemented
+    if _cached_hash(self) != _cached_hash(other):
+        return False
+    return all(getattr(self, f.name) == getattr(other, f.name)
+               for f in dataclasses.fields(self))
+
+
+def _without_cached_hash(self):
+    state = dict(self.__dict__)
+    state.pop("_hash", None)
+    return state
+
+
 @dataclass(frozen=True)
 class SourceIdentity:
     """Identifies WHAT pixels mean. Any field change invalidates every cache."""
+
+    __hash__ = _cached_hash
+    __eq__ = _fast_eq
+    __getstate__ = _without_cached_hash
 
     dataset_path: str
     dataset_fingerprint: str
@@ -47,6 +85,10 @@ class SourceIdentity:
 class TileGridSpec:
     """Canonical tiling grid for a session. `tile_size` is a session param."""
 
+    __hash__ = _cached_hash
+    __eq__ = _fast_eq
+    __getstate__ = _without_cached_hash
+
     tile_size: int = 512
     source_chunk_shape: Tuple[int, ...] = ()
     grid_version: str = "v1"
@@ -55,6 +97,10 @@ class TileGridSpec:
 @dataclass(frozen=True)
 class TileAddress:
     """One tile's position in a TileGridSpec at a given pyramid level."""
+
+    __hash__ = _cached_hash
+    __eq__ = _fast_eq
+    __getstate__ = _without_cached_hash
 
     grid: TileGridSpec
     level: int
@@ -66,6 +112,10 @@ class TileAddress:
 class RawKey:
     """Identity/cache key for an uncorrected (raw) tile."""
 
+    __hash__ = _cached_hash
+    __eq__ = _fast_eq
+    __getstate__ = _without_cached_hash
+
     source: SourceIdentity
     channel: str
     tile: TileAddress
@@ -74,6 +124,10 @@ class RawKey:
 @dataclass(frozen=True)
 class CorrectionKey:
     """Identity/cache key for a corrected tile. Equality == reusable result."""
+
+    __hash__ = _cached_hash
+    __eq__ = _fast_eq
+    __getstate__ = _without_cached_hash
 
     source: SourceIdentity
     channel: str

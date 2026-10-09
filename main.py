@@ -15,6 +15,12 @@ from .utils.gui_watchdog import start_gui_watchdog
 
 
 def main():
+    # Block A9 §35: how long a thread may hold the GIL while the GUI thread
+    # waits for it (CPython's default is 5 ms). Measurement switch for now.
+    import os
+    interval = os.environ.get("BLOCK01_SWITCH_INTERVAL_MS")
+    if interval:
+        sys.setswitchinterval(float(interval) / 1000.0)
     # Block A9: with BLOCK01_PERF_DISPATCH=1 (and BLOCK01_PERF=1) slow Qt
     # event deliveries are traced; otherwise this is a plain QApplication.
     from .utils import perf_dispatch

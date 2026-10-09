@@ -19,7 +19,7 @@ import pathlib
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Hashable, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Hashable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -60,6 +60,13 @@ def _valid_world_rect(plane) -> Optional[Tuple[float, float, float, float]]:
         return None
     sx, sy = (x1 - x0) / w, (y1 - y0) / h
     return (x0 + vx0 * sx, x0 + vx1 * sx, y0 + vy0 * sy, y0 + vy1 * sy)
+
+
+def _pixel_size(plane) -> Tuple[float, float]:
+    """World units per texel of a plane (A9 §35: equal = one pyramid level)."""
+    x0, x1, y0, y1 = plane.world_rect
+    h, w = np.asarray(plane.values).shape[:2]
+    return round((x1 - x0) / w, 9), round((y1 - y0) / h, 9)
 
 
 def _plane_quad_ndc(plane_rect, view_rect, target_size) -> Tuple[float, float, float, float]:
@@ -345,7 +352,9 @@ class _TextureLru:
         self.misses = 0
         self.uploads = 0
         self.evictions = 0
-        self.upload_submit_ms = []
+        self.upload_submit_ms = collections.deque(maxlen=256)   # A9 §35: bounded
+        #: Block A9 §35: bytes another store holds under the same budget
+        self.external_bytes = lambda: 0
 
     @staticmethod
     def plane_bytes(plane: RawPlane) -> int:
@@ -415,7 +424,7 @@ class _TextureLru:
         total_required = sum(record.byte_count if record is not None else self.plane_bytes(plane)
                              for record, plane in ((self.records.get(identity), plane)
                                                    for identity, plane in required.items()))
-        if total_required > self.max_bytes:
+        if total_required + self.external_bytes() > self.max_bytes:
             raise Step1GpuLayerError(
                 f"active raw working set {total_required} bytes exceeds cache budget {self.max_bytes}"
             )
@@ -430,7 +439,7 @@ class _TextureLru:
         missing = [(identity, plane) for identity, plane in required.items()
                    if identity not in self.records]
         missing_bytes = sum(self.plane_bytes(plane) for _identity, plane in missing)
-        while self.bytes + missing_bytes > self.max_bytes:
+        while self.bytes + missing_bytes + self.external_bytes() > self.max_bytes:
             victim = next((identity for identity in self.records if identity not in required), None)
             if victim is None:
                 raise Step1GpuLayerError("cache cannot fit active raw working set without deleting active texture")
@@ -530,6 +539,345 @@ class _TextureLru:
 #: pair is refused. They come from the same Step0 write, where the bbox IS
 #: the polygon's bounding box, so this is a rounding allowance, not a fit.
 ROI_POLYGON_BOUNDS_TOLERANCE = 1.0
+
+
+#: Block A9 §35: the tile slot of the array store (the Step1 tile size)
+ARRAY_TILE = 512
+#: preferred layers per array block (capped by GL_MAX_ARRAY_TEXTURE_LAYERS)
+ARRAY_LAYERS = 256
+#: instance record of one array-drawn plane (A9 §35.2): plane rect, valid
+#: world rect, texel size, layer -- 44 bytes, the layer a real int32
+INSTANCE_DTYPE = np.dtype([("rect", "<f4", 4), ("valid", "<f4", 4),
+                           ("size", "<f4", 2), ("layer", "<i4")])
+
+
+def _array_format(plane) -> str:
+    dtype = np.asarray(plane.values).dtype
+    if dtype == np.uint8:
+        return "u8"
+    if dtype == np.uint16:
+        return "u16"
+    return "f32"
+
+
+_FORMAT_BYTES = {"u8": 1, "u16": 2, "f32": 4}
+
+
+#: A9 §35.7: bytes per array block -- few, large blocks, since the single
+#: pass binds every block as its own sampler (6 integer + 4 float)
+ARRAY_BLOCK_BYTES = 256 * 1024 * 1024
+
+
+def _block_layers(max_bytes, max_layers, itemsize) -> int:
+    """Layers per block: ARRAY_BLOCK_BYTES worth, the GL limit, and at most
+    a quarter of the budget per block (so a small budget holds several)."""
+    slot = ARRAY_TILE * ARRAY_TILE * int(itemsize)
+    return max(1, min(ARRAY_BLOCK_BYTES // slot, int(max_layers or ARRAY_LAYERS),
+                      int(max_bytes) // (4 * slot)))
+
+
+class _LazyRequired:
+    """`identity in required`, the full set built on first use only."""
+
+    __slots__ = ("known", "fn", "full")
+
+    def __init__(self, known, fn):
+        self.known, self.fn, self.full = known, fn, None
+
+    def __contains__(self, identity) -> bool:
+        if self.fn is None:
+            return identity in self.known
+        if self.full is None:
+            self.full = set(self.fn()) | self.known
+        return identity in self.full
+
+
+class _ArrayBlock:
+    __slots__ = ("texture", "fmt", "layers", "free", "owners", "vt_index")
+
+    def __init__(self, texture, fmt, layers, vt_index=0):
+        self.texture = texture
+        self.fmt = fmt
+        self.layers = layers
+        #: A9 §35.7: the block's sampler slot in its family -- fixed for
+        #: its life, never renumbered
+        self.vt_index = vt_index
+        self.free = list(range(layers - 1, -1, -1))
+        self.owners: Dict[int, Hashable] = {}
+
+    @property
+    def nbytes(self) -> int:
+        return ARRAY_TILE * ARRAY_TILE * _FORMAT_BYTES[self.fmt] * self.layers
+
+
+class _TileArrayStore:
+    """Block A9 §35 (Odon: one quad per tile; batched, because Python pays
+    per call): raw planes of at most ARRAY_TILE x ARRAY_TILE in layers of
+    GL_TEXTURE_2D_ARRAY blocks, one format per block, drawn instanced.
+
+    Budget: every allocated block counts whole (empty layers included); the
+    store and the legacy per-plane LRU share `max_bytes`. A plane needed by
+    the submission being prepared is never evicted; a slot is reused only
+    by the same format; a block left empty is deleted when its bytes are
+    needed. Validity and pixel values are exactly the legacy path's."""
+
+    def __init__(self, max_bytes: int, max_layers: int):
+        self.max_bytes = int(max_bytes)
+        self.max_layers = int(max_layers)
+        self.blocks: List[_ArrayBlock] = []
+        self.slots: Dict[Hashable, Tuple[_ArrayBlock, int]] = {}
+        #: identity -> prepare() tick it was last required in (LRU by tick)
+        self.used: Dict[Hashable, int] = {}
+        self.tick = 0
+        self._evict_order = None
+        #: id(plane) -> plane, for planes already validated (immutable)
+        self._validated: Dict[int, object] = {}
+        self.meta: Dict[Hashable, Tuple] = {}     # identity -> (rect, valid, (w, h), fmt)
+        self.channel_blocks: Dict[str, List[_ArrayBlock]] = {}
+        self.external_bytes = lambda: 0
+        self.deferred = 0
+        self.uploads = 0
+        self.evictions = 0
+        self.hits = 0
+        self.peak_bytes = 0
+        self.storage_fallback = False
+        #: A9 §35.7: bumped by every upload / eviction (page tables follow)
+        self.meta_generation = 0
+        #: (block, layer, identity or None) per upload / eviction, in order:
+        #: the compositor's metadata texture follows it incrementally
+        self.meta_log: List[Tuple[_ArrayBlock, int, Optional[Hashable]]] = []
+
+    @staticmethod
+    def eligible(plane) -> bool:
+        values = np.asarray(plane.values)
+        return (values.ndim == 2 and 0 < values.shape[0] <= ARRAY_TILE
+                and 0 < values.shape[1] <= ARRAY_TILE)
+
+    @property
+    def allocated_bytes(self) -> int:
+        return sum(block.nbytes for block in self.blocks)
+
+    def is_resident(self, plane) -> bool:
+        return plane.identity in self.slots
+
+    def slot(self, plane) -> Tuple[_ArrayBlock, int]:
+        return self.slots[plane.identity]
+
+    def _layers(self, fmt) -> int:
+        return _block_layers(self.max_bytes, self.max_layers, _FORMAT_BYTES[fmt])
+
+    def _new_block(self, gl, fmt) -> _ArrayBlock:
+        layers = self._layers(fmt)
+        internal, _f, _t = self._gl_format(gl, fmt)
+        texture = _as_name(gl.glGenTextures(1))
+        gl.glBindTexture(gl.GL_TEXTURE_2D_ARRAY, texture)
+        for name in (gl.GL_TEXTURE_MIN_FILTER, gl.GL_TEXTURE_MAG_FILTER):
+            gl.glTexParameteri(gl.GL_TEXTURE_2D_ARRAY, name, gl.GL_NEAREST)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D_ARRAY, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D_ARRAY, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D_ARRAY, gl.GL_TEXTURE_MAX_LEVEL, 0)
+        storage = getattr(gl, "glTexStorage3D", None)
+        try:
+            if storage is None or self.storage_fallback:
+                raise AttributeError
+            storage(gl.GL_TEXTURE_2D_ARRAY, 1, internal, ARRAY_TILE, ARRAY_TILE, layers)
+            _check_gl(gl, "array block storage")
+        except Exception:                                  # noqa: BLE001 -- GL < 4.2
+            self.storage_fallback = True
+            while gl.glGetError() != gl.GL_NO_ERROR:
+                pass
+            _i, fmt_gl, typ = self._gl_format(gl, fmt)
+            gl.glTexImage3D(gl.GL_TEXTURE_2D_ARRAY, 0, internal, ARRAY_TILE, ARRAY_TILE,
+                            layers, 0, fmt_gl, typ, None)
+            _check_gl(gl, "array block allocation")
+        family = fmt == "f32"
+        taken = {b.vt_index for b in self.blocks if (b.fmt == "f32") == family}
+        index = next(i for i in range(len(taken) + 1) if i not in taken)
+        block = _ArrayBlock(texture, fmt, layers, index)
+        self.blocks.append(block)
+        self.peak_bytes = max(self.peak_bytes, self.allocated_bytes)
+        return block
+
+    @staticmethod
+    def _gl_format(gl, fmt):
+        if fmt == "u8":
+            return gl.GL_R8UI, gl.GL_RED_INTEGER, gl.GL_UNSIGNED_BYTE
+        if fmt == "u16":
+            return gl.GL_R16UI, gl.GL_RED_INTEGER, gl.GL_UNSIGNED_SHORT
+        return gl.GL_R32F, gl.GL_RED, gl.GL_FLOAT
+
+    def _drop_block(self, gl, block) -> None:
+        gl.glDeleteTextures([block.texture])
+        self.blocks.remove(block)
+        for blocks in self.channel_blocks.values():
+            if block in blocks:
+                blocks.remove(block)
+
+    def _free_slot(self, gl, fmt, channel, required) -> Tuple[_ArrayBlock, int]:
+        preferred = [b for b in self.channel_blocks.get(channel, ()) if b.fmt == fmt and b.free]
+        others = [b for b in self.blocks if b.fmt == fmt and b.free and b not in preferred]
+        for block in preferred + others:
+            return block, block.free.pop()
+        block_bytes = ARRAY_TILE * ARRAY_TILE * _FORMAT_BYTES[fmt] * self._layers(fmt)
+        # room for a new block: delete EMPTY blocks of any format first
+        while self.allocated_bytes + self.external_bytes() + block_bytes > self.max_bytes:
+            empty = next((b for b in self.blocks if not b.owners), None)
+            if empty is None:
+                break
+            self._drop_block(gl, empty)
+        if self.allocated_bytes + self.external_bytes() + block_bytes <= self.max_bytes:
+            block = self._new_block(gl, fmt)
+            self.channel_blocks.setdefault(channel, []).append(block)
+            return block, block.free.pop()
+        # reuse the least recently used slot of this format not needed now
+        # (the order is sorted once per prepare, on the first eviction)
+        if self._evict_order is None:
+            self._evict_order = collections.deque(
+                sorted((i for i in self.used if i not in required), key=self.used.__getitem__))
+        skipped = []
+        try:
+            while self._evict_order:
+                identity = self._evict_order.popleft()
+                if identity not in self.slots:
+                    continue
+                block, layer = self.slots[identity]
+                if block.fmt != fmt:
+                    skipped.append(identity)
+                    continue
+                self._evict(identity)
+                block.free.remove(layer)
+                return block, layer
+        finally:
+            self._evict_order.extendleft(reversed(skipped))
+        raise Step1GpuLayerError(
+            "array store cannot fit the active raw working set without deleting an active tile")
+
+    def _evict(self, identity) -> None:
+        block, layer = self.slots.pop(identity)
+        self.used.pop(identity, None)
+        self.meta.pop(identity, None)
+        block.owners.pop(layer, None)
+        block.free.append(layer)
+        self.evictions += 1
+        self.meta_generation += 1
+        self.meta_log.append((block, layer, None))
+
+    def prepare(self, gl, items, *, mandatory=frozenset(), budget_ms=None, validate=None,
+                also_required=frozenset(), required_fn=None) -> None:
+        """`items`: (channel, plane) of the submission, in draw order;
+        `also_required`: identities of the submission not listed (resident
+        already) that must not be evicted either; `required_fn`: or a
+        function giving the WHOLE submission's identities, called only if an
+        eviction is needed (A9 §35: hashing every key every publication was
+        the cost)."""
+        self._prepare_started = time.perf_counter()
+        self.deferred = 0
+        self._evict_order = None
+        ids = [plane.identity for _channel, plane in items]
+        required = _LazyRequired(set(ids) | set(also_required), required_fn)
+        slots = self.slots
+        # recency: one bulk update (an identity's geometry was validated
+        # when it entered; the identity is the caller's promise of the rest)
+        self.tick += 1
+        resident = [i for i in ids if i in slots]
+        self.used.update(dict.fromkeys(resident, self.tick))
+        self.hits += len(resident)
+        missing = []
+        seen = set()
+        checked = self._validated
+        for channel, plane in items:
+            identity = plane.identity
+            if identity in slots or identity in seen:
+                continue
+            # a plane waiting for its upload slot is validated ONCE, not on
+            # every publication it waits through (A9 §35: 230 waiting planes
+            # cost 9 ms per publication with 69 channels)
+            if validate is not None and checked.get(id(plane)) is not plane:
+                validate(plane)
+                if len(checked) > 50000:
+                    checked.clear()
+                checked[id(plane)] = plane
+            missing.append((channel, plane))
+            seen.add(identity)
+        missing.sort(key=lambda item: item[1].identity not in mandatory)
+        started = time.perf_counter()
+        if perf_trace.enabled():
+            perf_trace.mark("gpu.array_prepare", items=len(items), missing=len(missing),
+                            scan_ms=round((started - self._prepare_started) * 1000.0, 2))
+        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+        for channel, plane in missing:
+            if (budget_ms is not None and plane.identity not in mandatory
+                    and (time.perf_counter() - started) * 1000.0 >= budget_ms):
+                self.deferred += 1
+                continue
+            fmt = _array_format(plane)
+            block, layer = self._free_slot(gl, fmt, channel, required)
+            values = self._upload_values(plane, fmt)
+            _internal, fmt_gl, typ = self._gl_format(gl, fmt)
+            gl.glBindTexture(gl.GL_TEXTURE_2D_ARRAY, block.texture)
+            gl.glTexSubImage3D(gl.GL_TEXTURE_2D_ARRAY, 0, 0, 0, layer,
+                               values.shape[1], values.shape[0], 1, fmt_gl, typ, values)
+            identity = plane.identity
+            block.owners[layer] = identity
+            self.slots[identity] = (block, layer)
+            self.used[identity] = self.tick
+            valid = _valid_world_rect(plane)
+            self.meta[identity] = (plane.world_rect, valid,
+                                   (values.shape[1], values.shape[0]), fmt)
+            self.uploads += 1
+            self.meta_generation += 1
+            self.meta_log.append((block, layer, identity))
+        gl.glBindTexture(gl.GL_TEXTURE_2D_ARRAY, 0)
+        _check_gl(gl, "array tile upload")
+
+    @staticmethod
+    def _upload_values(plane, fmt) -> np.ndarray:
+        values = np.asarray(plane.values)
+        if fmt in ("u8", "u16"):
+            return np.ascontiguousarray(values)
+        values = np.ascontiguousarray(values, dtype=np.float32).copy()
+        if plane.valid is not None:
+            values[~np.asarray(plane.valid, dtype=bool)] = np.nan
+        if plane.valid_rect is not None:
+            y0, y1, x0, x1 = plane.valid_rect
+            keep = np.zeros(values.shape, bool)
+            keep[y0:y1, x0:x1] = True
+            values[~keep] = np.nan
+        return values
+
+    def instance(self, plane):
+        """(block, record) of a resident plane, or None when it draws nothing."""
+        block, layer = self.slots[plane.identity]
+        rect, valid, size, _fmt = self.meta[plane.identity]
+        if valid is None:
+            return None
+        return block, (rect, valid, size, layer)
+
+    def release_unused(self, gl, keep) -> int:
+        """Drop every tile not in `keep`, then every block left empty."""
+        for identity in [i for i in self.slots if i not in keep]:
+            self._evict(identity)
+        empty = [b for b in self.blocks if not b.owners]
+        for block in empty:
+            self._drop_block(gl, block)
+        return len(empty)
+
+    def clear(self, gl) -> int:
+        count = len(self.slots)
+        if self.blocks:
+            gl.glDeleteTextures([block.texture for block in self.blocks])
+        self.blocks.clear()
+        self.slots.clear()
+        self.used.clear()
+        self.meta.clear()
+        self.channel_blocks.clear()
+        return count
+
+    def stats(self) -> Dict[str, int]:
+        return {"array_blocks": len(self.blocks), "array_bytes": self.allocated_bytes,
+                "array_peak_bytes": self.peak_bytes, "array_tiles": len(self.slots),
+                "array_uploads": self.uploads, "array_evictions": self.evictions,
+                "array_storage_fallback": int(self.storage_fallback)}
 
 
 def sanitize_roi_polygon(points, roi_rect):
@@ -742,6 +1090,19 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         self._camera_dirty = False
         #: Block A9 §32: per-submission upload time budget (None: no limit)
         self.upload_budget_ms: Optional[float] = None
+        #: Block A9 §35: the Step1 binding turns the tile array store on;
+        #: every other caller (G1 tests, montage) keeps one texture per plane
+        self.use_tile_arrays = False
+        self._arrays: Optional[_TileArrayStore] = None
+        self._array_vao = 0
+        self._array_vbo = 0
+        self._max_array_layers = 0
+        #: A9 §35.7: the single-pass compositor (None until first used)
+        self._vt = None
+        self._vt_failed = ""
+        #: A9 §35: id(plane) -> plane for planes known to be in the arrays
+        self._known_resident: Dict[int, RawPlane] = {}
+        self._known_evictions = -1
         fmt = QtGui.QSurfaceFormat()
         fmt.setRenderableType(QtGui.QSurfaceFormat.OpenGL)
         fmt.setVersion(3, 3)
@@ -810,9 +1171,43 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             if own_current:
                 self.doneCurrent()
 
+    def residency_generation(self) -> int:
+        """Changes whenever a texture is uploaded or evicted (A9 §35)."""
+        arrays = self._arrays.meta_generation if self._arrays is not None else 0
+        return arrays * 1000003 + self._cache.uploads * 1009 + self._cache.evictions
+
     def is_resident(self, plane: RawPlane) -> bool:
         """Is this plane's texture on the GPU (drawable now)?"""
-        return self._cache.is_resident(plane)
+        return self._cache.is_resident(plane) or (
+            self._arrays is not None and self._arrays.is_resident(plane))
+
+    @property
+    def tile_arrays_active(self) -> bool:
+        """Block A9 §35: does this layer store tiles in arrays? Only when
+        asked to AND its budget holds a useful store (64 float32 slots);
+        a smaller budget keeps one texture per plane, as before."""
+        return bool(self.use_tile_arrays
+                    and self._cache.max_bytes >= 64 * ARRAY_TILE * ARRAY_TILE * 4)
+
+    def _array_store(self) -> Optional[_TileArrayStore]:
+        """Block A9 §35: the tile array store, when this layer uses one."""
+        if not self.tile_arrays_active:
+            return None
+        if self._arrays is None:
+            self._arrays = _TileArrayStore(self._cache.max_bytes, self._max_array_layers or ARRAY_LAYERS)
+            self._arrays.external_bytes = lambda: self._cache.bytes
+            self._cache.external_bytes = lambda: (self._arrays.allocated_bytes
+                                                  if self._arrays is not None else 0)
+        return self._arrays
+
+    def array_slack_bytes(self, itemsizes=(1, 2, 4)) -> int:
+        """Block A9 §35: what whole-block allocation may hold beyond the
+        tiles it stores -- one partly filled block per format in use
+        (`itemsizes`, bytes per texel); admission keeps it free."""
+        if not self.tile_arrays_active:
+            return 0
+        return sum(_block_layers(self._cache.max_bytes, self._max_array_layers, int(i))
+                   * ARRAY_TILE * ARRAY_TILE * int(i) for i in set(itemsizes))
 
     def _visible_drawn(self, source: ChannelSource, view_rect) -> ChannelSource:
         """Block A9 §32 (Odon: draw list culled to the view): the planes of
@@ -821,10 +1216,13 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         texture yet (a coarser plane under it still draws)."""
         vx0, vx1, vy0, vy1 = view_rect
 
+        arrays = self._arrays if self.tile_arrays_active else None
+
         def keep(plane):
             x0, x1, y0, y1 = plane.world_rect
             return (x1 > vx0 and x0 < vx1 and y1 > vy0 and y0 < vy1
-                    and self._cache.is_resident(plane))
+                    and (self._cache.is_resident(plane)
+                         or (arrays is not None and arrays.is_resident(plane))))
         coarse = tuple(plane for plane in source.coarse if keep(plane))
         fine = tuple(plane for plane in source.fine if keep(plane))
         if len(coarse) == len(source.coarse) and len(fine) == len(source.fine):
@@ -850,20 +1248,77 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             nonlocal deferred
             if not upload:
                 return
-            planes = [plane for source in active_sources for plane in source.selected_planes()]
-            mandatory = [plane for source in active_sources for plane in source.coarse]
+            arrays = self._array_store()
+            if arrays is None:
+                planes = [plane for source in active_sources for plane in source.selected_planes()]
+                mandatory = [plane for source in active_sources for plane in source.coarse]
+                with perf_trace.span("gpu.prepare"):
+                    self._cache.prepare(gl, planes, mandatory=mandatory,
+                                        budget_ms=upload_budget_ms)
+                deferred = int(getattr(self._cache, "deferred", 0))
+                return
+            # Block A9 §35: tiles into the array store, anything else per plane
+            items, legacy, legacy_mandatory = [], [], []
+            mandatory = set()
+            slots = arrays.slots
+            # A9 §35: planes KNOWN to be in the arrays, by object (planes are
+            # immutable; an eviction forgets them all) -- a publication only
+            # touches what is new, without hashing a single key for the rest
+            if self._known_evictions != arrays.evictions:
+                self._known_resident.clear()
+                self._known_evictions = arrays.evictions
+            known = self._known_resident
+            for source in active_sources:
+                channel = source.channel
+                coarse = {id(plane) for plane in source.coarse}
+                for plane in source.selected_planes():
+                    if known.get(id(plane)) is plane:
+                        continue
+                    identity = plane.identity
+                    if identity in slots:
+                        known[id(plane)] = plane
+                        continue
+                    if arrays.eligible(plane):
+                        items.append((channel, plane))
+                        if id(plane) in coarse:
+                            mandatory.add(identity)
+                    else:
+                        legacy.append(plane)
+                        if id(plane) in coarse:
+                            legacy_mandatory.append(plane)
+
+            def everything():
+                return [plane.identity for source in active_sources
+                        for plane in source.selected_planes()]
             with perf_trace.span("gpu.prepare"):
-                self._cache.prepare(gl, planes, mandatory=mandatory,
-                                    budget_ms=upload_budget_ms)
-            deferred = int(getattr(self._cache, "deferred", 0))
+                if legacy:
+                    self._cache.prepare(gl, legacy, mandatory=legacy_mandatory,
+                                        budget_ms=upload_budget_ms)
+                arrays.prepare(gl, items, mandatory=mandatory, budget_ms=upload_budget_ms,
+                               validate=self._cache._validate_identity, required_fn=everything)
+            if self._known_evictions != arrays.evictions:
+                self._known_resident.clear()
+                self._known_evictions = arrays.evictions
+            for _channel, plane in items:
+                if plane.identity in slots:
+                    known[id(plane)] = plane
+            deferred = int(arrays.deferred) + (int(getattr(self._cache, "deferred", 0)) if legacy else 0)
 
         if mode == MODE_OVERLAY:
             active, missing = self._overlay_active(by_channel, display_snapshot)
             prepare(list(active.values()))
-            active = {ch: self._visible_drawn(src, view_rect) for ch, src in active.items()}
-            active = {ch: src for ch, src in active.items() if src.selected_planes()}
+            rows = [(ch, src, {"mapping": display_snapshot.mappings[ch],
+                               "weight": min(1.0, float(display_snapshot.weights.get(ch, 0.0) or 0.0)),
+                               "color": display_snapshot.colors.get(ch, (1.0, 1.0, 1.0))})
+                    for ch, src in active.items()]
             with perf_trace.span("gpu.render", mode="overlay", channels=len(active)):
-                self._render_overlay(active, display_snapshot, viewport_snapshot)
+                drawn = self._render_vt(source_descriptor, rows, viewport_snapshot, fusion=False)
+                if not drawn or self._a9_probing():
+                    # the per-channel draw list (and the A9 probe's view of it)
+                    active = {ch: self._visible_drawn(src, view_rect) for ch, src in active.items()}
+                    active = {ch: src for ch, src in active.items() if src.selected_planes()}
+                if not drawn:
+                    self._render_overlay(active, display_snapshot, viewport_snapshot)
             composed = dict(active)
         elif mode == MODE_FUSION:
             active_groups, active_nucleus, missing = self._fusion_active(by_channel, display_snapshot)
@@ -871,6 +1326,20 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             if active_nucleus is not None:
                 sources.append(active_nucleus)
             prepare(sources)
+            fusion_rows = []
+            for index, (group, members) in enumerate(active_groups.items()):
+                group_weight = min(1.0, max(0.0, float(display_snapshot.group_weights.get(group, 1.0) or 0.0)))
+                for ch, src in members.items():
+                    fusion_rows.append((ch, src, {
+                        "mapping": display_snapshot.mappings[ch],
+                        "weight": min(1.0, max(0.0, float(display_snapshot.groups[group].get(ch, 0.0) or 0.0))),
+                        "color": (1.0, 0.0, 0.0), "group": index, "group_weight": group_weight}))
+            if active_nucleus is not None:
+                nucleus_channel, nucleus_weight = display_snapshot.nucleus
+                fusion_rows.append((nucleus_channel, active_nucleus, {
+                    "mapping": display_snapshot.mappings[nucleus_channel],
+                    "weight": min(1.0, max(0.0, float(nucleus_weight))),
+                    "color": (0.0, 0.0, 1.0), "group": -1, "group_weight": 0.0}))
             active_groups = {
                 group: {ch: drawn for ch, drawn in ((ch, self._visible_drawn(src, view_rect))
                                                     for ch, src in members.items())
@@ -884,7 +1353,8 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             planes = sum(len(src.selected_planes()) for group in active_groups.values()
                          for src in group.values())
             with perf_trace.span("gpu.render", mode="fusion", planes=planes):
-                self._render_fusion(active_groups, active_nucleus, display_snapshot, viewport_snapshot)
+                if not self._render_vt(source_descriptor, fusion_rows, viewport_snapshot, fusion=True):
+                    self._render_fusion(active_groups, active_nucleus, display_snapshot, viewport_snapshot)
             composed = {ch: src for group in active_groups.values()
                         for ch, src in group.items()}
             if active_nucleus is not None:
@@ -905,7 +1375,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             "missing_windows": tuple(missing),
             "pass_count": int(self._submission.get("pass_count", 0)),
             "cpu_submit_ms": (time.perf_counter() - submit_started) * 1000.0,
-            "cache": self._cache.stats(),
+            "cache": self.cache_stats(),
             "physical_size": viewport_snapshot.physical_size,
             "roi_scissor": self._submission.get("roi_scissor"),
             "roi_polygon_points": self._submission.get("roi_polygon_points", 0),
@@ -1048,7 +1518,9 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             finally:
                 self.doneCurrent()
         self._disposed = True
-        return {"already_disposed": False, "raw_textures_remaining": len(self._cache.records),
+        return {"already_disposed": False,
+                "raw_textures_remaining": len(self._cache.records) + (
+                    len(self._arrays.slots) if self._arrays is not None else 0),
                 "transient_targets_remaining": len(self._targets), "cache_bytes": self._cache.bytes,
                 "threads_created": 0}
 
@@ -1057,7 +1529,13 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         return self._roi_polygon_error
 
     def cache_stats(self) -> Dict[str, int]:
-        return self._cache.stats()
+        stats = dict(self._cache.stats())
+        if self._arrays is not None:
+            # A9 §35: tiles in the array store are textures resident too
+            stats.update(self._arrays.stats())
+            stats["textures"] = int(stats.get("textures", 0)) + len(self._arrays.slots)
+            stats["bytes"] = int(stats.get("bytes", 0)) + self._arrays.allocated_bytes
+        return stats
 
     def environment_report(self) -> Dict[str, Any]:
         return dict(self._capabilities)
@@ -1104,6 +1582,9 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             with perf_trace.span("gpu.init.compile"):
                 self._compile_programs()
             self._vao = _as_name(GL.glGenVertexArrays(1))
+            self._max_array_layers = int(GL.glGetIntegerv(GL.GL_MAX_ARRAY_TEXTURE_LAYERS))
+            self._capabilities["max_array_texture_layers"] = self._max_array_layers
+            self._setup_array_vao()
             _check_gl(GL, "G1 shader setup")
             self._initialized = True
         except (ImportError, RuntimeError, Step1GpuLayerError) as exc:
@@ -1129,6 +1610,10 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             return tuple(sorted(out))
         return tuple(sorted(ch for ch, weight in display.weights.items()
                             if float(weight or 0.0) > 0.0))
+
+    @staticmethod
+    def _a9_probing() -> bool:
+        return perf_trace.enabled() and os.environ.get("BLOCK01_A9_PROBE", "1") != "0"
 
     def _a9_note_submission(self, composed, display, viewport) -> None:
         """Block A9-M: the coverage of THIS submission -- the planes actually
@@ -1256,6 +1741,72 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
 
     # Rendering ----------------------------------------------------------
 
+    def _render_vt(self, descriptor, rows, viewport: ViewportSnapshot, *, fusion: bool) -> bool:
+        """Block A9 §35.7: every row in ONE pass, then `_finalize`. False
+        when this submission cannot be drawn that way (the caller then
+        draws it per channel, exactly as before)."""
+        store = self._arrays if self.tile_arrays_active else None
+        if (store is None or self._vt_failed or "vt" not in self._programs
+                or os.environ.get("BLOCK01_VT", "1") == "0"):
+            return False
+        from .step1_gpu_vt import VirtualCompositor, U_BLOCKS
+        if self._vt is None:
+            self._vt = VirtualCompositor()
+            self._vt.max_layers = int(self._max_array_layers or 2048)
+            self._vt.known_resident = self._known_resident
+            self._vt.max_texture = int(self._capabilities.get("max_texture_size", 16384) or 16384)
+        vt = self._vt
+        key = (id(descriptor), store.meta_generation, fusion,
+               tuple(ch for ch, _src, _p in rows))
+        plan = vt.last_plan if getattr(vt, "last_key", None) == key else vt.plan(store, rows, fusion, legacy=self._cache)
+        if plan is None:
+            vt.fallbacks += 1
+            return False
+        gl = self._gl
+        if vt.synced != key:
+            if not vt.sync(gl, store, plan, key):
+                vt.fallbacks += 1
+                return False
+        vt.last_key, vt.last_plan = key, plan
+        # the rows carry this display (mapping, weights): always fresh
+        plan.rows = rows
+        vt.upload_params(gl, plan)
+        target = "fusion" if fusion else "accum"
+        self._bind_target(target)
+        gl.glDisable(gl.GL_BLEND)
+        program = "vt"
+        gl.glUseProgram(self._programs[program])
+        self._uniform4(program, "u_view_rect", viewport.world_rect)
+        gl.glUniform2f(self._uniform_location(program, "u_target_size"),
+                       float(self._target_size[0]), float(self._target_size[1]))
+        gl.glUniform1i(self._uniform_location(program, "u_rows"), len(rows))
+        gl.glUniform1i(self._uniform_location(program, "u_fusion"), 1 if fusion else 0)
+        level_a, level_b = vt.level_uniforms(plan)
+        gl.glUniform4fv(self._uniform_location(program, "u_level_a"), len(level_a), level_a)
+        gl.glUniform2iv(self._uniform_location(program, "u_level_b"), len(level_b), level_b)
+        units = []
+        by_family = {(b.fmt == "f32", b.vt_index): b.texture for b in store.blocks}
+        for index in range(U_BLOCKS):
+            units.append((f"u_u{index}", gl.GL_TEXTURE_2D_ARRAY, by_family.get((False, index), 0)))
+        for index in range(4):
+            units.append((f"u_f{index}", gl.GL_TEXTURE_2D_ARRAY, by_family.get((True, index), 0)))
+        units += [("u_pages", gl.GL_TEXTURE_2D_ARRAY, vt.pages_tex),
+                  ("u_meta", gl.GL_TEXTURE_2D, vt.meta_tex),
+                  ("u_params", gl.GL_TEXTURE_2D, vt.params_tex)]
+        for unit, (name, target_kind, texture) in enumerate(units):
+            gl.glActiveTexture(gl.GL_TEXTURE0 + unit)
+            gl.glBindTexture(target_kind, texture)
+            self._uniform1i(program, name, unit)
+        self._draw()
+        for unit, (_name, target_kind, _texture) in enumerate(units):
+            gl.glActiveTexture(gl.GL_TEXTURE0 + unit)
+            gl.glBindTexture(target_kind, 0)
+        gl.glActiveTexture(gl.GL_TEXTURE0)
+        gl.glUseProgram(0)
+        vt.frames += 1
+        self._finalize(target, "final", "final_fusion" if fusion else "final_overlay", viewport)
+        return True
+
     def _render_overlay(self, active: Mapping[str, ChannelSource], display: DisplaySnapshot,
                         viewport: ViewportSnapshot) -> None:
         gl = self._gl
@@ -1294,13 +1845,32 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         self._bind_target("signal")
         gl.glDisable(gl.GL_BLEND)
         current = None
+        arrays = self._arrays if self.tile_arrays_active else None
+        planes = source.selected_planes()
         # Planes in order (coarsest first, finest last: a finer plane
         # overwrites); block A9 S2c switches the program per plane between
-        # the float one and the integer one.
-        for plane in source.selected_planes():
+        # the float one and the integer one. Block A9 §35: a RUN of
+        # array-stored planes of one pixel size (one pyramid level of the
+        # binding's grid, so disjoint) is drawn instanced, one call per
+        # array block.
+        index = 0
+        while index < len(planes):
+            plane = planes[index]
+            if arrays is not None and arrays.is_resident(plane):
+                size = _pixel_size(plane)
+                end = index + 1
+                while (end < len(planes) and arrays.is_resident(planes[end])
+                       and _pixel_size(planes[end]) == size):
+                    end += 1
+                if current in ("source", "source_uint"):
+                    self._uniform1i(current, "u_quad", 0)
+                current = self._draw_array_run(arrays, planes[index:end], mapping, viewport)
+                index = end
+                continue
+            index += 1
             program = "source_uint" if self._cache.is_integer(plane) else "source"
             if program != current:
-                if current is not None:
+                if current in ("source", "source_uint"):
                     self._uniform1i(current, "u_quad", 0)
                 gl.glUseProgram(self._programs[program])
                 self._uniform4(program, "u_view_rect", viewport.world_rect)
@@ -1321,10 +1891,71 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             self._uniform4(program, "u_quad_ndc",
                            _plane_quad_ndc(plane.world_rect, viewport.world_rect, self._target_size))
             self._draw(vertices=6)
-        if current is not None:
+        if current in ("source", "source_uint"):
             # programs keep uniforms: leave the default fullscreen geometry
             self._uniform1i(current, "u_quad", 0)
         gl.glUseProgram(0)
+
+    def _draw_array_run(self, arrays, run, mapping, viewport) -> Optional[str]:
+        """One instanced call per array block for `run` (disjoint planes of
+        one level). Returns the program left in use."""
+        gl = self._gl
+        groups: Dict[int, Tuple[_ArrayBlock, list]] = {}
+        for plane in run:
+            found = arrays.instance(plane)
+            if found is None:
+                continue                          # no valid pixel to draw
+            block, record = found
+            groups.setdefault(id(block), (block, []))[1].append(record)
+        program = None
+        for block, records in groups.values():
+            name = "array_float" if block.fmt == "f32" else "array_uint"
+            if name != program:
+                gl.glUseProgram(self._programs[name])
+                self._uniform4(name, "u_view_rect", viewport.world_rect)
+                self._uniform3(name, "u_mapping", mapping)
+                gl.glUniform2f(self._uniform_location(name, "u_target_size"),
+                               float(self._target_size[0]), float(self._target_size[1]))
+                self._uniform1i(name, "u_arr", 0)
+                program = name
+            data = np.empty(len(records), INSTANCE_DTYPE)
+            data["rect"] = [r[0] for r in records]
+            data["valid"] = [r[1] for r in records]
+            data["size"] = [r[2] for r in records]
+            data["layer"] = [r[3] for r in records]
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D_ARRAY, block.texture)
+            gl.glBindVertexArray(self._array_vao)
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._array_vbo)
+            gl.glBufferData(gl.GL_ARRAY_BUFFER, data.nbytes, data, gl.GL_STREAM_DRAW)
+            gl.glDrawArraysInstanced(gl.GL_TRIANGLES, 0, 6, len(records))
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
+            gl.glBindVertexArray(0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D_ARRAY, 0)
+            self._submission["pass_count"] = int(self._submission.get("pass_count", 0)) + 1
+        return program
+
+    def _setup_array_vao(self) -> None:
+        """Block A9 §35: the instance attributes of the array programs --
+        divisor 1, the layer an INTEGER attribute (glVertexAttribIPointer)."""
+        import ctypes
+        gl = self._gl
+        self._array_vao = _as_name(gl.glGenVertexArrays(1))
+        self._array_vbo = _as_name(gl.glGenBuffers(1))
+        gl.glBindVertexArray(self._array_vao)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._array_vbo)
+        stride = INSTANCE_DTYPE.itemsize
+        for location, (field, count) in enumerate((("rect", 4), ("valid", 4), ("size", 2))):
+            gl.glEnableVertexAttribArray(location)
+            gl.glVertexAttribPointer(location, count, gl.GL_FLOAT, gl.GL_FALSE, stride,
+                                     ctypes.c_void_p(INSTANCE_DTYPE.fields[field][1]))
+            gl.glVertexAttribDivisor(location, 1)
+        gl.glEnableVertexAttribArray(3)
+        gl.glVertexAttribIPointer(3, 1, gl.GL_INT, stride,
+                                  ctypes.c_void_p(INSTANCE_DTYPE.fields["layer"][1]))
+        gl.glVertexAttribDivisor(3, 1)
+        gl.glBindVertexArray(0)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
 
     def _contribute(self, target: str, weight: float, color: Tuple[float, float, float], component: int,
                     blend_equation: Tuple[int, int]) -> None:
@@ -1541,6 +2172,18 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         }.items():
             source = fragment.replace("\n", f"\n#define {define}\n", 1)
             self._programs[name] = self._link_program(vertex, source)
+            self._uniforms[name] = {}
+        try:
+            self._programs["vt"] = self._link_program(
+                vertex, (_SHADER_DIR / "step1_gpu_vt.frag").read_text(encoding="utf-8"))
+            self._uniforms["vt"] = {}
+        except Step1GpuLayerError as exc:            # the per-channel path stays
+            self._vt_failed = f"vt program: {exc}"[:200]
+        array_vertex = (_SHADER_DIR / "step1_gpu_array.vert").read_text(encoding="utf-8")
+        for name, define in {"array_uint": "PASS_ARRAY_UINT",
+                             "array_float": "PASS_ARRAY_FLOAT"}.items():
+            source = fragment.replace("\n", f"\n#define {define}\n", 1)
+            self._programs[name] = self._link_program(array_vertex, source)
             self._uniforms[name] = {}
         if self._labels_enabled:
             labels = (_SHADER_DIR / "step1_gpu_labels.frag").read_text(encoding="utf-8")
@@ -1771,6 +2414,18 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         if self._gl is None:
             return
         self._cache.clear(self._gl)
+        if self._arrays is not None:
+            self._arrays.clear(self._gl)
+            self._arrays = None
+        if self._vt is not None:
+            self._vt.clear(self._gl)
+            self._vt = None
+        if self._array_vao:
+            self._gl.glDeleteVertexArrays(1, [self._array_vao])
+            self._array_vao = 0
+        if self._array_vbo:
+            self._gl.glDeleteBuffers(1, [self._array_vbo])
+            self._array_vbo = 0
         if self._label_cache is not None:
             self._label_cache.clear(self._gl)
         self._shown_ready = False

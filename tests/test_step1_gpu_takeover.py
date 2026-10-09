@@ -2144,7 +2144,9 @@ def test_two_fast_far_landings_end_on_the_second_one_by_themselves(app):
             have = {(key.tile.tx, key.tile.ty)
                     for key in binding._published_fine.get("CD3", {})
                     if int(key.tile.level) == level}
-            return bool(wanted) and wanted <= have
+            # A9 §32: published is not yet on screen while uploads wait
+            return (bool(wanted) and wanted <= have
+                    and not binding.stats().get("deferred_uploads", 0))
 
         while not arrived() and time.monotonic() < deadline:
             _real_event_loop(0.05, lambda: None, 25)

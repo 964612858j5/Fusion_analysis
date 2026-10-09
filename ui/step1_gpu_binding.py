@@ -42,6 +42,7 @@ from PyQt5 import QtCore
 from ..viewer.tile_types import RawKey, TileAddress, TileRequest
 from ..utils import perf_trace
 from .step1_gpu_layer import (
+    ARRAY_TILE,
     MODE_FUSION,
     MODE_OVERLAY,
     ChannelSource,
@@ -70,6 +71,13 @@ UPLOAD_BUDGET_MS = 4.0
 INPUT_HOT_MS = 60.0
 HOT_PUBLISH_MS = 33.0
 HOT_UPLOAD_BUDGET_MS = 1.5
+#: Block A9 §35: above this many drawn channels a viewport is planned in
+#: slices of PLAN_SLICE_MS, the event loop (input) served in between
+PLAN_SLICE_MIN_CHANNELS = 8
+PLAN_SLICE_MS = 4.0
+#: Block A9 §35: refinement publications keep at most 1/PUBLISH_DUTY of the
+#: GUI thread (69 channels loading published ~11 ms every 16 ms)
+PUBLISH_DUTY = 3.0
 
 
 #: The whole G2.1 fairness policy, expressed only in the priority numbers
@@ -169,6 +177,11 @@ class Step1GpuBinding(QtCore.QObject):
             # Block A9 §32: this binding's publications upload a bounded
             # amount per frame; the rest follows in the next frame slot
             layer.upload_budget_ms = UPLOAD_BUDGET_MS
+        #: Block A9 §35: tiles live in array slots -- every tile costs a whole
+        #: slot and the admission keeps one block per format free
+        if hasattr(layer, "use_tile_arrays") and os.environ.get("BLOCK01_TILE_ARRAYS", "1") != "0":
+            layer.use_tile_arrays = True
+        self._slot_mode = False
         self._build_display_snapshot = build_display_snapshot
         self._build_viewport_snapshot = build_viewport_snapshot
         self.budgets = budgets
@@ -192,6 +205,8 @@ class Step1GpuBinding(QtCore.QObject):
         self._latest_snapshot = None
         self._fine_epoch = 0
         self._coarse: Dict[str, _Plan] = {}
+        self._coarse_version = 0          # A9 §35: bumped on every coarse change
+        self._admit_fast = None
         self._fine: Dict[str, _Plan] = {}
         self._published_coarse: Dict[str, Tuple[RawPlane, ...]] = {}
         #: The fine planes currently on screen, per channel, keyed by their
@@ -252,6 +267,13 @@ class Step1GpuBinding(QtCore.QObject):
         self._motion_timer.timeout.connect(self._flush_motion)
         self._motion_leading = False   # A9 §32: a deferred leading edge is due
         self._last_input_at = -1.0e9
+        self._last_publish_cost_ms = 0.0
+        #: A9 §35: per channel, the ChannelSource last published and what
+        #: it was built from -- a channel whose planes, admission and (for
+        #: finer stand-ins) GPU residency did not change is not rebuilt
+        self._fine_version = collections.Counter()
+        self._source_cache: Dict[str, tuple] = {}
+        self._admit_fast = None
         # Block A9-O2 (Odon's update loop): tiles that land are applied at
         # once but PUBLISHED at most once per frame -- a burst of 50 results
         # is one submit, not 50 back-to-back ones on the GUI thread.
@@ -276,9 +298,12 @@ class Step1GpuBinding(QtCore.QObject):
         self._revision += 1
         self._fine_epoch = 0
         self._coarse.clear()
+        self._coarse_version += 1
         self._fine.clear()
         self._published_coarse.clear()
         self._published_fine.clear()
+        self._fine_version.clear()
+        self._source_cache.clear()
         self._fine_budget_refused.clear()
         self._admission = None
         self._base_overflow = 0
@@ -386,6 +411,7 @@ class Step1GpuBinding(QtCore.QObject):
         for channel in tuple(self._published_fine):
             if channel not in wanted:
                 released += len(self._published_fine.pop(channel))
+                self._fine_version[channel] += 1
         for channel in tuple(self._fine):
             if channel not in wanted:
                 plan = self._fine.pop(channel)
@@ -449,9 +475,12 @@ class Step1GpuBinding(QtCore.QObject):
         self._disconnect_controller()
         self._cancel_all()
         self._coarse.clear()
+        self._coarse_version += 1
         self._fine.clear()
         self._published_coarse.clear()
         self._published_fine.clear()
+        self._fine_version.clear()
+        self._source_cache.clear()
         if self._dispose_layer:
             self.layer.dispose()
         return {"already_disposed": False, "published_channels": 0, "generations": 0}
@@ -634,6 +663,7 @@ class Step1GpuBinding(QtCore.QObject):
         plan = _Plan("coarse", channel, self._source, self._revision, generation, set(keys),
                      priority=PRIORITY_COARSE)
         self._coarse[channel] = plan
+        self._coarse_version += 1
         for key in sorted(keys, key=self._key_order):
             self._request(plan, key, priority=plan.priority)
 
@@ -674,13 +704,36 @@ class Step1GpuBinding(QtCore.QObject):
         # behind coarse in the existing scheduler's priority order.
         priority = self._fine_priority()
         self._fine_budget_refused.clear()
-        retained = requested = 0
-        for channel in active:
+        self._retained_fine_last_epoch = 0
+        self._requested_fine_last_epoch = 0
+        if len(active) <= PLAN_SLICE_MIN_CHANNELS:
+            self._plan_channels(list(active), snapshot, priority, self._fine_epoch, sliced=False)
+        else:
+            # Block A9 §35 (Odon: bounded work per frame): many channels are
+            # planned a slice at a time, the input handled in between; a
+            # newer epoch drops what is left of this one
+            self._plan_channels(list(active), snapshot, priority, self._fine_epoch, sliced=True)
+
+    def _plan_channels(self, pending, snapshot, priority, epoch, *, sliced) -> None:
+        if self._disposed or self._paused or epoch != self._fine_epoch:
+            return
+        started = time.perf_counter()
+        while pending:
+            channel = pending.pop(0)
             kept, asked = self._plan_fine_for_channel(channel, snapshot, priority)
-            retained += kept
-            requested += asked
-        self._retained_fine_last_epoch = retained
-        self._requested_fine_last_epoch = requested
+            self._retained_fine_last_epoch += kept
+            self._requested_fine_last_epoch += asked
+            if sliced and pending and (time.perf_counter() - started) * 1000.0 >= PLAN_SLICE_MS:
+                QtCore.QTimer.singleShot(0, lambda: self._continue_plan(pending, snapshot,
+                                                                        priority, epoch))
+                return
+
+    def _continue_plan(self, pending, snapshot, priority, epoch) -> None:
+        if self._disposed or self._paused or epoch != self._fine_epoch:
+            return
+        self._plan_channels(pending, snapshot, priority, epoch, sliced=True)
+        if not pending:
+            self._schedule_publish()
 
     def _fine_priority(self) -> int:
         self._last_fine_priority = (PRIORITY_FINE_DEFERRED
@@ -701,10 +754,12 @@ class Step1GpuBinding(QtCore.QObject):
             return 0, 0
         if channel in self._unavailable:
             self._published_fine.pop(channel, None)
+            self._fine_version[channel] += 1
             return 0, 0
         if channel not in self._published_coarse and channel not in self._coarse:
             # No coarse of any kind yet: starting it is what plans this.
             self._published_fine.pop(channel, None)
+            self._fine_version[channel] += 1
             return 0, 0
         if getattr(snapshot, "source", None) != self._source:
             return 0, 0
@@ -793,6 +848,15 @@ class Step1GpuBinding(QtCore.QObject):
         coarse landing) all read the same answer for the same situation."""
         # the planned channels, plus the one being planned now (a complete
         # coarse can land before the first viewport epoch recorded them)
+        # A9 §35: the same situation as the last call answers at once (the
+        # per-channel calls of one publication, with 69 channels, rebuilt
+        # this token 69 times)
+        fast = None
+        if self._active_fine_channels and (channel is None or channel in self._active_fine_channels):
+            fast = (self._revision, self._viewport_token(snapshot), self._active_fine_channels,
+                    self._coarse_version, frozenset(self._unavailable))
+            if self._admission is not None and self._admit_fast == fast:
+                return self._admission
         named = set(self._active_fine_channels)
         if not named:
             # nothing planned yet (a complete coarse landing before the
@@ -806,12 +870,13 @@ class Step1GpuBinding(QtCore.QObject):
         token = (self._revision, self._viewport_token(snapshot), active, coarse_state)
         previous = self._admission
         if previous is not None and previous.token == token:
+            self._admit_fast = fast
             return previous
         ideal = int(getattr(snapshot, "level", 0) or 0)
         coarsest = int(self.provider.num_levels) - 1
         fine_budget = self.budgets.max_fine_plane_bytes_per_channel
         max_tiles = self.budgets.max_fine_tiles_per_viewport
-        total = self.budgets.max_raw_texture_bytes
+        total = self._total_budget()
         coarse_keys: Set[RawKey] = set()
         for channel in active:
             plan = self._coarse.get(channel)
@@ -845,6 +910,7 @@ class Step1GpuBinding(QtCore.QObject):
         admission = _Admission(token=token, ideal=ideal, level=level, keys=fine, carry=carry,
                                coarse_only=coarse_only)
         self._admission = admission
+        self._admit_fast = fast
         if admission.limited:
             perf_trace.mark("gpu.fine_admitted", ideal=ideal, level=level,
                             channels=len(active), bytes=used, budget=total)
@@ -940,8 +1006,10 @@ class Step1GpuBinding(QtCore.QObject):
             total += size
         if kept:
             self._published_fine[channel] = kept
+            self._fine_version[channel] += 1
         else:
             self._published_fine.pop(channel, None)
+            self._fine_version[channel] += 1
         return len(kept)
 
     @staticmethod
@@ -1043,6 +1111,9 @@ class Step1GpuBinding(QtCore.QObject):
             return
         since = (time.monotonic() - self._last_publish_at) * 1000.0
         frame = HOT_PUBLISH_MS if self._input_hot() else PUBLISH_FRAME_MS
+        # A9 §35: an expensive publication (many channels loading) is
+        # spaced so it keeps at most ~1/PUBLISH_DUTY of the GUI thread
+        frame = max(frame, PUBLISH_DUTY * self._last_publish_cost_ms)
         self._publish_timer.start(int(math.ceil(max(0.0, frame - since))))
 
     def _input_hot(self) -> bool:
@@ -1101,6 +1172,7 @@ class Step1GpuBinding(QtCore.QObject):
             self._published_coarse[channel] = tuple(
                 plan.planes[item] for item in sorted(plan.expected, key=self._key_order))
             self._coarse[channel] = plan
+            self._coarse_version += 1
             if self._latest_snapshot is not None and not self._paused:
                 # Only this channel's fine starts here. Another channel's
                 # load is already under way and must not be restarted.
@@ -1113,6 +1185,7 @@ class Step1GpuBinding(QtCore.QObject):
             # the complete coarse background the moment it lands. Waiting
             # for the whole viewport is what kept every gesture blurry.
             self._published_fine.setdefault(channel, {})[key] = plane
+            self._fine_version[channel] += 1
             if plan.complete:
                 self._fine.pop(channel, None)
         if publish and deferred:
@@ -1140,11 +1213,20 @@ class Step1GpuBinding(QtCore.QObject):
         self._publish_due = False
         self._publish_timer.stop()
         self._last_publish_at = time.monotonic()
+        try:
+            self._publish_body()
+        finally:
+            self._last_publish_cost_ms = (time.monotonic() - self._last_publish_at) * 1000.0
+
+    def _publish_body(self) -> None:
         display = self._build_display_snapshot()
         viewport = self._build_viewport_snapshot()
         active = self._active_channels(display)
         channels = []
+        costs = []
         shown = set()
+        residency = getattr(self.layer, "residency_generation", None)
+        residency = residency() if callable(residency) else 0
         for channel in active:
             coarse = self._published_coarse.get(channel)
             if not coarse:
@@ -1157,6 +1239,17 @@ class Step1GpuBinding(QtCore.QObject):
             # hold-back until the viewport's fine was all in, which kept
             # the first Step1 picture off the screen for ~2 s.
             shown.add(channel)
+            snapshot = self._latest_snapshot
+            on_source = (snapshot is not None
+                         and getattr(snapshot, "source", None) == self._source)
+            admission = self._admit(snapshot, channel) if on_source else None
+            base = (id(coarse), self._fine_version[channel], id(admission), id(self._admission))
+            entry = self._source_cache.get(channel)
+            if (entry is not None and entry[0] == base
+                    and (not entry[3] or entry[4] == residency)):
+                channels.append(entry[1])
+                costs.append(entry[2])
+                continue
             # COARSEST FIRST, FINEST LAST. G1 draws a channel's planes in
             # the order given with blending off, so a finer plane overwrites
             # a coarser one exactly where it has pixels -- which is how a
@@ -1167,14 +1260,19 @@ class Step1GpuBinding(QtCore.QObject):
                 self._drawn_fine(resident),
                 key=lambda item: (-int(item[0].tile.level),
                                   int(item[0].tile.ty), int(item[0].tile.tx))))
-            snapshot = self._latest_snapshot
-            wants_fine = bool(snapshot is not None
-                              and getattr(snapshot, "source", None) == self._source
-                              and self._target_keys(channel, snapshot))
-            channels.append(ChannelSource(channel, coarse=coarse, fine=fine,
-                                          selected_level="fine" if fine else "coarse",
-                                          target_level="fine" if wants_fine else "coarse"))
-        fitted = self._fit_total_budget(channels)
+            wants_fine = bool(admission is not None and admission.keys.get(channel))
+            source = ChannelSource(channel, coarse=coarse, fine=fine,
+                                   selected_level="fine" if fine else "coarse",
+                                   target_level="fine" if wants_fine else "coarse")
+            # whether finer stand-ins depend on what is on the GPU now
+            target = None if admission is None or admission.coarse_only else int(admission.level)
+            finer = target is not None and any(int(key.tile.level) < target for key in resident)
+            self._slot_mode = self._slot_accounting
+            cost = sum(self._cost_bytes(plane) for plane in coarse + fine)
+            self._source_cache[channel] = (base, source, cost, finer, residency)
+            channels.append(source)
+            costs.append(cost)
+        fitted = self._fit_total_budget(channels, used_now=sum(costs))
         overflow = 0 if fitted is not None else len(channels)
         if overflow != self._base_overflow:
             self._base_overflow = overflow
@@ -1209,7 +1307,7 @@ class Step1GpuBinding(QtCore.QObject):
             return
         if tracing:
             cache = stats.get("cache") or {}
-            uploads = int(cache.get("uploads", 0) or 0)
+            uploads = int(cache.get("uploads", 0) or 0) + int(cache.get("array_uploads", 0) or 0)
             perf_trace.mark(
                 "gpu.frame", frame=getattr(self.layer, "_a9_frame", 0), level=target_index,
                 ideal=ideal_index,
@@ -1273,23 +1371,25 @@ class Step1GpuBinding(QtCore.QObject):
             drawn.append((key, plane))
         return drawn
 
-    def _fit_total_budget(self, channels):
+    def _fit_total_budget(self, channels, used_now: Optional[int] = None):
         """Block A9 S2b safety net: the submitted planes, counted once per
         identity, must fit the total raw-texture budget. Admission already
         guarantees it for coarse + target; if carried stand-ins still push
         it over (a channel's admission changed while they were resident),
         the stand-ins go first -- never a target plane, never a coarse one."""
-        total = self.budgets.max_raw_texture_bytes
+        total = self._total_budget()
         if total is None:
             return channels
+
+        self._slot_mode = self._slot_accounting      # read once per check
 
         def used(items):
             seen = {}
             for source in items:
                 for plane in tuple(source.coarse) + tuple(source.fine):
-                    seen[plane.identity] = self._plane_bytes(plane)
+                    seen[plane.identity] = self._cost_bytes(plane)
             return sum(seen.values())
-        if used(channels) <= total:
+        if (used_now if used_now is not None else used(channels)) <= total:
             return channels
         snapshot = self._latest_snapshot
         admitted = (self._admit(snapshot).keys if snapshot is not None
@@ -1389,8 +1489,52 @@ class Step1GpuBinding(QtCore.QObject):
             tile_size = key.tile.grid.tile_size
             tile_h = max(0, min(tile_size, height - key.tile.ty * tile_size))
             tile_w = max(0, min(tile_size, width - key.tile.tx * tile_size))
+            if self._slot_accounting and tile_h and tile_w:
+                tile_h = tile_w = max(tile_size, ARRAY_TILE)   # a whole array slot
             total += tile_h * tile_w * self._pixel_bytes(key)
         return int(total)
+
+    @property
+    def _slot_accounting(self) -> bool:
+        """A9 §35: is the layer storing tiles in array slots right now?"""
+        return bool(getattr(self.layer, "tile_arrays_active", False))
+
+    def _total_budget(self) -> Optional[int]:
+        """The raw-texture total the plans are admitted against (A9 §35:
+        less the array store's per-format block slack)."""
+        total = self.budgets.max_raw_texture_bytes
+        if total is None or not self._slot_accounting:
+            return total
+        # one block of each format this binding's tiles can take: the raw
+        # channels' native integers, float32 for anything else
+        itemsizes = {self._native_pixel_bytes}
+        table = getattr(self.provider, "source_table", None)
+        if table is None or any(table.source_of(c) != "raw" for c in self._active_fine_channels):
+            itemsizes.add(4)
+        slack = getattr(self.layer, "array_slack_bytes", lambda _sizes: 0)(itemsizes)
+        return max(0, int(total) - int(slack))
+
+    def _cost_bytes(self, plane: RawPlane) -> int:
+        """A submitted plane's texture cost: its slot in array mode
+        (A9 §35: cached per plane object -- planes are immutable)."""
+        cache = self.__dict__.setdefault("_cost_cache", {})
+        key = (id(plane), self._slot_mode)
+        hit = cache.get(key)
+        if hit is not None and hit[0] is plane:
+            return hit[1]
+        cost = self._cost_bytes_uncached(plane)
+        if len(cache) > 200000:
+            cache.clear()
+        cache[key] = (plane, cost)
+        return cost
+
+    def _cost_bytes_uncached(self, plane: RawPlane) -> int:
+        if self._slot_mode:
+            values = np.asarray(plane.values)
+            if values.ndim == 2 and values.shape[0] <= ARRAY_TILE and values.shape[1] <= ARRAY_TILE:
+                itemsize = values.dtype.itemsize if values.dtype in (np.uint8, np.uint16) else 4
+                return ARRAY_TILE * ARRAY_TILE * itemsize
+        return self._plane_bytes(plane)
 
     def _native_identity(self):
         """Block A9 S2c: the provider's native namespace, or the source."""

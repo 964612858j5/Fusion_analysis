@@ -409,9 +409,9 @@ class Driver(QtCore.QObject):
         self._next(0)
 
     def _do_xwheel(self, a, _t):
-        target, pos = self._viewer()
+        target, pos = self._uncovered_point()
         if target is None:
-            raise RuntimeError("no viewer on screen")
+            raise RuntimeError("no uncovered viewer point on screen")
         _mark_target(self.i, target)
         layers = [w for w in QtWidgets.QApplication.allWidgets()
                   if type(w).__name__ == "Step1GpuLayer" and _alive_visible(w)]
@@ -429,6 +429,33 @@ class Driver(QtCore.QObject):
             perf_trace.mark("a9.xwheel_end", n=self.i, rc=proc.returncode, received=rx.seq)
             QtCore.QTimer.singleShot(int(a.get("tail_ms", 1500)), lambda: (rx.done(), self._next(0)))
         QtCore.QTimer.singleShot(50, poll)
+
+    def _uncovered_point(self):
+        """§34 M0: real injected input goes to whatever window is on top at
+        the screen point -- the Tissue Navigator popup sometimes lies over
+        the viewer's centre, and the gestures then went to its list. The
+        point nearest the centre whose top widget belongs to the main
+        window's viewer is used instead."""
+        target, _pos = self._viewer()          # refreshes the viewer cache
+        if target is None:
+            return None, None
+        best = _VIEWER_CACHE.get("best")
+        if best is None:
+            return None, None
+        rect = best.rect()
+        centre = rect.center()
+        candidates = sorted(
+            (QtCore.QPoint(int(rect.width() * fx), int(rect.height() * fy))
+             for fx in (0.5, 0.4, 0.6, 0.3, 0.7, 0.25, 0.75)
+             for fy in (0.5, 0.4, 0.6, 0.3, 0.7, 0.25, 0.75)),
+            key=lambda p: (p - centre).manhattanLength())
+        for local in candidates:
+            g = best.mapToGlobal(local)
+            top = QtWidgets.QApplication.widgetAt(g)
+            if top is not None and top.window() is self.w and (top is best or best.isAncestorOf(top)
+                                                              or top.isAncestorOf(best)):
+                return top, top.mapFromGlobal(g)
+        return None, None
 
     def _do_drag(self, a, _t):
         target, pos = self._viewer()

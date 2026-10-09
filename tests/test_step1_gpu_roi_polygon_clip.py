@@ -446,7 +446,7 @@ def test_a_failure_while_clipping_still_hands_the_state_back(layer):
     real_draw = type(layer)._draw
     boom = RuntimeError("the draw failed")
 
-    def failing(self):
+    def failing(self, *_args, **_kwargs):   # A9 §32: `_draw(vertices=)`
         raise boom
 
     type(layer)._draw = failing

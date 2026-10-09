@@ -1353,7 +1353,10 @@ def _settled_on_level(app, rig, level, timeout=40.0):
         have = {(key.tile.tx, key.tile.ty)
                 for key in binding._published_fine.get("CD3", {})
                 if int(key.tile.level) == int(level)}
-        return bool(wanted) and wanted <= have
+        # A9 §32: published is not yet on screen while uploads wait for
+        # their frame slot
+        return (bool(wanted) and wanted <= have
+                and not binding.stats().get("deferred_uploads", 0))
     return _wait(app, ready, timeout=timeout)
 
 
@@ -2198,7 +2201,8 @@ def test_a_cold_landing_sharpens_without_any_further_gesture(app):
                     for key in binding._published_fine.get("CD3", {})
                     if int(key.tile.level) == level}
             seen.append(len(have))
-            if wanted <= have:
+            # A9 §32: published is not yet on screen while uploads wait
+            if wanted <= have and not binding.stats().get("deferred_uploads", 0):
                 break
             _real_event_loop(0.05, lambda: None, 25)
 

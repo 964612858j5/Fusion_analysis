@@ -37,6 +37,10 @@ def main():
     # for 2 s or more -- see utils/gui_watchdog.py. A diagnostic for freezes
     # that offscreen runs cannot reproduce; off unless BLOCK01_GUI_WATCHDOG=1.
     watchdog = start_gui_watchdog()
+    # Block A9 §32: full garbage collections wait for an idle moment
+    # instead of pausing a wheel gesture (utils/gc_pacer.py)
+    from .utils import gc_pacer
+    app._gc_pacer = gc_pacer.start(app)
 
     win = MainWindow()
     win.show()

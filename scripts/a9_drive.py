@@ -21,10 +21,14 @@ Scenario: a JSON list of actions --
   {"do": "winstate", "value": "max"}        (or "normal"; A9 M0)
   {"do": "mark", "label": "..."}
   {"do": "repeat", "n": 20, "body": [ ... ]}
+  {"do": "xwheel", "pattern": "+4@30,w300,-4@30"}   (§30 F6: REAL system
+      wheel notches from a separate XTest process, see a9_xwheel.py)
 """
 
 import json
 import os
+import subprocess
+import sys
 import time
 
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -46,6 +50,38 @@ def _flatten(actions):
         else:
             out.append(action)
     return out
+
+
+class _WheelRx(QtCore.QObject):
+    """§30 F6: marks every wheel event the viewer RECEIVES (before handling)
+    with a running count, and hands that count to the GPU layers so the
+    frame they present says how many notches it includes."""
+
+    def __init__(self, target, layers):
+        super().__init__(target)
+        self.seq = 0
+        self.layers = layers
+        target.installEventFilter(self)
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        kind = event.type()
+        dragging = (kind == QtCore.QEvent.MouseMove
+                    and bool(event.buttons() & QtCore.Qt.LeftButton))
+        if kind == QtCore.QEvent.Wheel or dragging:
+            self.seq += 1
+            for layer in self.layers:
+                layer._a9_input_seq = self.seq
+            perf_trace.mark("a9.wheel_rx", seq=self.seq,
+                            dy=event.angleDelta().y() if not dragging else 0,
+                            xts=int(event.timestamp()))
+        return False
+
+    def done(self):
+        try:
+            self.parent().removeEventFilter(self)
+        except Exception:                                    # noqa: BLE001
+            pass
+        self.deleteLater()
 
 
 class _Handled(QtCore.QObject):
@@ -372,6 +408,28 @@ class Driver(QtCore.QObject):
         QtCore.QTimer.singleShot(0, handled.done)
         self._next(0)
 
+    def _do_xwheel(self, a, _t):
+        target, pos = self._viewer()
+        if target is None:
+            raise RuntimeError("no viewer on screen")
+        _mark_target(self.i, target)
+        layers = [w for w in QtWidgets.QApplication.allWidgets()
+                  if type(w).__name__ == "Step1GpuLayer" and _alive_visible(w)]
+        rx = _WheelRx(target, layers)
+        g = target.mapToGlobal(pos)
+        log = os.environ.get("BLOCK01_PERF_LOG", "a9") + ".xwheel.jsonl"
+        perf_trace.mark("a9.xwheel", n=self.i, x=g.x(), y=g.y(), layers=len(layers), log=log)
+        proc = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "a9_xwheel.py"), str(g.x()), str(g.y()), a["pattern"], log])
+
+        def poll():
+            if proc.poll() is None:
+                QtCore.QTimer.singleShot(50, poll)
+                return
+            perf_trace.mark("a9.xwheel_end", n=self.i, rc=proc.returncode, received=rx.seq)
+            QtCore.QTimer.singleShot(int(a.get("tail_ms", 1500)), lambda: (rx.done(), self._next(0)))
+        QtCore.QTimer.singleShot(50, poll)
+
     def _do_drag(self, a, _t):
         target, pos = self._viewer()
         if target is None:
@@ -515,11 +573,54 @@ def _on_wsl():
         return False
 
 
+def _attribute():
+    """§31 measurement only (`BLOCK01_A9_ATTR=1`): wrap the per-notch GUI
+    paths in spans, at start-up -- before any slot is connected, so the
+    bound methods Qt keeps are the wrapped ones."""
+    import functools
+    import pyqtgraph as pg
+    from block01.ui import step1_viewer_mount
+    from block01.viewer import explore_view
+
+    def wrap(cls, name, label):
+        real = getattr(cls, name)
+
+        @functools.wraps(real)
+        def timed(self, *a, **k):
+            with perf_trace.span(label):
+                return real(self, *a, **k)
+        setattr(cls, name, timed)
+    wrap(pg.ViewBox, "wheelEvent", "attr.vb_wheel")
+    wrap(pg.GraphicsView, "paintEvent", "attr.scene_paint")
+    wrap(explore_view.ExploreController, "_on_range_changed", "attr.ctl_range")
+    wrap(step1_viewer_mount.Step1WholeSlideMount, "_on_range_changed", "attr.mount_range")
+    wrap(step1_viewer_mount.Step1WholeSlideMount, "_on_user_range", "attr.mount_user")
+    from block01.ui import step1_gpu_binding, step1_gpu_layer
+    wrap(step1_gpu_binding.Step1GpuBinding, "_fit_total_budget", "attr.fit_budget")
+    wrap(step1_gpu_binding.Step1GpuBinding, "_drawn_fine", "attr.drawn_fine")
+    wrap(step1_gpu_binding.Step1GpuBinding, "update_viewport", "attr.update_viewport")
+    wrap(step1_gpu_layer.Step1GpuLayer, "_visible_drawn", "attr.visible_drawn")
+    import gc
+    started = {}
+
+    def gc_timer(phase, info):
+        if phase == "start":
+            started["t"] = time.perf_counter()
+        elif "t" in started:
+            ms = (time.perf_counter() - started.pop("t")) * 1000.0
+            if ms >= 1.0:
+                perf_trace.mark("attr.gc", gen=info.get("generation"), ms=round(ms, 2),
+                                collected=info.get("collected"))
+    gc.callbacks.append(gc_timer)
+
+
 def attach(window):
     """Called by the main window at start-up when `BLOCK01_A9_SCRIPT` is set."""
     path = os.environ.get(ENV) or ""
     if not path:
         return None
+    if os.environ.get("BLOCK01_A9_ATTR") == "1":
+        _attribute()
     if path in ("1", "default"):
         path = DEFAULT_SCENARIO
     with open(path, encoding="utf-8") as f:

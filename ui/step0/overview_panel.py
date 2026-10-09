@@ -3049,13 +3049,21 @@ class OverviewPanel(QWidget):
         ROI artists use (cx = x/ds, cy = y/ds). This overlay is purely visual:
         it is never added to self._rois and does not interfere with ROI editing.
         """
-        self.clear_current_view_rect()
         if full_rect is None:
+            self.clear_current_view_rect()
             return
         y0, y1, x0, x1 = (float(v) for v in full_rect)
         ds = float(self.ds or 1)
         xs = [x0 / ds, x1 / ds, x1 / ds, x0 / ds, x0 / ds]
         ys = [y0 / ds, y0 / ds, y1 / ds, y1 / ds, y0 / ds]
+        item = self._current_view_item
+        if item is not None and item.getViewBox() is self.vb:
+            # Block A9 §32: the outline already drawn is MOVED, not removed
+            # and rebuilt (that cost ~3 ms on every wheel notch in Step1)
+            item.setData(xs, ys)
+            self._current_view_full = (y0, y1, x0, x1)
+            return
+        self.clear_current_view_rect()
         item = pg.PlotDataItem(
             xs, ys, pen=pg.mkPen("#19e0e0", width=2, style=Qt.DashLine))
         item.setZValue(50)            # above ROI/patch artists

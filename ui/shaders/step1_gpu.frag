@@ -8,12 +8,14 @@ uniform sampler2D u_raw;
 uniform vec4 u_view_rect;
 uniform vec4 u_plane_rect;
 uniform vec3 u_mapping;
+uniform vec2 u_target_size;     // A9 §32: pixel centres by gl_FragCoord
 
 void main() {
+    vec2 screen_uv = gl_FragCoord.xy / u_target_size;
     vec2 view_size = vec2(u_view_rect.y - u_view_rect.x,
                           u_view_rect.w - u_view_rect.z);
-    vec2 world = vec2(u_view_rect.x + v_screen_uv.x * view_size.x,
-                      u_view_rect.w - v_screen_uv.y * view_size.y);
+    vec2 world = vec2(u_view_rect.x + screen_uv.x * view_size.x,
+                      u_view_rect.w - screen_uv.y * view_size.y);
     if (world.x < u_plane_rect.x || world.x >= u_plane_rect.y ||
         world.y < u_plane_rect.z || world.y >= u_plane_rect.w) {
         discard;
@@ -46,12 +48,14 @@ uniform vec4 u_view_rect;
 uniform vec4 u_plane_rect;
 uniform vec4 u_valid_rect;
 uniform vec3 u_mapping;
+uniform vec2 u_target_size;     // A9 §32: pixel centres by gl_FragCoord
 
 void main() {
+    vec2 screen_uv = gl_FragCoord.xy / u_target_size;
     vec2 view_size = vec2(u_view_rect.y - u_view_rect.x,
                           u_view_rect.w - u_view_rect.z);
-    vec2 world = vec2(u_view_rect.x + v_screen_uv.x * view_size.x,
-                      u_view_rect.w - v_screen_uv.y * view_size.y);
+    vec2 world = vec2(u_view_rect.x + screen_uv.x * view_size.x,
+                      u_view_rect.w - screen_uv.y * view_size.y);
     if (world.x < u_plane_rect.x || world.x >= u_plane_rect.y ||
         world.y < u_plane_rect.z || world.y >= u_plane_rect.w) {
         discard;

@@ -28,7 +28,9 @@ second scheduler, raw cache, LRU authority or repository here.
 
 from __future__ import annotations
 
+import collections
 import math
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -52,6 +54,22 @@ from .step1_gpu_layer import (
 
 #: Block A9-O2: the frame slot landed results are published on (~60 Hz).
 PUBLISH_FRAME_MS = 16.0
+#: Block A9 §32: publications the binding remembers (see `_descriptor_history`)
+HISTORY_LIMIT = 64
+#: Block A9 §32 (Odon: bounded work per frame): texture upload time one
+#: publication may spend; the rest is uploaded by the next publication(s),
+#: one frame slot later, while coarser planes stand in.
+UPLOAD_BUDGET_MS = 4.0
+#: Block A9 §32: while the user is moving the camera (an input within
+#: INPUT_HOT_MS), the INPUT comes first: refinement publications are spaced
+#: HOT_PUBLISH_MS apart and upload at most HOT_UPLOAD_BUDGET_MS each, so a
+#: wheel notch never queues behind back-to-back uploads (measured: two 12 ms
+#: publications in a row held a notch 47 ms). The picture keeps following
+#: the camera from what is resident; refinement speeds up again as soon as
+#: the hand pauses.
+INPUT_HOT_MS = 60.0
+HOT_PUBLISH_MS = 33.0
+HOT_UPLOAD_BUDGET_MS = 1.5
 
 
 #: The whole G2.1 fairness policy, expressed only in the priority numbers
@@ -147,6 +165,10 @@ class Step1GpuBinding(QtCore.QObject):
         self.scheduler = scheduler
         self.controller = controller
         self.layer = layer
+        if hasattr(layer, "upload_budget_ms"):
+            # Block A9 §32: this binding's publications upload a bounded
+            # amount per frame; the rest follows in the next frame slot
+            layer.upload_budget_ms = UPLOAD_BUDGET_MS
         self._build_display_snapshot = build_display_snapshot
         self._build_viewport_snapshot = build_viewport_snapshot
         self.budgets = budgets
@@ -208,7 +230,16 @@ class Step1GpuBinding(QtCore.QObject):
         self._generations: Set[Hashable] = set()
         self._unavailable: Dict[str, str] = {}
         self._last_error: Optional[str] = None
-        self._descriptor_history = []
+        # Block A9 §32: the history used to keep EVERY publication (and the
+        # tile arrays it references) for the whole session. Production keeps
+        # the last HISTORY_LIMIT; `BLOCK01_GPU_HISTORY_ALL=1` (tests that
+        # inspect every publication) keeps all. `publication_count` is the
+        # lifetime count either way.
+        self._descriptor_history = collections.deque(
+            maxlen=None if os.environ.get("BLOCK01_GPU_HISTORY_ALL") == "1" else HISTORY_LIMIT)
+        self._publication_count = 0
+        #: planes the last publication could not upload within its budget
+        self._deferred_uploads = 0
         self._request_count = 0
         self._fine_requests_by_priority: Dict[int, int] = {}
         self._last_fine_priority: Optional[int] = None
@@ -219,6 +250,8 @@ class Step1GpuBinding(QtCore.QObject):
         self._motion_timer = QtCore.QTimer(self)
         self._motion_timer.setSingleShot(True)
         self._motion_timer.timeout.connect(self._flush_motion)
+        self._motion_leading = False   # A9 §32: a deferred leading edge is due
+        self._last_input_at = -1.0e9
         # Block A9-O2 (Odon's update loop): tiles that land are applied at
         # once but PUBLISHED at most once per frame -- a burst of 50 results
         # is one submit, not 50 back-to-back ones on the GUI thread.
@@ -456,7 +489,9 @@ class Step1GpuBinding(QtCore.QObject):
             "rejected_late_results": self._rejected_late_count,
             "unavailable": dict(self._unavailable),
             "last_error": self._last_error,
-            "descriptor_publications": len(self._descriptor_history),
+            "descriptor_publications": self._publication_count,
+            # A9 §32: > 0 = resident on the CPU side, not yet on screen
+            "deferred_uploads": self._deferred_uploads,
         }
 
     def coarse_pending_channels(self) -> Tuple[str, ...]:
@@ -471,6 +506,11 @@ class Step1GpuBinding(QtCore.QObject):
     @property
     def descriptor_history(self):
         return tuple(self._descriptor_history)
+
+    @property
+    def publication_count(self) -> int:
+        """Every publication since this binding was built (never capped)."""
+        return self._publication_count
 
     # Public controller signals -----------------------------------------
 
@@ -506,6 +546,7 @@ class Step1GpuBinding(QtCore.QObject):
         if self._disposed:
             return
         self._latest_snapshot = snapshot
+        self._last_input_at = time.monotonic()
         if kind == "NAVIGATOR_JUMP":
             # A LANDING IS THE LAST WORD on where the camera is, and it is
             # served now. A motion timer still running from the gesture
@@ -516,8 +557,15 @@ class Step1GpuBinding(QtCore.QObject):
             self.update_viewport(snapshot)
             return
         if not self._motion_timer.isActive():
-            self.update_viewport(snapshot)
-            self._motion_timer.start(self.budgets.motion_interval_ms)
+            # Block A9 §32 (Odon app.rs:12399: an input moves the camera and
+            # nothing else). The GPU layer already redraws the new camera
+            # from what is resident; the PLANNING of it runs on the next
+            # event-loop turn -- after the wheel notches already queued
+            # behind this one -- and then at most once per motion interval
+            # (`_flush_motion` re-arms the throttle). Previously it ran here,
+            # synchronously, inside the wheel event.
+            self._motion_leading = True
+            self._motion_timer.start(0)
 
     def _gesture_quiet(self, snapshot) -> None:
         """The controller says the gesture is over. Catch up only if behind."""
@@ -538,11 +586,23 @@ class Step1GpuBinding(QtCore.QObject):
         question "has anything happened since we last planned".
         """
         snapshot = self._latest_snapshot
+        if getattr(self, "_motion_leading", False):
+            # the deferred leading edge: plan now, then hold the throttle
+            # window open so the motion that follows is planned at most
+            # once per interval (the old leading-edge behaviour, one turn on)
+            self._motion_leading = False
+            if snapshot is not None and self._consumed_viewport != self._viewport_token(snapshot):
+                self.update_viewport(snapshot)
+            self._motion_timer.start(self.budgets.motion_interval_ms)
+            return
         if snapshot is None:
             return
         if self._consumed_viewport == self._viewport_token(snapshot):
             return
         self.update_viewport(snapshot)
+        # A9 §32 (codex): a trailing plan reopens the throttle window, so a
+        # wheel event right after it cannot start a leading plan at once
+        self._motion_timer.start(self.budgets.motion_interval_ms)
 
     @staticmethod
     def _viewport_token(snapshot):
@@ -982,7 +1042,12 @@ class Step1GpuBinding(QtCore.QObject):
         if self._publish_timer.isActive():
             return
         since = (time.monotonic() - self._last_publish_at) * 1000.0
-        self._publish_timer.start(int(math.ceil(max(0.0, PUBLISH_FRAME_MS - since))))
+        frame = HOT_PUBLISH_MS if self._input_hot() else PUBLISH_FRAME_MS
+        self._publish_timer.start(int(math.ceil(max(0.0, frame - since))))
+
+    def _input_hot(self) -> bool:
+        """Block A9 §32: is the user moving the camera right now?"""
+        return (time.monotonic() - self._last_input_at) * 1000.0 < INPUT_HOT_MS
 
     def _flush_publish(self) -> None:
         if self._publish_due and not self._disposed:
@@ -1099,7 +1164,7 @@ class Step1GpuBinding(QtCore.QObject):
             # has instead of falling back to the whole-slide coarse.
             resident = self._published_fine.get(channel) or {}
             fine = tuple(plane for _key, plane in sorted(
-                resident.items(),
+                self._drawn_fine(resident),
                 key=lambda item: (-int(item[0].tile.level),
                                   int(item[0].tile.ty), int(item[0].tile.tx))))
             snapshot = self._latest_snapshot
@@ -1133,6 +1198,9 @@ class Step1GpuBinding(QtCore.QObject):
             ideal_index = int(snapshot.level) if on_source else None
             target_index = self._admit(snapshot).level if on_source else None
             self.layer._a9_target_index = target_index
+        if hasattr(self.layer, "upload_budget_ms"):
+            self.layer.upload_budget_ms = (HOT_UPLOAD_BUDGET_MS if self._input_hot()
+                                           else UPLOAD_BUDGET_MS)
         try:
             stats = self.layer.submit(descriptor, display, viewport)
         except Step1GpuLayerError as exc:
@@ -1157,6 +1225,53 @@ class Step1GpuBinding(QtCore.QObject):
             self._a9_uploads_seen = uploads
         self._shown_channels = shown
         self._descriptor_history.append((descriptor, display, viewport, stats))
+        self._publication_count += 1
+        self._deferred_uploads = int(stats.get("deferred_uploads", 0) or 0)
+        if self._deferred_uploads > 0:
+            # Block A9 §32: what did not fit this frame's upload budget goes
+            # up in the next frame slot (coarser planes stand in meanwhile)
+            self._schedule_publish()
+
+    def _drawn_fine(self, resident):
+        """Block A9 §32 (Odon app.rs:12925-12980: a finer level is drawn over
+        a coarser target only until the target is there). The resident fine
+        planes of one channel that are worth DRAWING: every plane at or
+        coarser than the admitted target level, and a FINER stand-in only
+        where the target tile under it is not resident yet -- once it is,
+        the finer plane adds no pixel the target lacks at this zoom, only a
+        pass. They stay resident (memory is the admission's business); they
+        are just not drawn. 220 such planes were drawn on every frame after
+        zooming out, at level 5 (Kevin, 4 channels)."""
+        admission = self._admission
+        if admission is None or admission.coarse_only or not resident:
+            return resident.items()
+        target = int(admission.level)
+        # a target tile REPLACES only once its texture is on the GPU: one
+        # decoded but still waiting for an upload slot covers nothing yet
+        on_gpu = getattr(self.layer, "is_resident", None)
+        covered = {(int(key.tile.tx), int(key.tile.ty)) for key, plane in resident.items()
+                   if int(key.tile.level) == target
+                   and (on_gpu is None or on_gpu(plane))}
+        if not covered:
+            return resident.items()
+        some = next(iter(resident))
+        tile_size = some.tile.grid.tile_size
+        ds_y, ds_x = self.provider.level_downsample_yx(target)
+        cell_w, cell_h = tile_size * float(ds_x), tile_size * float(ds_y)
+        drawn = []
+        for key, plane in resident.items():
+            if int(key.tile.level) < target:
+                # dropped only when EVERY target cell the stand-in touches
+                # is there (a pyramid whose grids do not nest exactly
+                # straddles two)
+                x0, x1, y0, y1 = plane.world_rect
+                cx0, cx1 = int(x0 // cell_w), int(math.ceil(x1 / cell_w)) - 1
+                cy0, cy1 = int(y0 // cell_h), int(math.ceil(y1 / cell_h)) - 1
+                if all((cx, cy) in covered for cx in range(cx0, cx1 + 1)
+                       for cy in range(cy0, cy1 + 1)):
+                    continue
+            drawn.append((key, plane))
+        return drawn
 
     def _fit_total_budget(self, channels):
         """Block A9 S2b safety net: the submitted planes, counted once per

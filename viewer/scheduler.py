@@ -54,6 +54,7 @@ Contract (docs/v15_viewer_foundation_interfaces.md §4):
   and always run with I/O parallelism instead of serially inside compute.
 """
 
+import os
 import dataclasses
 import heapq
 import itertools
@@ -114,7 +115,7 @@ from ..utils import perf_trace
 # inside run-to-run spread; zoom 62.7% against 47.5%; cold start 259 ms
 # against 366 ms. 8 it is. Do not lower this on the strength of the drag
 # sweep alone -- measure a level-crossing zoom too.
-DEFAULT_IO_WORKERS = 8
+DEFAULT_IO_WORKERS = int(os.environ.get("BLOCK01_A9_IO_WORKERS", "8"))   # A9 §31: A/B only
 DEFAULT_COMPUTE_WORKERS = 4
 
 

@@ -62,6 +62,27 @@ def _valid_world_rect(plane) -> Optional[Tuple[float, float, float, float]]:
     return (x0 + vx0 * sx, x0 + vx1 * sx, y0 + vy0 * sy, y0 + vy1 * sy)
 
 
+def _plane_quad_ndc(plane_rect, view_rect, target_size) -> Tuple[float, float, float, float]:
+    """Block A9 §32: the NDC rectangle a plane pass rasterises -- the plane's
+    world rect mapped like the fragment shader maps pixels (x right, world
+    y DOWN the screen), padded by one physical pixel on every side and
+    clamped to the target. Conservative: every pixel whose centre the
+    shader's half-open test would accept lies inside it; the shader still
+    decides each pixel exactly as the fullscreen triangle did."""
+    vx0, vx1, vy0, vy1 = view_rect
+    px0, px1, py0, py1 = plane_rect
+    width, height = target_size
+    sx = 2.0 / max(vx1 - vx0, 1e-12)
+    sy = 2.0 / max(vy1 - vy0, 1e-12)
+    pad_x, pad_y = 2.0 / max(width, 1), 2.0 / max(height, 1)
+    x0 = (px0 - vx0) * sx - 1.0 - pad_x
+    x1 = (px1 - vx0) * sx - 1.0 + pad_x
+    y0 = (vy1 - py1) * sy - 1.0 - pad_y      # world bottom edge -> NDC low
+    y1 = (vy1 - py0) * sy - 1.0 + pad_y
+    clamp = lambda v: min(1.0, max(-1.0, v))  # noqa: E731
+    return clamp(x0), clamp(x1), clamp(y0), clamp(y1)
+
+
 #: Block A9 S2c: the integer formats a raw plane is uploaded in unchanged.
 INTEGER_PLANE_DTYPES = (np.dtype(np.uint8), np.dtype(np.uint16))
 
@@ -357,11 +378,33 @@ class _TextureLru:
             if not (0 <= y0 <= y1 <= values.shape[0] and 0 <= x0 <= x1 <= values.shape[1]):
                 raise Step1GpuLayerError("raw plane valid_rect must lie inside its values")
 
+    def is_resident(self, plane: RawPlane) -> bool:
+        return plane.identity in self.records
+
     @perf_trace.timed("gpu.upload")
-    def prepare(self, gl, planes: Sequence[RawPlane]) -> None:
-        """Make a submitted active set resident or fail before issuing passes."""
+    def prepare(self, gl, planes: Sequence[RawPlane], *, mandatory: Sequence[RawPlane] = (),
+                budget_ms: Optional[float] = None) -> None:
+        """Make a submitted active set resident or fail before issuing passes.
+
+        Block A9 §32 (Odon: upload only what is drawn, a bounded amount per
+        frame). `budget_ms` None uploads everything (the G1 contract). With
+        a budget, every `mandatory` plane (a channel's complete coarse) is
+        still uploaded, and the others only until `budget_ms` has been
+        spent; the rest stay out (`self.deferred` counts them) and are
+        skipped by the passes, which fall back to the coarser planes below
+        them. A plane already resident with the same identity is checked
+        only against its record, not re-validated pixel by pixel.
+        """
+        self.deferred = 0
         required: Dict[Hashable, RawPlane] = {}
+        must = {plane.identity for plane in mandatory}
         for plane in planes:
+            record = self.records.get(plane.identity)
+            if record is not None and plane.identity not in required:
+                if record.world_rect != plane.world_rect:
+                    raise Step1GpuLayerError("resubmitted identity has incompatible raw texture metadata")
+                required[plane.identity] = plane
+                continue
             self._validate_identity(plane)
             previous = required.get(plane.identity)
             if previous is not None:
@@ -369,7 +412,9 @@ class _TextureLru:
                         previous.world_rect != plane.world_rect):
                     raise Step1GpuLayerError("one supplied identity has incompatible raw geometry")
             required[plane.identity] = plane
-        total_required = sum(self.plane_bytes(plane) for plane in required.values())
+        total_required = sum(record.byte_count if record is not None else self.plane_bytes(plane)
+                             for record, plane in ((self.records.get(identity), plane)
+                                                   for identity, plane in required.items()))
         if total_required > self.max_bytes:
             raise Step1GpuLayerError(
                 f"active raw working set {total_required} bytes exceeds cache budget {self.max_bytes}"
@@ -382,8 +427,9 @@ class _TextureLru:
                 if (record.byte_count != expected or record.height != shape[0] or
                         record.width != shape[1] or record.world_rect != plane.world_rect):
                     raise Step1GpuLayerError("resubmitted identity has incompatible raw texture metadata")
-        missing_bytes = sum(self.plane_bytes(plane) for identity, plane in required.items()
-                            if identity not in self.records)
+        missing = [(identity, plane) for identity, plane in required.items()
+                   if identity not in self.records]
+        missing_bytes = sum(self.plane_bytes(plane) for _identity, plane in missing)
         while self.bytes + missing_bytes > self.max_bytes:
             victim = next((identity for identity in self.records if identity not in required), None)
             if victim is None:
@@ -392,10 +438,17 @@ class _TextureLru:
             gl.glDeleteTextures([record.texture])
             self.bytes -= record.byte_count
             self.evictions += 1
-        for identity, plane in required.items():
+        for identity in required:
             if identity in self.records:
                 self.records.move_to_end(identity)
                 self.hits += 1
+        # mandatory first, then the rest in the order given (coarse -> fine)
+        missing.sort(key=lambda item: item[0] not in must)
+        started = time.perf_counter()
+        for identity, plane in missing:
+            if (budget_ms is not None and identity not in must and
+                    (time.perf_counter() - started) * 1000.0 >= budget_ms):
+                self.deferred += 1
                 continue
             self.misses += 1
             integer = _is_integer_plane(plane)
@@ -560,6 +613,63 @@ def _as_name(value) -> int:
     return int(value)
 
 
+class _GlTimer:
+    """A9 §32 measurement only (`BLOCK01_A9_GLPROF=1`): wall time per GL
+    function, reported by `gpu.glprof` after each composition."""
+
+    def __init__(self, gl):
+        self._real = gl
+        self.totals = collections.Counter()
+        self.calls = collections.Counter()
+
+    def __getattr__(self, name):
+        value = getattr(self._real, name)
+        if not callable(value) or not name.startswith("gl"):
+            return value
+
+        def timed(*args, **kwargs):
+            started = time.perf_counter()
+            try:
+                return value(*args, **kwargs)
+            finally:
+                self.totals[name] += time.perf_counter() - started
+                self.calls[name] += 1
+        return timed
+
+    def report(self, where):
+        top = self.totals.most_common(4)
+        perf_trace.mark("gpu.glprof", where=where, **{
+            name: f"{seconds * 1000:.2f}/{self.calls[name]}" for name, seconds in top})
+        self.totals.clear()
+        self.calls.clear()
+
+
+def configure_pyopengl() -> None:
+    """Block A9 §32: PROCESS-WIDE PyOpenGL policy, set before `OpenGL.GL`
+    is first imported (later it has no effect). Automatic error checking
+    calls glGetError after EVERY GL call -- each one a further GIL release
+    and re-acquire on the GUI thread while tile readers run. It is off;
+    this layer's explicit `_check_gl` checkpoints (setup, uploads,
+    submissions, readback) still raise. `BLOCK01_GL_CHECK=1` keeps
+    PyOpenGL's own checking on, for diagnosis."""
+    import OpenGL
+    if os.environ.get("BLOCK01_GL_CHECK") != "1":
+        OpenGL.ERROR_CHECKING = False
+    if os.environ.get("BLOCK01_GL_KEEP_GIL", "1") != "0":
+        # GL CALLS KEEP THE GIL. ctypes' ordinary function type releases
+        # the GIL around every call and re-acquires it afterwards; with the
+        # tile readers running, each re-acquisition waited in line behind
+        # them -- measured on Kevin: 18 glDisable calls 17 ms, a 21-pass
+        # composition 27-70 ms instead of 3-4 ms. A GL call on this thread
+        # is microseconds of driver work: holding the GIL through it costs
+        # the readers nothing they would notice. PyOpenGL builds every
+        # function with `functionTypeFor(dll)`, which honours the
+        # library's `FunctionType`; set before `OpenGL.GL` is imported.
+        import ctypes
+        from OpenGL import platform as gl_platform
+        gl_platform.PLATFORM.GL.FunctionType = ctypes.PYFUNCTYPE
+
+
 def _check_gl(gl, operation: str) -> None:
     error = gl.glGetError()
     if error != gl.GL_NO_ERROR:
@@ -624,6 +734,14 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         self._attached_view = None
         self._attached_viewport = None
         self._attached_range = None
+        #: Block A9 §32 (Odon: the picture follows the camera every frame):
+        #: the last submitted scene, the world rect it was composed for,
+        #: and whether the attached camera has moved since.
+        self._scene = None
+        self._composed_rect = None
+        self._camera_dirty = False
+        #: Block A9 §32: per-submission upload time budget (None: no limit)
+        self.upload_budget_ms: Optional[float] = None
         fmt = QtGui.QSurfaceFormat()
         fmt.setRenderableType(QtGui.QSurfaceFormat.OpenGL)
         fmt.setVersion(3, 3)
@@ -668,71 +786,136 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
     @perf_trace.timed("gpu.submit")
     def submit(self, source_descriptor: SourceDescriptor, display_snapshot: DisplaySnapshot,
                viewport_snapshot: ViewportSnapshot) -> Dict[str, Any]:
-        """Synchronously render caller-provided snapshots; no I/O or CPU fallback."""
+        """Synchronously render caller-provided snapshots; no I/O or CPU fallback.
+
+        Block A9 §32: the layer's `upload_budget_ms` bounds each call's
+        texture uploads (None, the default: everything, the G1 contract; the
+        Step1 binding sets it); `deferred_uploads` in the result says how
+        many planes were left for a later submission."""
         self._validate_snapshots(source_descriptor, display_snapshot, viewport_snapshot)
         own_current = QtGui.QOpenGLContext.currentContext() is not self.context()
         if own_current:
             self.makeCurrent()
         try:
             self._require_ready()
-            submit_started = time.perf_counter()
-            gl = self._gl
-            self._ensure_targets(viewport_snapshot.physical_size)
-            self._submission = {"pass_count": 0}
-            by_channel = source_descriptor.by_channel()
-            mode = display_snapshot.mode
-            if mode == MODE_OVERLAY:
-                active, missing = self._overlay_active(by_channel, display_snapshot)
-                with perf_trace.span("gpu.prepare"):
-                    self._cache.prepare(gl, [plane for source in active.values() for plane in source.selected_planes()])
-                with perf_trace.span("gpu.render", mode="overlay", channels=len(active)):
-                    self._render_overlay(active, display_snapshot, viewport_snapshot)
-                composed = dict(active)
-            elif mode == MODE_FUSION:
-                active_groups, active_nucleus, missing = self._fusion_active(by_channel, display_snapshot)
-                planes = []
-                for sources in active_groups.values():
-                    for source in sources.values():
-                        planes.extend(source.selected_planes())
-                if active_nucleus is not None:
-                    planes.extend(active_nucleus.selected_planes())
-                with perf_trace.span("gpu.prepare"):
-                    self._cache.prepare(gl, planes)
-                with perf_trace.span("gpu.render", mode="fusion", planes=len(planes)):
-                    self._render_fusion(active_groups, active_nucleus, display_snapshot, viewport_snapshot)
-                composed = {ch: src for sources in active_groups.values()
-                            for ch, src in sources.items()}
-                if active_nucleus is not None:
-                    composed[active_nucleus.channel] = active_nucleus
-            else:
-                raise Step1GpuLayerError(f"unknown display mode {mode!r}")
-            if perf_trace.enabled():
-                self._a9_note_submission(composed, display_snapshot, viewport_snapshot)
-            if self._labels_enabled:
-                # THE SAME SUBMISSION, THE SAME VIEW: the mask is drawn over
-                # the picture it belongs to, never a frame behind it.
-                self._label_counts["image_submissions"] += 1
-                self._last_viewport = viewport_snapshot
-                self._compose_labels()
-            self._submission = {
-                "mode": mode,
-                "missing_windows": tuple(missing),
-                "pass_count": int(self._submission.get("pass_count", 0)),
-                "cpu_submit_ms": (time.perf_counter() - submit_started) * 1000.0,
-                "cache": self._cache.stats(),
-                "physical_size": viewport_snapshot.physical_size,
-                "roi_scissor": self._submission.get("roi_scissor"),
-                "roi_polygon_points": self._submission.get("roi_polygon_points", 0),
-                "roi_polygon_error": self._submission.get("roi_polygon_error", ""),
-            }
+            result = self._compose(source_descriptor, display_snapshot, viewport_snapshot,
+                                   upload=True, upload_budget_ms=self.upload_budget_ms)
+            self._scene = (source_descriptor, display_snapshot, viewport_snapshot)
+            self._camera_dirty = False
             if callable(viewport_snapshot.repaint_request):
                 viewport_snapshot.repaint_request()
             self.update()
-            _check_gl(gl, "G1 submission")
-            return dict(self._submission)
+            return result
         finally:
             if own_current:
                 self.doneCurrent()
+
+    def is_resident(self, plane: RawPlane) -> bool:
+        """Is this plane's texture on the GPU (drawable now)?"""
+        return self._cache.is_resident(plane)
+
+    def _visible_drawn(self, source: ChannelSource, view_rect) -> ChannelSource:
+        """Block A9 §32 (Odon: draw list culled to the view): the planes of
+        `source` that are resident AND meet the view. What is skipped is
+        exactly what could not have put a pixel on screen, or what has no
+        texture yet (a coarser plane under it still draws)."""
+        vx0, vx1, vy0, vy1 = view_rect
+
+        def keep(plane):
+            x0, x1, y0, y1 = plane.world_rect
+            return (x1 > vx0 and x0 < vx1 and y1 > vy0 and y0 < vy1
+                    and self._cache.is_resident(plane))
+        coarse = tuple(plane for plane in source.coarse if keep(plane))
+        fine = tuple(plane for plane in source.fine if keep(plane))
+        if len(coarse) == len(source.coarse) and len(fine) == len(source.fine):
+            return source
+        return dataclasses.replace(source, coarse=coarse, fine=fine)
+
+    def _compose(self, source_descriptor: SourceDescriptor, display_snapshot: DisplaySnapshot,
+                 viewport_snapshot: ViewportSnapshot, *, upload: bool,
+                 upload_budget_ms: Optional[float] = None) -> Dict[str, Any]:
+        """Compose one picture into `final` (and `shown`) with this context
+        current. `upload` False (a camera-only repaint from `paintGL`)
+        uploads nothing: it draws what is resident."""
+        submit_started = time.perf_counter()
+        gl = self._gl
+        self._ensure_targets(viewport_snapshot.physical_size)
+        self._submission = {"pass_count": 0}
+        by_channel = source_descriptor.by_channel()
+        mode = display_snapshot.mode
+        view_rect = viewport_snapshot.world_rect
+        deferred = 0
+
+        def prepare(active_sources):
+            nonlocal deferred
+            if not upload:
+                return
+            planes = [plane for source in active_sources for plane in source.selected_planes()]
+            mandatory = [plane for source in active_sources for plane in source.coarse]
+            with perf_trace.span("gpu.prepare"):
+                self._cache.prepare(gl, planes, mandatory=mandatory,
+                                    budget_ms=upload_budget_ms)
+            deferred = int(getattr(self._cache, "deferred", 0))
+
+        if mode == MODE_OVERLAY:
+            active, missing = self._overlay_active(by_channel, display_snapshot)
+            prepare(list(active.values()))
+            active = {ch: self._visible_drawn(src, view_rect) for ch, src in active.items()}
+            active = {ch: src for ch, src in active.items() if src.selected_planes()}
+            with perf_trace.span("gpu.render", mode="overlay", channels=len(active)):
+                self._render_overlay(active, display_snapshot, viewport_snapshot)
+            composed = dict(active)
+        elif mode == MODE_FUSION:
+            active_groups, active_nucleus, missing = self._fusion_active(by_channel, display_snapshot)
+            sources = [src for group in active_groups.values() for src in group.values()]
+            if active_nucleus is not None:
+                sources.append(active_nucleus)
+            prepare(sources)
+            active_groups = {
+                group: {ch: drawn for ch, drawn in ((ch, self._visible_drawn(src, view_rect))
+                                                    for ch, src in members.items())
+                        if drawn.selected_planes()}
+                for group, members in active_groups.items()}
+            active_groups = {group: members for group, members in active_groups.items() if members}
+            if active_nucleus is not None:
+                active_nucleus = self._visible_drawn(active_nucleus, view_rect)
+                if not active_nucleus.selected_planes():
+                    active_nucleus = None
+            planes = sum(len(src.selected_planes()) for group in active_groups.values()
+                         for src in group.values())
+            with perf_trace.span("gpu.render", mode="fusion", planes=planes):
+                self._render_fusion(active_groups, active_nucleus, display_snapshot, viewport_snapshot)
+            composed = {ch: src for group in active_groups.values()
+                        for ch, src in group.items()}
+            if active_nucleus is not None:
+                composed[active_nucleus.channel] = active_nucleus
+        else:
+            raise Step1GpuLayerError(f"unknown display mode {mode!r}")
+        if perf_trace.enabled():
+            self._a9_note_submission(composed, display_snapshot, viewport_snapshot)
+        if self._labels_enabled:
+            # THE SAME SUBMISSION, THE SAME VIEW: the mask is drawn over
+            # the picture it belongs to, never a frame behind it.
+            self._label_counts["image_submissions"] += 1
+            self._last_viewport = viewport_snapshot
+            self._compose_labels()
+        self._composed_rect = view_rect
+        self._submission = {
+            "mode": mode,
+            "missing_windows": tuple(missing),
+            "pass_count": int(self._submission.get("pass_count", 0)),
+            "cpu_submit_ms": (time.perf_counter() - submit_started) * 1000.0,
+            "cache": self._cache.stats(),
+            "physical_size": viewport_snapshot.physical_size,
+            "roi_scissor": self._submission.get("roi_scissor"),
+            "roi_polygon_points": self._submission.get("roi_polygon_points", 0),
+            "roi_polygon_error": self._submission.get("roi_polygon_error", ""),
+            "deferred_uploads": deferred,
+        }
+        _check_gl(gl, "G1 submission")
+        if isinstance(gl, _GlTimer):
+            gl.report("upload" if upload else "camera")
+        return dict(self._submission)
 
     def readback_rgba_for_test(self) -> np.ndarray:
         """Return the final RGBA8 FBO, flipped once to C1 top-left rows."""
@@ -856,6 +1039,8 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             return {"already_disposed": True, "raw_textures_remaining": 0,
                     "transient_targets_remaining": 0, "cache_bytes": 0, "threads_created": 0}
         self._disconnect_attachment()
+        self._scene = None
+        self._camera_dirty = False
         if self.context() is not None and self.context().isValid():
             self.makeCurrent()
             try:
@@ -887,9 +1072,12 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             return
         try:
             with perf_trace.span("gpu.init.import"):
+                configure_pyopengl()
                 from OpenGL import GL
                 import OpenGL
             self._gl = GL
+            if os.environ.get("BLOCK01_A9_GLPROF") == "1":     # A9 §32 measurement only
+                self._gl = _GlTimer(GL)
             actual = context.format()
             renderer = _decode(GL.glGetString(GL.GL_RENDERER))
             vendor = _decode(GL.glGetString(GL.GL_VENDOR))
@@ -952,7 +1140,8 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             # presentation marked, but not probed -- the probe's own cost
             # grows with the plane count and dominated 69-channel frames
             self._a9_frame += 1
-            self._a9_pending = (self._a9_frame, {"probe": "off"})
+            self._a9_pending = (self._a9_frame, {"probe": "off"},
+                                getattr(self, "_a9_input_seq", None))
             return
         started = time.perf_counter()
         try:
@@ -966,20 +1155,29 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         except Exception as exc:                            # noqa: BLE001 -- measuring only
             result = {"error": str(exc)[:120]}
         self._a9_frame += 1
-        self._a9_pending = (self._a9_frame, result)
+        self._a9_pending = (self._a9_frame, result, getattr(self, "_a9_input_seq", None))
 
     def _a9_presented(self) -> None:
         pending, self._a9_pending = self._a9_pending, None
         if pending is None:
             return
-        frame, result = pending
-        perf_trace.mark("gpu.present", frame=frame)
+        frame, result, seq = pending
+        # §30 F6: `seq` = how many received wheel notches this frame includes
+        perf_trace.mark("gpu.present", frame=frame, seq=seq)
         coverage_probe.publish(result, "gpu", frame)
 
     @perf_trace.timed("gpu.paint")
     def paintGL(self) -> None:  # noqa: N802
         if not self._initialized or self._target_size is None:
             return
+        if not self._camera_dirty and self._scene is not None and self._attached_range is not None:
+            # A9 §32 (codex): a new size or pixel ratio alone also needs a
+            # composition at that size -- not the old one stretched
+            live = self._live_viewport()
+            if live is not None and live.physical_size != self._target_size:
+                self._camera_dirty = True
+        if self._camera_dirty:
+            self._recompose_for_camera()
         gl = self._gl
         final_fbo, final_texture = self._targets["shown" if self._shown_ready else "final"]
         gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, final_fbo)
@@ -1102,9 +1300,14 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         for plane in source.selected_planes():
             program = "source_uint" if self._cache.is_integer(plane) else "source"
             if program != current:
+                if current is not None:
+                    self._uniform1i(current, "u_quad", 0)
                 gl.glUseProgram(self._programs[program])
                 self._uniform4(program, "u_view_rect", viewport.world_rect)
                 self._uniform3(program, "u_mapping", mapping)
+                gl.glUniform2f(self._uniform_location(program, "u_target_size"),
+                               float(self._target_size[0]), float(self._target_size[1]))
+                self._uniform1i(program, "u_quad", 1)
                 current = program
             if program == "source_uint":
                 valid = _valid_world_rect(plane)
@@ -1115,7 +1318,12 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             gl.glBindTexture(gl.GL_TEXTURE_2D, self._cache.texture_for(plane))
             self._uniform1i(program, "u_raw", 0)
             self._uniform4(program, "u_plane_rect", plane.world_rect)
-            self._draw()
+            self._uniform4(program, "u_quad_ndc",
+                           _plane_quad_ndc(plane.world_rect, viewport.world_rect, self._target_size))
+            self._draw(vertices=6)
+        if current is not None:
+            # programs keep uniforms: leave the default fullscreen geometry
+            self._uniform1i(current, "u_quad", 0)
         gl.glUseProgram(0)
 
     def _contribute(self, target: str, weight: float, color: Tuple[float, float, float], component: int,
@@ -1225,9 +1433,9 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                     self._submission["roi_scissor"] = tuple(scissor)
         _check_gl(gl, f"G1 {program}")
 
-    def _draw(self) -> None:
+    def _draw(self, vertices: int = 3) -> None:
         self._gl.glBindVertexArray(self._vao)
-        self._gl.glDrawArrays(self._gl.GL_TRIANGLES, 0, 3)
+        self._gl.glDrawArrays(self._gl.GL_TRIANGLES, 0, int(vertices))
         self._gl.glBindVertexArray(0)
         self._submission["pass_count"] = int(self._submission.get("pass_count", 0)) + 1
 
@@ -1587,6 +1795,36 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
     def _attached_range_changed(self, _view_box, ranges) -> None:
         self._attached_range = (float(ranges[0][0]), float(ranges[0][1]),
                                 float(ranges[1][0]), float(ranges[1][1]))
+        # Block A9 §32 (Odon app.rs: input moves the camera, the next frame
+        # draws it): the picture follows NOW, from what is resident --
+        # planning and uploads come later, from the binding.
+        if self._scene is not None and self._attached_range != self._composed_rect:
+            self._camera_dirty = True
+            self.update()
+
+    def _live_viewport(self) -> Optional[ViewportSnapshot]:
+        """The last submitted viewport moved to the attached camera, at the
+        widget's current size."""
+        if self._scene is None or self._attached_range is None:
+            return None
+        viewport = self._scene[2]
+        ratio = float(self.devicePixelRatioF()) or 1.0
+        return dataclasses.replace(viewport, world_rect=self._attached_range,
+                                   logical_size=(max(1, int(self.width())), max(1, int(self.height()))),
+                                   device_pixel_ratio=ratio, repaint_request=None)
+
+    def _recompose_for_camera(self) -> None:
+        """paintGL's camera-only composition (context current)."""
+        self._camera_dirty = False
+        viewport = self._live_viewport()
+        if viewport is None or self._disposed:
+            return
+        descriptor, display, _old = self._scene
+        try:
+            with perf_trace.span("gpu.camera_frame"):
+                self._compose(descriptor, display, viewport, upload=False)
+        except Step1GpuLayerError as exc:
+            perf_trace.mark("gpu.camera_frame_failed", error=str(exc)[:120].replace(" ", "_"))
 
     def _sync_attached_geometry(self, *_args) -> None:
         """Cover exactly the ViewBox (block A1, C1).

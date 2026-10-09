@@ -44,6 +44,8 @@ class GpuWarmup(QtCore.QObject):
         ok = True
         with perf_trace.span("gpu.warm.import"):
             try:
+                from .step1_gpu_layer import configure_pyopengl
+                configure_pyopengl()        # before the first OpenGL.GL import
                 from OpenGL import GL  # noqa: F401
             except Exception:                               # noqa: BLE001
                 ok = False

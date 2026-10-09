@@ -37,6 +37,17 @@ _OME_NS = {"ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"}
 _HANDLE_MODES = ("per_call", "per_thread", "shared_lock")
 
 
+class _ChunkPlan:
+    """One pyramid level's tile table for direct reads (block A9 §32)."""
+
+    __slots__ = ("tile", "across", "height", "width", "dtype", "decode",
+                 "predictor", "offsets", "counts")
+
+    def __init__(self, **fields):
+        for name, value in fields.items():
+            setattr(self, name, value)
+
+
 class RawTileProvider:
     """Reads float32 tiles/regions from an OME-TIFF pyramid on demand."""
 
@@ -72,6 +83,15 @@ class RawTileProvider:
         self._shared_levels: Dict[int, object] = {}
 
         self._closed = False
+        # Block A9 §32 (Odon xenium/tiff_pyramid.rs:1293: decode the file's
+        # own tile): per level, None = not built yet, False = this level is
+        # read through zarr, else a `_ChunkPlan`. Built once per level
+        # under `_chunk_lock`; `_chunk_fd` is one read-only descriptor that
+        # every thread `pread`s from (positioned reads share no offset).
+        self._chunk_plans: Dict[int, object] = {}
+        self._chunk_lock = threading.Lock()
+        self._chunk_fd = None
+        self._direct_tiles = os.environ.get("BLOCK01_DIRECT_TILES", "1") != "0"
         # Computed on first use and never recomputed -- see
         # `source_identity`. Threads may race to build it; the value is
         # identical either way, so no lock is needed.
@@ -199,6 +219,110 @@ class RawTileProvider:
 
     # ── pixel reads ──────────────────────────────────────────────────────
 
+    # ── direct chunk reads (block A9 §32) ───────────────────────────────
+
+    def _direct_plan(self, level: int, tf=None):
+        """The level's `_ChunkPlan`, or None when it is read through zarr.
+
+        WHY: a 512x512 uint8 LZW tile through tifffile's zarr store costs
+        ~11 ms of mostly Python (GIL held) on Kevin's qptiff; reading the
+        tile's bytes with `os.pread` and decoding them with imagecodecs
+        (both release the GIL) costs ~1.8 ms and returns the same array.
+        Eight reader threads holding the GIL starved the GUI thread's GL
+        calls during every zoom across a level (render 4 -> 50-70 ms).
+        Only the simple, common layout is taken: tiled, one sample, one
+        page per channel, LZW / Deflate / Zstd / none, predictor none or
+        horizontal. Anything else keeps the zarr path, as before.
+        `BLOCK01_DIRECT_TILES=0` turns the direct path off."""
+        plan = self._chunk_plans.get(level)
+        if plan is None:
+            with self._chunk_lock:
+                plan = self._chunk_plans.get(level)
+                if plan is None:
+                    plan = self._build_chunk_plan(level, tf)
+                    self._chunk_plans[level] = plan
+        return plan or None
+
+    def _build_chunk_plan(self, level: int, tf=None):
+        if not self._direct_tiles or self._closed:
+            return False
+        try:
+            import imagecodecs
+            if tf is None:
+                tf, _levels = self._per_thread_state()
+            series = tf.series[0]
+            if str(series.axes) != "CYX" or level >= len(series.levels):
+                return False
+            # a TiffFrame (tifffile's light page) carries offsets but not
+            # the tags checked below: `aspage()` reads the full page once
+            pages = [page.aspage() if hasattr(page, "aspage") else page
+                     for page in series.levels[level].pages]
+            if len(pages) != self._num_channels:
+                return False
+            decoders = {1: None, 5: imagecodecs.lzw_decode, 8: imagecodecs.zlib_decode,
+                        32946: imagecodecs.zlib_decode, 50000: imagecodecs.zstd_decode}
+            first = pages[0]
+            tile = (int(first.tilelength), int(first.tilewidth))
+            dtype = np.dtype(first.dtype).newbyteorder(tf.byteorder)
+            if dtype.kind not in "uif" or not first.is_tiled:
+                return False
+            offsets, counts = [], []
+            for page in pages:
+                if (not page.is_tiled or int(page.samplesperpixel) != 1
+                        or (int(page.tilelength), int(page.tilewidth)) != tile
+                        or int(page.compression) != int(first.compression)
+                        or int(page.predictor) != int(first.predictor)
+                        or int(getattr(page, "tiledepth", 1) or 1) != 1
+                        or int(getattr(page, "fillorder", 1) or 1) != 1
+                        or np.dtype(page.dtype) != np.dtype(first.dtype)
+                        # packed samples (e.g. 12-bit in uint16) are not
+                        # full-width words: only whole-byte storage is read
+                        or int(page.bitspersample) != np.dtype(page.dtype).itemsize * 8
+                        or tuple(page.shape[-2:]) != tuple(self._level_shapes[level][-2:])):
+                    return False
+                offsets.append(np.asarray(page.dataoffsets, np.int64))
+                counts.append(np.asarray(page.databytecounts, np.int64))
+            compression, predictor = int(first.compression), int(first.predictor)
+            if compression not in decoders or predictor not in (1, 2):
+                return False
+            if self._chunk_fd is None:
+                self._chunk_fd = os.open(self.path, os.O_RDONLY)
+            height, width = self._level_shapes[level][-2:]
+            return _ChunkPlan(tile=tile, across=-(-int(width) // tile[1]),
+                              height=int(height), width=int(width), dtype=dtype,
+                              decode=decoders[compression], predictor=predictor,
+                              offsets=offsets, counts=counts)
+        except Exception:                                    # noqa: BLE001 -- zarr stays
+            return False
+
+    def _direct_read(self, plan, c: int, y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
+        import imagecodecs
+
+        th, tw = plan.tile
+        # an inverted region is empty, exactly as a zarr slice [10:5] is
+        out = np.empty((max(0, y1 - y0), max(0, x1 - x0)), plan.dtype.newbyteorder("="))
+        if out.size == 0:
+            return out
+        for ty in range(y0 // th, -(-y1 // th) if y1 > y0 else y0 // th):
+            for tx in range(x0 // tw, -(-x1 // tw) if x1 > x0 else x0 // tw):
+                index = ty * plan.across + tx
+                count = int(plan.counts[c][index])
+                if count <= 0:
+                    tile = np.zeros((th, tw), out.dtype)     # an empty tile is zeros
+                else:
+                    raw = os.pread(self._chunk_fd, count, int(plan.offsets[c][index]))
+                    if plan.decode is not None:
+                        raw = plan.decode(raw)
+                    tile = np.frombuffer(raw, plan.dtype, count=th * tw).reshape(th, tw)
+                    if plan.predictor == 2:
+                        tile = imagecodecs.delta_decode(tile, axis=-1)
+                ty0, tx0 = ty * th, tx * tw
+                sy0, sy1 = max(y0, ty0), min(y1, ty0 + th)
+                sx0, sx1 = max(x0, tx0), min(x1, tx0 + tw)
+                out[sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0] = tile[sy0 - ty0:sy1 - ty0,
+                                                                 sx0 - tx0:sx1 - tx0]
+        return out
+
     def _open_level_array(self, tf, level: int):
         import zarr
 
@@ -293,6 +417,12 @@ class RawTileProvider:
             for level in levels:
                 if level not in level_arrays:
                     level_arrays[level] = self._open_level_array(tf, level)
+            # Block A9 §32: every level's direct-read table is built here,
+            # at warm-up, not on the first read of that level -- building
+            # level 0's (69 pages x 6138 tiles on Kevin) held the GIL ~85 ms
+            # in the middle of a zoom. One thread builds; the others find it.
+            for level in range(len(self._level_shapes)):
+                self._direct_plan(level, tf)
             return True
         except Exception:
             return False
@@ -319,6 +449,14 @@ class RawTileProvider:
                     pass
                 self._shared_tf = None
                 self._shared_levels.clear()
+        with self._chunk_lock:
+            if self._chunk_fd is not None:
+                try:
+                    os.close(self._chunk_fd)
+                except OSError:
+                    pass
+                self._chunk_fd = None
+            self._chunk_plans.clear()
 
     def read_tile(self, channel, tile: TileAddress):
         """Return (2D array in NATIVE source dtype, io_ms).
@@ -383,6 +521,9 @@ class RawTileProvider:
             with self._counted_tifffile(tifffile, self.path) as tf:
                 zarr_arr = self._open_level_array(tf, level)
                 data = np.asarray(zarr_arr[c, cy0:cy1, cx0:cx1])
+
+        elif self.handle_mode == "per_thread" and self._direct_plan(level) is not None:
+            data = self._direct_read(self._chunk_plans[level], c, cy0, cy1, cx0, cx1)
 
         elif self.handle_mode == "per_thread":
             tf, levels = self._per_thread_state()

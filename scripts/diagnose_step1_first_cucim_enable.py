@@ -343,7 +343,7 @@ def measure_tick(rig, ledger, heart, paints, channel, label, timeout=180.0):
     binding = mount.gpu_binding
     layer = mount.gpu_layer
     uploads_before = layer.cache_stats().get("uploads", 0)
-    submits_before = len(binding.descriptor_history)
+    submits_before = binding.publication_count
     paints_before = len(paints.stamps)
     stats_before = binding.stats()
     ledger.reset_marks()
@@ -380,7 +380,7 @@ def measure_tick(rig, ledger, heart, paints, channel, label, timeout=180.0):
             upload_at = time.perf_counter()
             mark("first_texture_upload", upload_at)
         if submit_at is None and \
-                len(binding.descriptor_history) > submits_before:
+                binding.publication_count > submits_before:
             submit_at = time.perf_counter()
             mark("first_gpu_submit", submit_at)
         if coarse_at is not None and binding._viewport_fine_ready(channel):
@@ -449,7 +449,7 @@ def measure_tick(rig, ledger, heart, paints, channel, label, timeout=180.0):
             "raw_cache_hits": sum(1 for _t, _k, hit in cache_gets if hit),
             "raw_cache_misses": sum(1 for _t, _k, hit in cache_gets if not hit),
             "gpu_uploads": layer.cache_stats().get("uploads", 0) - uploads_before,
-            "gpu_submits": len(binding.descriptor_history) - submits_before,
+            "gpu_submits": binding.publication_count - submits_before,
             "rejected_late_results": stats_after["rejected_late_results"]
                                      - stats_before["rejected_late_results"],
         },

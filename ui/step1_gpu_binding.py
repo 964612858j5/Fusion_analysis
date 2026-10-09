@@ -56,7 +56,7 @@ from .step1_gpu_layer import (
 #: Block A9-O2: the frame slot landed results are published on (~60 Hz).
 PUBLISH_FRAME_MS = 16.0
 #: Block A9 §32: publications the binding remembers (see `_descriptor_history`)
-HISTORY_LIMIT = 64
+HISTORY_LIMIT = 8
 #: Block A9 §32 (Odon: bounded work per frame): texture upload time one
 #: publication may spend; the rest is uploaded by the next publication(s),
 #: one frame slot later, while coarser planes stand in.
@@ -462,6 +462,8 @@ class Step1GpuBinding(QtCore.QObject):
         self._paused = True
         self._motion_timer.stop()
         self._disconnect_controller()
+        if hasattr(self.layer, "hidden"):
+            self.layer.hidden = True          # A9 §36: may give textures back
         return True
 
     def resume(self) -> bool:
@@ -476,6 +478,10 @@ class Step1GpuBinding(QtCore.QObject):
             return False
         self._forget_display()
         self._paused = False
+        if hasattr(self.layer, "hidden"):
+            self.layer.hidden = False
+            from . import gpu_memory
+            gpu_memory.on_layer_active(self.layer)
         self._connect_controller()
         if self._source_pending:
             self._source_pending = False
@@ -1302,6 +1308,10 @@ class Step1GpuBinding(QtCore.QObject):
     def _publish_current(self) -> None:
         if self._disposed or self._source is None:
             return
+        if self._paused:
+            # A9 §36: a hidden viewer draws nothing; `resume()` publishes
+            self._publish_due = False
+            return
         # Whatever is due rides this publish: it reads every applied plane.
         self._publish_due = False
         self._publish_timer.stop()
@@ -1618,15 +1628,15 @@ class Step1GpuBinding(QtCore.QObject):
     def _cost_bytes(self, plane: RawPlane) -> int:
         """A submitted plane's texture cost: its slot in array mode
         (A9 §35: cached per plane object -- planes are immutable)."""
-        cache = self.__dict__.setdefault("_cost_cache", {})
-        key = (id(plane), self._slot_mode)
-        hit = cache.get(key)
-        if hit is not None and hit[0] is plane:
+        cache = self.__dict__.get("_cost_cache")
+        if cache is None:
+            from .step1_gpu_layer import ObjectCache
+            cache = self._cost_cache = ObjectCache()
+        hit = cache.get(plane)
+        if hit is not None and hit[0] == self._slot_mode:
             return hit[1]
         cost = self._cost_bytes_uncached(plane)
-        if len(cache) > 200000:
-            cache.clear()
-        cache[key] = (plane, cost)
+        cache.set(plane, (self._slot_mode, cost))
         return cost
 
     def _cost_bytes_uncached(self, plane: RawPlane) -> int:

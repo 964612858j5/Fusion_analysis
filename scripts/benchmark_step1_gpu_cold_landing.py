@@ -388,7 +388,7 @@ def measure_action(rig, ledger, heart, paints, label, kind, run):
     binding = rig.mount.gpu_binding
     layer = rig.mount.gpu_layer
     uploads_before = layer.cache_stats().get("uploads", 0)
-    submits_before = len(binding.descriptor_history)
+    submits_before = binding.publication_count
     stats_before = binding.stats()
     paints_before = len(paints.stamps)
     ledger.reset_marks()
@@ -425,7 +425,7 @@ def measure_action(rig, ledger, heart, paints, label, kind, run):
             first_upload_at = time.perf_counter()
             mark("first_raw_texture_upload", first_upload_at)
         if first_submit_at is None and \
-                len(binding.descriptor_history) > submits_before:
+                binding.publication_count > submits_before:
             first_submit_at = time.perf_counter()
             mark("first_gpu_submit", first_submit_at)
         coarse_now = set(binding.stats()["coarse_channels"])
@@ -518,7 +518,7 @@ def measure_action(rig, ledger, heart, paints, label, kind, run):
             "raw_cache_hits": sum(1 for _t, _k, hit in cache_gets if hit),
             "raw_cache_misses": sum(1 for _t, _k, hit in cache_gets if not hit),
             "gpu_uploads": layer.cache_stats().get("uploads", 0) - uploads_before,
-            "gpu_submits": len(binding.descriptor_history) - submits_before,
+            "gpu_submits": binding.publication_count - submits_before,
             "rejected_late_results":
                 stats_after["rejected_late_results"]
                 - stats_before["rejected_late_results"],

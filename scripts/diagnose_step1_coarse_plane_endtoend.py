@@ -87,7 +87,7 @@ def one_run(with_plane, round_index, ledger):
     counted = count_level0_reads(table, CHANNEL)
 
     uploads0 = layer.cache_stats().get("uploads", 0)
-    submits0 = len(binding.descriptor_history)
+    submits0 = binding.publication_count
     paints0 = len(paints.stamps)
     ledger.reset_marks()
     heart.reset()
@@ -161,7 +161,7 @@ def one_run(with_plane, round_index, ledger):
         "provider_reads_corrected": len(corrected_reads),
         "requests": len(requests),
         "gpu_uploads": layer.cache_stats().get("uploads", 0) - uploads0,
-        "gpu_submits": len(binding.descriptor_history) - submits0,
+        "gpu_submits": binding.publication_count - submits0,
         **after,
     }
     heart.stop()

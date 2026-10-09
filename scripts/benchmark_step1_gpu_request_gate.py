@@ -437,7 +437,7 @@ def measure(window, mount, ledger, heart, paints, work, label, kind, arg,
     layer = mount.gpu_layer
     uploads0 = layer.cache_stats().get("uploads", 0)
     bytes0 = layer.cache_stats().get("bytes", 0)
-    submits0 = len(binding.descriptor_history)
+    submits0 = binding.publication_count
     stats0 = binding.stats()
     paints0 = len(paints.stamps)
     work0 = work.snapshot()
@@ -476,7 +476,7 @@ def measure(window, mount, ledger, heart, paints, work, label, kind, arg,
             first_upload = time.perf_counter()
             mark("T10_first_raw_texture_upload", first_upload)
         if first_submit is None and \
-                len(binding.descriptor_history) > submits0:
+                binding.publication_count > submits0:
             first_submit = time.perf_counter()
             mark("T10b_first_gpu_submit", first_submit)
         if ready_at is None and ready():
@@ -578,7 +578,7 @@ def measure(window, mount, ledger, heart, paints, work, label, kind, arg,
             "gpu_uploads": layer.cache_stats().get("uploads", 0) - uploads0,
             "gpu_texture_bytes_delta":
                 layer.cache_stats().get("bytes", 0) - bytes0,
-            "gpu_submits": len(binding.descriptor_history) - submits0,
+            "gpu_submits": binding.publication_count - submits0,
             "rejected_late_results": (stats1["rejected_late_results"]
                                       - stats0["rejected_late_results"]),
             "cancelled_requests": sum(1 for r in requests

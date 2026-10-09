@@ -1102,7 +1102,7 @@ def test_a_display_only_change_still_asks_for_nothing_after_the_release(app):
         _deliver_all(app, scheduler, scheduler.requests[marker:],
                      value=np.full((4, 4), 0.9, np.float32))
         before = len(scheduler.requests)
-        submissions = len(binding.descriptor_history)
+        submissions = binding.publication_count
 
         # Same channels, different numbers: a weight and a window.
         display_holder[0] = dataclasses_replace(
@@ -1114,7 +1114,7 @@ def test_a_display_only_change_still_asks_for_nothing_after_the_release(app):
         binding.refresh_display()
         _events(app)
         assert len(scheduler.requests) == before, "a display change asked for tiles"
-        assert len(binding.descriptor_history) > submissions
+        assert binding.publication_count > submissions
         assert binding.stats()["fine_tiles"]["A"] > 0
         assert binding.stats()["fine_tiles"]["B"] > 0
     finally:

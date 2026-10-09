@@ -112,8 +112,18 @@ class OMETIFFLoader:
                 return region.astype(np.float32, copy=False)
 
         page_idx = self.ch_map[channel_name]
-        region = self._read_roi_zarr(page_idx, y0, y1, x0, x1)
         cfg = self.correction_config if correction_config is None else _normalize_correction_config(correction_config)
+        if downsample > 1 and not self._corrects(channel_name, cfg):
+            # Block A9 §36: nothing to correct, so read only every
+            # `downsample`-th pixel -- exactly `full[::ds, ::ds]`, without
+            # holding the full-resolution region. The Step0 DAPI overview
+            # read Kevin's whole level 0 (1.6 GB) and copied it: RSS went
+            # from ~1 GB to 6.8 GB while a project opened.
+            region = self._read_roi_zarr(page_idx, y0, y1, x0, x1, step=downsample)
+            if normalize:
+                return self._norm(region)
+            return region.astype(np.float32, copy=False)
+        region = self._read_roi_zarr(page_idx, y0, y1, x0, x1)
         region = self._apply_configured_correction(channel_name, region, cfg)
 
         if downsample > 1:
@@ -239,6 +249,14 @@ class OMETIFFLoader:
                 )
         return None
 
+    @staticmethod
+    def _corrects(channel_name, correction_config) -> bool:
+        """Would `_apply_configured_correction` change this channel's pixels?"""
+        if not correction_config:
+            return False
+        decisions = correction_config.get("channel_decisions") or {}
+        return str(decisions.get(channel_name, "original")).strip().lower() in {"tophat", "cucim"}
+
     def _apply_configured_correction(self, channel_name, region, correction_config):
         if not correction_config:
             return region
@@ -262,7 +280,7 @@ class OMETIFFLoader:
             prefer_gpu=CUCIM_AVAILABLE,
         )
 
-    def _read_roi_zarr(self, page_idx, y0, y1, x0, x1):
+    def _read_roi_zarr(self, page_idx, y0, y1, x0, x1, step=1):
         """
         Read only the ROI region using the zarr interface.
         zarr translates the request into reads of the corresponding tiles,
@@ -278,12 +296,13 @@ class OMETIFFLoader:
                 else:
                     z0 = z
 
+                ys, xs = slice(y0, y1, step), slice(x0, x1, step)
                 if z0.ndim == 3:
-                    region = np.array(z0[page_idx, y0:y1, x0:x1])
+                    region = np.array(z0[page_idx, ys, xs])
                 elif z0.ndim == 4:
-                    region = np.array(z0[0, page_idx, y0:y1, x0:x1])
+                    region = np.array(z0[0, page_idx, ys, xs])
                 elif z0.ndim == 2:
-                    region = np.array(z0[y0:y1, x0:x1])
+                    region = np.array(z0[ys, xs])
                 else:
                     raise ValueError(f"Unknown zarr dimensions: {z0.ndim}")
 

@@ -228,3 +228,39 @@ def test_whole_blocks_are_counted_and_empty_ones_released(app):
         assert store.allocated_bytes == 0 and not store.slots
     finally:
         layer.deleteLater()
+
+
+def test_a_hidden_layer_gives_back_everything_but_its_coarse(app):
+    """A9 §36: release on need keeps the complete coarse and frees the rest
+    (tiles, empty blocks, composition targets); the next submission draws
+    the same picture again."""
+    from block01.ui import gpu_memory
+    layer = _layer(app, True)
+    try:
+        viewport = ViewportSnapshot((0.0, 1300.0, 0.0, 900.0), SIZE, 1.0)
+        layer.submit(_scene(False), _overlay(), viewport)
+        before = layer.readback_rgba_for_test()
+        held = layer.gpu_bytes()
+        layer.hidden = True
+        released = gpu_memory.release_hidden("test")
+        assert released > 0 and layer.gpu_bytes() < held
+        coarse = {p.identity for c in _scene(False).channels for p in c.coarse}
+        assert set(layer._arrays.slots) <= coarse
+        layer.hidden = False
+        layer.submit(_scene(False), _overlay(), viewport)
+        assert np.array_equal(before, layer.readback_rgba_for_test())
+    finally:
+        layer.deleteLater()
+
+
+def test_a_visible_layer_is_never_released(app):
+    from block01.ui import gpu_memory
+    layer = _layer(app, True)
+    try:
+        layer.submit(_scene(False), _overlay(), ViewportSnapshot((0.0, 1300.0, 0.0, 900.0), SIZE, 1.0))
+        held = layer.gpu_bytes()
+        layer.hidden = False
+        gpu_memory.release_hidden("test")
+        assert layer.gpu_bytes() == held
+    finally:
+        layer.deleteLater()

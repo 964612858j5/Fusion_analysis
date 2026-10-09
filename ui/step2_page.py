@@ -3055,6 +3055,10 @@ class Step2Page(QWidget):
         self._btn_back.setEnabled(False)
         self._btn_stop.setEnabled(True)
         self._prog_bar.setValue(0)
+        # Block A9 §36: a hidden image viewer gives its GPU textures back
+        # (down to its coarse) before segmentation needs the memory
+        from . import gpu_memory
+        gpu_memory.release_hidden("segmentation")
         self._worker.start()
 
         # Mark first tile as running

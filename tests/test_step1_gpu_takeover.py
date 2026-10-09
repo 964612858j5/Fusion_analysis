@@ -406,7 +406,7 @@ def _counters(rig):
         "requests": sum(len(s.public_requests) for s in rig.schedulers),
         "uploads": layer.cache_stats()["uploads"] if layer else 0,
         "cpu_compose": 0 if rig.mount.coordinator is None else 1,
-        "submits": len(rig.mount.gpu_binding.descriptor_history)
+        "submits": rig.mount.gpu_binding.publication_count
                    if rig.mount.gpu_binding else 0,
     }
 
@@ -944,9 +944,9 @@ def test_closing_releases_every_gl_resource_and_stops_the_binding(app):
         assert layer.cache_stats()["textures"] == 0
         assert layer.cache_stats()["bytes"] == 0
         assert binding.dispose()["already_disposed"] is True
-        before = len(binding.descriptor_history)
+        before = binding.publication_count
         binding.refresh_display()
-        assert len(binding.descriptor_history) == before, \
+        assert binding.publication_count == before, \
             "a disposed binding still submitted"
         assert controller._marker_visible is True, \
             "the single-channel layers never got the screen back"

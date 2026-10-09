@@ -20,6 +20,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .step1_gpu_layer import ObjectCache
+
 TILE = 512
 U_BLOCKS = 6        # defaults; the layer sets the real split per GL context
 F_BLOCKS = 4
@@ -96,14 +98,14 @@ class VirtualCompositor:
         #: channel -> (plane signature, cells, levels used, extent): reused
         #: when a publication hands the same planes back
         self._channel_cells = {}
-        #: the layer's id(plane) -> plane residency cache (shared)
-        self.known_resident = {}
+        #: the layer's residency cache by plane object (shared)
+        self.known_resident = ObjectCache()
         #: channel -> the cells its page layer was last written from
         self._written = {}
         #: id(plane) -> the (block, layer) its page entry points at
         self._slot_of = {}
         #: id(plane) -> (plane, ds_x, level key, tx, ty, x1, y1): its grid cell
-        self._geometry = {}
+        self._geometry = ObjectCache()
         self.frames = 0
         self.fallbacks = 0
 
@@ -130,7 +132,7 @@ class VirtualCompositor:
             # binding hands its resident planes back unchanged)
             known = self.known_resident
             sig = (tuple(map(id, planes)),
-                   sum(1 for plane in planes if known.get(id(plane)) is plane),
+                   sum(1 for plane in planes if known.has(plane)),
                    store.evictions)
             cached = self._channel_cells.get(channel)
             if cached is not None and cached[0] == sig and all(
@@ -143,13 +145,13 @@ class VirtualCompositor:
             last_ds = math.inf
             own_extent = (0.0, 0.0)
             for plane in planes:
-                if known.get(id(plane)) is not plane and not store.is_resident(plane):
+                if not known.has(plane) and not store.is_resident(plane):
                     if legacy is not None and legacy.is_resident(plane):
                         self.why = "legacy plane"
                         return None
                     continue
-                info = self._geometry.get(id(plane))
-                if info is None or info[0] is not plane:
+                info = self._geometry.get(plane)
+                if info is None:
                     values = np.asarray(plane.values)
                     h, w = values.shape[:2]
                     if h > TILE or w > TILE:
@@ -162,12 +164,10 @@ class VirtualCompositor:
                             or tx < -0.5 or ty < -0.5):
                         self.why = "off grid"
                         return None                 # not on the binding's grid
-                    info = (plane, ds_x, (round(ds_x, 9), round(ds_y, 9)),
+                    info = (ds_x, (round(ds_x, 9), round(ds_y, 9)),
                             int(round(tx)), int(round(ty)), x1, y1)
-                    if len(self._geometry) > 200000:
-                        self._geometry.clear()
-                    self._geometry[id(plane)] = info
-                _p, ds_x, key_ds, tx, ty, x1, y1 = info
+                    self._geometry.set(plane, info)
+                ds_x, key_ds, tx, ty, x1, y1 = info
                 if ds_x > last_ds * (1 + 1e-9):
                     self.why = "order"
                     return None                     # not coarse -> fine

@@ -65,6 +65,13 @@ class PresegRunJob:
 
     # ── control ──────────────────────────────────────────────────────
     def start(self):
+        # Block A9 §36: hidden image viewers give their GPU textures back
+        # (down to their coarse) before the engine needs the memory
+        try:
+            from .. import gpu_memory
+            gpu_memory.release_hidden("segmentation")
+        except Exception:                                    # noqa: BLE001 -- never blocks a run
+            pass
         self._thread = threading.Thread(target=self._main, name="preseg-run", daemon=True)
         self._thread.start()
 

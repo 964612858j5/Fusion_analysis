@@ -595,7 +595,7 @@ class _PaintWatcher(QtCore.QObject):
                 "target_tiles_on_screen": len(resident),
                 "target_tiles_wanted": len(wanted),
                 "complete": bool(wanted and wanted <= resident),
-                "submits_so_far": len(binding.descriptor_history),
+                "submits_so_far": binding.publication_count,
             })
         return False
 

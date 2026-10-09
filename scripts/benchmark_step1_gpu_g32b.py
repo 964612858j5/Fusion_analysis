@@ -103,7 +103,7 @@ def counters(rig):
         "provider_reads": sum(len(raw.reads) for raw in rig.raws),
         "scheduler_requests": sum(len(s.public_requests) for s in rig.schedulers),
         "raw_uploads": layer.cache_stats()["uploads"] if layer else 0,
-        "gpu_submits": len(rig.mount.gpu_binding.descriptor_history)
+        "gpu_submits": rig.mount.gpu_binding.publication_count
                        if rig.mount.gpu_binding else 0,
     }
 

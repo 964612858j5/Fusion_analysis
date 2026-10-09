@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import collections
 import dataclasses
+import weakref
 import math
 import pathlib
 import os
@@ -578,6 +579,42 @@ def _block_layers(max_bytes, max_layers, itemsize) -> int:
                       int(max_bytes) // (4 * slot)))
 
 
+class ObjectCache:
+    """A9 §35: a value per LIVE object, found by identity, never keeping the
+    object alive (a tile is 256 KiB: caches of tile objects kept tiles the
+    program had dropped -- RSS grew ~1 GiB/min with 69 channels)."""
+
+    __slots__ = ("_entries",)
+
+    def __init__(self):
+        self._entries: Dict[int, Tuple[Any, Any]] = {}
+
+    def get(self, obj, default=None):
+        entry = self._entries.get(id(obj))
+        if entry is None or entry[0]() is not obj:
+            return default
+        return entry[1]
+
+    def has(self, obj) -> bool:
+        entry = self._entries.get(id(obj))
+        return entry is not None and entry[0]() is obj
+
+    def set(self, obj, value=True) -> None:
+        key = id(obj)
+        entries = self._entries
+        entries[key] = (weakref.ref(obj, lambda _r, k=key: entries.pop(k, None)), value)
+
+    def discard(self, obj) -> None:
+        if self.has(obj):
+            self._entries.pop(id(obj), None)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
 class _NoGrowth(Exception):
     """A9 §35: a new array block was needed while growth is held back."""
 
@@ -637,7 +674,7 @@ class _TileArrayStore:
         self.tick = 0
         self._evict_order = None
         #: id(plane) -> plane, for planes already validated (immutable)
-        self._validated: Dict[int, object] = {}
+        self._validated = ObjectCache()
         self.meta: Dict[Hashable, Tuple] = {}     # identity -> (rect, valid, (w, h), fmt)
         self.channel_blocks: Dict[str, List[_ArrayBlock]] = {}
         self.external_bytes = lambda: 0
@@ -846,11 +883,9 @@ class _TileArrayStore:
             # a plane waiting for its upload slot is validated ONCE, not on
             # every publication it waits through (A9 §35: 230 waiting planes
             # cost 9 ms per publication with 69 channels)
-            if validate is not None and checked.get(id(plane)) is not plane:
+            if validate is not None and not checked.has(plane):
                 validate(plane)
-                if len(checked) > 50000:
-                    checked.clear()
-                checked[id(plane)] = plane
+                checked.set(plane)
             missing.append((channel, plane))
             seen.add(identity)
         missing.sort(key=lambda item: item[1].identity not in mandatory)
@@ -1179,6 +1214,11 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         #: A9 §35: the binding sets this while the user is moving -- no new
         #: array block is created then (mandatory coarse still always is)
         self.hold_growth = False
+        #: A9 §36: set by the binding while its viewer is paused (hidden);
+        #: a hidden layer may be asked to give its textures back
+        self.hidden = False
+        from . import gpu_memory
+        gpu_memory.register(self)
         #: Block A9 §35: the Step1 binding turns the tile array store on;
         #: every other caller (G1 tests, montage) keeps one texture per plane
         self.use_tile_arrays = False
@@ -1191,7 +1231,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         self._vt_failed = ""
         self._vt_split = (6, 4)
         #: A9 §35: id(plane) -> plane for planes known to be in the arrays
-        self._known_resident: Dict[int, RawPlane] = {}
+        self._known_resident = ObjectCache()
         self._known_evictions = -1
         fmt = QtGui.QSurfaceFormat()
         fmt.setRenderableType(QtGui.QSurfaceFormat.OpenGL)
@@ -1290,6 +1330,54 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                                                   if self._arrays is not None else 0)
         return self._arrays
 
+    def gpu_bytes(self) -> int:
+        """What this layer holds on the GPU: raw tiles, labels and its
+        composition targets (A9 §36)."""
+        if self._disposed:
+            return 0
+        total = self._cache.bytes + (self._arrays.allocated_bytes if self._arrays is not None else 0)
+        if self._label_cache is not None:
+            total += int(self._label_cache.stats().get("bytes", 0) or 0)
+        if self._target_size is not None:
+            width, height = self._target_size
+            total += width * height * (4 * 16 + 4 + 1)       # 4 x RGBA32F, RGBA8, stencil
+        return int(total)
+
+    def release_to_coarse(self) -> int:
+        """A9 §36: give back every raw texture except the complete coarse of
+        the scene last shown, the array blocks that leaves empty, and the
+        composition targets (rebuilt on the next composition). Returns the
+        bytes released. The next submission re-uploads what it needs."""
+        if self._disposed or not self._initialized:
+            return 0
+        before = self.gpu_bytes()
+        keep = set()
+        if self._scene is not None:
+            for source in self._scene[0].channels:
+                keep.update(plane.identity for plane in source.coarse)
+        own_current = QtGui.QOpenGLContext.currentContext() is not self.context()
+        if own_current:
+            self.makeCurrent()
+        try:
+            gl = self._gl
+            if self._arrays is not None:
+                self._arrays.release_unused(gl, keep)
+            for identity in [i for i in self._cache.records if i not in keep]:
+                record = self._cache.records.pop(identity)
+                gl.glDeleteTextures([record.texture])
+                self._cache.bytes -= record.byte_count
+                self._cache.evictions += 1
+            self._known_resident.clear()
+            if self._vt is not None:
+                self._vt.synced = None
+                self._vt.last_key = None
+            self._destroy_targets()
+            self._camera_dirty = self._scene is not None
+        finally:
+            if own_current:
+                self.doneCurrent()
+        return max(0, before - self.gpu_bytes())
+
     def prepare_headroom(self) -> bool:
         """A9 §35: the binding calls this when the user is NOT moving: the
         next array block, if one will soon be needed, is allocated now."""
@@ -1378,11 +1466,11 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                 channel = source.channel
                 coarse = {id(plane) for plane in source.coarse}
                 for plane in source.selected_planes():
-                    if known.get(id(plane)) is plane:
+                    if known.has(plane):
                         continue
                     identity = plane.identity
                     if identity in slots:
-                        known[id(plane)] = plane
+                        known.set(plane)
                         continue
                     if arrays.eligible(plane):
                         items.append((channel, plane))
@@ -1408,7 +1496,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                 self._known_evictions = arrays.evictions
             for _channel, plane in items:
                 if plane.identity in slots:
-                    known[id(plane)] = plane
+                    known.set(plane)
             deferred = int(arrays.deferred) + (int(getattr(self._cache, "deferred", 0)) if legacy else 0)
 
         if mode == MODE_OVERLAY:

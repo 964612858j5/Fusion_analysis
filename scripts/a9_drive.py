@@ -457,6 +457,13 @@ class Driver(QtCore.QObject):
                 return top, top.mapFromGlobal(g)
         return None, None
 
+    def _do_gpurelease(self, a, _t):
+        """§36: what a segmentation start does to hidden viewers."""
+        from block01.ui import gpu_memory
+        released = gpu_memory.release_hidden("a9")
+        perf_trace.mark("a9.gpurelease", released=released)
+        self._next(0)
+
     def _do_drag(self, a, _t):
         target, pos = self._viewer()
         if target is None:

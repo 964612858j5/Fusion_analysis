@@ -35,6 +35,10 @@ TILE_SIZE = 512
 
 #: What the caches may hold before the least-recently-used goes.
 from ..core import resource_tiers as _tiers
+#: Block A9 §37: pyqtgraph zooms by 1.02 ** (delta * factor) per wheel
+#: event, a notch being delta 120; -1/35 gives x1.070 per notch (Odon's
+#: exp(scroll * 0.0015) at ~45 points per line), pyqtgraph's -1/8 x1.346
+WHEEL_SCALE_FACTOR = -1.0 / 35.0
 RAW_CACHE_BYTES = _tiers.STEP1_VIEWER_RAW_CACHE_BYTES  # (block A8 / A5: one place)
 CORRECTED_CACHE_BYTES = _tiers.STEP1_VIEWER_CORRECTED_CACHE_BYTES  # (block A8 / A5: one place)
 
@@ -484,6 +488,9 @@ def build_step1_stack(dataset_path, channel, table, parent_widget=None, *,
             # Block A9 S2a (Odon): Step1/Step3 draw the level closest to 1:1
             from ..viewer import request_planning as _planning
             controller.level_policy = _planning.LEVEL_POLICY_NEAREST_LOG
+            # Block A9 §37 (Odon app.rs:12405, user ruling 2026-10-10): a
+            # wheel notch zooms x1.07, not pyqtgraph's x1.35
+            view.view_box.state["wheelScaleFactor"] = WHEEL_SCALE_FACTOR
         if load_overview:
             with perf_trace.span("step1.entry.controller_overview"):
                 controller.load_overview()

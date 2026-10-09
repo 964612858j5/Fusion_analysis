@@ -593,3 +593,9 @@ def test_a_boundary_tile_shows_the_colour_underneath_it_outside_the_region(app):
         assert deep[3] == 255
     finally:
         _close(host)
+
+
+def test_a_wheel_notch_zooms_like_odon():
+    """A9 §37 (user ruling 2026-10-10): x1.07 per notch, not x1.35."""
+    from block01.ui import step1_viewer_host as host
+    assert abs(1.02 ** (120 * -host.WHEEL_SCALE_FACTOR) - 1.07) < 0.002

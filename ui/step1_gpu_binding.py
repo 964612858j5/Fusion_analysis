@@ -78,6 +78,8 @@ PLAN_SLICE_MIN_CHANNELS = 8
 HEADROOM_IDLE_MS = 150
 #: ...and only after this long without any camera input
 HEADROOM_QUIET_MS = 1500
+#: A9 §35: no new array block (coarse excepted) until this long after input
+GROWTH_QUIET_MS = 300
 PLAN_SLICE_MS = 4.0
 #: Block A9 §35: refinement publications keep at most 1/PUBLISH_DUTY of the
 #: GUI thread (69 channels loading published ~11 ms every 16 ms)
@@ -1407,7 +1409,11 @@ class Step1GpuBinding(QtCore.QObject):
             hot = self._input_hot()
             self.layer.upload_budget_ms = HOT_UPLOAD_BUDGET_MS if hot else UPLOAD_BUDGET_MS
             if hasattr(self.layer, "hold_growth"):
-                self.layer.hold_growth = hot
+                # a new array block costs the driver 100-190 ms on first use:
+                # only after GROWTH_QUIET_MS without camera input (a slow
+                # zoom, notches 80-200 ms apart, is still "moving")
+                quiet = (time.monotonic() - self._last_input_at) * 1000.0
+                self.layer.hold_growth = quiet < GROWTH_QUIET_MS
         try:
             stats = self.layer.submit(descriptor, display, viewport)
         except Step1GpuLayerError as exc:
@@ -1434,16 +1440,24 @@ class Step1GpuBinding(QtCore.QObject):
         self._descriptor_history.append((descriptor, display, viewport, stats))
         self._publication_count += 1
         self._deferred_uploads = int(stats.get("deferred_uploads", 0) or 0)
+        waiting_for_growth = int(stats.get("deferred_growth", 0) or 0)
         headroom = getattr(self.layer, "prepare_headroom", None)
         if (headroom is not None and not self._headroom_timer.isActive()
                 and os.environ.get("BLOCK01_HEADROOM", "1") != "0"):
             # A9 §35: the next texture block is allocated while the user
             # is not moving (it costs the driver ~100 ms on first use)
             self._headroom_timer.start(HEADROOM_IDLE_MS)
-        if self._deferred_uploads > 0:
+        if self._deferred_uploads > waiting_for_growth:
             # Block A9 §32: what did not fit this frame's upload budget goes
             # up in the next frame slot (coarser planes stand in meanwhile)
             self._schedule_publish()
+        elif waiting_for_growth:
+            # A9 §35: only a new block is missing -- try again once the
+            # camera has been still for GROWTH_QUIET_MS, not every frame
+            self._publish_due = True
+            wait = GROWTH_QUIET_MS - (time.monotonic() - self._last_input_at) * 1000.0
+            if not self._publish_timer.isActive():
+                self._publish_timer.start(int(max(PUBLISH_FRAME_MS, wait + 5)))
 
     def _drawn_fine(self, resident):
         """Block A9 §32 (Odon app.rs:12925-12980: a finer level is drawn over

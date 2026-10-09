@@ -870,6 +870,7 @@ class _TileArrayStore:
         the cost)."""
         self._prepare_started = time.perf_counter()
         self.deferred = 0
+        self.deferred_growth = 0
         self._evict_order = None
         ids = [plane.identity for _channel, plane in items]
         required = _LazyRequired(set(ids) | set(also_required), required_fn)
@@ -910,13 +911,19 @@ class _TileArrayStore:
             fmt = _array_format(plane)
             # a channel's complete coarse may always grow the store
             self._may_grow = may_grow or plane.identity in mandatory
+            slot_started = time.perf_counter()
             try:
                 block, layer = self._free_slot(gl, fmt, channel, required)
             except _NoGrowth:
                 # the user is moving: no new block now (its first use costs
                 # tens of ms); this and the rest wait, coarser planes stand in
                 self.deferred += 1
+                self.deferred_growth += 1
                 continue
+            slot_ms = (time.perf_counter() - slot_started) * 1000.0
+            if slot_ms > 5.0 and perf_trace.enabled():
+                perf_trace.mark("gpu.slot_slow", ms=round(slot_ms, 2), blocks=len(self.blocks),
+                                fmt=fmt, mandatory=plane.identity in mandatory)
             values = self._upload_values(plane, fmt)
             _internal, fmt_gl, typ = self._gl_format(gl, fmt)
             gl.glBindTexture(gl.GL_TEXTURE_2D_ARRAY, block.texture)
@@ -1444,9 +1451,10 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         mode = display_snapshot.mode
         view_rect = viewport_snapshot.world_rect
         deferred = 0
+        deferred_growth = 0
 
         def prepare(active_sources):
-            nonlocal deferred
+            nonlocal deferred, deferred_growth
             if not upload:
                 return
             arrays = self._array_store()
@@ -1505,6 +1513,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                 if plane.identity in slots:
                     known.set(plane)
             deferred = int(arrays.deferred) + (int(getattr(self._cache, "deferred", 0)) if legacy else 0)
+            deferred_growth = int(arrays.deferred_growth)
             if len(arrays.blocks) > self._blocks_seen:
                 # A9 §36: the viewers grew -- hidden ones give back if over target
                 from . import gpu_memory
@@ -1588,6 +1597,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             "roi_polygon_points": self._submission.get("roi_polygon_points", 0),
             "roi_polygon_error": self._submission.get("roi_polygon_error", ""),
             "deferred_uploads": deferred,
+            "deferred_growth": deferred_growth,
         }
         _check_gl(gl, "G1 submission")
         if isinstance(gl, _GlTimer):

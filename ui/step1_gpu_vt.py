@@ -43,10 +43,21 @@ def shader_source(template: str, u_blocks: int, f_blocks: int) -> str:
     fetch += ["        return 0.0;", "    }"]
     fetch += [f"    if (block == {i}) return texelFetch(u_f{i}, at, 0).r;" for i in range(f_blocks)]
     fetch += ["    return 0.0;"]
+    # A9 §38: the four texels of a bilinear footprint, one sampler choice
+    def quad(sampler, cast):
+        taps = ", ".join(f"{cast}(texelFetch({sampler}, ivec3(t{k}, layer), 0).r)"
+                         for k in range(4))
+        return f"return vec4({taps});"
+    fetch4 = ["    if (family == 0) {"]
+    fetch4 += [f"        if (block == {i}) {quad(f'u_u{i}', 'float')}" for i in range(u_blocks)]
+    fetch4 += ["        return vec4(0.0);", "    }"]
+    fetch4 += [f"    if (block == {i}) {quad(f'u_f{i}', '')}" for i in range(f_blocks)]
+    fetch4 += ["    return vec4(0.0);"]
     constants = (f"const int BLOCK_ROWS = {BLOCK_ROWS};\n"
                  f"const int U_BLOCKS = {u_blocks};")
     return (template.replace("//@SAMPLERS@", "\n".join(samplers))
             .replace("//@FETCH@", "\n".join(fetch))
+            .replace("//@FETCH4@", "\n".join(fetch4))
             .replace("//@BLOCK_CONSTANTS@", constants))
 
 

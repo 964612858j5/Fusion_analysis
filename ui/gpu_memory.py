@@ -14,6 +14,7 @@ The registry holds the layers weakly and only ever calls them on the GUI
 thread (their GL context lives there).
 """
 
+import os
 import weakref
 
 from ..core import resource_tiers as _tiers
@@ -23,6 +24,25 @@ from ..utils import perf_trace
 VIEW_VRAM_TARGET = _tiers.EDGE.vram_target_bytes
 
 _layers = weakref.WeakSet()
+
+#: A9 §38: the "Smooth" display setting (Odon's smooth_pixels, default on),
+#: one for every image viewer; the registry above already knows them all
+_smooth = os.environ.get("BLOCK01_SMOOTH", "1") != "0"
+
+
+def smooth_pixels() -> bool:
+    return _smooth
+
+
+def set_smooth(smooth: bool) -> None:
+    """Every Step1 GPU layer, now and later, draws smoothed or nearest."""
+    global _smooth
+    _smooth = bool(smooth)
+    for layer in list(_layers):
+        try:
+            layer.set_smooth(_smooth)
+        except Exception:                                    # noqa: BLE001 -- a disposed layer
+            continue
 
 
 def register(layer) -> None:

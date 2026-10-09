@@ -1233,6 +1233,10 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         self.hidden = False
         from . import gpu_memory
         gpu_memory.register(self)
+        #: A9 §38 (Odon's "Smooth", default on): channel values are mixed
+        #: bilinearly between texels; False draws nearest texels, exactly
+        #: as before. `gpu_memory.set_smooth` sets every layer at once.
+        self.smooth = gpu_memory.smooth_pixels()
         #: Block A9 §35: the Step1 binding turns the tile array store on;
         #: every other caller (G1 tests, montage) keeps one texture per plane
         self.use_tile_arrays = False
@@ -2031,6 +2035,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                        float(self._target_size[0]), float(self._target_size[1]))
         gl.glUniform1i(self._uniform_location(program, "u_rows"), len(rows))
         gl.glUniform1i(self._uniform_location(program, "u_fusion"), 1 if fusion else 0)
+        gl.glUniform1i(self._uniform_location(program, "u_smooth"), 1 if self.smooth else 0)
         level_a, level_b = vt.level_uniforms(plan)
         gl.glUniform4fv(self._uniform_location(program, "u_level_a"), len(level_a), level_a)
         gl.glUniform2iv(self._uniform_location(program, "u_level_b"), len(level_b), level_b)
@@ -2134,6 +2139,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                 gl.glUniform2f(self._uniform_location(program, "u_target_size"),
                                float(self._target_size[0]), float(self._target_size[1]))
                 self._uniform1i(program, "u_quad", 1)
+                self._uniform1i(program, "u_smooth", 1 if self.smooth else 0)
                 current = program
             if program == "source_uint":
                 valid = _valid_world_rect(plane)
@@ -2173,6 +2179,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                 gl.glUniform2f(self._uniform_location(name, "u_target_size"),
                                float(self._target_size[0]), float(self._target_size[1]))
                 self._uniform1i(name, "u_arr", 0)
+                self._uniform1i(name, "u_smooth", 1 if self.smooth else 0)
                 program = name
             data = np.empty(len(records), INSTANCE_DTYPE)
             data["rect"] = [r[0] for r in records]
@@ -2729,10 +2736,22 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                                    logical_size=(max(1, int(self.width())), max(1, int(self.height()))),
                                    device_pixel_ratio=ratio, repaint_request=None)
 
+    def set_smooth(self, smooth: bool) -> None:
+        """A9 §38: redraw the current picture with or without smoothing."""
+        smooth = bool(smooth)
+        if smooth == self.smooth:
+            return
+        self.smooth = smooth
+        if self._scene is not None and not self._disposed:
+            self._camera_dirty = True
+            self.update()
+
     def _recompose_for_camera(self) -> None:
         """paintGL's camera-only composition (context current)."""
         self._camera_dirty = False
         viewport = self._live_viewport()
+        if viewport is None and self._scene is not None and self._attached_range is None:
+            viewport = self._scene[2]          # A9 §38: a redraw in place (montage)
         if viewport is None or self._disposed:
             return
         descriptor, display, _old = self._scene

@@ -27,6 +27,7 @@ uniform vec4 u_view_rect;
 uniform vec2 u_target_size;
 uniform int u_rows;
 uniform int u_fusion;
+uniform int u_smooth;              // A9 §38: bilinear raw values (default on)
 uniform vec4 u_level_a[16];        // (tile world w, tile world h, page x offset, 0)
 uniform ivec2 u_level_b[16];       // (grid w, grid h)
 
@@ -35,6 +36,66 @@ uniform ivec2 u_level_b[16];       // (grid w, grid h)
 float fetch_raw(int family, int block, int layer, ivec2 texel) {
     ivec3 at = ivec3(texel, layer);
 //@FETCH@
+}
+
+// A9 §38: texels t0..t3 of one layer (x then y), one sampler choice
+vec4 fetch_raw4(int family, int block, int layer, ivec2 t0, ivec2 t1, ivec2 t2, ivec2 t3) {
+//@FETCH4@
+}
+
+// A9 §38: the plane of `level` holding `world` for page layer
+// `page_layer` -- the same cell lookup and rect retry as `channel_signal`.
+bool find_plane(int page_layer, int level, vec2 world, out int family, out int block,
+                out int layer, out int meta_row, out vec4 rect) {
+    family = 0; block = 0; layer = 0; meta_row = 0; rect = vec4(0.0);
+    vec4 la = u_level_a[level];
+    ivec2 grid = u_level_b[level];
+    ivec2 cell = ivec2(floor(world.x / la.x), floor(world.y / la.y));
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (cell.x < 0 || cell.y < 0 || cell.x >= grid.x || cell.y >= grid.y) {
+            return false;
+        }
+        int code = texelFetch(u_pages, ivec3(int(la.z) + cell.x, cell.y, page_layer), 0).r;
+        if (code < 0) {
+            return false;
+        }
+        family = code >> 24;
+        block = (code >> 16) & 255;
+        layer = code & 65535;
+        meta_row = (family * U_BLOCKS + block) * BLOCK_ROWS;
+        rect = texelFetch(u_meta, ivec2(layer, meta_row), 0);
+        if (world.x < rect.x) { cell.x -= 1; continue; }
+        if (world.x >= rect.y) { cell.x += 1; continue; }
+        if (world.y < rect.z) { cell.y -= 1; continue; }
+        if (world.y >= rect.w) { cell.y += 1; continue; }
+        return true;
+    }
+    return false;
+}
+
+// A9 §38: the raw value at `world` (a texel centre) in channel `page_layer`
+// at `level`, from whichever plane of that level holds it -- the tile
+// across an edge included. False when absent or invalid there; a coarser
+// level is never used for a tap.
+bool level_raw(int page_layer, int level, vec2 world, out float raw) {
+    raw = 0.0;
+    int family; int block; int layer; int meta_row; vec4 rect;
+    if (!find_plane(page_layer, level, world, family, block, layer, meta_row, rect)) {
+        return false;
+    }
+    if (family == 0) {
+        vec4 valid = texelFetch(u_meta, ivec2(layer, meta_row + 1), 0);
+        if (world.x < valid.x || world.x >= valid.y ||
+            world.y < valid.z || world.y >= valid.w) {
+            return false;
+        }
+    }
+    ivec2 size = ivec2(texelFetch(u_meta, ivec2(layer, meta_row + 2), 0).xy);
+    vec2 uv = vec2((world.x - rect.x) / (rect.y - rect.x),
+                   (world.y - rect.z) / (rect.w - rect.z));
+    ivec2 texel = clamp(ivec2(floor(uv * vec2(size))), ivec2(0), size - 1);
+    raw = fetch_raw(family, block, layer, texel);
+    return !(family == 1 && (isnan(raw) || isinf(raw)));
 }
 
 // The signal of channel `row` at `world`, or -1.0 when no submitted plane
@@ -85,6 +146,65 @@ float channel_signal(int row, vec2 world) {
             float raw = fetch_raw(family, block, layer, texel);
             if (family == 1 && (isnan(raw) || isinf(raw))) {
                 break;
+            }
+            // smoothing shows only where a texel is wider than a screen
+            // pixel (zoomed past this level's detail); below that it would
+            // cost GPU time for a difference nobody sees
+            if (u_smooth != 0 && (plane_size.x * u_target_size.x
+                    > float(size.x) * (u_view_rect.y - u_view_rect.x)
+                    || plane_size.y * u_target_size.y
+                    > float(size.y) * (u_view_rect.w - u_view_rect.z))) {
+                // four texels around the pixel, each by its own world
+                // centre (in this plane: here; across an edge: the
+                // neighbour tile of this level), invalid ones dropped
+                vec2 p = uv * vec2(size) - 0.5;
+                vec2 base = floor(p);
+                vec2 f = p - base;
+                ivec2 i0 = ivec2(base);
+                vec2 texel_world = plane_size / vec2(size);
+                // the in-plane taps in one fetch (an outside one reads a
+                // clamped texel and is replaced below)
+                ivec2 top = size - 1;
+                vec4 quad = fetch_raw4(family, block, layer,
+                                       clamp(i0, ivec2(0), top),
+                                       clamp(i0 + ivec2(1, 0), ivec2(0), top),
+                                       clamp(i0 + ivec2(0, 1), ivec2(0), top),
+                                       clamp(i0 + ivec2(1, 1), ivec2(0), top));
+                vec4 valid = family == 0 ? texelFetch(u_meta, ivec2(layer, meta_row + 1), 0)
+                                         : vec4(0.0);
+                float total = 0.0;
+                float weights = 0.0;
+                for (int j = 0; j < 4; j++) {
+                    ivec2 d = ivec2(j & 1, j >> 1);
+                    float w = (d.x == 1 ? f.x : 1.0 - f.x) * (d.y == 1 ? f.y : 1.0 - f.y);
+                    if (w <= 0.0) {
+                        continue;
+                    }
+                    ivec2 t = i0 + d;
+                    float tap;
+                    bool ok;
+                    if (t.x >= 0 && t.y >= 0 && t.x < size.x && t.y < size.y) {
+                        tap = quad[j];
+                        ok = true;
+                        if (family == 0) {
+                            vec2 c = vec2(rect.x, rect.z) + (vec2(t) + 0.5) * texel_world;
+                            ok = !(c.x < valid.x || c.x >= valid.y ||
+                                   c.y < valid.z || c.y >= valid.w);
+                        } else {
+                            ok = !(isnan(tap) || isinf(tap));
+                        }
+                    } else {
+                        vec2 c = vec2(rect.x, rect.z) + (vec2(t) + 0.5) * texel_world;
+                        ok = level_raw(page_layer, level, c, tap);
+                    }
+                    if (ok) {
+                        total += w * tap;
+                        weights += w;
+                    }
+                }
+                if (weights > 0.0) {
+                    raw = total / weights;
+                }
             }
             float denominator = mapping.y - mapping.x;
             float signal = 0.0;

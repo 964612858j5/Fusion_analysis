@@ -3,12 +3,62 @@
 in vec2 v_screen_uv;
 out vec4 out_rgba;
 
+#if defined(PASS_SOURCE) || defined(PASS_SOURCE_UINT) || defined(PASS_ARRAY_UINT) || defined(PASS_ARRAY_FLOAT)
+// Block A9 §38: "Smooth" (default on). The level and the pixel's validity
+// are decided exactly as without it, by the nearest sample; then the raw
+// value -- where a texel is wider than a screen pixel; elsewhere nothing
+// changes -- is the bilinear mix of the four texels around the pixel, each used
+// only when valid (inside this plane, inside its valid rect, not NaN/Inf),
+// the weights renormalised. Raw values are mixed, the mapping comes after.
+// In these per-plane passes a tap across the tile edge is not reachable and
+// is dropped; the single-pass compositor (step1_gpu_vt.frag) reaches it.
+uniform int u_smooth;
+bool raw_tap(ivec2 texel, ivec2 size, out float raw);
+
+float smoothed_raw(vec2 uv, ivec2 size, float nearest, vec2 plane_size,
+                   vec4 view_rect, vec2 target_size) {
+    // only where a texel is wider than a screen pixel (as the single pass)
+    if (plane_size.x * target_size.x <= float(size.x) * (view_rect.y - view_rect.x)
+        && plane_size.y * target_size.y <= float(size.y) * (view_rect.w - view_rect.z)) {
+        return nearest;
+    }
+    vec2 p = uv * vec2(size) - 0.5;
+    vec2 base = floor(p);
+    vec2 f = p - base;
+    ivec2 i0 = ivec2(base);
+    float total = 0.0;
+    float weights = 0.0;
+    for (int j = 0; j < 4; j++) {
+        ivec2 d = ivec2(j & 1, j >> 1);
+        float w = (d.x == 1 ? f.x : 1.0 - f.x) * (d.y == 1 ? f.y : 1.0 - f.y);
+        if (w <= 0.0) {
+            continue;
+        }
+        ivec2 t = i0 + d;
+        if (t.x < 0 || t.y < 0 || t.x >= size.x || t.y >= size.y) {
+            continue;
+        }
+        float raw;
+        if (raw_tap(t, size, raw)) {
+            total += w * raw;
+            weights += w;
+        }
+    }
+    return weights > 0.0 ? total / weights : nearest;
+}
+#endif
+
 #ifdef PASS_SOURCE
 uniform sampler2D u_raw;
 uniform vec4 u_view_rect;
 uniform vec4 u_plane_rect;
 uniform vec3 u_mapping;
 uniform vec2 u_target_size;     // A9 §32: pixel centres by gl_FragCoord
+
+bool raw_tap(ivec2 texel, ivec2 size, out float raw) {
+    raw = texelFetch(u_raw, texel, 0).r;
+    return !(isnan(raw) || isinf(raw));
+}
 
 void main() {
     vec2 screen_uv = gl_FragCoord.xy / u_target_size;
@@ -32,6 +82,9 @@ void main() {
     if (isnan(raw) || isinf(raw)) {
         discard;
     }
+    if (u_smooth != 0) {
+        raw = smoothed_raw(uv, size, raw, plane_size, u_view_rect, u_target_size);
+    }
     float denominator = u_mapping.y - u_mapping.x;
     float signal = 0.0;
     if (denominator > 0.0) {
@@ -54,6 +107,20 @@ uniform vec4 u_valid_rect;
 uniform vec3 u_mapping;
 uniform vec2 u_target_size;     // A9 §32: pixel centres by gl_FragCoord
 
+bool raw_tap(ivec2 texel, ivec2 size, out float raw) {
+    // the texel's centre must lie in the valid rect
+    vec2 c = vec2(u_plane_rect.x, u_plane_rect.z)
+             + (vec2(texel) + 0.5) * vec2(u_plane_rect.y - u_plane_rect.x,
+                                          u_plane_rect.w - u_plane_rect.z) / vec2(size);
+    raw = 0.0;
+    if (c.x < u_valid_rect.x || c.x >= u_valid_rect.y ||
+        c.y < u_valid_rect.z || c.y >= u_valid_rect.w) {
+        return false;
+    }
+    raw = float(texelFetch(u_raw, texel, 0).r);
+    return true;
+}
+
 void main() {
     vec2 screen_uv = gl_FragCoord.xy / u_target_size;
     vec2 view_size = vec2(u_view_rect.y - u_view_rect.x,
@@ -75,6 +142,9 @@ void main() {
     ivec2 size = textureSize(u_raw, 0);
     ivec2 texel = clamp(ivec2(floor(uv * vec2(size))), ivec2(0), size - 1);
     float raw = float(texelFetch(u_raw, texel, 0).r);
+    if (u_smooth != 0) {
+        raw = smoothed_raw(uv, size, raw, plane_size, u_view_rect, u_target_size);
+    }
     float denominator = u_mapping.y - u_mapping.x;
     float signal = 0.0;
     if (denominator > 0.0) {
@@ -102,6 +172,24 @@ flat in vec4 v_plane_rect;
 flat in vec4 v_valid_rect;
 flat in vec2 v_size;
 flat in int v_layer;
+
+bool raw_tap(ivec2 texel, ivec2 size, out float raw) {
+#ifdef PASS_ARRAY_UINT
+    vec2 c = vec2(v_plane_rect.x, v_plane_rect.z)
+             + (vec2(texel) + 0.5) * vec2(v_plane_rect.y - v_plane_rect.x,
+                                          v_plane_rect.w - v_plane_rect.z) / vec2(size);
+    raw = 0.0;
+    if (c.x < v_valid_rect.x || c.x >= v_valid_rect.y ||
+        c.y < v_valid_rect.z || c.y >= v_valid_rect.w) {
+        return false;
+    }
+    raw = float(texelFetch(u_arr, ivec3(texel, v_layer), 0).r);
+    return true;
+#else
+    raw = texelFetch(u_arr, ivec3(texel, v_layer), 0).r;
+    return !(isnan(raw) || isinf(raw));
+#endif
+}
 
 void main() {
     vec2 screen_uv = gl_FragCoord.xy / u_target_size;
@@ -133,6 +221,9 @@ void main() {
         discard;
     }
 #endif
+    if (u_smooth != 0) {
+        raw = smoothed_raw(uv, size, raw, plane_size, u_view_rect, u_target_size);
+    }
     float denominator = u_mapping.y - u_mapping.x;
     float signal = 0.0;
     if (denominator > 0.0) {

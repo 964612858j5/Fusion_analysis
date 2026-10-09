@@ -548,6 +548,49 @@ def test_the_display_state_survives_a_session_round_trip(app):
         w.close()
 
 
+@pytest.mark.parametrize("saved, start", [(True, False), (False, True), (True, True), (None, True)],
+                         ids=["on", "off", "unchanged", "old-session"])
+def test_smooth_comes_back_with_the_session(app, saved, start):
+    """A9 §38: the session's "Smooth" is restored (button and every
+    picture agree); a session written before it leaves it alone; the
+    restore itself saves nothing; a failed restore takes it back."""
+    from block01.ui import gpu_memory
+    w = _window(app)
+    try:
+        w._btn_smooth.setChecked(start)
+        w.step0_output = {"output_dir": "/tmp", "step1_dir": "/tmp"}
+        payload = w._step1_session_payload()
+        if saved is None:
+            payload.pop("smooth_pixels")
+        else:
+            payload["smooth_pixels"] = saved
+        w._step1_session_timer.stop()
+        w._step1_restore_active = True            # as the real restore path
+        try:
+            w._restore_step1_scientific_state(payload)
+        finally:
+            w._step1_restore_active = False
+        expected = start if saved is None else saved
+        assert gpu_memory.smooth_pixels() is expected
+        assert w._btn_smooth.isChecked() is expected
+        assert not w._step1_session_timer.isActive(), "the restore saved"
+
+        payload["smooth_pixels"] = not expected
+        original = w._restore_step1_session_owners
+
+        def _boom(*a, **k):
+            raise RuntimeError("restore failed")
+        w._restore_step1_session_owners = _boom
+        with pytest.raises(RuntimeError):
+            w._restore_step1_scientific_state(payload)
+        w._restore_step1_session_owners = original
+        assert gpu_memory.smooth_pixels() is expected
+        assert w._btn_smooth.isChecked() is expected
+    finally:
+        gpu_memory.set_smooth(False)
+        w.close()
+
+
 def test_a_new_dataset_keeps_the_one_colour_and_resets_the_weights(app):
     """`load_panel` re-deals the WEIGHTS, never the colours.
 

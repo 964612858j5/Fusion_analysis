@@ -120,3 +120,23 @@ def pytest_configure(config):
     The patches are process-wide and stay until the process is gone.
     """
     _guard.install(_SANDBOX)
+
+
+# ── Block A9 §38: GPU picture gates check the NEAREST picture ────────────────
+#
+# "Smooth" is on in the product (Odon's default). The GPU gates compare
+# against CPU references and against each other texel for texel, so every
+# test starts with it off; tests of smoothing turn it on themselves.
+
+import os as _os
+
+# read by `ui/gpu_memory.py` at import, whenever a test first imports it
+_os.environ["BLOCK01_SMOOTH"] = "0"
+
+
+@_pytest.fixture(autouse=True)
+def _nearest_pixels_by_default():
+    yield
+    module = sys.modules.get("block01.ui.gpu_memory")
+    if module is not None and module._smooth:
+        module.set_smooth(False)          # a smoothing test leaves it as found

@@ -98,6 +98,7 @@ from .step1_presegmentation.montage_supply import MontageSupply, spec_channels a
 from .step1_presegmentation import montage_gpu
 from . import step1_draft_spec
 from .step1_button_styles import MODE_BUTTON_QSS, SECTION_BOX_QSS
+from . import gpu_memory
 from .step1_presegmentation.run_job import PresegRunJob, open_loader, summary_line
 from ..core import preseg_contract, preseg_input, preseg_run
 from ..seg_runner.engines import METHOD_OUTPUTS
@@ -1129,6 +1130,17 @@ class MainWindow(QMainWindow):
         sel_row.addStretch()
         sel_row.addWidget(self._btn_mode_overlay)
         sel_row.addWidget(self._btn_mode_fusion)
+        # "Smooth" (user ruling 2026-10-10; Odon's smooth_pixels): one
+        # setting for every Step1 picture, on by default, kept in the session
+        self._btn_smooth = QPushButton("Smooth")
+        self._btn_smooth.setCheckable(True)
+        self._btn_smooth.setStyleSheet(MODE_BUTTON_QSS)
+        self._btn_smooth.setChecked(gpu_memory.smooth_pixels())
+        self._btn_smooth.setToolTip(
+            "When on, pixels are blended smoothly when zoomed in past the image's "
+            "resolution. Turn off for crisp (nearest-neighbour) pixels.")
+        self._btn_smooth.toggled.connect(self._set_smooth_pixels)
+        sel_row.addWidget(self._btn_smooth)
         sel_row.addSpacing(8)
         # The frame's tool row (block A1b S1): a fixed height, the same in
         # every step, so the viewer under it starts on the same line.
@@ -3847,6 +3859,7 @@ class MainWindow(QMainWindow):
             "channel_colors": self.config.channel_colors(),
             "current_channel": self.config.current_channel(),
             "preview_mode": self._step1_preview_mode,
+            "smooth_pixels": gpu_memory.smooth_pixels(),
             "p2_params": self._p2_params,
             "segmentation_preview_history": self._seg_preview_history,
             "active_segmentation_method": self._active_segmentation_method,
@@ -4055,6 +4068,12 @@ class MainWindow(QMainWindow):
         # PREVIOUS mode's picture on the shared Tissue Preview and need a
         # second frame to correct it. Set silently (`reconcile=False`): the
         # one reconcile this restore gets happens when everything is final.
+        # "Smooth" likewise (A9 §38); a session written before it existed
+        # leaves the current setting alone
+        previous_smooth = gpu_memory.smooth_pixels()
+        smooth = sess.get("smooth_pixels")
+        if isinstance(smooth, bool) and smooth != previous_smooth:
+            self._btn_smooth.setChecked(smooth)      # a display answer only
         mode = str(sess.get("preview_mode") or "")
         mode_moved = (mode in (STEP1_PREVIEW_OVERLAY, STEP1_PREVIEW_FUSION)
                       and mode != self._step1_preview_mode)
@@ -4078,6 +4097,8 @@ class MainWindow(QMainWindow):
             if mode_moved:
                 self.set_preview_mode(previous_mode, force=True,
                                       reconcile=False)
+            if gpu_memory.smooth_pixels() != previous_smooth:
+                self._btn_smooth.setChecked(previous_smooth)
             raise
 
     def _restore_step1_session_owners(self, sess, names, identity,
@@ -7292,6 +7313,15 @@ class MainWindow(QMainWindow):
         self._restore_patch_preview_view_state(state)
 
     # ── preview mode, overlay rendering ────────────────────────────────
+    def _set_smooth_pixels(self, smooth):
+        """The "Smooth" button: every Step1 picture redraws, the session
+        remembers it. No frame request, no binding generation."""
+        if bool(smooth) == gpu_memory.smooth_pixels():
+            return
+        gpu_memory.set_smooth(bool(smooth))
+        if not getattr(self, "_restoring_display_state", False):
+            self._schedule_step1_session_save()
+
     def set_preview_mode(self, mode, force=False, reconcile=True):
         """Switch between the multi-channel overlay and the fusion preview.
 

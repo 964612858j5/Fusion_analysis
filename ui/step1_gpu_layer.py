@@ -563,9 +563,11 @@ def _array_format(plane) -> str:
 _FORMAT_BYTES = {"u8": 1, "u16": 2, "f32": 4}
 
 
-#: A9 §35.7: bytes per array block -- few, large blocks, since the single
-#: pass binds every block as its own sampler (6 integer + 4 float)
-ARRAY_BLOCK_BYTES = 256 * 1024 * 1024
+#: A9 §35.7: bytes per array block. A block's first use costs the driver
+#: ~0.3-1.3 ms per MiB (measured: 256 MiB ~90-290 ms, 64 MiB ~22-70 ms),
+#: so blocks are 64 MiB -- the single pass binds each as its own sampler,
+#: up to the context's texture units (32 on the 3060 and on Intel)
+ARRAY_BLOCK_BYTES = 64 * 1024 * 1024
 
 
 def _block_layers(max_bytes, max_layers, itemsize) -> int:
@@ -574,6 +576,10 @@ def _block_layers(max_bytes, max_layers, itemsize) -> int:
     slot = ARRAY_TILE * ARRAY_TILE * int(itemsize)
     return max(1, min(ARRAY_BLOCK_BYTES // slot, int(max_layers or ARRAY_LAYERS),
                       int(max_bytes) // (4 * slot)))
+
+
+class _NoGrowth(Exception):
+    """A9 §35: a new array block was needed while growth is held back."""
 
 
 class _LazyRequired:
@@ -690,6 +696,7 @@ class _TileArrayStore:
             gl.glTexImage3D(gl.GL_TEXTURE_2D_ARRAY, 0, internal, ARRAY_TILE, ARRAY_TILE,
                             layers, 0, fmt_gl, typ, None)
             _check_gl(gl, "array block allocation")
+        self._warm(gl, texture, fmt, layers)
         family = fmt == "f32"
         taken = {b.vt_index for b in self.blocks if (b.fmt == "f32") == family}
         index = next(i for i in range(len(taken) + 1) if i not in taken)
@@ -697,6 +704,49 @@ class _TileArrayStore:
         self.blocks.append(block)
         self.peak_bytes = max(self.peak_bytes, self.allocated_bytes)
         return block
+
+    def _warm(self, gl, texture, fmt, layers) -> None:
+        """Pay a new block's first-use cost NOW: clear one layer on the GPU,
+        write a texel from the CPU, read it back on the GPU (a 1x1 blit) and
+        write again. Measured (scratchpad/blockbench2.py, 4090): a fresh
+        64 MiB block otherwise costs 22-70 ms on its first upload / draw,
+        mid-gesture; warmed like this it costs ~75 ms here and ~0.2 ms
+        afterwards. Called where a block is created -- ahead of need, at a
+        quiet moment, when `ensure_headroom` keeps a reserve."""
+        internal, fmt_gl, typ = self._gl_format(gl, fmt)
+        value = np.zeros(1, {"u8": np.uint8, "u16": np.uint16}.get(fmt, np.float32))
+        read_fbo, draw_fbo = _as_name(gl.glGenFramebuffers(1)), _as_name(gl.glGenFramebuffers(1))
+        target = _as_name(gl.glGenRenderbuffers(1))
+        try:
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, read_fbo)
+            gl.glFramebufferTextureLayer(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, texture, 0,
+                                         layers - 1)
+            if fmt == "f32":
+                gl.glClearBufferfv(gl.GL_COLOR, 0, np.zeros(4, np.float32))
+            else:
+                gl.glClearBufferuiv(gl.GL_COLOR, 0, np.zeros(4, np.uint32))
+            gl.glBindTexture(gl.GL_TEXTURE_2D_ARRAY, texture)
+            gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+            gl.glTexSubImage3D(gl.GL_TEXTURE_2D_ARRAY, 0, 0, 0, layers - 1, 1, 1, 1,
+                               fmt_gl, typ, value)
+            gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, target)
+            gl.glRenderbufferStorage(gl.GL_RENDERBUFFER, internal, 1, 1)
+            gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, draw_fbo)
+            gl.glFramebufferRenderbuffer(gl.GL_DRAW_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0,
+                                         gl.GL_RENDERBUFFER, target)
+            gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, read_fbo)
+            gl.glBlitFramebuffer(0, 0, 1, 1, 0, 0, 1, 1, gl.GL_COLOR_BUFFER_BIT, gl.GL_NEAREST)
+            gl.glFinish()
+            gl.glTexSubImage3D(gl.GL_TEXTURE_2D_ARRAY, 0, 0, 0, layers - 1, 1, 1, 1,
+                               fmt_gl, typ, value)
+        finally:
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+            gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, 0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D_ARRAY, 0)
+            gl.glDeleteFramebuffers(2, [read_fbo, draw_fbo])
+            gl.glDeleteRenderbuffers(1, [target])
+            while gl.glGetError() != gl.GL_NO_ERROR:     # a refused blit is not fatal
+                pass
 
     @staticmethod
     def _gl_format(gl, fmt):
@@ -715,7 +765,9 @@ class _TileArrayStore:
 
     def _free_slot(self, gl, fmt, channel, required) -> Tuple[_ArrayBlock, int]:
         preferred = [b for b in self.channel_blocks.get(channel, ()) if b.fmt == fmt and b.free]
-        others = [b for b in self.blocks if b.fmt == fmt and b.free and b not in preferred]
+        # the fullest block first: an empty reserve block is used last
+        others = sorted((b for b in self.blocks if b.fmt == fmt and b.free and b not in preferred),
+                        key=lambda b: len(b.free))
         for block in preferred + others:
             return block, block.free.pop()
         block_bytes = ARRAY_TILE * ARRAY_TILE * _FORMAT_BYTES[fmt] * self._layers(fmt)
@@ -726,6 +778,8 @@ class _TileArrayStore:
                 break
             self._drop_block(gl, empty)
         if self.allocated_bytes + self.external_bytes() + block_bytes <= self.max_bytes:
+            if not getattr(self, "_may_grow", True):
+                raise _NoGrowth()
             block = self._new_block(gl, fmt)
             self.channel_blocks.setdefault(channel, []).append(block)
             return block, block.free.pop()
@@ -763,7 +817,7 @@ class _TileArrayStore:
         self.meta_log.append((block, layer, None))
 
     def prepare(self, gl, items, *, mandatory=frozenset(), budget_ms=None, validate=None,
-                also_required=frozenset(), required_fn=None) -> None:
+                also_required=frozenset(), required_fn=None, may_grow=True) -> None:
         """`items`: (channel, plane) of the submission, in draw order;
         `also_required`: identities of the submission not listed (resident
         already) that must not be evicted either; `required_fn`: or a
@@ -800,6 +854,7 @@ class _TileArrayStore:
             missing.append((channel, plane))
             seen.add(identity)
         missing.sort(key=lambda item: item[1].identity not in mandatory)
+        self._may_grow = may_grow
         started = time.perf_counter()
         if perf_trace.enabled():
             perf_trace.mark("gpu.array_prepare", items=len(items), missing=len(missing),
@@ -811,7 +866,15 @@ class _TileArrayStore:
                 self.deferred += 1
                 continue
             fmt = _array_format(plane)
-            block, layer = self._free_slot(gl, fmt, channel, required)
+            # a channel's complete coarse may always grow the store
+            self._may_grow = may_grow or plane.identity in mandatory
+            try:
+                block, layer = self._free_slot(gl, fmt, channel, required)
+            except _NoGrowth:
+                # the user is moving: no new block now (its first use costs
+                # tens of ms); this and the rest wait, coarser planes stand in
+                self.deferred += 1
+                continue
             values = self._upload_values(plane, fmt)
             _internal, fmt_gl, typ = self._gl_format(gl, fmt)
             gl.glBindTexture(gl.GL_TEXTURE_2D_ARRAY, block.texture)
@@ -852,6 +915,29 @@ class _TileArrayStore:
         if valid is None:
             return None
         return block, (rect, valid, size, layer)
+
+    def ensure_headroom(self, gl, fraction: float = 1.0, family_limits=(6, 4)) -> bool:
+        """A9 §35: allocate the NEXT block of a format before it is needed.
+        A new 256 MiB block costs the driver ~100 ms on first use (measured:
+        a 101-111 ms frame at each new block); allocated here, while the
+        user is not moving, and written once, it is ready when tiles land.
+        Only when a format's free slots fall below `fraction` of a block
+        and the budget (and the single pass's samplers) allow another."""
+        made = False
+        for fmt in {block.fmt for block in self.blocks}:
+            same = [b for b in self.blocks if b.fmt == fmt]
+            free = sum(len(b.free) for b in same)
+            layers = self._layers(fmt)
+            limit = family_limits[1] if fmt == "f32" else family_limits[0]
+            family = [b for b in self.blocks if (b.fmt == "f32") == (fmt == "f32")]
+            block_bytes = ARRAY_TILE * ARRAY_TILE * _FORMAT_BYTES[fmt] * layers
+            if (free >= fraction * layers or len(family) >= limit
+                    or self.allocated_bytes + self.external_bytes() + block_bytes > self.max_bytes):
+                continue
+            self._new_block(gl, fmt)            # touched on the GPU there
+            gl.glFinish()
+            made = True
+        return made
 
     def release_unused(self, gl, keep) -> int:
         """Drop every tile not in `keep`, then every block left empty."""
@@ -1090,6 +1176,9 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         self._camera_dirty = False
         #: Block A9 §32: per-submission upload time budget (None: no limit)
         self.upload_budget_ms: Optional[float] = None
+        #: A9 §35: the binding sets this while the user is moving -- no new
+        #: array block is created then (mandatory coarse still always is)
+        self.hold_growth = False
         #: Block A9 §35: the Step1 binding turns the tile array store on;
         #: every other caller (G1 tests, montage) keeps one texture per plane
         self.use_tile_arrays = False
@@ -1100,6 +1189,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         #: A9 §35.7: the single-pass compositor (None until first used)
         self._vt = None
         self._vt_failed = ""
+        self._vt_split = (6, 4)
         #: A9 §35: id(plane) -> plane for planes known to be in the arrays
         self._known_resident: Dict[int, RawPlane] = {}
         self._known_evictions = -1
@@ -1200,6 +1290,22 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                                                   if self._arrays is not None else 0)
         return self._arrays
 
+    def prepare_headroom(self) -> bool:
+        """A9 §35: the binding calls this when the user is NOT moving: the
+        next array block, if one will soon be needed, is allocated now."""
+        if self._arrays is None or not self._initialized or self._disposed:
+            return False
+        own_current = QtGui.QOpenGLContext.currentContext() is not self.context()
+        if own_current:
+            self.makeCurrent()
+        try:
+            with perf_trace.span("gpu.headroom"):
+                u, f = getattr(self, "_vt_split", (6, 4))
+                return self._arrays.ensure_headroom(self._gl, family_limits=(u, f))
+        finally:
+            if own_current:
+                self.doneCurrent()
+
     def array_slack_bytes(self, itemsizes=(1, 2, 4)) -> int:
         """Block A9 §35: what whole-block allocation may hold beyond the
         tiles it stores -- one partly filled block per format in use
@@ -1295,7 +1401,8 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                     self._cache.prepare(gl, legacy, mandatory=legacy_mandatory,
                                         budget_ms=upload_budget_ms)
                 arrays.prepare(gl, items, mandatory=mandatory, budget_ms=upload_budget_ms,
-                               validate=self._cache._validate_identity, required_fn=everything)
+                               validate=self._cache._validate_identity, required_fn=everything,
+                               may_grow=not self.hold_growth)
             if self._known_evictions != arrays.evictions:
                 self._known_resident.clear()
                 self._known_evictions = arrays.evictions
@@ -1741,6 +1848,26 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
 
     # Rendering ----------------------------------------------------------
 
+    def _vt_placeholders(self):
+        """1x1x1 R8UI and R32F arrays bound to the single pass's unused
+        sampler slots (A9 §35)."""
+        if not getattr(self, "_vt_dummy", None):
+            gl = self._gl
+            names = []
+            for internal, fmt, typ, value in (
+                    (gl.GL_R8UI, gl.GL_RED_INTEGER, gl.GL_UNSIGNED_BYTE, np.zeros(1, np.uint8)),
+                    (gl.GL_R32F, gl.GL_RED, gl.GL_FLOAT, np.zeros(1, np.float32))):
+                texture = _as_name(gl.glGenTextures(1))
+                gl.glBindTexture(gl.GL_TEXTURE_2D_ARRAY, texture)
+                for name in (gl.GL_TEXTURE_MIN_FILTER, gl.GL_TEXTURE_MAG_FILTER):
+                    gl.glTexParameteri(gl.GL_TEXTURE_2D_ARRAY, name, gl.GL_NEAREST)
+                gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+                gl.glTexImage3D(gl.GL_TEXTURE_2D_ARRAY, 0, internal, 1, 1, 1, 0, fmt, typ, value)
+                names.append(texture)
+            gl.glBindTexture(gl.GL_TEXTURE_2D_ARRAY, 0)
+            self._vt_dummy = tuple(names)
+        return self._vt_dummy
+
     def _render_vt(self, descriptor, rows, viewport: ViewportSnapshot, *, fusion: bool) -> bool:
         """Block A9 §35.7: every row in ONE pass, then `_finalize`. False
         when this submission cannot be drawn that way (the caller then
@@ -1749,24 +1876,37 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         if (store is None or self._vt_failed or "vt" not in self._programs
                 or os.environ.get("BLOCK01_VT", "1") == "0"):
             return False
-        from .step1_gpu_vt import VirtualCompositor, U_BLOCKS
+        from .step1_gpu_vt import VirtualCompositor
         if self._vt is None:
             self._vt = VirtualCompositor()
+            self._vt.u_blocks, self._vt.f_blocks = self._vt_split
             self._vt.max_layers = int(self._max_array_layers or 2048)
             self._vt.known_resident = self._known_resident
             self._vt.max_texture = int(self._capabilities.get("max_texture_size", 16384) or 16384)
         vt = self._vt
         key = (id(descriptor), store.meta_generation, fusion,
                tuple(ch for ch, _src, _p in rows))
+        t_plan = time.perf_counter()
         plan = vt.last_plan if getattr(vt, "last_key", None) == key else vt.plan(store, rows, fusion, legacy=self._cache)
+        t_planned = time.perf_counter()
         if plan is None:
             vt.fallbacks += 1
+            if perf_trace.enabled():
+                perf_trace.mark("gpu.vt_fallback", why=str(getattr(vt, "why", "?")).replace(" ", "_")[:60])
             return False
         gl = self._gl
         if vt.synced != key:
             if not vt.sync(gl, store, plan, key):
                 vt.fallbacks += 1
                 return False
+            if perf_trace.enabled():
+                plan_ms = (t_planned - t_plan) * 1000.0
+                sync_ms = (time.perf_counter() - t_planned) * 1000.0
+                if plan_ms + sync_ms > 8.0:
+                    perf_trace.mark("gpu.vt_slow", plan_ms=round(plan_ms, 2),
+                                    sync_ms=round(sync_ms, 2), levels=len(vt.level_slots),
+                                    channels=len(vt.channel_slots), rows=len(rows),
+                                    written=vt.last_written, layout=vt.last_layout)
         vt.last_key, vt.last_plan = key, plan
         # the rows carry this display (mapping, weights): always fresh
         plan.rows = rows
@@ -1786,10 +1926,16 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         gl.glUniform2iv(self._uniform_location(program, "u_level_b"), len(level_b), level_b)
         units = []
         by_family = {(b.fmt == "f32", b.vt_index): b.texture for b in store.blocks}
-        for index in range(U_BLOCKS):
-            units.append((f"u_u{index}", gl.GL_TEXTURE_2D_ARRAY, by_family.get((False, index), 0)))
-        for index in range(4):
-            units.append((f"u_f{index}", gl.GL_TEXTURE_2D_ARRAY, by_family.get((True, index), 0)))
+        # an unused sampler gets a 1x1 placeholder of its own type, never
+        # "no texture": a slot going from empty to a new block otherwise
+        # cost a ~100 ms frame (the driver re-specialising the program)
+        dummy_u, dummy_f = self._vt_placeholders()
+        for index in range(vt.u_blocks):
+            units.append((f"u_u{index}", gl.GL_TEXTURE_2D_ARRAY,
+                          by_family.get((False, index), dummy_u)))
+        for index in range(vt.f_blocks):
+            units.append((f"u_f{index}", gl.GL_TEXTURE_2D_ARRAY,
+                          by_family.get((True, index), dummy_f)))
         units += [("u_pages", gl.GL_TEXTURE_2D_ARRAY, vt.pages_tex),
                   ("u_meta", gl.GL_TEXTURE_2D, vt.meta_tex),
                   ("u_params", gl.GL_TEXTURE_2D, vt.params_tex)]
@@ -2174,8 +2320,10 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             self._programs[name] = self._link_program(vertex, source)
             self._uniforms[name] = {}
         try:
-            self._programs["vt"] = self._link_program(
-                vertex, (_SHADER_DIR / "step1_gpu_vt.frag").read_text(encoding="utf-8"))
+            from .step1_gpu_vt import sampler_split, shader_source
+            self._vt_split = sampler_split(int(self._capabilities.get("max_texture_image_units", 16) or 16))
+            template = (_SHADER_DIR / "step1_gpu_vt.frag").read_text(encoding="utf-8")
+            self._programs["vt"] = self._link_program(vertex, shader_source(template, *self._vt_split))
             self._uniforms["vt"] = {}
         except Step1GpuLayerError as exc:            # the per-channel path stays
             self._vt_failed = f"vt program: {exc}"[:200]
@@ -2420,6 +2568,9 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         if self._vt is not None:
             self._vt.clear(self._gl)
             self._vt = None
+        if getattr(self, "_vt_dummy", None):
+            self._gl.glDeleteTextures(list(self._vt_dummy))
+            self._vt_dummy = None
         if self._array_vao:
             self._gl.glDeleteVertexArrays(1, [self._array_vao])
             self._array_vao = 0

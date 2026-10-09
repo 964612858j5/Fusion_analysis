@@ -21,12 +21,39 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 TILE = 512
-U_BLOCKS = 6
+U_BLOCKS = 6        # defaults; the layer sets the real split per GL context
 F_BLOCKS = 4
 MAX_LEVELS = 16
 MAX_LEVELS_PER_CHANNEL = 8
 BLOCK_ROWS = 3
 PARAM_TEXELS = 5
+
+
+def shader_source(template: str, u_blocks: int, f_blocks: int) -> str:
+    """The single-pass fragment shader for this many integer / float block
+    samplers (GLSL 3.30 indexes samplers only by constants: one name and
+    one branch per slot)."""
+    samplers = [f"uniform usampler2DArray u_u{i};" for i in range(u_blocks)]
+    samplers += [f"uniform sampler2DArray u_f{i};" for i in range(f_blocks)]
+    fetch = ["    if (family == 0) {"]
+    fetch += [f"        if (block == {i}) return float(texelFetch(u_u{i}, at, 0).r);"
+              for i in range(u_blocks)]
+    fetch += ["        return 0.0;", "    }"]
+    fetch += [f"    if (block == {i}) return texelFetch(u_f{i}, at, 0).r;" for i in range(f_blocks)]
+    fetch += ["    return 0.0;"]
+    constants = (f"const int BLOCK_ROWS = {BLOCK_ROWS};\n"
+                 f"const int U_BLOCKS = {u_blocks};")
+    return (template.replace("//@SAMPLERS@", "\n".join(samplers))
+            .replace("//@FETCH@", "\n".join(fetch))
+            .replace("//@BLOCK_CONSTANTS@", constants))
+
+
+def sampler_split(max_units: int) -> Tuple[int, int]:
+    """(integer blocks, float blocks) the single pass can bind: every unit
+    but the page, meta and parameter textures; mostly integer (raw)."""
+    available = max(2, min(int(max_units), 32) - 3)
+    floats = max(1, available // 6)
+    return available - floats, floats
 
 
 def _family(fmt: str) -> int:
@@ -62,6 +89,10 @@ class VirtualCompositor:
         self.synced = None                                  # (id(descriptor), store generation)
         self.max_layers = 2048
         self.max_texture = 16384
+        self.u_blocks = U_BLOCKS
+        self.f_blocks = F_BLOCKS
+        self.last_written = 0
+        self.last_layout = ""
         #: channel -> (plane signature, cells, levels used, extent): reused
         #: when a publication hands the same planes back
         self._channel_cells = {}
@@ -69,6 +100,10 @@ class VirtualCompositor:
         self.known_resident = {}
         #: channel -> the cells its page layer was last written from
         self._written = {}
+        #: id(plane) -> the (block, layer) its page entry points at
+        self._slot_of = {}
+        #: id(plane) -> (plane, ds_x, level key, tx, ty, x1, y1): its grid cell
+        self._geometry = {}
         self.frames = 0
         self.fallbacks = 0
 
@@ -83,7 +118,8 @@ class VirtualCompositor:
         blocks = {0: 0, 1: 0}
         for block in store.blocks:
             blocks[_family(block.fmt)] += 1
-        if blocks[0] > U_BLOCKS or blocks[1] > F_BLOCKS:
+        if blocks[0] > self.u_blocks or blocks[1] > self.f_blocks:
+            self.why = "blocks"
             return None
         cells: Dict[str, Dict[Tuple[int, int, int], object]] = {}
         levels: List[Tuple[float, float]] = list(self.level_slots)
@@ -109,35 +145,49 @@ class VirtualCompositor:
             for plane in planes:
                 if known.get(id(plane)) is not plane and not store.is_resident(plane):
                     if legacy is not None and legacy.is_resident(plane):
+                        self.why = "legacy plane"
                         return None
                     continue
-                values = np.asarray(plane.values)
-                h, w = values.shape[:2]
-                if h > TILE or w > TILE:
-                    return None
-                x0, x1, y0, y1 = plane.world_rect
-                ds_x, ds_y = (x1 - x0) / w, (y1 - y0) / h
-                tx, ty = x0 / (TILE * ds_x), y0 / (TILE * ds_y)
-                if (abs(tx - round(tx)) > 1e-6 or abs(ty - round(ty)) > 1e-6
-                        or tx < -0.5 or ty < -0.5):
-                    return None                     # not on the binding's grid
+                info = self._geometry.get(id(plane))
+                if info is None or info[0] is not plane:
+                    values = np.asarray(plane.values)
+                    h, w = values.shape[:2]
+                    if h > TILE or w > TILE:
+                        self.why = "oversized"
+                        return None
+                    x0, x1, y0, y1 = plane.world_rect
+                    ds_x, ds_y = (x1 - x0) / w, (y1 - y0) / h
+                    tx, ty = x0 / (TILE * ds_x), y0 / (TILE * ds_y)
+                    if (abs(tx - round(tx)) > 1e-6 or abs(ty - round(ty)) > 1e-6
+                            or tx < -0.5 or ty < -0.5):
+                        self.why = "off grid"
+                        return None                 # not on the binding's grid
+                    info = (plane, ds_x, (round(ds_x, 9), round(ds_y, 9)),
+                            int(round(tx)), int(round(ty)), x1, y1)
+                    if len(self._geometry) > 200000:
+                        self._geometry.clear()
+                    self._geometry[id(plane)] = info
+                _p, ds_x, key_ds, tx, ty, x1, y1 = info
                 if ds_x > last_ds * (1 + 1e-9):
+                    self.why = "order"
                     return None                     # not coarse -> fine
                 last_ds = ds_x
-                key_ds = (round(ds_x, 9), round(ds_y, 9))
                 if key_ds not in levels:
                     levels.append(key_ds)
                     if len(levels) > MAX_LEVELS:
+                        self.why = "levels"
                         return None
                 level = levels.index(key_ds)
-                cell = (level, int(round(tx)), int(round(ty)))
+                cell = (level, tx, ty)
                 held = mine.get(cell)
-                if held is not None and held.identity != plane.identity:
+                if held is not None and held is not plane and held.identity != plane.identity:
+                    self.why = "cell conflict %r" % (cell,)
                     return None                     # two planes in one cell
                 mine[cell] = plane
                 extent_w, extent_h = max(extent_w, x1), max(extent_h, y1)
                 own_extent = (max(own_extent[0], x1), max(own_extent[1], y1))
             if len({cell[0] for cell in mine}) > MAX_LEVELS_PER_CHANNEL:
+                self.why = "levels per channel"
                 return None
             used_levels = tuple((level, levels[level]) for level in {cell[0] for cell in mine})
             self._channel_cells[channel] = (sig, mine, used_levels, own_extent)
@@ -181,7 +231,10 @@ class VirtualCompositor:
         """Bring the GL page/meta/param textures to `plan`. False: cannot."""
         if not plan.levels:
             return False                      # nothing to page: the empty case draws per channel
+        before = (len(self.level_slots), self.extent)
         relaid = self._layout(gl, plan.levels, self._extent_next)
+        self.last_layout = ("reset" if relaid else
+                            "append" if before != (len(self.level_slots), self.extent) else "same")
         width = sum(g[0] for g in self.level_grid)
         height = max(g[1] for g in self.level_grid)
         for channel, _source, _params in plan.rows:
@@ -209,26 +262,34 @@ class VirtualCompositor:
                 if channel in self._written:      # no longer drawn: its page empties
                     self.pages[slot].fill(-1)
                     del self._written[channel]
-                    changed_layers.append(slot)
+                    changed_layers.append((slot, 0, height))
                 continue
             if self._written.get(channel) is cells:
                 continue                          # the very same cells: nothing to write
-            layer_pages = np.full((height, width), -1, np.int32)
-            if cells:
-                ys, xs, codes = [], [], []
-                for (level, tx, ty), plane in cells.items():
-                    gw, gh = self.level_grid[level]
-                    if tx >= gw or ty >= gh:
-                        return False
-                    block, layer = store.slot(plane)
-                    ys.append(ty)
-                    xs.append(self.level_offset[level] + tx)
-                    codes.append((_family(block.fmt) << 24) | (block.vt_index << 16) | layer)
-                layer_pages[np.asarray(ys), np.asarray(xs)] = np.asarray(codes, np.int32)
-            self.pages[slot] = layer_pages
-            changed_layers.append(slot)
+            # write only what changed against the cells last written
+            previous = self._written.get(channel) or {}
+            layer_pages = self.pages[slot]
+            touched_rows = []
+            for cell in previous.keys() - cells.keys():
+                level, tx, ty = cell
+                layer_pages[ty, self.level_offset[level] + tx] = -1
+                touched_rows.append(ty)
+            for cell, plane in cells.items():
+                if previous.get(cell) is plane and not self._moved(store, plane):
+                    continue
+                level, tx, ty = cell
+                gw, gh = self.level_grid[level]
+                if tx >= gw or ty >= gh:
+                    return False
+                block, layer = store.slot(plane)
+                layer_pages[ty, self.level_offset[level] + tx] = (
+                    (_family(block.fmt) << 24) | (block.vt_index << 16) | layer)
+                touched_rows.append(ty)
+            if touched_rows:
+                changed_layers.append((slot, min(touched_rows), max(touched_rows) + 1))
             self._written[channel] = cells
         del drawn
+        self.last_written = len(changed_layers)
         if full:
             self._upload_pages(gl, self.pages, full=True)
         elif changed_layers:
@@ -236,6 +297,14 @@ class VirtualCompositor:
         self._sync_meta(gl, store)
         self.synced = descriptor_key
         return True
+
+    def _moved(self, store, plane) -> bool:
+        """Did this plane's slot change since its cell was written (an
+        eviction and a re-upload put it elsewhere)?"""
+        now = store.slots.get(plane.identity)
+        was = self._slot_of.get(id(plane))
+        self._slot_of[id(plane)] = now
+        return was is not None and was != now
 
     def _upload_pages(self, gl, pages, full, changed=None) -> None:
         layers, height, width = pages.shape
@@ -251,10 +320,10 @@ class VirtualCompositor:
             self.pages_shape = pages.shape
         else:
             gl.glBindTexture(gl.GL_TEXTURE_2D_ARRAY, self.pages_tex)
-            for layer in changed:                 # one channel's whole page layer
-                gl.glTexSubImage3D(gl.GL_TEXTURE_2D_ARRAY, 0, 0, 0, int(layer), width, height, 1,
-                                   gl.GL_RED_INTEGER, gl.GL_INT,
-                                   np.ascontiguousarray(pages[layer]))
+            for layer, row0, row1 in changed:     # the changed rows of one channel
+                gl.glTexSubImage3D(gl.GL_TEXTURE_2D_ARRAY, 0, 0, int(row0), int(layer),
+                                   width, int(row1 - row0), 1, gl.GL_RED_INTEGER, gl.GL_INT,
+                                   np.ascontiguousarray(pages[layer, row0:row1]))
         gl.glBindTexture(gl.GL_TEXTURE_2D_ARRAY, 0)
 
     def _sync_meta(self, gl, store) -> None:
@@ -263,7 +332,7 @@ class VirtualCompositor:
         Follows the store's upload/eviction log; rebuilt only when the
         block layout changed."""
         width = max([block.layers for block in store.blocks] + [1])
-        height = (U_BLOCKS + F_BLOCKS) * BLOCK_ROWS
+        height = (self.u_blocks + self.f_blocks) * BLOCK_ROWS
         rebuild = self.meta.shape[:2] != (height, width) or not self.meta_tex
         log = store.meta_log
         start = getattr(self, "_meta_seen", 0)
@@ -276,7 +345,7 @@ class VirtualCompositor:
             entries = log[start:]
         touched = set()
         for block, layer, identity in entries:
-            row = (_family(block.fmt) * U_BLOCKS + block.vt_index) * BLOCK_ROWS
+            row = (_family(block.fmt) * self.u_blocks + block.vt_index) * BLOCK_ROWS
             if identity is None or identity not in store.slots or store.slots[identity] != (block, layer):
                 self.meta[row:row + 3, layer] = 0.0
             else:

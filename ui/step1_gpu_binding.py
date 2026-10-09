@@ -74,6 +74,10 @@ HOT_UPLOAD_BUDGET_MS = 1.5
 #: Block A9 §35: above this many drawn channels a viewport is planned in
 #: slices of PLAN_SLICE_MS, the event loop (input) served in between
 PLAN_SLICE_MIN_CHANNELS = 8
+#: Block A9 §35: quiet time before a texture block is allocated ahead
+HEADROOM_IDLE_MS = 150
+#: ...and only after this long without any camera input
+HEADROOM_QUIET_MS = 1500
 PLAN_SLICE_MS = 4.0
 #: Block A9 §35: refinement publications keep at most 1/PUBLISH_DUTY of the
 #: GUI thread (69 channels loading published ~11 ms every 16 ms)
@@ -182,7 +186,8 @@ class Step1GpuBinding(QtCore.QObject):
         if hasattr(layer, "use_tile_arrays") and os.environ.get("BLOCK01_TILE_ARRAYS", "1") != "0":
             layer.use_tile_arrays = True
         self._slot_mode = False
-        self._build_display_snapshot = build_display_snapshot
+        self._display_source = build_display_snapshot
+        self._display_cached = None
         self._build_viewport_snapshot = build_viewport_snapshot
         self.budgets = budgets
         self._dispose_layer = bool(dispose_layer)
@@ -268,6 +273,9 @@ class Step1GpuBinding(QtCore.QObject):
         self._motion_leading = False   # A9 §32: a deferred leading edge is due
         self._last_input_at = -1.0e9
         self._last_publish_cost_ms = 0.0
+        self._headroom_timer = QtCore.QTimer(self)
+        self._headroom_timer.setSingleShot(True)
+        self._headroom_timer.timeout.connect(self._headroom_when_idle)
         #: A9 §35: per channel, the ChannelSource last published and what
         #: it was built from -- a channel whose planes, admission and (for
         #: finer stand-ins) GPU residency did not change is not rebuilt
@@ -289,6 +297,7 @@ class Step1GpuBinding(QtCore.QObject):
 
     def source_changed(self) -> None:
         """Explicit owner lifecycle fence after a public source replacement."""
+        self._forget_display()
         if self._disposed:
             return
         if self._paused:
@@ -339,6 +348,26 @@ class Step1GpuBinding(QtCore.QObject):
         self._begin_fine_epoch(snapshot)
         self._publish_current()
 
+    #: A9 §35: how long a display snapshot is reused between the refreshes
+    #: that announce a change (a safety net for any path that does not)
+    DISPLAY_TTL_S = 0.25
+
+    def _build_display_snapshot(self):
+        """The owner's display snapshot, built once per change. Building it
+        reads the whole draft spec (~2 ms with 69 channels) and every
+        publication asked for it; `refresh_display()` / `source_changed()`
+        / `resume()` drop the copy, and it is never older than DISPLAY_TTL_S."""
+        cached = self._display_cached
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < self.DISPLAY_TTL_S:
+            return cached[1]
+        snapshot = self._display_source()
+        self._display_cached = (now, snapshot)
+        return snapshot
+
+    def _forget_display(self) -> None:
+        self._display_cached = None
+
     @perf_trace.timed("gpu.refresh")
     def refresh_display(self) -> None:
         """Resubmit resident immutable planes; display-only changes issue no I/O.
@@ -350,6 +379,7 @@ class Step1GpuBinding(QtCore.QObject):
         colour, a weight or an Intensity window leaves the active set alone
         and therefore still reads nothing and asks for nothing.
         """
+        self._forget_display()
         if self._disposed or self._source is None:
             return
         if self._paused:
@@ -444,6 +474,7 @@ class Step1GpuBinding(QtCore.QObject):
         whatever is resident stays."""
         if self._disposed or not self._paused:
             return False
+        self._forget_display()
         self._paused = False
         self._connect_controller()
         if self._source_pending:
@@ -471,6 +502,7 @@ class Step1GpuBinding(QtCore.QObject):
         self._disposed = True
         self._motion_timer.stop()
         self._publish_timer.stop()
+        self._headroom_timer.stop()
         self._publish_due = False
         self._disconnect_controller()
         self._cancel_all()
@@ -714,6 +746,7 @@ class Step1GpuBinding(QtCore.QObject):
             # newer epoch drops what is left of this one
             self._plan_channels(list(active), snapshot, priority, self._fine_epoch, sliced=True)
 
+    @perf_trace.timed("gpu.plan")
     def _plan_channels(self, pending, snapshot, priority, epoch, *, sliced) -> None:
         if self._disposed or self._paused or epoch != self._fine_epoch:
             return
@@ -884,28 +917,43 @@ class Step1GpuBinding(QtCore.QObject):
             coarse_keys |= (set(plan.expected) if plan is not None
                             else self._full_level_keys(channel, coarsest))
         chosen = None
+        # A9 §35: every channel sees the SAME tiles at a level (only the
+        # channel differs in the key), so the geometry and its pixel count
+        # are worked out once per level, the bytes per channel from its
+        # texel size -- not 69 key sets per level. The exact set union is
+        # kept for the one level that overlaps the coarse (the coarsest).
+        coarse_bytes = self._planned_bytes(coarse_keys)
+        texel = {c: self._channel_pixel_bytes(c) for c in active}
+        fine_bytes: Dict[str, int] = {}
         for level in range(max(0, ideal), coarsest + 1):
-            fine = {c: frozenset(self._candidate_keys(c, snapshot, level)) for c in active}
-            if any(len(k) > max_tiles or self._planned_bytes(k) > fine_budget
-                   for k in fine.values()):
+            tiles = self._level_tiles(snapshot, level)
+            pixels = self._tiles_pixels(level, tiles)
+            fine_bytes = {c: pixels * texel[c] for c in active}
+            if len(tiles) > max_tiles or any(b > fine_budget for b in fine_bytes.values()):
                 continue
-            union = set(coarse_keys)
-            for k in fine.values():
-                union |= k
-            used = self._planned_bytes(union)
+            if level == coarsest:
+                fine = self._keys_for(active, level, tiles)
+                union = set(coarse_keys)
+                for k in fine.values():
+                    union |= k
+                used = self._planned_bytes(union)
+            else:
+                fine = None
+                used = coarse_bytes + sum(fine_bytes.values())
             if total is None or used <= total:
-                chosen = (level, fine, used)
+                chosen = (level, fine if fine is not None else self._keys_for(active, level, tiles),
+                          used)
                 break
         coarse_only = chosen is None
         if coarse_only:
             # nothing finer fits: the complete coarse alone is the picture
-            chosen = (coarsest, {c: frozenset() for c in active},
-                      self._planned_bytes(coarse_keys))
+            chosen = (coarsest, {c: frozenset() for c in active}, coarse_bytes)
+            fine_bytes = {c: 0 for c in active}
         level, fine, used = chosen
         share = (None if total is None
                  else max(0, total - used) // max(1, len(active)))
-        carry = {c: max(0, fine_budget - self._planned_bytes(fine[c])) if share is None
-                 else min(share, max(0, fine_budget - self._planned_bytes(fine[c])))
+        carry = {c: max(0, fine_budget - fine_bytes.get(c, 0)) if share is None
+                 else min(share, max(0, fine_budget - fine_bytes.get(c, 0)))
                  for c in active}
         admission = _Admission(token=token, ideal=ideal, level=level, keys=fine, carry=carry,
                                coarse_only=coarse_only)
@@ -921,6 +969,43 @@ class Step1GpuBinding(QtCore.QObject):
             if hook is not None:
                 QtCore.QTimer.singleShot(0, hook)
         return admission
+
+    def _level_tiles(self, snapshot, level: int) -> Tuple[Tuple[int, int], ...]:
+        """A9 §35: the (tx, ty) of `level` the viewport needs -- the same
+        cover `_candidate_keys` builds, channel-free."""
+        keys = self._candidate_keys("", snapshot, level)
+        return tuple(sorted((int(k.tile.tx), int(k.tile.ty)) for k in keys))
+
+    def _tiles_pixels(self, level: int, tiles) -> int:
+        """Texels of these tiles (whole slots in array mode), as
+        `_planned_bytes` counts them at one byte per texel."""
+        height, width = self.provider.level_shape(level)
+        tile_size = self.controller.grid.tile_size
+        slot = self._slot_accounting
+        total = 0
+        for tx, ty in tiles:
+            tile_h = max(0, min(tile_size, height - ty * tile_size))
+            tile_w = max(0, min(tile_size, width - tx * tile_size))
+            if slot and tile_h and tile_w:
+                tile_h = tile_w = max(tile_size, ARRAY_TILE)
+            total += tile_h * tile_w
+        return total
+
+    def _channel_pixel_bytes(self, channel: str) -> int:
+        """`_pixel_bytes` of any tile of `channel` (it depends on the
+        channel and the namespace, never on the tile)."""
+        probe = RawKey(source=self._key_source, channel=channel,
+                       tile=TileAddress(grid=self.controller.grid, level=0, tx=0, ty=0))
+        return self._pixel_bytes(probe)
+
+    def _keys_for(self, channels, level: int, tiles) -> Dict[str, frozenset]:
+        """The per-channel key sets of `tiles` -- one TileAddress per tile,
+        shared by every channel's key (hashed once)."""
+        grid = self.controller.grid
+        addresses = [TileAddress(grid=grid, level=level, tx=tx, ty=ty) for tx, ty in tiles]
+        source = self._key_source
+        return {c: frozenset(RawKey(source=source, channel=c, tile=a) for a in addresses)
+                for c in channels}
 
     def _candidate_keys(self, channel: str, snapshot, level: int) -> Set[RawKey]:
         """The visible tiles at `level`: the requested level's own visible
@@ -1116,6 +1201,14 @@ class Step1GpuBinding(QtCore.QObject):
         frame = max(frame, PUBLISH_DUTY * self._last_publish_cost_ms)
         self._publish_timer.start(int(math.ceil(max(0.0, frame - since))))
 
+    def _headroom_when_idle(self) -> None:
+        if self._disposed or self._paused:
+            return
+        if (time.monotonic() - self._last_input_at) * 1000.0 < HEADROOM_QUIET_MS:
+            self._headroom_timer.start(HEADROOM_IDLE_MS)    # still moving: later
+            return
+        self.layer.prepare_headroom()
+
     def _input_hot(self) -> bool:
         """Block A9 §32: is the user moving the camera right now?"""
         return (time.monotonic() - self._last_input_at) * 1000.0 < INPUT_HOT_MS
@@ -1297,8 +1390,10 @@ class Step1GpuBinding(QtCore.QObject):
             target_index = self._admit(snapshot).level if on_source else None
             self.layer._a9_target_index = target_index
         if hasattr(self.layer, "upload_budget_ms"):
-            self.layer.upload_budget_ms = (HOT_UPLOAD_BUDGET_MS if self._input_hot()
-                                           else UPLOAD_BUDGET_MS)
+            hot = self._input_hot()
+            self.layer.upload_budget_ms = HOT_UPLOAD_BUDGET_MS if hot else UPLOAD_BUDGET_MS
+            if hasattr(self.layer, "hold_growth"):
+                self.layer.hold_growth = hot
         try:
             stats = self.layer.submit(descriptor, display, viewport)
         except Step1GpuLayerError as exc:
@@ -1325,6 +1420,12 @@ class Step1GpuBinding(QtCore.QObject):
         self._descriptor_history.append((descriptor, display, viewport, stats))
         self._publication_count += 1
         self._deferred_uploads = int(stats.get("deferred_uploads", 0) or 0)
+        headroom = getattr(self.layer, "prepare_headroom", None)
+        if (headroom is not None and not self._headroom_timer.isActive()
+                and os.environ.get("BLOCK01_HEADROOM", "1") != "0"):
+            # A9 §35: the next texture block is allocated while the user
+            # is not moving (it costs the driver ~100 ms on first use)
+            self._headroom_timer.start(HEADROOM_IDLE_MS)
         if self._deferred_uploads > 0:
             # Block A9 §32: what did not fit this frame's upload budget goes
             # up in the next frame slot (coarser planes stand in meanwhile)

@@ -19,16 +19,7 @@
 in vec2 v_screen_uv;
 out vec4 out_rgba;
 
-uniform usampler2DArray u_u0;
-uniform usampler2DArray u_u1;
-uniform usampler2DArray u_u2;
-uniform usampler2DArray u_u3;
-uniform usampler2DArray u_u4;
-uniform usampler2DArray u_u5;
-uniform sampler2DArray u_f0;
-uniform sampler2DArray u_f1;
-uniform sampler2DArray u_f2;
-uniform sampler2DArray u_f3;
+//@SAMPLERS@
 uniform isampler2DArray u_pages;   // all levels side by side; layer = channel slot
 uniform sampler2D u_meta;          // per (family, block, layer): rect, valid rect, size
 uniform sampler2D u_params;        // per drawn channel, in draw order
@@ -39,23 +30,11 @@ uniform int u_fusion;
 uniform vec4 u_level_a[16];        // (tile world w, tile world h, page x offset, 0)
 uniform ivec2 u_level_b[16];       // (grid w, grid h)
 
-const int BLOCK_ROWS = 3;          // meta rows per block: rect, valid, size
-const int U_BLOCKS = 6;
+//@BLOCK_CONSTANTS@
 
 float fetch_raw(int family, int block, int layer, ivec2 texel) {
     ivec3 at = ivec3(texel, layer);
-    if (family == 0) {
-        if (block == 0) return float(texelFetch(u_u0, at, 0).r);
-        if (block == 1) return float(texelFetch(u_u1, at, 0).r);
-        if (block == 2) return float(texelFetch(u_u2, at, 0).r);
-        if (block == 3) return float(texelFetch(u_u3, at, 0).r);
-        if (block == 4) return float(texelFetch(u_u4, at, 0).r);
-        return float(texelFetch(u_u5, at, 0).r);
-    }
-    if (block == 0) return texelFetch(u_f0, at, 0).r;
-    if (block == 1) return texelFetch(u_f1, at, 0).r;
-    if (block == 2) return texelFetch(u_f2, at, 0).r;
-    return texelFetch(u_f3, at, 0).r;
+//@FETCH@
 }
 
 // The signal of channel `row` at `world`, or -1.0 when no submitted plane

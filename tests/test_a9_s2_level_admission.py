@@ -307,3 +307,42 @@ def test_a_readmission_back_to_a_resident_level_cancels_the_finer_requests(app):
             assert _union_bytes(descriptor) <= 1000
     finally:
         binding.dispose()
+
+
+# ── §38: the profile's shortcuts give the answers they replace ───────────
+
+def _planes(descriptor):
+    return [(s.channel, tuple(id(p) for p in s.coarse), tuple(id(p) for p in s.fine),
+             s.selected_level, s.target_level) for s in descriptor.channels]
+
+
+@pytest.mark.parametrize("tiles, level", [(((1, 1), (2, 1), (1, 2), (2, 2)), 0),
+                                          (((0, 0), (1, 0), (0, 1), (1, 1)), 1)],
+                         ids=["same-level-pan", "zoom-out-to-coarsest"])
+def test_a_camera_move_publishes_what_a_fresh_build_would(app, tiles, level):
+    """Admission's shared bytes / rect equal the per-key ones; the publish
+    cache (no longer keyed by the admission object) gives the sources a
+    build from scratch gives, after a pan and after a zoom-out."""
+    _p, controller, scheduler, layer, binding, _h = _rig(app, ("A", "B"), total=10_000)
+    try:
+        binding.update_viewport(controller.snapshot())
+        g._deliver_all(app, scheduler, list(scheduler.requests),
+                       value=np.full((4, 4), 0.5, np.float32))
+        marker = len(scheduler.requests)
+        binding.update_viewport(controller.set_snapshot(visible_tiles=tiles, level=level, epoch=2))
+        g._deliver_all(app, scheduler, scheduler.requests[marker:],
+                       value=np.full((4, 4), 0.6, np.float32))
+        admission = binding._admission
+        assert admission.level == level and admission.keys.get("A")
+        for channel in ("A", "B"):
+            keys = set(admission.keys.get(channel, frozenset()))
+            if keys:
+                assert admission.fine_bytes[channel] == binding._planned_bytes(keys)
+                assert admission.rect == binding._keys_world_rect(keys)
+        binding._publish_current()
+        cached = _planes(layer.calls[-1][0])
+        binding._source_cache.clear()
+        binding._publish_current()
+        assert cached == _planes(layer.calls[-1][0])
+    finally:
+        binding.dispose()

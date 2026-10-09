@@ -29,6 +29,8 @@ second scheduler, raw cache, LRU authority or repository here.
 from __future__ import annotations
 
 import collections
+import collections.abc
+import dataclasses
 import math
 import os
 import threading
@@ -140,6 +142,37 @@ class BindingBudgets:
     max_raw_texture_bytes: Optional[int] = None
 
 
+class _LazyKeys(collections.abc.Mapping):
+    """A9 §38 (profile): an admission's per-channel key sets, each built
+    when first asked for. Building all 69 at every camera move was most of
+    the first plan slice; a newer move usually comes before most are read."""
+
+    __slots__ = ("_source", "_addresses", "_channels", "_built")
+
+    def __init__(self, source, addresses, channels):
+        self._source = source
+        self._addresses = addresses
+        self._channels = tuple(channels)
+        self._built = {}
+
+    def __getitem__(self, channel):
+        try:
+            return self._built[channel]
+        except KeyError:
+            if channel not in self._channels:
+                raise
+        keys = frozenset(RawKey(source=self._source, channel=channel, tile=a)
+                         for a in self._addresses)
+        self._built[channel] = keys
+        return keys
+
+    def __iter__(self):
+        return iter(self._channels)
+
+    def __len__(self):
+        return len(self._channels)
+
+
 @dataclass(frozen=True)
 class _Admission:
     """Block A9 S2b: one viewport's admitted fine target (immutable).
@@ -158,6 +191,11 @@ class _Admission:
     carry: Mapping[str, int]
     #: no level's fine fits at all: the complete coarse alone is drawn
     coarse_only: bool = False
+    #: A9 §38 (profile): what every channel's plan would otherwise work out
+    #: again tile by tile -- its `keys`' bytes and their world rectangle
+    #: (the same tiles for every channel)
+    fine_bytes: Mapping[str, int] = dataclasses.field(default_factory=dict)
+    rect: Optional[Tuple[float, float, float, float]] = None
 
     @property
     def limited(self) -> bool:
@@ -820,13 +858,18 @@ class Step1GpuBinding(QtCore.QObject):
         admission = self._admit(snapshot, channel)
         target_level = admission.level
         keys = set(admission.keys.get(channel, frozenset()))
-        viewport = self._keys_world_rect(keys) or self._keys_world_rect(
-            self._visible_keys(channel, snapshot))
+        # A9 §38 (profile): the admission worked both out once for all
+        # channels; per channel, tile by tile, was most of a plan's time
+        shared = bool(keys) and channel in admission.fine_bytes
+        viewport = ((admission.rect if shared else None)
+                    or self._keys_world_rect(keys)
+                    or self._keys_world_rect(self._visible_keys(channel, snapshot)))
         # THE CURRENT TARGET LEVEL IS RESERVED FIRST. A layer carried over
         # from another zoom is a stand-in until the target arrives; it must
         # never be the reason the target itself does not fit, which would
         # leave the viewport on that stand-in for good.
-        target_bytes = self._planned_bytes(keys)
+        target_bytes = (admission.fine_bytes[channel] if shared
+                        else self._planned_bytes(keys))
         if (len(keys) > self.budgets.max_fine_tiles_per_viewport or
                 target_bytes > budget):
             # FAIL CLOSED AND SAY SO: this viewport's OWN target level does
@@ -922,24 +965,46 @@ class Step1GpuBinding(QtCore.QObject):
         if previous is not None and previous.token == token:
             self._admit_fast = fast
             return previous
+        return self._admit_new(snapshot, active, coarse_state, token, previous, fast)
+
+    @perf_trace.timed("gpu.admit")
+    def _admit_new(self, snapshot, active, coarse_state, token, previous, fast) -> _Admission:
         ideal = int(getattr(snapshot, "level", 0) or 0)
         coarsest = int(self.provider.num_levels) - 1
         fine_budget = self.budgets.max_fine_plane_bytes_per_channel
         max_tiles = self.budgets.max_fine_tiles_per_viewport
         total = self._total_budget()
-        coarse_keys: Set[RawKey] = set()
-        for channel in active:
-            plan = self._coarse.get(channel)
-            # the COMPLETE expected coarse, delivered or not (codex)
-            coarse_keys |= (set(plan.expected) if plan is not None
-                            else self._full_level_keys(channel, coarsest))
+        # A9 §38 (profile): the complete coarse does not move with the
+        # camera -- its key union and bytes are kept until it changes
+        memo_key = (coarse_state, self._coarse_version, self._slot_accounting,
+                    self._key_source, coarsest)
+        memo = self.__dict__.get("_coarse_memo")
+        if memo is not None and memo[0] == memo_key:
+            coarse_keys, coarse_bytes = memo[1], memo[2]
+        else:
+            coarse_keys: Set[RawKey] = set()
+            for channel in active:
+                plan = self._coarse.get(channel)
+                # the COMPLETE expected coarse, delivered or not (codex)
+                coarse_keys |= (set(plan.expected) if plan is not None
+                                else self._full_level_keys(channel, coarsest))
+            coarse_bytes = self._planned_bytes(coarse_keys)
+            self._coarse_memo = (memo_key, coarse_keys, coarse_bytes)
+            # per channel, the coarsest-level tiles the coarse already
+            # holds under this binding's key namespace
+            coarse_tiles: Dict[str, Set[Tuple[int, int]]] = {}
+            for key in coarse_keys:
+                if key.source == self._key_source and int(key.tile.level) == coarsest:
+                    coarse_tiles.setdefault(key.channel, set()).add(
+                        (int(key.tile.tx), int(key.tile.ty)))
+            self._coarse_memo += (coarse_tiles,)
+        coarse_tiles = self._coarse_memo[3]
         chosen = None
         # A9 §35: every channel sees the SAME tiles at a level (only the
         # channel differs in the key), so the geometry and its pixel count
         # are worked out once per level, the bytes per channel from its
         # texel size -- not 69 key sets per level. The exact set union is
         # kept for the one level that overlaps the coarse (the coarsest).
-        coarse_bytes = self._planned_bytes(coarse_keys)
         texel = {c: self._channel_pixel_bytes(c) for c in active}
         fine_bytes: Dict[str, int] = {}
         for level in range(max(0, ideal), coarsest + 1):
@@ -949,20 +1014,24 @@ class Step1GpuBinding(QtCore.QObject):
             if len(tiles) > max_tiles or any(b > fine_budget for b in fine_bytes.values()):
                 continue
             if level == coarsest:
-                fine = self._keys_for(active, level, tiles)
-                union = set(coarse_keys)
-                for k in fine.values():
-                    union |= k
-                used = self._planned_bytes(union)
+                # the union of coarse and fine, counted without building
+                # it (A9 §38, profile): the coarse plus, per channel, the
+                # fine tiles its coarse does not already hold
+                used = coarse_bytes
+                for c in active:
+                    held = coarse_tiles.get(c, ())
+                    extra = [t for t in tiles if t not in held]
+                    if extra:
+                        used += self._tiles_pixels(level, extra) * texel[c]
             else:
-                fine = None
                 used = coarse_bytes + sum(fine_bytes.values())
             if total is None or used <= total:
-                chosen = (level, fine if fine is not None else self._keys_for(active, level, tiles),
-                          used)
+                chosen = (level, self._keys_for(active, level, tiles, lazy=True), used)
+                chosen_rect = self._tiles_world_rect(level, tiles)
                 break
         coarse_only = chosen is None
         if coarse_only:
+            chosen_rect = None
             # nothing finer fits: the complete coarse alone is the picture
             chosen = (coarsest, {c: frozenset() for c in active}, coarse_bytes)
             fine_bytes = {c: 0 for c in active}
@@ -973,7 +1042,8 @@ class Step1GpuBinding(QtCore.QObject):
                  else min(share, max(0, fine_budget - fine_bytes.get(c, 0)))
                  for c in active}
         admission = _Admission(token=token, ideal=ideal, level=level, keys=fine, carry=carry,
-                               coarse_only=coarse_only)
+                               coarse_only=coarse_only, fine_bytes=dict(fine_bytes),
+                               rect=chosen_rect)
         self._admission = admission
         self._admit_fast = fast
         if admission.limited:
@@ -1015,12 +1085,15 @@ class Step1GpuBinding(QtCore.QObject):
                        tile=TileAddress(grid=self.controller.grid, level=0, tx=0, ty=0))
         return self._pixel_bytes(probe)
 
-    def _keys_for(self, channels, level: int, tiles) -> Dict[str, frozenset]:
+    def _keys_for(self, channels, level: int, tiles, lazy: bool = False) -> Mapping[str, frozenset]:
         """The per-channel key sets of `tiles` -- one TileAddress per tile,
-        shared by every channel's key (hashed once)."""
+        shared by every channel's key (hashed once); `lazy`: each channel's
+        set built when first read."""
         grid = self.controller.grid
         addresses = [TileAddress(grid=grid, level=level, tx=tx, ty=ty) for tx, ty in tiles]
         source = self._key_source
+        if lazy:
+            return _LazyKeys(source, addresses, channels)
         return {c: frozenset(RawKey(source=source, channel=c, tile=a) for a in addresses)
                 for c in channels}
 
@@ -1130,6 +1203,26 @@ class Step1GpuBinding(QtCore.QObject):
             return None
         return (min(r[0] for r in rects), max(r[1] for r in rects),
                 min(r[2] for r in rects), max(r[3] for r in rects))
+
+    def _tiles_world_rect(self, level: int, tiles):
+        """`_keys_world_rect` of `tiles` at `level`, for any channel."""
+        height, width = self.provider.level_shape(level)
+        tile_size = self.controller.grid.tile_size
+        ds_y, ds_x = self.provider.level_downsample_yx(level)
+        x0 = x1 = y0 = y1 = None
+        for tx, ty in tiles:
+            tile_h = min(tile_size, height - ty * tile_size)
+            tile_w = min(tile_size, width - tx * tile_size)
+            if tile_h <= 0 or tile_w <= 0:
+                continue
+            ax = tx * tile_size * float(ds_x)
+            ay = ty * tile_size * float(ds_y)
+            bx, by = ax + tile_w * float(ds_x), ay + tile_h * float(ds_y)
+            if x0 is None:
+                x0, x1, y0, y1 = ax, bx, ay, by
+            else:
+                x0, x1, y0, y1 = min(x0, ax), max(x1, bx), min(y0, ay), max(y1, by)
+        return None if x0 is None else (x0, x1, y0, y1)
 
     def _tile_world_rect(self, key: RawKey):
         """One tile address as a world rectangle, from public geometry only."""
@@ -1373,7 +1466,13 @@ class Step1GpuBinding(QtCore.QObject):
             on_source = (snapshot is not None
                          and getattr(snapshot, "source", None) == self._source)
             admission = self._admit(snapshot, channel) if on_source else None
-            base = (id(coarse), self._fine_version[channel], id(admission), id(self._admission))
+            # A9 §38 (profile): what of the admission this channel's source
+            # depends on -- not the admission object, which is new at every
+            # camera move and made all 69 channels rebuild on every frame
+            current = self._admission
+            base = (id(coarse), self._fine_version[channel], self._slot_accounting,
+                    None if admission is None else bool(admission.keys.get(channel)),
+                    None if current is None else (int(current.level), bool(current.coarse_only)))
             entry = self._source_cache.get(channel)
             if (entry is not None and entry[0] == base
                     and (not entry[3] or entry[4] == residency)):

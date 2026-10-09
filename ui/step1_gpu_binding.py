@@ -168,6 +168,7 @@ class Step1GpuBinding(QtCore.QObject):
     """Public-port-only, test-reachable G2 source-supply adapter."""
 
     _tile_result_received = QtCore.pyqtSignal(object)
+    _inbox_ready = QtCore.pyqtSignal()
 
     def __init__(self, *, provider, scheduler, controller, layer,
                  build_display_snapshot: Callable[[], DisplaySnapshot],
@@ -269,6 +270,12 @@ class Step1GpuBinding(QtCore.QObject):
         self._rejected_late_count = 0
         self._gui_thread = QtCore.QThread.currentThread()
         self._tile_result_received.connect(self._accept_result, QtCore.Qt.QueuedConnection)
+        #: A9 §38 EXPERIMENT ONLY (`BLOCK01_A9_BATCH=1`): batched delivery
+        self._batch_delivery = os.environ.get("BLOCK01_A9_BATCH") == "1"
+        self._inbox = collections.deque()
+        self._inbox_lock = threading.Lock()
+        self._inbox_armed = False
+        self._inbox_ready.connect(self._drain_inbox, QtCore.Qt.QueuedConnection)
         self._motion_timer = QtCore.QTimer(self)
         self._motion_timer.setSingleShot(True)
         self._motion_timer.timeout.connect(self._flush_motion)
@@ -1179,6 +1186,15 @@ class Step1GpuBinding(QtCore.QObject):
                     and QtCore.QThread.currentThread() is self._gui_thread):
                 collector.append((captured, result))
                 return
+            if self._batch_delivery:
+                # §38 experiment: results queue up; one signal per batch
+                self._inbox.append((captured, result))
+                with self._inbox_lock:
+                    if self._inbox_armed:
+                        return
+                    self._inbox_armed = True
+                self._inbox_ready.emit()
+                return
             self._tile_result_received.emit((captured, result))
 
         self._request_count += 1
@@ -1189,6 +1205,13 @@ class Step1GpuBinding(QtCore.QObject):
             self.scheduler.request(request, callback)
         finally:
             inside_this_call[0] = False
+
+    @perf_trace.timed("gpu.accept_batch")
+    def _drain_inbox(self) -> None:
+        with self._inbox_lock:
+            self._inbox_armed = False
+        while self._inbox:
+            self._apply_result(self._inbox.popleft(), publish=True, deferred=True)
 
     @QtCore.pyqtSlot(object)
     @perf_trace.timed("gpu.accept")

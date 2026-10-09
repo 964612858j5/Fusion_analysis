@@ -23,6 +23,7 @@ consumer that paints it must treat it as absent. The three kinds of tile are
 the source table's, unchanged.
 """
 
+import os
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
@@ -39,6 +40,10 @@ from ..core import resource_tiers as _tiers
 #: event, a notch being delta 120; -1/35 gives x1.070 per notch (Odon's
 #: exp(scroll * 0.0015) at ~45 points per line), pyqtgraph's -1/8 x1.346
 WHEEL_SCALE_FACTOR = -1.0 / 35.0
+#: Block A9 §38 EXPERIMENT ONLY (`BLOCK01_A9_REPLAY=1`): every tile read
+#: once is kept and handed back without decoding or I/O -- the ceiling of
+#: what faster / isolated readers could give. Never set in normal use.
+_A9_REPLAY = {} if os.environ.get("BLOCK01_A9_REPLAY") == "1" else None
 RAW_CACHE_BYTES = _tiers.STEP1_VIEWER_RAW_CACHE_BYTES  # (block A8 / A5: one place)
 CORRECTED_CACHE_BYTES = _tiers.STEP1_VIEWER_CORRECTED_CACHE_BYTES  # (block A8 / A5: one place)
 
@@ -166,10 +171,18 @@ class Step1TileProvider:
     def read_tile_key(self, key):
         """Block A9 S2d: the scheduler's read, by key. A `step1-native` key
         gets a `NativeTile`; any other key gets `read_tile`, unchanged."""
+        if _A9_REPLAY is not None:
+            hit = _A9_REPLAY.get(key)
+            if hit is not None:
+                return hit                     # §38 experiment: no decode, no I/O
         from ..viewer.native_tile import is_native
         if is_native(key.source):
-            return self.read_tile_native(key.channel, key.tile)
-        return self.read_tile(key.channel, key.tile)
+            result = self.read_tile_native(key.channel, key.tile)
+        else:
+            result = self.read_tile(key.channel, key.tile)
+        if _A9_REPLAY is not None:
+            _A9_REPLAY[key] = result
+        return result
 
     def read_tile_native(self, channel, tile):
         """`(NativeTile, io_ms)`: `read_tile`'s pixels in their own format.

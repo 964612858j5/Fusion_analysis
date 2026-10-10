@@ -6,7 +6,8 @@ any X11 program (our viewer, Odon): it reads the window's own contents
 Usage: a9_pixwatch.py WINDOW_ID X Y W ROWS SECONDS OUT
   X, Y, W: the first row's offset and width inside the window; ROWS rows
   are sampled, spread evenly over the next 400 px. One JSON line per
-  change: {"t": monotonic, "n": capture index}; the last line holds the
+  change: {"t": monotonic, "n": capture index, "d": share of the sampled
+  pixels that changed (blue byte)}; the last line holds the
   capture count and mean capture interval.
 """
 import ctypes
@@ -58,7 +59,13 @@ def main():
             frame = b"".join(parts)
             n += 1
             if last is not None and frame != last:
-                f.write(json.dumps({"t": t, "n": n}) + "\n")
+                if len(frame) == len(last):
+                    # how much changed: the share of sampled pixels that differ
+                    diff = sum(1 for a, b in zip(frame[0::4], last[0::4]) if a != b)
+                    share = diff / max(1, len(frame) // 4)
+                else:
+                    share = 1.0
+                f.write(json.dumps({"t": t, "n": n, "d": round(share, 4)}) + "\n")
             last = frame
         f.write(json.dumps({"captures": n, "interval_ms": (time.monotonic() - t_start) * 1000.0 / max(1, n)}) + "\n")
 

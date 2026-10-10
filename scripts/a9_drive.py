@@ -389,6 +389,15 @@ class Driver(QtCore.QObject):
         self._after_settle(lambda: perf_trace.mark(
             "a9.window_reads", n=self.i, reads=read_ledger.delta(before).get("total", 0)))
 
+    def _do_camera(self, a, _t):
+        """§41: put Step1's camera at (cx, cy) level-0 px, `scale` screen px
+        per level-0 px -- through the viewer's own `apply_camera`."""
+        mount = getattr(self.w, "_step1_mount", None)
+        ok = bool(mount is not None and mount.apply_camera(
+            float(a["cx"]), float(a["cy"]), float(a["scale"])))
+        perf_trace.mark("a9.camera_set", ok=ok, cx=a["cx"], cy=a["cy"], scale=a["scale"])
+        self._next(0)
+
     def _do_wheel(self, a, _t):
         target, pos = self._viewer()
         if target is None:

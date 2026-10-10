@@ -87,9 +87,18 @@ def main(data, outdir, channels, gestures_path):
                                   str(cx_win - 150), str(cy_win - 200), "300", "5",
                                   str(total), os.path.join(outdir, "changes.jsonl")])
         time.sleep(1.0)
+        shots = None
+        if os.environ.get("ODON_SHOTS") == "1":                # §41: pictures after each stop
+            shots = subprocess.Popen([PY, os.path.join(HERE, "a9_stopshots.py"),
+                                      os.path.join(outdir, "part.jsonl"), win,
+                                      os.path.join(outdir, "shots"), str(len(gestures["gestures"])),
+                                      f"0,{wh - CANVAS_H},{CANVAS_W},{CANVAS_H}"],
+                                     stdout=open(os.path.join(outdir, "shots.txt"), "w"),
+                                     stderr=subprocess.STDOUT)
         marks = open(os.path.join(outdir, "marks.tsv"), "w")
         inj = os.path.join(outdir, "xwheel.jsonl")
         open(inj, "w").close()
+        open(os.path.join(outdir, "part.jsonl"), "w").close()
         for g in gestures["gestures"]:
             marks.write(f"{time.monotonic():.6f}\t{g['label']}\n")
             marks.flush()
@@ -103,6 +112,8 @@ def main(data, outdir, channels, gestures_path):
         marks.close()
         watch.terminate()
         watch.wait()
+        if shots is not None:
+            shots.wait(30)
         print(json.dumps({"window": win, "point": [px, py], "canvas_centre_in_window": [cx_win, cy_win]}))
     finally:
         proc.terminate()

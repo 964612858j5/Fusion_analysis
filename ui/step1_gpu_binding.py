@@ -71,8 +71,8 @@ UPLOAD_BUDGET_MS = 4.0
 #: the camera from what is resident; refinement speeds up again as soon as
 #: the hand pauses.
 INPUT_HOT_MS = 60.0
-HOT_PUBLISH_MS = 33.0
-HOT_UPLOAD_BUDGET_MS = 1.5
+HOT_PUBLISH_MS = float(os.environ.get("BLOCK01_A9_HOT_PUBLISH_MS", "33.0"))   # §43 tuning switch
+HOT_UPLOAD_BUDGET_MS = float(os.environ.get("BLOCK01_A9_HOT_UPLOAD_BUDGET_MS", "1.5"))   # §43 tuning switch
 #: Block A9 §35: above this many drawn channels a viewport is planned in
 #: slices of PLAN_SLICE_MS, the event loop (input) served in between
 PLAN_SLICE_MIN_CHANNELS = 8
@@ -85,7 +85,7 @@ GROWTH_QUIET_MS = 300
 PLAN_SLICE_MS = 4.0
 #: Block A9 §35: refinement publications keep at most 1/PUBLISH_DUTY of the
 #: GUI thread (69 channels loading published ~11 ms every 16 ms)
-PUBLISH_DUTY = 3.0
+PUBLISH_DUTY = float(os.environ.get("BLOCK01_A9_PUBLISH_DUTY", "3.0"))   # §43 tuning switch
 #: A9 §41 EXPERIMENT ONLY (`BLOCK01_A9_PUBMODE`): "sched" -- a camera move
 #: during a gesture schedules its publication instead of running it at once;
 #: "quiet" -- publications wait until the input has been quiet INPUT_HOT_MS

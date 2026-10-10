@@ -86,6 +86,10 @@ PLAN_SLICE_MS = 4.0
 #: Block A9 §35: refinement publications keep at most 1/PUBLISH_DUTY of the
 #: GUI thread (69 channels loading published ~11 ms every 16 ms)
 PUBLISH_DUTY = 3.0
+#: A9 §41 EXPERIMENT ONLY (`BLOCK01_A9_PUBMODE`): "sched" -- a camera move
+#: during a gesture schedules its publication instead of running it at once;
+#: "quiet" -- publications wait until the input has been quiet INPUT_HOT_MS
+_A9_PUBMODE = os.environ.get("BLOCK01_A9_PUBMODE", "")
 
 
 #: The whole G2.1 fairness policy, expressed only in the priority numbers
@@ -391,8 +395,16 @@ class Step1GpuBinding(QtCore.QObject):
             self._last_error = "viewport source differs from explicit binding source; source_changed() required"
             return
         self._latest_snapshot = snapshot
+        if _A9_PUBMODE == "quiet2" and self._input_hot():          # §41 EXPERIMENT
+            self._viewport_deferred = True        # planned once the hand stops
+            self._schedule_publish()
+            return
+        self._viewport_deferred = False
         self._consumed_viewport = self._viewport_token(snapshot)
         self._begin_fine_epoch(snapshot)
+        if _A9_PUBMODE in ("sched", "quiet") and self._input_hot():   # §41 EXPERIMENT
+            self._schedule_publish()
+            return
         self._publish_current()
 
     #: A9 §35: how long a display snapshot is reused between the refreshes
@@ -1321,6 +1333,10 @@ class Step1GpuBinding(QtCore.QObject):
         if self._publish_timer.isActive():
             return
         since = (time.monotonic() - self._last_publish_at) * 1000.0
+        if _A9_PUBMODE in ("quiet", "quiet2") and self._input_hot():   # §41 EXPERIMENT
+            quiet_in = INPUT_HOT_MS - (time.monotonic() - self._last_input_at) * 1000.0
+            self._publish_timer.start(int(math.ceil(max(1.0, quiet_in))))
+            return
         frame = HOT_PUBLISH_MS if self._input_hot() else PUBLISH_FRAME_MS
         # A9 §35: an expensive publication (many channels loading) is
         # spaced so it keeps at most ~1/PUBLISH_DUTY of the GUI thread
@@ -1340,6 +1356,14 @@ class Step1GpuBinding(QtCore.QObject):
         return (time.monotonic() - self._last_input_at) * 1000.0 < INPUT_HOT_MS
 
     def _flush_publish(self) -> None:
+        if _A9_PUBMODE in ("quiet", "quiet2") and self._input_hot() and not self._disposed:
+            self._publish_timer.stop()                              # §41 EXPERIMENT
+            self._schedule_publish()
+            return
+        if (_A9_PUBMODE == "quiet2" and self.__dict__.get("_viewport_deferred")
+                and not self._disposed and self._latest_snapshot is not None):
+            self.update_viewport(self._latest_snapshot)              # plans + publishes
+            return
         if self._publish_due and not self._disposed:
             perf_trace.mark("gpu.batch")
             self._publish_current()

@@ -63,6 +63,7 @@ import time
 
 from .tile_types import CorrectionKey, PixelBuffer, QualityLevel, RawKey, TileResult
 from ..utils import perf_trace
+from ..utils import tile_trace
 
 
 # Measured 2026-08-31 (docs/benchmarks/2026-08-31_57ch_multichannel_prefetch.md,
@@ -542,6 +543,10 @@ class TileScheduler:
 
     @perf_trace.timed("sched.read")
     def _run_raw(self, key: RawKey):
+        if tile_trace.ON:                     # A9 §44 step 0, measurement only
+            tile_trace.stamp("start", key)
+            tile_trace.take_split()
+            wall0, cpu0 = time.perf_counter(), time.thread_time()
         try:
             # block A9 S2d: a provider that reads by key (Step1's, for its
             # native namespace) is handed the key; any other is read as before
@@ -554,6 +559,11 @@ class TileScheduler:
         except Exception as exc:  # pragma: no cover - defensive
             arr, io_ms, error = None, None, str(exc)
 
+        if tile_trace.ON:
+            tile_trace.stamp("read", key, wall_ms=round((time.perf_counter() - wall0) * 1000.0, 3),
+                             cpu_ms=round((time.thread_time() - cpu0) * 1000.0, 3),
+                             err=error is not None,
+                             **{k: round(v, 3) for k, v in tile_trace.take_split().items()})
         if error is None:
             self.raw_cache.put(key, arr)
 
@@ -581,6 +591,8 @@ class TileScheduler:
             request=req, pixels=pixels, quality=QualityLevel.NATIVE,
             provisional=False, timing=timing, error=None,
         ))
+        if tile_trace.ON:
+            tile_trace.stamp("done", key, waiters=len(waiters))
         self._maybe_notify_idle()
 
     # -- compute path --

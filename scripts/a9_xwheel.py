@@ -66,8 +66,20 @@ def main():
     time.sleep(0.3)
     due = time.monotonic()
     seq = 0
+    steps = parse(pattern)
+    # §44 step 0: the planned moment of the last logged injection, written
+    # BEFORE the first one, so a stop-shot watcher can aim at the real stop
+    # (it used to wait 50 ms of silence first, and its "20 ms" shot was ~52)
+    end = last_due = due
+    for kind, value in steps:
+        if kind == "wait":
+            end += value
+        elif kind in ("move", "notch"):
+            last_due = end
+    with open(log + ".plan", "a") as plan:
+        plan.write(json.dumps({"start": due, "end": last_due, "pattern": pattern}) + "\n")
     with open(log, "a") as out:
-        for kind, value in parse(pattern):
+        for kind, value in steps:
             if kind == "wait":
                 due += value
                 continue
@@ -95,6 +107,9 @@ def main():
             x11.XFlush(dpy)
             out.write(json.dumps({"seq": seq, "t": t, "kind": kind,
                                   "button": value if kind == "notch" else None,
+                                  # §44 step 0: where a move went (pairs it with its receipt)
+                                  "xy": [int(round(x + value[0])), int(round(y + value[1]))]
+                                  if kind == "move" else None,
                                   "late_ms": round((t - due) * 1000.0, 3)}) + "\n")
     x11.XSync(dpy, 0)
 

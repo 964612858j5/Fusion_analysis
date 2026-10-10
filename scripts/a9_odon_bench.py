@@ -18,6 +18,8 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 ODON = "/sda1/Fusion/analysis_pipline/odon/odon-app/usr/lib/odon/odon"
+# §44 step 0: the last stop shot (a9_stopshots A9_SHOT_DELAYS), the reference
+REFERENCE_S = float(os.environ.get("A9_SHOT_DELAYS", "2300").split(",")[-1]) / 1000.0
 sys.path.insert(0, HERE)
 import a9_odon_ctl as ctl  # noqa: E402
 
@@ -88,6 +90,9 @@ def main(data, outdir, channels, gestures_path):
                                   str(total), os.path.join(outdir, "changes.jsonl")])
         time.sleep(1.0)
         shots = None
+        # §44 step 0: emptied BEFORE the shot watcher starts (it counts plans)
+        open(os.path.join(outdir, "part.jsonl.plan"), "w").close()
+        open(os.path.join(outdir, "loading.jsonl"), "w").close()
         if os.environ.get("ODON_SHOTS") == "1":                # §41: pictures after each stop
             shots = subprocess.Popen([PY, os.path.join(HERE, "a9_stopshots.py"),
                                       os.path.join(outdir, "part.jsonl"), win,
@@ -103,17 +108,31 @@ def main(data, outdir, channels, gestures_path):
             marks.write(f"{time.monotonic():.6f}\t{g['label']}\n")
             marks.flush()
             part = os.path.join(outdir, "part.jsonl")
+            done_before = len(open(part).read().splitlines())
             subprocess.run([PY, os.path.join(HERE, "a9_xwheel.py"), str(px), str(py),
                             g["pattern"], part])
+            # §44 step 0 (codex): only THIS gesture's injections -- part.jsonl
+            # accumulates (the shot watcher reads it), and copying it whole
+            # every gesture repeated the earlier ones in xwheel.jsonl
             with open(inj, "a") as f:
-                f.write(open(part).read())
-            time.sleep(g.get("tail_ms", 3000) / 1000.0)
+                f.writelines(line + "\n" for line in open(part).read().splitlines()[done_before:])
+            tail_end = time.monotonic() + g.get("tail_ms", 3000) / 1000.0
+            # §44 step 0: was Odon's reference picture (the last stop shot,
+            # REFERENCE_S after the planned stop) the finished one? its own
+            # loading state, asked right after that shot
+            plan_end = json.loads(open(part + ".plan").read().splitlines()[-1])["end"]
+            time.sleep(max(0.0, plan_end + REFERENCE_S + 0.03 - time.monotonic()))
+            with open(os.path.join(outdir, "loading.jsonl"), "a") as f:
+                f.write(json.dumps({"t": time.monotonic(), "since_stop_ms": round(
+                    (time.monotonic() - plan_end) * 1000.0, 1), "label": g["label"],
+                    "state": ctl.call("get_loading_state").get("result")}) + "\n")
+            time.sleep(max(0.0, tail_end - time.monotonic()))
         marks.write(f"{time.monotonic():.6f}\tdone\n")
         marks.close()
         watch.terminate()
         watch.wait()
         if shots is not None:
-            shots.wait(30)
+            shots.wait(600)   # §44: ~150 full-canvas PNGs are written at the end
         print(json.dumps({"window": win, "point": [px, py], "canvas_centre_in_window": [cx_win, cy_win]}))
     finally:
         proc.terminate()

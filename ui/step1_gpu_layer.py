@@ -189,6 +189,7 @@ class ViewportSnapshot:
 #: beside -- never inside -- the raw textures' 512 MB.
 from ..core import resource_tiers as _tiers
 from ..utils import perf_trace
+from ..utils import tile_trace
 from ..viewer import coverage_probe
 LABEL_TEXTURE_BYTES = _tiers.GPU_LABEL_TEXTURE_BYTES  # (block A8 / A5: one place)
 #: The largest outline radius the draw pass loops over, in screen pixels.
@@ -939,6 +940,8 @@ class _TileArrayStore:
             self.uploads += 1
             self.meta_generation += 1
             self.meta_log.append((block, layer, identity))
+            if tile_trace.ON and hasattr(identity, "tile"):   # A9 §44 step 0
+                tile_trace.stamp("gpu", identity)
         gl.glBindTexture(gl.GL_TEXTURE_2D_ARRAY, 0)
         _check_gl(gl, "array tile upload")
 
@@ -1174,7 +1177,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         # block A9-M: which submission the next presented frame shows
         self._a9_frame = 0
         self._a9_pending = None
-        if perf_trace.enabled():
+        if perf_trace.enabled() or tile_trace.ON:
             self.frameSwapped.connect(self._a9_presented)
         #: Block 4b: the label layer, Step3 only. Off (the default), nothing
         #: below exists: no target, no program, no texture, and `paintGL`
@@ -1867,6 +1870,8 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         self._a9_pending = (self._a9_frame, result, getattr(self, "_a9_input_seq", None))
 
     def _a9_presented(self) -> None:
+        if tile_trace.ON:                     # A9 §44 step 0: every swap
+            tile_trace.stamp("present", frame=self._a9_frame)
         pending, self._a9_pending = self._a9_pending, None
         if pending is None:
             return
@@ -1877,6 +1882,8 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
 
     @perf_trace.timed("gpu.paint")
     def paintGL(self) -> None:  # noqa: N802
+        if tile_trace.ON:                     # A9 §44 step 0: reads the live camera
+            tile_trace.stamp("paint")
         if not self._initialized or self._target_size is None:
             return
         if not self._camera_dirty and self._scene is not None and self._attached_range is not None:

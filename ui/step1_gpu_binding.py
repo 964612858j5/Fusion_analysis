@@ -43,6 +43,7 @@ from PyQt5 import QtCore
 
 from ..viewer.tile_types import RawKey, TileAddress, TileRequest
 from ..utils import perf_trace
+from ..utils import tile_trace
 from .step1_gpu_layer import (
     ARRAY_TILE,
     MODE_FUSION,
@@ -1303,6 +1304,8 @@ class Step1GpuBinding(QtCore.QObject):
             self._tile_result_received.emit((captured, result))
 
         self._request_count += 1
+        if tile_trace.ON:                     # A9 §44 step 0, measurement only
+            tile_trace.stamp("req", key, tier=plan.tier, pri=priority)
         if plan.tier == "fine":
             self._fine_requests_by_priority[priority] = (
                 self._fine_requests_by_priority.get(priority, 0) + 1)
@@ -1376,7 +1379,11 @@ class Step1GpuBinding(QtCore.QObject):
         plan = self._coarse.get(channel) if tier == "coarse" else self._fine.get(channel)
         if not self._is_current_delivery(plan, source, revision, generation, viewport_epoch, key, result):
             self._rejected_late_count += 1
+            if tile_trace.ON:                 # A9 §44 step 0, measurement only
+                tile_trace.stamp("recv", key, ok=0)
             return
+        if tile_trace.ON:
+            tile_trace.stamp("recv", key, ok=1, tier=tier)
         if result.error is not None or result.pixels is None or result.pixels.residency != "cpu":
             plan.failed = True
             self._last_error = f"{tier} tile failed for {channel}: {result.error or 'missing cpu pixels'}"
@@ -1582,6 +1589,8 @@ class Step1GpuBinding(QtCore.QObject):
                 uploads=uploads - getattr(self, "_a9_uploads_seen", 0),
                 resident=cache.get("bytes"), refused=len(self._fine_budget_refused))
             self._a9_uploads_seen = uploads
+        if tile_trace.ON:
+            self._trace_coverage(channels)
         self._shown_channels = shown
         self._descriptor_history.append((descriptor, display, viewport, stats))
         self._publication_count += 1
@@ -1604,6 +1613,32 @@ class Step1GpuBinding(QtCore.QObject):
             wait = GROWTH_QUIET_MS - (time.monotonic() - self._last_input_at) * 1000.0
             if not self._publish_timer.isActive():
                 self._publish_timer.start(int(max(PUBLISH_FRAME_MS, wait + 5)))
+
+    def _trace_coverage(self, channels) -> None:
+        """A9 §44 step 0, measurement only: how many of the admitted target
+        tiles of the drawn channels are on the GPU, recorded when it changes
+        -- the in-app answer to "is the final picture really the target
+        level", which a screenshot that stopped changing cannot give."""
+        admission = self._admission
+        if admission is None or admission.coarse_only:
+            state = (None, 0, 0, None)
+        else:
+            on_gpu = getattr(self.layer, "is_resident", None)
+            wanted = shown = 0
+            for source in channels:
+                keys = admission.keys.get(source.channel) or ()
+                resident = self._published_fine.get(source.channel) or {}
+                for key in keys:
+                    wanted += 1
+                    plane = resident.get(key)
+                    if plane is not None and (on_gpu is None or on_gpu(plane)):
+                        shown += 1
+            # the viewport is part of the state: the same level and counts
+            # for a new viewport are a new target, not "still complete"
+            state = (int(admission.level), wanted, shown, hash(admission.token) & 0xFFFFFFFF)
+        if state != getattr(self, "_traced_coverage", None):
+            self._traced_coverage = state
+            tile_trace.stamp("cov", level=state[0], wanted=state[1], shown=state[2], vp=state[3])
 
     def _drawn_fine(self, resident):
         """Block A9 §32 (Odon app.rs:12925-12980: a finer level is drawn over

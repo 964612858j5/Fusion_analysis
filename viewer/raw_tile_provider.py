@@ -24,12 +24,14 @@ verifiable in benchmark output.
 import os
 import re
 import threading
+import time
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from . import read_ledger
+from ..utils import tile_trace
 from .tile_types import SourceIdentity, TileAddress
 
 _OME_NS = {"ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"}
@@ -309,6 +311,20 @@ class RawTileProvider:
                 count = int(plan.counts[c][index])
                 if count <= 0:
                     tile = np.zeros((th, tw), out.dtype)     # an empty tile is zeros
+                elif tile_trace.ON:
+                    # A9 §44 step 0, measurement only: the same steps, timed
+                    t0 = time.perf_counter()
+                    raw = os.pread(self._chunk_fd, count, int(plan.offsets[c][index]))
+                    t1 = time.perf_counter()
+                    if plan.decode is not None:
+                        raw = plan.decode(raw)
+                    tile = np.frombuffer(raw, plan.dtype, count=th * tw).reshape(th, tw)
+                    if plan.predictor == 2:
+                        tile = imagecodecs.delta_decode(tile, axis=-1)
+                    t2 = time.perf_counter()
+                    tile_trace.add("pread_ms", (t1 - t0) * 1000.0)
+                    tile_trace.add("decode_ms", (t2 - t1) * 1000.0)
+                    tile_trace.add("bytes", count)
                 else:
                     raw = os.pread(self._chunk_fd, count, int(plan.offsets[c][index]))
                     if plan.decode is not None:
@@ -319,8 +335,12 @@ class RawTileProvider:
                 ty0, tx0 = ty * th, tx * tw
                 sy0, sy1 = max(y0, ty0), min(y1, ty0 + th)
                 sx0, sx1 = max(x0, tx0), min(x1, tx0 + tw)
+                if tile_trace.ON:
+                    t3 = time.perf_counter()
                 out[sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0] = tile[sy0 - ty0:sy1 - ty0,
                                                                  sx0 - tx0:sx1 - tx0]
+                if tile_trace.ON:
+                    tile_trace.add("copy_ms", (time.perf_counter() - t3) * 1000.0)
         return out
 
     def _open_level_array(self, tf, level: int):

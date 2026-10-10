@@ -28,6 +28,7 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
 from ..utils import perf_trace
+from ..utils import tile_trace
 from ..viewer import step1_source as sources
 from ..viewer.tile_types import SourceIdentity
 
@@ -211,8 +212,11 @@ class Step1TileProvider:
                                                         cy0, cy1, cx0, cx1)
                 pixels = np.asarray(pixels)
                 if pixels.dtype in nt.INTEGER_DTYPES:
+                    wrap0 = time.perf_counter() if tile_trace.ON else 0.0
                     values = np.zeros((y1 - y0, x1 - x0), pixels.dtype)
                     values[cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0] = pixels
+                    if tile_trace.ON:          # A9 §44 step 0, measurement only
+                        tile_trace.add("wrap_ms", (time.perf_counter() - wrap0) * 1000.0)
                     io_ms = (time.perf_counter() - start) * 1000.0
                     return nt.NativeTile(values, (cy0 - y0, cy1 - y0, cx0 - x0, cx1 - x0),
                                          nt.KIND_RAW), io_ms

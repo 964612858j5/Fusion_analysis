@@ -699,6 +699,33 @@ def _event_timeline(path):
     app.aboutToQuit.connect(dump)
 
 
+def _input_stamps():
+    """§44 step 0 (BLOCK01_A9_TILETRACE): when Qt received each real input
+    (a wheel notch, a drag motion) -- the in-app response of an injection
+    is the first frame PAINTED after its receipt, not just any next frame.
+    Stamped on the QWindow, which every spontaneous event reaches first and
+    once."""
+    from block01.utils import tile_trace
+    if not tile_trace.ON:
+        return
+    from PyQt5 import QtCore, QtGui
+    app = QtCore.QCoreApplication.instance()
+
+    class _Filter(QtCore.QObject):
+        def eventFilter(self, obj, event):           # noqa: N802
+            kind = event.type()
+            if kind in (QtCore.QEvent.Wheel, QtCore.QEvent.MouseMove) and isinstance(obj, QtGui.QWindow):
+                if kind == QtCore.QEvent.Wheel:
+                    tile_trace.stamp("input", kind="notch")
+                elif event.buttons():
+                    pos = event.globalPos()
+                    tile_trace.stamp("input", kind="move", xy=[pos.x(), pos.y()])
+            return False
+    flt = _Filter(app)
+    app.installEventFilter(flt)
+    _input_stamps.keep = flt
+
+
 def attach(window):
     """Called by the main window at start-up when `BLOCK01_A9_SCRIPT` is set."""
     path = os.environ.get(ENV) or ""
@@ -708,6 +735,7 @@ def attach(window):
         _attribute()
     if os.environ.get("BLOCK01_A9_EVENTS"):
         _event_timeline(os.environ["BLOCK01_A9_EVENTS"])
+    _input_stamps()
     if path in ("1", "default"):
         path = DEFAULT_SCENARIO
     with open(path, encoding="utf-8") as f:

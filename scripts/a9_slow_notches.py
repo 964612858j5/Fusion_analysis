@@ -1,6 +1,6 @@
 """Where the slow notches went (block A9 §38): for every injected notch
 shown later than THRESHOLD ms, the GUI-thread spans inside [injection,
-shown], summed by name (nested spans: only the outermost is counted), and
+shown], summed by name (nested spans: each moment counted once, to the innermost span), and
 what is left uncovered (Qt / the driver / idle waits).
 Usage: a9_slow_notches.py PERF_LOG [THRESHOLD_MS=50]
 """
@@ -27,15 +27,31 @@ def main(path, threshold=50.0):
     rx = [(t, int(f["seq"]), int(f.get("xts", 0))) for t, e, f in ev if e == "a9.wheel_rx"]
     pres = [(t, int(f["seq"])) for t, e, f in ev
             if e == "gpu.present" and f.get("seq", "None") != "None"]
-    spans = sorted((float(f["t_begin"]), t, e) for t, e, f in ev
-                   if "dur_ms" in f and "t_begin" in f and e not in WORKER)
-    # outermost only: drop a span inside an earlier one
-    outer, end = [], -1.0
+    spans = sorted(((float(f["t_begin"]), -t, e) for t, e, f in ev
+                    if "dur_ms" in f and "t_begin" in f and e not in WORKER))
+    spans = [(b, -nt, e) for b, nt, e in spans]
+    # EXCLUSIVE segments: each moment goes to the innermost span open then
+    # (spans on one thread nest; a child starts after and ends before its parent)
+    outer, stack, cursor = [], [], None
+    events = []
     for b, t, e in spans:
-        if t <= end:
-            continue
-        outer.append((b, t, e))
-        end = t
+        events.append((b, 1, t, e))
+    events.sort(key=lambda x: (x[0], -x[2]))
+    for b, _kind, t, e in events:
+        while stack and stack[-1][0] <= b:
+            end_t, name = stack.pop()
+            if cursor is not None and end_t > cursor:
+                outer.append((cursor, end_t, name))
+            cursor = end_t
+        if stack and cursor is not None and b > cursor:
+            outer.append((cursor, b, stack[-1][1]))
+        stack.append((t, e))
+        cursor = b
+    while stack:
+        end_t, name = stack.pop()
+        if end_t > cursor:
+            outer.append((cursor, end_t, name))
+        cursor = end_t
     # the GUI loop's own stalls (`gui.gap`): time the thread was blocked
     gaps = [(float(f["t_begin"]), t) for t, e, f in ev
             if e == "gui.gap" and f.get("where") == "main" and "t_begin" in f]

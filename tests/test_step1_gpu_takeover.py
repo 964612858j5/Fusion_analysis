@@ -2466,3 +2466,68 @@ def test_a_half_cached_viewport_shows_its_cached_half_at_once(app):
     finally:
         rig.raws[0].release_all()
         _close(rig)
+
+
+# ══ A9 §40: the scene under the GPU layer is not repainted while hidden ══
+
+def _pg_default_update_mode():
+    import pyqtgraph as pg
+    return pg.GraphicsLayoutWidget().viewportUpdateMode()
+
+
+def test_the_scene_under_the_gpu_layer_stops_repainting_and_comes_back(app):
+    rig = _mount(app)
+    try:
+        _require_gpu(rig)
+        graphics = rig.mount.host.stack.view.graphics
+        assert graphics.viewportUpdateMode() == QtWidgets.QGraphicsView.NoViewportUpdate
+        rig.mount._stop_gpu_backend(restore_controller=True)
+        assert graphics.viewportUpdateMode() == _pg_default_update_mode()
+        rig.mount._stop_gpu_backend(restore_controller=True)          # idempotent
+        assert graphics.viewportUpdateMode() == _pg_default_update_mode()
+    finally:
+        _close(rig)
+
+
+def test_a_cpu_fallback_keeps_the_scene_repainting(app):
+    class _Broken:
+        def attach(self, _view):
+            raise RuntimeError("no OpenGL 3.3 context on this machine")
+
+        def dispose(self):
+            pass
+
+        def setParent(self, _parent):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    rig = _mount(app, gpu_layer_factory=lambda _s: _Broken())
+    try:
+        assert rig.mount.backend == BACKEND_CPU_FALLBACK
+        graphics = rig.mount.host.stack.view.graphics
+        assert graphics.viewportUpdateMode() == _pg_default_update_mode()
+    finally:
+        _close(rig)
+
+
+@pytest.mark.parametrize("how", ["release-without-reads", "close"])
+def test_every_way_the_gpu_leaves_gives_the_scene_back(app, how):
+    rig = _mount(app)
+    try:
+        _require_gpu(rig)
+        graphics = rig.mount.host.stack.view.graphics
+        assert graphics.viewportUpdateMode() == QtWidgets.QGraphicsView.NoViewportUpdate
+        if how == "close":
+            rig.mount.close()
+            QtWidgets.QApplication.processEvents()
+        else:
+            rig.mount._stop_gpu_backend(restore_controller=False)
+        try:
+            mode = graphics.viewportUpdateMode()
+        except RuntimeError:                       # the view itself went with it
+            return
+        assert mode == _pg_default_update_mode()
+    finally:
+        _close(rig)

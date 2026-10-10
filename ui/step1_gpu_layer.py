@@ -1256,6 +1256,9 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
         fmt.setRenderableType(QtGui.QSurfaceFormat.OpenGL)
         fmt.setVersion(3, 3)
         fmt.setProfile(QtGui.QSurfaceFormat.CoreProfile)
+        # A9 §40: Qt5 hands a widget's interval up to its window -- keep
+        # the application's (`gpu_warmup.configure_surface_format`)
+        fmt.setSwapInterval(QtGui.QSurfaceFormat.defaultFormat().swapInterval())
         self.setFormat(fmt)
 
     # Public G1 boundary -------------------------------------------------

@@ -648,6 +648,48 @@ def _attribute():
     gc.callbacks.append(gc_timer)
 
 
+def _event_timeline(path):
+    """§38 measurement only (`BLOCK01_A9_EVENTS=<file>`): every event Qt
+    dispatches on the GUI thread (start stamp, type, receiver class) and
+    every time the thread goes idle / wakes (`aboutToBlock` / `awake`).
+    Consecutive stamps partition the thread's time: an event runs until
+    the next event starts or the thread blocks. Written at exit (TSV)."""
+    import atexit
+    from PyQt5 import QtCore
+    app = QtCore.QCoreApplication.instance()
+    clock = time.monotonic
+    rows = []
+    append = rows.append
+
+    class _Filter(QtCore.QObject):
+        def eventFilter(self, obj, event):           # noqa: N802
+            kind = event.type()
+            name = obj.metaObject().className()
+            if kind == 12:                            # Paint: which widget, how big
+                chain, p = [], obj.parent() if hasattr(obj, "parent") else None
+                while p is not None and len(chain) < 3:
+                    chain.append(p.metaObject().className())
+                    p = p.parent() if hasattr(p, "parent") else None
+                rect = event.rect()
+                name = (f"{name}[{obj.objectName() or '-'}]<{'<'.join(chain)}>"
+                        f" {rect.width()}x{rect.height()}")
+            append((clock(), kind, name))
+            return False
+    flt = _Filter(app)
+    app.installEventFilter(flt)
+    dispatcher = QtCore.QAbstractEventDispatcher.instance(app.thread())
+    dispatcher.aboutToBlock.connect(lambda: append((clock(), -1, "<block>")))
+    dispatcher.awake.connect(lambda: append((clock(), -2, "<awake>")))
+    _event_timeline.keep = (flt, dispatcher)
+
+    def dump():
+        with open(path, "w") as out:
+            for t, kind, cls in rows:
+                out.write(f"{t:.6f}\t{int(kind)}\t{cls}\n")
+    atexit.register(dump)
+    app.aboutToQuit.connect(dump)
+
+
 def attach(window):
     """Called by the main window at start-up when `BLOCK01_A9_SCRIPT` is set."""
     path = os.environ.get(ENV) or ""
@@ -655,6 +697,8 @@ def attach(window):
         return None
     if os.environ.get("BLOCK01_A9_ATTR") == "1":
         _attribute()
+    if os.environ.get("BLOCK01_A9_EVENTS"):
+        _event_timeline(os.environ["BLOCK01_A9_EVENTS"])
     if path in ("1", "default"):
         path = DEFAULT_SCENARIO
     with open(path, encoding="utf-8") as f:

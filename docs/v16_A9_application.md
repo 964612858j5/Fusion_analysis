@@ -2932,3 +2932,28 @@ codex 的意见已逐条对照代码核实，采纳如下：
 ### 39.3 目标（"与 Odon 一样丝滑"的量化定义，69 通道，本方法）
 - 快速手势：中位数 ≤ 11 ms；99% ≤ 60 ms；每轮 420 格中超过 50 ms 的 ≤ 12 格；最慢 ≤ 100 ms。
 - 单格响应：中位数 ≤ 30 ms，最慢 ≤ 60 ms（已达到）。
+
+## 40. 交换画面不等刷新、GPU 接管时底层场景不重画（2026-10-10，本地提交）
+- 诊断（`scripts/a9_notch_split.py`、`a9_event_attr.py` + `a9_drive` 的 `BLOCK01_A9_EVENTS` 事件时间线、`a9_gdb_poll.sh`）：
+  - 慢格约 62 ms：Qt 送达滚轮之前约 42 ms，送达之后约 20 ms。
+  - 送达前有约 15 ms 是"每帧第一次 Paint"：窗口合成加交换缓冲，按 Qt 默认的 swap interval 1 等待屏幕刷新。
+  - 关掉底层场景重画后，这 15 ms 原样转到了 GPU 图层的 Paint 上，证明它是交换时的等待，而不是绘制本身。
+  - gdb 采样确认：线程睡着时是在 Qt 事件循环里正常空等。
+- 改动：
+  - `ui/gpu_warmup.configure_surface_format()`：在 QApplication 之前请求 swap interval 0，`main.py` 调用。这只是向系统"请求"，驱动可以不理；`BLOCK01_VSYNC=1` 时保持 Qt 默认。
+  - GPU 图层沿用应用的 interval（Qt5 会把控件的 interval 传回窗口）。
+  - `Step1WholeSlideMount._hold_scene_repaint` / `_release_scene_repaint`：GPU 接管成功后，底层 QGraphicsView 设为 NoViewportUpdate；每一种释放（交还 CPU、重建、关闭）都恢复原模式。暴露和改变大小时仍会重画。
+- 验证：
+  - `tests/test_a9_s40_swap.py` 4 项、`test_step1_gpu_takeover` 新增 4 项；
+  - 106 个相关模块回归与 a1f81e4 一致（唯一差异是已知的偶发失败 `test_the_real_start_path_records_what_the_worker_is_reading`，新旧代码各 10 次里都挂 3 次）。
+- 实测（与 Odon 同一方法）：
+
+| 运行 | 单格 中位 / 95% / 最慢 | 快速 中位 / 95% / 99% / 最慢 | > 50 ms |
+|---|---|---|---|
+| 69 通道 第 1 轮 | 19.9 / 25 / 30 | 17.3 / 75 / 171 / 203 | 44 |
+| 69 通道 第 2 轮 | 17.0 / 29 / 39 | 15.7 / 46 / 59 / 72 | 16 |
+| 3 通道 | 7.5 / 12 / 18 | 7.4 / 19 / 40 / 64 | 2 |
+
+- 3 通道全面优于 Odon（Odon：快速中位 10.9、99% 51、超过 50 ms 5 格；单格中位 37）。
+- 69 通道第 1 轮的长卡顿全部在第二组拖动：它紧跟在回归测试之后，文件缓存是冷的，拖到新区域时有 27 次读盘、191 次图块到达，界面线程连续多次各卡 40–50 ms。图块在移动中到达时，每帧的处理时间没有上限，这是下一步（第 3 项"记账让路"）要解决的。
+- 实机验收待做：放大缩小窗口后边缘是否正常、Step1 与 Step3 来回切换、掩膜、CPU 后备的第一帧。Windows 上是否不等刷新、是否撕裂，需要在笔记本上确认。

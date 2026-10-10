@@ -23,6 +23,9 @@ def main():
         sys.setswitchinterval(float(interval) / 1000.0)
     # Block A9: with BLOCK01_PERF_DISPATCH=1 (and BLOCK01_PERF=1) slow Qt
     # event deliveries are traced; otherwise this is a plain QApplication.
+    # Block A9 §40: swaps that do not hold the GUI thread for the refresh
+    from .ui.gpu_warmup import configure_surface_format
+    configure_surface_format()
     from .utils import perf_dispatch
     app = perf_dispatch.make_application(sys.argv)
     app.setStyle("Fusion")

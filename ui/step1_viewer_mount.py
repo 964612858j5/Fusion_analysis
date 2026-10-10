@@ -44,7 +44,7 @@ import inspect
 import logging
 import math
 
-from PyQt5 import QtCore
+from PyQt5 import QtCore, QtWidgets
 
 from ..utils import perf_trace
 from ..viewer import step1_compose as compose_core
@@ -465,6 +465,7 @@ class Step1WholeSlideMount(QtCore.QObject):
         # publisher of interaction/quiet/view-rect -- see
         # `ExploreController.set_viewport_requests_enabled`.
         self._set_controller_viewport_requests(stack.controller, False)
+        self._hold_scene_repaint(stack.controller)
         self._backend = BACKEND_GPU
         self._gpu_reason = ""
         self._gpu_seed_requested.clear()
@@ -574,6 +575,8 @@ class Step1WholeSlideMount(QtCore.QObject):
         if binding is not None:
             binding.dispose()
         self._release_gpu_layer(layer)
+        # whatever comes next draws through the scene again
+        self._release_scene_repaint()
         stack = self.host.stack
         controller = getattr(stack, "controller", None)
         if controller is not None:
@@ -590,6 +593,35 @@ class Step1WholeSlideMount(QtCore.QObject):
         if self._backend == BACKEND_GPU:
             self._backend = BACKEND_LEGACY
         return True
+
+    def _hold_scene_repaint(self, controller):
+        """Block A9 §40: while the GPU layer is the picture, the scene under
+        it is not repainted on every camera move. The layer covers the whole
+        ViewBox, so nothing the scene draws there can be seen -- and on a
+        window holding an OpenGL widget every repaint is composed and
+        swapped, which kept the GUI thread from the next wheel notch
+        (measured: ~15 ms of a slow notch). Expose and resize still paint.
+        The mode in force before is given back by `_release_scene_repaint`."""
+        graphics = getattr(getattr(controller, "view", None), "graphics", None)
+        if graphics is None or self.__dict__.get("_scene_hold") is not None:
+            return
+        try:
+            self._scene_hold = (graphics, graphics.viewportUpdateMode())
+            graphics.setViewportUpdateMode(QtWidgets.QGraphicsView.NoViewportUpdate)
+        except RuntimeError:                                # C++ side gone
+            self._scene_hold = None
+
+    def _release_scene_repaint(self):
+        hold = self.__dict__.get("_scene_hold")
+        self._scene_hold = None
+        if hold is None:
+            return
+        graphics, mode = hold
+        try:
+            graphics.setViewportUpdateMode(mode)
+            graphics.viewport().update()
+        except RuntimeError:                                # C++ side gone
+            pass
 
     @staticmethod
     def _set_controller_viewport_requests(controller, enabled):

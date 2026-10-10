@@ -21,9 +21,27 @@ BLOCK01_GPU_WARMUP=0 turns it off.
 import os
 import threading
 
-from PyQt5 import QtCore
+from PyQt5 import QtCore, QtGui
 
 from ..utils import perf_trace
+
+
+def configure_surface_format():
+    """Block A9 §40: ask for buffer swaps that do not wait for the display's
+    refresh (swap interval 0). With an OpenGL widget in the window, Qt
+    composes and swaps the whole window on the GUI thread; the default
+    interval 1 made that swap wait up to a refresh period, during which no
+    input was handled (measured: a single notch on screen 28-33 ms -> 17 ms).
+    The desktop compositor (GNOME, Windows DWM) still presents in step with
+    the display. A REQUEST, not a guarantee: a driver may ignore it.
+    `BLOCK01_VSYNC=1` leaves Qt's default untouched (a machine that tears).
+    Called before the QApplication exists."""
+    if os.environ.get("BLOCK01_VSYNC") == "1":
+        return False
+    fmt = QtGui.QSurfaceFormat.defaultFormat()
+    fmt.setSwapInterval(0)
+    QtGui.QSurfaceFormat.setDefaultFormat(fmt)
+    return True
 
 
 class GpuWarmup(QtCore.QObject):

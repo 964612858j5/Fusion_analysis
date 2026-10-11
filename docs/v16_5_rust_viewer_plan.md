@@ -1,6 +1,6 @@
 # v16_5：Step1 查看器 Rust 内核方案（v2.1，2026-10-11）
 
-状态：v2.1，已合并第二轮独立审核（§11），待用户审核。通过后生成交接提示词，由新的执行窗口实施。确认前不动产品代码。
+状态：**v2.1 已获用户批准（2026-10-11），§10 全部 8 项均批准。** 由新的执行窗口按 `docs/v16_5_handoff.md` 实施，从 R0 开始。
 
 版本历史：
 - v0、v1 在 v16 分支（已冻结为标签 `v16-final`，`8c21be9`），文件名 `docs/v16_rust_viewer_plan.md`。
@@ -240,7 +240,7 @@ Python 一侧新增 `Step1CoreLayer(QOpenGLWidget)` 和一个薄绑定。以下�
 8. **依赖记录**：把 Rust wheel 写进 `requirements-pip.txt`，会改变分割运行记录里的环境指纹（`engine_provenance` 的 `env_lock_hash`），**不改变**判断"是否同一分割引擎"的行为身份（`engine_identity` → `engines.behavior_identity`，`seg_runner/runner.py:32-38`）。v1 这里写错了，已更正。
 9. **许可证**：Odon 是 GPL-3，只参考设计，不拷代码和常量；每个 Rust 模块写明参考了哪些设计。依赖的 crate（pyo3、glow、weezl、flate2+zlib-ng、zstd、blosc-src、socket2）都是 MIT、Apache、BSD 或 zlib 许可。
 
-## 10. 需要用户确认的事项
+## 10. 用户确认的事项（2026-10-11 全部批准）
 
 1. 采用路线 B 和 §2 的五条契约；顺序为 R0 → S-Raw → R1 → R2 → R3 → R4 → R5，S-Raw 的继续条件按 §8。
 2. 按 AGENTS 规则 4 授权新增的 Rust 内核：读图线程、缓存、调度。每个阶段开始前由执行窗口再报文件范围。

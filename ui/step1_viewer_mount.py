@@ -180,6 +180,12 @@ class Step1WholeSlideMount(QtCore.QObject):
         self.viewer = Step1ViewerBinding(window, host=host)
         if self._gpu_wanted:
             self._defer_overview_to_the_cpu_fallback()
+        #: v16_5 S-Raw: the Rust core draws Step1 when asked for
+        #: (`BLOCK01_STEP1_BACKEND=rust`) and able to; "" or why not
+        self._rust_refused = ""
+        self._rust_wanted = self._decide_rust(gpu_layer_factory)
+        if self._rust_wanted:
+            self._defer_scheduler_for_rust()
         self.coordinator = None
         self.compose = None
         self.layer = None
@@ -324,6 +330,116 @@ class Step1WholeSlideMount(QtCore.QObject):
         host.stack_factory = _stack_without_overview
         return True
 
+    # ── v16_5 S-Raw: the Rust core ────────────────────────────────────
+    def _decide_rust(self, gpu_layer_factory):
+        """Rust mode: asked for, the core imports, a plain Step1 viewer
+        (no masks, no injected layer). Otherwise the reason is logged."""
+        from . import step1_core_adapter as adapter
+        if adapter.requested_backend() != adapter.BACKEND_RUST:
+            return False
+        why = adapter.core_unavailable_reason()
+        if not why and (not self._gpu_wanted or gpu_layer_factory is not None):
+            why = "this viewer does not take the GPU path"
+        if not why and self._labels_wanted:
+            why = "this viewer draws masks (not in the Rust thin slice)"
+        if why:
+            self._rust_refused = why
+            _log.warning("Step1 Rust backend not used: %s", why)
+            return False
+        return True
+
+    def _defer_scheduler_for_rust(self):
+        """The stack's scheduler starts only when something asks for a tile
+        (`step1_viewer_host.DeferredScheduler`): in Rust mode, never."""
+        host = self.host
+        factory = getattr(host, "stack_factory", None)
+        if factory is None:
+            return False
+        try:
+            import inspect
+            if "deferred_scheduler" not in inspect.signature(
+                    getattr(factory, "__wrapped__", factory)).parameters and \
+                    factory.__name__ != "_stack_without_overview":
+                return False
+        except (TypeError, ValueError):
+            return False
+
+        def _stack_with_deferred_scheduler(*args, **kwargs):
+            kwargs.setdefault("deferred_scheduler", True)
+            return factory(*args, **kwargs)
+
+        host.stack_factory = _stack_with_deferred_scheduler
+        return True
+
+    def _start_rust_backend(self, stack):
+        """The Rust core's layer on the existing view (as the Python GPU
+        path: the controller stays the one camera and mouse)."""
+        from . import step1_core_binding
+        layer = None
+        try:
+            layer, args = step1_core_binding.build(self, stack, demo_budgets())
+            layer.attach(stack.view)
+            if layer.width() <= 0 or layer.height() <= 0:
+                layer.resize(1, 1)
+            with perf_trace.span("step1.entry.gl_show"):
+                layer.show()
+            with perf_trace.span("step1.entry.gl_initialize"):
+                layer.grabFramebuffer()
+            if not layer.initialized:
+                raise layer.init_error or RuntimeError("the Rust layer did not initialize")
+            binding = step1_core_binding.Step1CoreBinding(parent=self, **args)
+        except Exception as exc:                            # noqa: BLE001
+            self._rust_refused = f"{type(exc).__name__}: {exc}"
+            _log.warning("Step1 Rust backend unavailable, using the Python GPU path: %s",
+                         self._rust_refused)
+            self._release_gpu_layer(layer)
+            return False
+        self.gpu_layer = layer
+        self.gpu_binding = binding
+        binding.on_status_changed = self._refresh_notice
+        stack.controller.set_marker_visible(False)
+        self._set_controller_viewport_requests(stack.controller, False)
+        self._hold_scene_repaint(stack.controller)
+        if hasattr(stack.scheduler, "idle_probe"):
+            stack.scheduler.idle_probe = binding.idle
+        self._backend = BACKEND_GPU
+        self._gpu_reason = ""
+        self._gpu_seed_requested.clear()
+        binding.source_changed()
+        return True
+
+    def _rust_unsupported(self, why):
+        """The display left the thin slice's range: the Python GPU path
+        takes over for the rest of this source (plan §6). Called on the
+        next event-loop turn, never inside a refresh."""
+        from .step1_core_binding import Step1CoreBinding
+        if not isinstance(self.gpu_binding, Step1CoreBinding):
+            return False
+        _log.warning("Step1 Rust backend hands over to the Python GPU path: %s", why)
+        self._rust_refused = why
+        stack = self.host.stack
+        was_active, paused = self._active, self._paused
+        self._stop_gpu_backend(restore_controller=False)
+        if hasattr(getattr(stack, "scheduler", None), "idle_probe"):
+            stack.scheduler.idle_probe = None
+        if stack is None:
+            return False
+        if not self._start_gpu_backend(stack):
+            # the controller's own layers are the picture now: they are
+            # supplied again (unless the viewer is paused, which keeps them
+            # off until `resume_requests`)
+            self._load_overview_for_the_cpu_picture(stack)
+            if not paused:
+                self._set_controller_viewport_requests(stack.controller, True)
+            self._start_cpu_backend(stack)
+            return True
+        self._active = False
+        if was_active and not paused:
+            self.activate()
+        elif paused and self.gpu_binding is not None:
+            self.gpu_binding.pause()
+        return True
+
     @staticmethod
     def _load_overview_for_the_cpu_picture(stack):
         """Read the overview the stack factory was told to skip.
@@ -414,6 +530,8 @@ class Step1WholeSlideMount(QtCore.QObject):
         """
         if not self._gpu_wanted or self.gpu_binding is not None:
             return False
+        if self._rust_wanted and not self._rust_refused and self._start_rust_backend(stack):
+            return True
         layer = None
         try:
             layer = self._build_gpu_layer(stack)
@@ -1090,6 +1208,8 @@ class Step1WholeSlideMount(QtCore.QObject):
         # The outgoing controller is about to be destroyed by `open()`;
         # it must not issue one last round on its way out.
         self._stop_gpu_backend(restore_controller=False)
+        # v16_5 S-Raw: a rebuilt viewer chooses its backend again
+        self._rust_refused = ""
         # Masks belong to the source they were resolved for: a new source
         # starts without them until its owner (block 4c) sets them again.
         self._mask_sources = None

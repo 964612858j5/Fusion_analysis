@@ -454,14 +454,86 @@ class Step1ViewerHost(QtWidgets.QWidget):
             widget.setVisible(True)
 
 
+class DeferredScheduler:
+    """v16_5 S-Raw: Step1's scheduler, BUILT ONLY WHEN SOMETHING ASKS FOR A
+    TILE (docs/v16_5_sraw_plan.md §5).
+
+    In Rust mode the Rust core reads every tile; `TileScheduler` starts its
+    worker threads in its constructor, so it is not constructed until a
+    `request` arrives -- which happens only after a fallback to the Python
+    path. Every other call is answered explicitly, without starting it
+    (no generic lazy attribute: a cancellation must never start workers).
+    `idle_probe` (set while the Rust core draws) answers `idle()` for it.
+    """
+
+    def __init__(self, factory, raw_cache, corrected_cache, provider=None, compute=None):
+        self._factory = factory
+        self._real = None
+        self._shut = False
+        self.raw_cache = raw_cache
+        self.corrected_cache = corrected_cache
+        self.provider = provider
+        self.compute = compute
+        self.idle_probe = None
+
+    @property
+    def started(self) -> bool:
+        return self._real is not None
+
+    def _start(self):
+        if self._real is None:
+            self._real = self._factory()
+        return self._real
+
+    def request(self, req, callback):
+        if self._shut:
+            return None
+        return self._start().request(req, callback)
+
+    def cancel_generation(self, gen):
+        if self._real is not None:
+            self._real.cancel_generation(gen)
+
+    def notify_when_idle(self, callback):
+        if self._real is not None:
+            return self._real.notify_when_idle(callback)
+        if not self._shut:
+            callback()
+        return None
+
+    def idle(self) -> bool:
+        if self._real is not None:
+            return self._real.idle()
+        probe = self.idle_probe
+        return True if probe is None else bool(probe())
+
+    def status(self):
+        if self._real is not None:
+            return self._real.status()
+        return {"queued": 0, "running": 0, "total": 0, "warming": 0}
+
+    @property
+    def warmed_workers(self) -> int:
+        return 0 if self._real is None else self._real.warmed_workers
+
+    def shutdown(self):
+        self._shut = True
+        if self._real is not None:
+            self._real.shutdown()
+
+
 def build_step1_stack(dataset_path, channel, table, parent_widget=None, *,
-                      load_overview=True):
+                      load_overview=True, deferred_scheduler=False):
     """The real stack: provider -> scheduler -> controller -> view.
 
     Composed from the same primitives Step0's factory uses
     (`RawTileProvider`, `TileScheduler`, `LRUByteCache`, `TileGridSpec`,
     `ExploreView`, `ExploreController`) -- the pieces are shared, the
     ownership is not: Step0's own stack is neither moved nor touched.
+
+    `deferred_scheduler=True` (v16_5 Rust mode) hands the controller a
+    `DeferredScheduler`: no tile worker starts unless a request arrives, and
+    the controller's own reads are off before the view is first ranged.
 
     `load_overview=False` builds the same stack WITHOUT the synchronous
     coarsest-level read below. It is for the one caller that knows the
@@ -492,8 +564,14 @@ def build_step1_stack(dataset_path, channel, table, parent_widget=None, *,
         raw_cache = LRUByteCache(RAW_CACHE_BYTES)
         corrected_cache = LRUByteCache(CORRECTED_CACHE_BYTES)
         compute = CorrectionCompute(provider, raw_cache)
-        scheduler = TileScheduler(provider, compute, raw_cache,
-                                  corrected_cache)
+        if deferred_scheduler:
+            def _real(p=provider, c=compute, r=raw_cache, k=corrected_cache):
+                return TileScheduler(p, c, r, k)
+            scheduler = DeferredScheduler(_real, raw_cache, corrected_cache,
+                                          provider=provider, compute=compute)
+        else:
+            scheduler = TileScheduler(provider, compute, raw_cache,
+                                      corrected_cache)
         grid = TileGridSpec(tile_size=TILE_SIZE, source_chunk_shape=(),
                             grid_version="v1")
         with perf_trace.span("step1.entry.qt_view"):
@@ -508,6 +586,8 @@ def build_step1_stack(dataset_path, channel, table, parent_widget=None, *,
             # Block A9 §37 (Odon app.rs:12405, user ruling 2026-10-10): a
             # wheel notch zooms x1.07, not pyqtgraph's x1.35
             view.view_box.state["wheelScaleFactor"] = WHEEL_SCALE_FACTOR
+        if deferred_scheduler:
+            controller.set_viewport_requests_enabled(False)
         if load_overview:
             with perf_trace.span("step1.entry.controller_overview"):
                 controller.load_overview()

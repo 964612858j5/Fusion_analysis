@@ -27,3 +27,18 @@ pub fn monotonic() -> f64 {
     }
     count as f64 / freq as f64
 }
+
+/// CPU seconds this thread has used (the reader's `cpu_ms` in the trace);
+/// wall time where the OS has no per-thread clock here.
+#[cfg(unix)]
+pub fn thread_cpu() -> f64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: valid out-pointer; the clock exists on Linux.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
+}
+
+#[cfg(windows)]
+pub fn thread_cpu() -> f64 {
+    monotonic()
+}

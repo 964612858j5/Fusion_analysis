@@ -61,28 +61,33 @@ fn level(d: &Bound<'_, PyDict>) -> PyResult<LevelTable> {
     })
 }
 
+/// Open the raw source a Python manifest describes (shared with `ViewerCore`).
+pub fn open_source(manifest: &Bound<'_, PyDict>) -> PyResult<RawSource> {
+    let item = |k: &str| -> PyResult<Bound<'_, PyAny>> {
+        manifest.get_item(k)?.ok_or_else(|| PyValueError::new_err(format!("manifest needs '{k}'")))
+    };
+    let levels = item("levels")?.cast_into::<PyList>()?
+        .iter().map(|l| level(l.cast::<PyDict>()?)).collect::<PyResult<Vec<_>>>()?;
+    let m = RawManifest {
+        path: PathBuf::from(item("path")?.extract::<String>()?),
+        expected: FileId {
+            size: item("size")?.extract()?,
+            mtime_ns: item("mtime_ns")?.extract()?,
+            file_number: item("file_number")?.extract()?,
+            alt_number: None,
+        },
+        levels,
+    };
+    RawSource::open(m).map_err(to_py_err)
+}
+
 #[pymethods]
 impl RawReader {
     /// `manifest`: {"path", "size", "mtime_ns", "file_number", "levels": [..]};
     /// see docs/v16_5_r0_interfaces.md. Refuses a file that changed.
     #[new]
     fn new(manifest: &Bound<'_, PyDict>) -> PyResult<Self> {
-        let item = |k: &str| -> PyResult<Bound<'_, PyAny>> {
-            manifest.get_item(k)?.ok_or_else(|| PyValueError::new_err(format!("manifest needs '{k}'")))
-        };
-        let levels = item("levels")?.cast_into::<PyList>()?
-            .iter().map(|l| level(l.cast::<PyDict>()?)).collect::<PyResult<Vec<_>>>()?;
-        let m = RawManifest {
-            path: PathBuf::from(item("path")?.extract::<String>()?),
-            expected: FileId {
-                size: item("size")?.extract()?,
-                mtime_ns: item("mtime_ns")?.extract()?,
-                file_number: item("file_number")?.extract()?,
-                alt_number: None,
-            },
-            levels,
-        };
-        Ok(RawReader { source: RawSource::open(m).map_err(to_py_err)? })
+        Ok(RawReader { source: open_source(manifest)? })
     }
 
     /// One region's bytes (row-major, native-endian); the GIL is released.

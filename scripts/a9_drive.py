@@ -423,7 +423,8 @@ class Driver(QtCore.QObject):
             raise RuntimeError("no uncovered viewer point on screen")
         _mark_target(self.i, target)
         layers = [w for w in QtWidgets.QApplication.allWidgets()
-                  if type(w).__name__ == "Step1GpuLayer" and _alive_visible(w)]
+                  if type(w).__name__ in ("Step1GpuLayer", "Step1CoreLayer")   # v16_5 S-Raw
+                  and _alive_visible(w)]
         rx = _WheelRx(target, layers)
         g = target.mapToGlobal(pos)
         log = os.environ.get("BLOCK01_PERF_LOG", "a9") + ".xwheel.jsonl"
@@ -643,6 +644,20 @@ def _attribute():
     wrap(step1_gpu_binding.Step1GpuBinding, "_drawn_fine", "attr.drawn_fine")
     wrap(step1_gpu_binding.Step1GpuBinding, "update_viewport", "attr.update_viewport")
     wrap(step1_gpu_layer.Step1GpuLayer, "_visible_drawn", "attr.visible_drawn")
+    # v16_5 S-Raw (the user's question: what of the remaining Python costs
+    # time per gesture): pyqtgraph's drag handling, the Tissue Preview
+    # rectangle, and the Rust layer's paintGL shell (gpu.paint already
+    # times the whole paint; this is the Python around the core's call).
+    # Nested spans: attr.ctl_range runs inside attr.vb_wheel -- the report
+    # subtracts children (a9_event_attr / a9_slow_notches).
+    wrap(pg.ViewBox, "mouseDragEvent", "attr.vb_drag")
+    wrap(step1_viewer_mount.Step1WholeSlideMount, "publish_view_rect", "attr.view_rect")
+    try:
+        from block01.ui import step1_core_binding, step1_core_layer
+        wrap(step1_core_binding.Step1CoreBinding, "_set_view", "attr.core_set_view")
+        wrap(step1_core_layer.Step1CoreLayer, "paintGL", "attr.core_paint")
+    except ImportError:
+        pass
     import gc
     started = {}
 

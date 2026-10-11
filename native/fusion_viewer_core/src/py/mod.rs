@@ -4,6 +4,8 @@ mod gil;
 mod gl;
 mod notify;
 mod reader;
+mod testing;
+mod viewer;
 
 use pyo3::prelude::*;
 
@@ -14,7 +16,9 @@ fn fusion_viewer_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<reader::RawReader>()?;
     m.add_class::<gl::GlCore>()?;
     m.add_class::<notify::Notifier>()?;
+    m.add_class::<viewer::ViewerCore>()?;
     gil::register(m)?;
+    testing::register(m)?;
     Ok(())
 }
 

@@ -50,6 +50,27 @@ pub struct Store {
     pub uploads: u64,
     pub evictions: u64,
     pub generation: u64,
+    /// blocks created since last drained, for the A9 record (`gpu.grow`)
+    pub growths: Vec<Growth>,
+    /// blocks the frame wants to exist ahead of need (frame::top_up); up
+    /// to this many a free layer comes from a new block before an eviction
+    pub target_blocks: usize,
+    /// the first-use draw (made at the first block); None until then
+    touch: Option<crate::gpu_touch::TouchKit>,
+    /// rollback switch BLOCK01_RUST_OLD_WARM=1: the old FBO warm (§48)
+    old_warm: bool,
+}
+
+/// One block creation: when, its size and the time of its two stages, ms.
+#[derive(Clone, Copy, Debug)]
+pub struct Growth {
+    pub at: f64,
+    pub layers: u32,
+    pub alloc_ms: f64,
+    pub warm_ms: f64,
+    /// the touch's attachment status and first GL error (0, 0 for the old warm)
+    pub touch_status: u32,
+    pub gl_error: u32,
 }
 
 /// `_block_layers` for uint8: a 64 MiB block, the GL limit, and at most a
@@ -70,7 +91,8 @@ impl Store {
         Store { max_bytes, layers_per_block: block_layers(max_bytes, max_gl_layers),
                 max_blocks, blocks: Vec::new(), slots: HashMap::new(), meta: HashMap::new(),
                 used: HashMap::new(), tick: 0, dirty: Vec::new(), uploads: 0, evictions: 0,
-                generation: 0 }
+                generation: 0, growths: Vec::new(), target_blocks: 0, touch: None,
+                old_warm: std::env::var_os("BLOCK01_RUST_OLD_WARM").is_some_and(|v| v == "1") }
     }
 
     /// What admission keeps free: one partly filled block (`array_slack_bytes`).
@@ -120,6 +142,7 @@ impl Store {
             }
         }
         missing.sort_by_key(|it| !mandatory.contains(&it.0));
+        let mut no_victim = false;               // looked once: every resident tile is needed
         unsafe { gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1) };
         for (key, tile, rect) in missing {
             let must = mandatory.contains(key);
@@ -127,7 +150,7 @@ impl Store {
                 out.deferred += 1;
                 continue;
             }
-            let slot = match self.free_slot(gl, must || may_grow, required) {
+            let slot = match self.free_slot(gl, must || may_grow, required, &mut no_victim) {
                 Ok(Some(s)) => s,
                 Ok(None) => {
                     out.deferred += 1;
@@ -168,11 +191,14 @@ impl Store {
         }
     }
 
-    /// A free layer: an existing block's (fullest first), a new block
-    /// (`grow`), or the least recently used tile not `required`.
+    /// A free layer: an existing block's (fullest first); a new block while
+    /// fewer than `target_blocks` exist (`grow`); the least recently used
+    /// tile not `required`; else a new block within the budget (`grow`).
     /// Ok(None): a new block was needed but growth is held back.
-    fn free_slot(&mut self, gl: &glow::Context, grow: bool, required: &HashSet<Key>)
-                 -> Result<Option<(usize, u32)>, String> {
+    /// `no_victim`: set once a search found every resident tile required,
+    /// so a frame does not search again per tile.
+    fn free_slot(&mut self, gl: &glow::Context, grow: bool, required: &HashSet<Key>,
+                 no_victim: &mut bool) -> Result<Option<(usize, u32)>, String> {
         let fullest = (0..self.blocks.len())
             .filter(|&i| self.blocks[i].as_ref().is_some_and(|b| !b.free.is_empty()))
             .min_by_key(|&i| self.blocks[i].as_ref().map_or(0, |b| b.free.len()));
@@ -180,23 +206,29 @@ impl Store {
             return Ok(Some((i, self.block(i).free.pop().unwrap())));
         }
         let block_bytes = self.layers_per_block as usize * SLOT_BYTES;
-        if self.allocated_bytes() + block_bytes <= self.max_bytes && self.free_block_slot().is_some() {
+        let may_add = self.allocated_bytes() + block_bytes <= self.max_bytes && self.free_block_slot().is_some();
+        if may_add && grow && self.live_blocks() < self.target_blocks {
+            let i = self.new_block(gl)?;
+            return Ok(Some((i, self.block(i).free.pop().unwrap())));
+        }
+        if !*no_victim {
+            let victim = self.used.iter().filter(|(k, _)| !required.contains(k))
+                .min_by_key(|(_, t)| **t).map(|(k, _)| *k);
+            if let Some(k) = victim {
+                let slot = self.evict(&k);
+                self.block(slot.0).free.retain(|&l| l != slot.1);
+                return Ok(Some(slot));
+            }
+            *no_victim = true;
+        }
+        if may_add {
             if !grow {
                 return Ok(None);
             }
             let i = self.new_block(gl)?;
             return Ok(Some((i, self.block(i).free.pop().unwrap())));
         }
-        let victim = self.used.iter().filter(|(k, _)| !required.contains(k))
-            .min_by_key(|(_, t)| **t).map(|(k, _)| *k);
-        match victim {
-            Some(k) => {
-                let slot = self.evict(&k);
-                self.block(slot.0).free.retain(|&l| l != slot.1);
-                Ok(Some(slot))
-            }
-            None => Err("the GPU store cannot fit the active tiles without evicting one in use".into()),
-        }
+        Err("the GPU store cannot fit the active tiles without evicting one in use".into())
     }
 
     fn evict(&mut self, key: &Key) -> (usize, u32) {
@@ -226,23 +258,46 @@ impl Store {
         let layers = self.layers_per_block;
         let slot = self.free_block_slot().ok_or("no sampler left for another block")?;
         unsafe {
-            let tex = gl.create_texture()?;
-            gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(tex));
-            for (p, v) in [(glow::TEXTURE_MIN_FILTER, glow::NEAREST), (glow::TEXTURE_MAG_FILTER, glow::NEAREST),
-                           (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE), (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE)] {
-                gl.tex_parameter_i32(glow::TEXTURE_2D_ARRAY, p, v as i32);
-            }
-            gl.tex_parameter_i32(glow::TEXTURE_2D_ARRAY, glow::TEXTURE_MAX_LEVEL, 0);
-            gl.tex_image_3d(glow::TEXTURE_2D_ARRAY, 0, glow::R8UI as i32, TILE as i32, TILE as i32,
-                            layers as i32, 0, glow::RED_INTEGER, glow::UNSIGNED_BYTE,
-                            glow::PixelUnpackData::Slice(None));
-            gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
-            crate::gpu_warm::warm(gl, tex, layers);
+            let t = Instant::now();
+            let tex = create_block_texture(gl, layers, false)?;
+            let alloc_ms = t.elapsed().as_secs_f64() * 1000.0;
+            let t = Instant::now();
+            let (touch_status, gl_error) = self.pay_first_use(gl, tex, layers);
+            let warm_ms = t.elapsed().as_secs_f64() * 1000.0;
+            self.growths.push(Growth { at: crate::clock::monotonic(), layers, alloc_ms, warm_ms,
+                                       touch_status, gl_error });
             let block = Block { texture: tex, layers, free: (0..layers).rev().collect(),
                                 owners: HashMap::new() };
             if slot == self.blocks.len() { self.blocks.push(Some(block)); } else { self.blocks[slot] = Some(block); }
             Ok(slot)
         }
+    }
+
+    /// A new block's first use, paid now (`gpu_touch`: attach, one sampled texel),
+    /// or the old warm when switched back or the draw cannot be built.
+    unsafe fn pay_first_use(&mut self, gl: &glow::Context, tex: glow::Texture, layers: u32) -> (u32, u32) {
+        unsafe {
+            if !self.old_warm && self.touch.is_none() {
+                match crate::gpu_touch::TouchKit::new(gl) {
+                    Ok(kit) => self.touch = Some(kit),
+                    Err(_) => self.old_warm = true,
+                }
+            }
+            match &self.touch {
+                Some(kit) if !self.old_warm => kit.touch(gl, tex, layers),
+                _ => { crate::gpu_warm::warm(gl, tex, layers); (0, 0) }
+            }
+        }
+    }
+
+    /// Whole blocks inside the admission budget (budget minus slack).
+    pub fn budget_blocks(&self) -> usize {
+        let block_bytes = self.layers_per_block as usize * SLOT_BYTES;
+        (self.max_bytes.saturating_sub(self.slack_bytes()) / block_bytes).min(self.max_blocks)
+    }
+
+    pub fn live_blocks(&self) -> usize {
+        self.live().count()
     }
 
     /// Allocate blocks ahead (initialisation / a quiet moment) while the
@@ -269,6 +324,9 @@ impl Store {
         for b in self.blocks.drain(..).flatten() {
             unsafe { gl.delete_texture(b.texture) };
         }
+        if let Some(kit) = self.touch.take() {
+            unsafe { kit.destroy(gl) };
+        }
         self.slots.clear();
         self.meta.clear();
         self.used.clear();
@@ -292,3 +350,27 @@ impl Store {
     }
 }
 
+
+/// An empty R8UI 512x512 array texture of `layers` layers, NEAREST and
+/// clamped, allocated with glTexImage3D or (`storage`) glTexStorage3D.
+pub unsafe fn create_block_texture(gl: &glow::Context, layers: u32, storage: bool)
+                                   -> Result<glow::Texture, String> {
+    unsafe {
+        let tex = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(tex));
+        for (p, v) in [(glow::TEXTURE_MIN_FILTER, glow::NEAREST), (glow::TEXTURE_MAG_FILTER, glow::NEAREST),
+                       (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE), (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE)] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D_ARRAY, p, v as i32);
+        }
+        gl.tex_parameter_i32(glow::TEXTURE_2D_ARRAY, glow::TEXTURE_MAX_LEVEL, 0);
+        if storage {
+            gl.tex_storage_3d(glow::TEXTURE_2D_ARRAY, 1, glow::R8UI, TILE as i32, TILE as i32, layers as i32);
+        } else {
+            gl.tex_image_3d(glow::TEXTURE_2D_ARRAY, 0, glow::R8UI as i32, TILE as i32, TILE as i32,
+                            layers as i32, 0, glow::RED_INTEGER, glow::UNSIGNED_BYTE,
+                            glow::PixelUnpackData::Slice(None));
+        }
+        gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
+        Ok(tex)
+    }
+}

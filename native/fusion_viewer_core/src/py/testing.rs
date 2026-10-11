@@ -34,8 +34,34 @@ fn cover_for_test(shapes: Vec<(usize, usize)>, bbox_l0: [i64; 4], level: u8) -> 
     c
 }
 
+/// `grow_probe::run` in the caller's current context (`get_proc`: Qt's
+/// getProcAddress), `warm` none | old | touch: per block [drain,
+/// allocate, its finish, warm, upload+draw of layer 0, the middle, the
+/// last, the middle again, the layer after it] ms.
+#[pyfunction]
+fn grow_probe_for_test(get_proc: Bound<'_, PyAny>, layers: u32, storage: bool, warm: &str,
+                       count: usize) -> PyResult<Vec<[f64; 9]>> {
+    let mut failure: Option<PyErr> = None;
+    let gl = unsafe {
+        glow::Context::from_loader_function(|name| {
+            match get_proc.call1((pyo3::types::PyBytes::new(get_proc.py(), name.as_bytes()),))
+                .and_then(|v| if v.is_none() { Ok(0usize) } else { v.extract::<usize>() }) {
+                Ok(a) => a as *const std::ffi::c_void,
+                Err(e) => { failure.get_or_insert(e); std::ptr::null() }
+            }
+        })
+    };
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    use crate::grow_probe::Warm;
+    let warm = match warm { "old" => Warm::Old, "touch" => Warm::Touch, _ => Warm::None };
+    Ok(unsafe { crate::grow_probe::run(&gl, layers, storage, warm, count) })
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(admit_for_test, m)?)?;
     m.add_function(wrap_pyfunction!(cover_for_test, m)?)?;
+    m.add_function(wrap_pyfunction!(grow_probe_for_test, m)?)?;
     Ok(())
 }

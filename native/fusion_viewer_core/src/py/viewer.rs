@@ -118,6 +118,7 @@ impl ViewerCore {
             d.set_item(k, v)?;
         }
         d.set_item("limited", r.limited)?;
+        d.set_item("reserving", r.reserving)?;
         d.set_item("error", r.error)?;
         Ok(d)
     }
@@ -191,6 +192,8 @@ impl ViewerCore {
         if let Some(g) = core.gpu.as_ref() {
             d.set_item("gpu_tiles", g.store.slots.len())?;
             d.set_item("gpu_blocks", g.store.blocks.len())?;
+            d.set_item("gpu_live_blocks", g.store.live_blocks())?;
+            d.set_item("gpu_target_blocks", g.store.target_blocks)?;
             d.set_item("gpu_uploads", g.store.uploads)?;
             d.set_item("gpu_evictions", g.store.evictions)?;
             d.set_item("u_blocks", g.render.u_blocks)?;
@@ -199,6 +202,17 @@ impl ViewerCore {
     }
 
     /// The stage records so far, `(t, stage, (c, level, tx, ty) | None, {extra})`.
+    /// GPU blocks created since the last call: (t, layers, alloc_ms,
+    /// warm_ms, touch framebuffer status, first GL error).
+    fn drain_growths(&self) -> Vec<(f64, u32, f64, f64, u32, u32)> {
+        let mut core = self.inner.borrow_mut();
+        match core.gpu.as_mut() {
+            Some(g) => g.store.growths.drain(..)
+                .map(|x| (x.at, x.layers, x.alloc_ms, x.warm_ms, x.touch_status, x.gl_error)).collect(),
+            None => Vec::new(),
+        }
+    }
+
     fn drain_trace<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
         let recs = self.inner.borrow().trace.drain();
         let mut out = Vec::with_capacity(recs.len());

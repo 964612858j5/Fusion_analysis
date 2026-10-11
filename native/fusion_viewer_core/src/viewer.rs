@@ -66,8 +66,6 @@ pub struct ViewerCore {
     pub last_error: String,
     /// keys asked for and still owed: only a NEW want is a trace "req"
     issued: std::collections::HashSet<Key>,
-    /// the GPU blocks were reserved once, at the first frame with channels
-    pub reserved: bool,
 }
 
 impl ViewerCore {
@@ -85,7 +83,7 @@ impl ViewerCore {
         ViewerCore { cfg, pyr, roi_world, planner, pool, notifier, trace, gpu: None,
                      display: Vec::new(), smooth: true, last_input: -1e9, paused: false,
                      held: HashMap::new(), frames: 0, last_error: String::new(),
-                     issued: Default::default(), reserved: false }
+                     issued: Default::default() }
     }
 
     /// The drawn channels (sorted by name) and their display parameters.
@@ -198,7 +196,6 @@ impl ViewerCore {
         let total = self.cfg.max_raw_texture_bytes.saturating_sub(store.slack_bytes());
         self.planner.set_total(Some(total as u64));
         self.gpu = Some(Gpu { gl, store, vt, render });
-        self.reserved = false;
         Ok(())
     }
 

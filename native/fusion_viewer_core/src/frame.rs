@@ -26,6 +26,8 @@ pub struct FrameReport {
     pub view_id: u64,
     pub limited: bool,
     pub base_overflow: bool,
+    /// blocks are still being reserved ahead (one per frame): paint again
+    pub reserving: bool,
     pub drain_ms: f64,
     pub upload_ms: f64,
     pub draw_ms: f64,
@@ -49,19 +51,32 @@ fn drawn_rows(core: &mut ViewerCore) -> Vec<(crate::plan::Ch, Vec<crate::geom::T
     rows
 }
 
-/// The GPU blocks for this many channels' coarse plus a viewport each and
-/// one spare, allocated ONCE at the first frame (no idle timer, plan §1).
-fn reserve_once(core: &mut ViewerCore) {
+/// Hold GPU blocks ahead of need (`reserve::target_blocks`; docs §48, the
+/// approved exception to "reserve once": the first frames, and again when
+/// more channels are drawn, the canvas grows or a release dropped blocks).
+/// One block per frame and never while input is hot, so no frame pays more
+/// than one first use (55-64 ms per 64 MiB on the server, `gpu_touch`). Tiles the frame
+/// must have (complete coarse) still grow the store at once in `prepare`.
+/// Returns whether more blocks are still to come.
+fn top_up(core: &mut ViewerCore, w: i32, h: i32, hot: bool, base_overflow: bool) -> bool {
     let channels = core.planner.active().len();
-    let Some(gpu) = core.gpu.as_mut() else { return };
-    if core.reserved || channels == 0 {
-        return;
-    }
-    core.reserved = true;
     let (across, down) = core.pyr.grid(core.pyr.coarsest());
-    let tiles = channels * ((across * down) as usize + 16);
-    let blocks = tiles.div_ceil(gpu.store.layers_per_block as usize) + 1;
-    gpu.store.reserve(&gpu.gl, blocks);
+    let Some(gpu) = core.gpu.as_mut() else { return false };
+    let store = &mut gpu.store;
+    if base_overflow {
+        store.target_blocks = store.live_blocks();   // no speculative block then
+        return false;
+    }
+    store.target_blocks = crate::reserve::target_blocks(channels, (across * down) as usize, w, h,
+                                                        store.layers_per_block as usize,
+                                                        store.budget_blocks());
+    if store.live_blocks() >= store.target_blocks {
+        return false;
+    }
+    if !hot {
+        store.reserve(&gpu.gl, 1);
+    }
+    store.live_blocks() < store.target_blocks
 }
 
 /// `view`: the world rect on screen now (x0, x1, y0, y1); `fbo`, `w`, `h`:
@@ -90,8 +105,8 @@ pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) ->
     if core.gpu.is_none() {
         return rep;
     }
-    reserve_once(core);
     let base_overflow = core.planner.admission().is_some_and(|a| a.base_overflow);
+    rep.reserving = top_up(core, w, h, hot, base_overflow);
     // 2. what each channel draws, coarse first then fine (coarse to fine)
     let rows = if base_overflow { Vec::new() } else { drawn_rows(core) };
     let coarsest = core.pyr.coarsest();

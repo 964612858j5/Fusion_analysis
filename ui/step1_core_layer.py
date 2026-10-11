@@ -166,8 +166,10 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget):
             self.doneCurrent()
 
     def prepare_headroom(self) -> bool:
-        """The core reserves its GPU blocks once, at its first frame with
-        channels (plan §1: no idle allocation timer)."""
+        """The core reserves its GPU blocks ahead in its own frames: the
+        first ones, and again when more channels are drawn, the canvas grows
+        or a release dropped blocks -- one per frame, never while input is
+        hot (§48, the approved exception to plan §1; no idle timer)."""
         return False
 
     def array_slack_bytes(self, _itemsizes=(1,)) -> int:
@@ -251,8 +253,8 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget):
         self.last_report = report
         if report.get("error"):
             perf_trace.mark("gpu.core_error", error=str(report["error"])[:160].replace(" ", "_"))
-        if report.get("deferred", 0) and not self._again.isActive():
-            self._again.start(FRAME_MS)                 # the rest in the next frame slot
+        if (report.get("deferred", 0) or report.get("reserving")) and not self._again.isActive():
+            self._again.start(FRAME_MS)                 # the rest (or the next reserved block) next slot
         self._note_reads()
         self._a9_note_frame(report)
 
@@ -299,7 +301,12 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget):
             self._traced_coverage = state
             tile_trace.stamp("cov", level=None if state[0] < 0 else state[0], wanted=state[1],
                              shown=state[2], vp=state[3])
+        growths = self.core.drain_growths()
         if perf_trace.enabled():
+            for at, layers, alloc_ms, warm_ms, status, error in growths:   # §48: block creation
+                perf_trace.mark("gpu.grow", frame=self._a9_frame, at=round(at, 6), layers=layers,
+                                alloc_ms=round(alloc_ms, 3), warm_ms=round(warm_ms, 3),
+                                fb_status=hex(status), gl_error=hex(error))
             perf_trace.mark("gpu.frame", frame=self._a9_frame, level=int(report.get("level", -1)),
                             ideal=int(report.get("ideal", -1)), channels=int(report.get("channels", 0)),
                             planes=int(report.get("planes", 0)), uploads=int(report.get("uploads", 0)),

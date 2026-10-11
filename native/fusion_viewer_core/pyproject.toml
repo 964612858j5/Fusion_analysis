@@ -1,0 +1,12 @@
+[build-system]
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[project]
+name = "fusion_viewer_core"
+requires-python = ">=3.10"
+description = "Block01 Step1 viewer performance core (Rust, v16_5)"
+dynamic = ["version"]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]

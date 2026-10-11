@@ -16,3 +16,6 @@ sync_v5.sh
 
 # block S4-1P probe build output
 scripts/probe_step4_rust/target/
+
+# v16_5 Rust viewer core build output
+native/fusion_viewer_core/target/

@@ -1,0 +1,27 @@
+[package]
+name = "fusion_viewer_core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Proprietary"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
+glow = "0.18.0"
+pyo3 = { version = "0.29.3", features = ["abi3-py310"] }
+socket2 = { version = "0.6.5", features = ["all"] }
+weezl = "0.2.1"
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.190"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Performance", "Win32_Networking_WinSock"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

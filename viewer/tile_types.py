@@ -30,6 +30,9 @@ class QualityLevel:
     INTERACTIVE = "interactive"
     NATIVE = "native"
     PRODUCTION = "production"
+    #: the SAVED product itself (Step0 Save), reduced to the tile's level;
+    #: `CorrectionKey.algorithm_version` then names the product's identity
+    SAVED = "saved"
 
 
 # ── Identity types ───────────────────────────────────────────────────────────

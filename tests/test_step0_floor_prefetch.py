@@ -372,13 +372,14 @@ def viewport_keys(controller, channel, method, params, level=None):
     """The corrected keys covering the CURRENT viewport at `level`.
 
     Uses the controller's own `request_planning.bbox_to_level` +
-    `tiles_covering` + `effective_param` -- the same three the foreground
-    and HOT both call. No fourth coordinate formula lives in this file.
+    `tiles_covering` + `correction_identity` -- the same three the
+    foreground and HOT both call (the identity rule is
+    `viewer/correction_plan.py`: a level within 2x of level 0 is corrected
+    exactly, with the real parameter). No fourth formula lives in this file.
     """
-    from block01.viewer import explore_view as ev
     from block01.viewer import request_planning as planning
     from block01.viewer.tile_types import (CorrectionKey, TileAddress,
-                                           effective_param, tiles_covering)
+                                           tiles_covering)
 
     level = controller.level if level is None else int(level)
     if level >= controller.provider.num_levels:
@@ -387,14 +388,15 @@ def viewport_keys(controller, channel, method, params, level=None):
     bbox = controller._current_bbox
     if bbox is None:
         return set()
-    eff = tuple(effective_param(p, level, ds) for p in tuple(params or ()))
+    eff, quality, algo = controller.correction_identity(
+        level, channel=channel, method=method, params=tuple(params or ()))
     return {
         CorrectionKey(
             source=controller.provider.source_identity(), channel=channel,
             tile=TileAddress(grid=controller.grid, level=level, tx=tx, ty=ty),
             method=method, params=eff,
-            algorithm_version=ev.BG_CORRECTION_ALGO_VERSION,
-            quality=controller.quality)
+            algorithm_version=algo,
+            quality=quality)
         for tx, ty in tiles_covering(
             planning.bbox_to_level(bbox, ds), controller.grid.tile_size)}
 

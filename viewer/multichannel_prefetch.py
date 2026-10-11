@@ -683,17 +683,27 @@ class MultiChannelPrefetchController(QtCore.QObject):
     def _make_key(self, snapshot, channel, tx, ty, method, base_param,
                   level=None):
         level = int(snapshot.level if level is None else level)
-        downsample = self._level_downsample(level)
-        param = effective_param(base_param, level, downsample)
+        # THE controller's rule (viewer/correction_plan.py): the same
+        # params, quality and algorithm the foreground key will carry --
+        # the saved product, level-0 exact, or the approximation
+        identity = getattr(self.controller, "correction_identity", None)
+        if identity is not None:
+            params, quality, algo = identity(level, channel=channel,
+                                             method=method,
+                                             params=(base_param,))
+        else:
+            downsample = self._level_downsample(level)
+            params = (effective_param(base_param, level, downsample),)
+            quality, algo = snapshot.quality, snapshot.algorithm_version
         return CorrectionKey(
             source=snapshot.source,
             channel=channel,
             tile=TileAddress(grid=self.grid, level=level,
                              tx=tx, ty=ty),
             method=method,
-            params=(param,),
-            algorithm_version=snapshot.algorithm_version,
-            quality=snapshot.quality,
+            params=params,
+            algorithm_version=algo,
+            quality=quality,
         )
 
     # ── lifecycle hooks (see `viewer.experimental.coverage_prefetch`) ────

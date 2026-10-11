@@ -1178,9 +1178,19 @@ class CompareStrip(QtWidgets.QWidget):
             method = COMPARE_METHODS.get(source)
             base = () if method is None else tuple(
                 params_for(source) if params_for is not None else ())
+            quality, algo = snapshot.quality, snapshot.algorithm_version
             try:
-                eff = tuple(effective_param(p, snapshot.level, downsample)
-                            for p in base)
+                identity = getattr(controller, "correction_identity", None)
+                if method is not None and identity is not None:
+                    # the panel controller's own rule for this channel
+                    # (viewer/correction_plan.py), so the probe asks for
+                    # exactly the key the panel will cache
+                    eff, quality, algo = identity(snapshot.level,
+                                                  channel=channel,
+                                                  method=method, params=base)
+                else:
+                    eff = tuple(effective_param(p, snapshot.level, downsample)
+                                for p in base)
             except Exception:                               # noqa: BLE001
                 return None
             plans.append({
@@ -1191,8 +1201,8 @@ class CompareStrip(QtWidgets.QWidget):
                 "level": snapshot.level,
                 "tiles": tuple(sorted(snapshot.visible_tiles)),
                 "source": snapshot.source,
-                "quality": snapshot.quality,
-                "algorithm_version": snapshot.algorithm_version,
+                "quality": quality,
+                "algorithm_version": algo,
             })
         return plans
 

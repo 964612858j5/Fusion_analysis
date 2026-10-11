@@ -80,6 +80,9 @@ class OMETIFFLoader:
             if str(method).strip().lower() in {"tophat", "cucim"}
         }
         self._corrected_store = None
+        # the viewers' saved-product answer (`core.saved_correction`)
+        from . import saved_correction
+        saved_correction.register_loader(self)
 
     def read_region(self, channel_name, y0, y1, x0, x1, downsample=1,
                     correction_config=None, normalize=True):

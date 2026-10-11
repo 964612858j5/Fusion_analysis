@@ -796,6 +796,8 @@ from .tile_types import (
     tiles_covering,
 )
 from ..core.bg_correction import BG_CORRECTION_ALGO_VERSION
+from ..core import saved_correction
+from . import correction_plan
 
 
 # Where this module says something went wrong that it then carried on from.
@@ -2627,15 +2629,54 @@ class ExploreController(QtCore.QObject):
         return (kind, self._gen_ns, n)
 
     def selection_key_context(self):
-        """(source, channel, method, effective params, level, quality) —
-        the identity tuple a precise tile must match to be considered
-        current (design doc §1.2)."""
+        """(source, channel, method, effective params, level, quality,
+        algorithm version) — the identity tuple a precise tile must match to
+        be considered current (design doc §1.2). The algorithm version names
+        the saved write a SAVED tile came from, so a re-Save with the same
+        method and parameter does not count the old tiles as coverage."""
         source = self.provider.source_identity()
-        ds = self.provider.level_downsample(self.level)
-        eff_params = tuple(
-            effective_param(p, self.level, ds) for p in self.params
-        )
-        return (source, self.channel, self.method, eff_params, self.level, self.quality)
+        params, quality, algo = self.correction_identity(self.level)
+        return (source, self.channel, self.method, params, self.level, quality,
+                algo)
+
+    # ── how a corrected tile at a level is made (viewer/correction_plan) ──
+    def _saved_for(self, channel, method, params):
+        """The SAVED product for this selection, or None. Memoised per
+        Save (`saved_correction.version()`): asked once per key."""
+        if method is None or not params:
+            return None
+        source = self.provider.source_identity()
+        path = getattr(source, "dataset_path", None)
+        if not path or getattr(source, "stage", "raw") != "raw":
+            return None          # a viewer of products, or a stand-in source
+        memo_key = (saved_correction.version(), source, str(channel), method,
+                    tuple(int(p) for p in params))
+        memo = self.__dict__.setdefault("_saved_memo", {})
+        if memo_key not in memo:
+            if len(memo) > 256:
+                memo.clear()
+            memo[memo_key] = correction_plan.saved_product(
+                path, channel, method, params, self.provider.level_shape(0))
+        return memo[memo_key]
+
+    def correction_identity(self, level, channel=None, method=None, params=None):
+        """`(params, quality, algorithm_version)` a corrected key at `level`
+        carries -- THE rule (`correction_plan.plan`), for this controller's
+        live selection unless another one is named."""
+        channel = self.channel if channel is None else channel
+        method = self.method if method is None else method
+        params = tuple(self.params if params is None else params)
+        ds = self.provider.level_downsample(level)
+        return correction_plan.plan(method, params, level, ds,
+                                    self._saved_for(channel, method, params))
+
+    def view_is_approximate(self) -> bool:
+        """Is the corrected picture at the live level the approximation?"""
+        if self.method is None:
+            return False
+        _p, quality, _a = self.correction_identity(self.level)
+        return correction_plan.is_approximate(
+            quality, self.level, self.provider.level_downsample(self.level))
 
     def _wants_precise(self) -> bool:
         return self.method is not None
@@ -2651,13 +2692,12 @@ class ExploreController(QtCore.QObject):
         if level is None:
             level = self.level
         source = self.provider.source_identity()
-        ds = self.provider.level_downsample(level)
-        eff_params = tuple(effective_param(p, level, ds) for p in self.params)
+        eff_params, quality, algo = self.correction_identity(level)
         addr = TileAddress(grid=self.grid, level=level, tx=tx, ty=ty)
         return CorrectionKey(
             source=source, channel=self.channel, tile=addr, method=self.method,
-            params=eff_params, algorithm_version=BG_CORRECTION_ALGO_VERSION,
-            quality=self.quality,
+            params=eff_params, algorithm_version=algo,
+            quality=quality,
         )
 
     def _visible_tiles_center_out(self):
@@ -3157,6 +3197,7 @@ class ExploreController(QtCore.QObject):
         shown progressively, per tile, as they land -- the atomic
         all-or-nothing gate is kept only for the floor-not-ready window,
         where a corrected tile next to raw would still be a hard seam."""
+        self._refresh_badge()
         wants = self._wants_precise()
         covered = wants and bool(self._visible_tiles) and self._coverage_complete()
         floor_ctx = self._current_floor_ctx(self._floor_level, self._floor_stride)
@@ -3210,10 +3251,11 @@ class ExploreController(QtCore.QObject):
 
     @staticmethod
     def _key_matches_context(key: CorrectionKey, ctx) -> bool:
-        source, channel, method, eff_params, level, quality = ctx
+        source, channel, method, eff_params, level, quality, algo = ctx
         return (
             key.source == source and key.channel == channel and key.method == method
             and key.params == eff_params and key.tile.level == level and key.quality == quality
+            and key.algorithm_version == algo
         )
 
     def _precise_key_current_for_level(self, key, level) -> bool:
@@ -3228,11 +3270,11 @@ class ExploreController(QtCore.QObject):
         if key is None:
             return False
         source = self.provider.source_identity()
-        ds = self.provider.level_downsample(level)
-        eff_params = tuple(effective_param(p, level, ds) for p in self.params)
+        eff_params, quality, algo = self.correction_identity(level)
         return (
             key.source == source and key.channel == self.channel and key.method == self.method
-            and key.params == eff_params and key.tile.level == level and key.quality == self.quality
+            and key.params == eff_params and key.tile.level == level and key.quality == quality
+            and key.algorithm_version == algo
         )
 
     # ── interaction contract ─────────────────────────────────────────────
@@ -3248,8 +3290,8 @@ class ExploreController(QtCore.QObject):
             method=self.method,
             params=tuple(self.params),
             level=self.level,
-            quality=self.quality,
-            algorithm_version=BG_CORRECTION_ALGO_VERSION,
+            quality=self.correction_identity(self.level)[1],
+            algorithm_version=self.correction_identity(self.level)[2],
             bbox_l0=self._current_bbox,
             visible_tiles=frozenset(self._visible_tiles),
             overview_ready=ready,
@@ -3600,17 +3642,34 @@ class ExploreController(QtCore.QObject):
         """
         if floor_level is None:
             return None
+        source = self.provider.source_identity()
+        # THE SAVED PRODUCT, when this selection has one: the floor is then
+        # that product at the floor's grid -- exact, nothing corrected
+        # (viewer/correction_plan.py). The fifth element names the write.
+        saved = self._saved_for(channel, method, tuple(params or ()))
+        if saved is not None:
+            return (source, str(channel), method,
+                    tuple(int(p) for p in params), ("saved", saved.token))
         ds = self.provider.level_downsample(floor_level) * stride
         eff_params = tuple(effective_param(p, floor_level, ds)
                            for p in tuple(params or ()))
-        source = self.provider.source_identity()
         return (source, str(channel), method, eff_params)
 
     def _display_gain_for_level(self, level: int) -> float:
         """Per-level display gain for CORRECTED pixels (module docstring).
         Returns 1.0 for EVERY level whenever `_gain_ctx` does not match the
         LIVE selection context -- a stale or never-calibrated table must
-        never silently scale pixels."""
+        never silently scale pixels.
+
+        And 1.0 for a level whose tiles are EXACT (the saved product, or
+        corrected at level 0): the gain exists to brighten the
+        approximation, and scaling the real result would make it a
+        different picture (viewer/correction_plan.py)."""
+        if self.method is not None:
+            _p, quality, _a = self.correction_identity(level)
+            if not correction_plan.is_approximate(
+                    quality, level, self.provider.level_downsample(level)):
+                return 1.0
         if self._gain_ctx is None or self._gain_ctx != self._current_floor_ctx(
                 self._floor_level, self._floor_stride):
             return 1.0
@@ -3701,7 +3760,25 @@ class ExploreController(QtCore.QObject):
             # "not preparing any more" must not wipe the suspension notice.
             self.view.set_status_text(self._suspend_badge_text())
             return
-        self.view.set_status_text("Preparing corrected preview…" if preparing else None)
+        self._badge_preparing = bool(preparing)
+        self._refresh_badge(force=True)
+
+    def _refresh_badge(self, force=False):
+        """The badge when nothing is suspended: "Preparing…" while the
+        floor is computed, else -- for a corrected view that is NOT exact at
+        this level -- the approximation note (viewer/correction_plan.py; the
+        `QualityLevel.INTERACTIVE` contract always promised that label)."""
+        if getattr(self, "_suspended", False) or getattr(self, "_torn_down", True):
+            return
+        if getattr(self, "_badge_preparing", False):
+            text = "Preparing corrected preview…"
+        elif self.view_is_approximate():
+            text = correction_plan.APPROX_BADGE
+        else:
+            text = None
+        if force or text != getattr(self, "_badge_text", None):
+            self._badge_text = text
+            self.view.set_status_text(text)
 
     # ── production hand-off: suspend / resume ───────────────────────────
 
@@ -3924,7 +4001,8 @@ class ExploreController(QtCore.QObject):
 
         start_floor = self._floor_pending and not self._floor_job_running
         preparing = self._wants_precise() and (start_floor or self._floor_job_running)
-        self.view.set_status_text("Preparing corrected preview…" if preparing else None)
+        self._badge_preparing = bool(preparing)
+        self._refresh_badge(force=True)
         if start_floor:
             self._floor_pending = False
             self._start_floor_job(self._floor_gen)
@@ -4176,15 +4254,26 @@ class ExploreController(QtCore.QObject):
                             else None)
         cal_overview_level = getattr(self, "_overview_level", floor_level)
 
+        saved = (self._saved_for(channel, method, base_params)
+                 if ctx is not None and len(ctx) > 4 else None)
+
         def work():
             try:
-                arr_in = overview_arr
-                if arr_in is None:
+                if saved is not None:
+                    # the saved product on the floor's grid: what the box
+                    # downsample of this level would cover, block-averaged
                     h, w = provider.level_shape(floor_level)
-                    arr_in, _off = provider.read_region(channel, floor_level, 0, h, 0, w)
-                    arr_in = arr_in.astype(np.float32, copy=False)
-                arr_in = _box_downsample(arr_in, k)
-                result_arr = compute.correct_array(arr_in, method, param)
+                    s_total = correction_plan.stride_of(
+                        provider.level_downsample(floor_level)) * k
+                    result_arr = saved.tile((0, h // k, 0, w // k), s_total)
+                else:
+                    arr_in = overview_arr
+                    if arr_in is None:
+                        h, w = provider.level_shape(floor_level)
+                        arr_in, _off = provider.read_region(channel, floor_level, 0, h, 0, w)
+                        arr_in = arr_in.astype(np.float32, copy=False)
+                    arr_in = _box_downsample(arr_in, k)
+                    result_arr = compute.correct_array(arr_in, method, param)
                 error = None
             except Exception as exc:  # noqa: BLE001 -- reported via signal, never raised on worker thread
                 result_arr = None
@@ -4198,9 +4287,10 @@ class ExploreController(QtCore.QObject):
             gains: Dict[int, float] = {}
             gain_error = None
             try:
-                gains = self._calibrate_level_gains(
-                    provider, compute, channel, method, base_params,
-                    cal_overview_arr, cal_overview_level)
+                if saved is None:   # nothing approximate to brighten
+                    gains = self._calibrate_level_gains(
+                        provider, compute, channel, method, base_params,
+                        cal_overview_arr, cal_overview_level)
             except Exception as exc:  # noqa: BLE001 -- reported via signal
                 gains = {}
                 gain_error = exc

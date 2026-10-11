@@ -395,16 +395,18 @@ class _SharedSpecTissueContext:
         wanted = tuple(spec.get("channels") or ())
         arrays, loading = {}, []
         for ch in wanted:
-            arr = self._services.lowres_array(ch)
+            # THE SAVED STAGE: a corrected channel's saved product, never
+            # Step0's raw slide, all on one grid (`viewer/tissue_grid.py`)
+            arr = self._services.tissue_array(ch)
             if arr is None:
                 loading.append(ch)
             else:
                 arrays[ch] = arr
         if loading:
-            loading = list(self._services.ensure_lowres(loading))
+            loading = list(self._services.ensure_tissue_arrays(loading))
             for ch in wanted:
                 if ch not in arrays:
-                    arr = self._services.lowres_array(ch)
+                    arr = self._services.tissue_array(ch)
                     if arr is not None:
                         arrays[ch] = arr
         if not arrays:
@@ -515,6 +517,11 @@ class MainWindow(QMainWindow):
         # in the same popup, and Step2/Step3 navigate in it. Every step is
         # handed this object and asks it -- no step reaches into another.
         self._display = Block01DisplayServices(self)
+        # Step1-3's Tissue Preview draws a corrected channel from its SAVED
+        # product (CD45RO, 2026-10-11: it drew the raw slide)
+        self._saved_stage_memo = (None, None)
+        self._saved_stamp_memo = (None, 0.0, None)
+        self._display.set_saved_stage_port(self._saved_stage_port)
         # A9-O1: no Tissue Preview compose for panels nobody can see
         self._display.coordinator.hold_hidden_frames = True
         self.loader = None   # loaded on demand when user clicks "Load"
@@ -2578,6 +2585,70 @@ class MainWindow(QMainWindow):
                 if self._step1_preview_mode == STEP1_PREVIEW_FUSION
                 else tissue_compose.MODE_OVERLAY)
 
+    def _saved_product_stamp(self, path):
+        """When the saved product last changed (the run's own markers).
+
+        Asked at most every half second: it is read per frame."""
+        now = time.monotonic()
+        memo_path, at, stamp = self._saved_stamp_memo
+        if memo_path == path and now - at < 0.5:
+            return stamp
+        stamp = []
+        for name in (path, os.path.join(os.path.dirname(path), ".done"),
+                     os.path.join(os.path.dirname(path), "params.json")):
+            try:
+                stamp.append(os.stat(name).st_mtime_ns)
+            except OSError:
+                stamp.append(0)
+        stamp = tuple(stamp)
+        self._saved_stamp_memo = (path, now, stamp)
+        return stamp
+
+    def _saved_stage_port(self):
+        """What the downstream Tissue Preview draws: the saved stage.
+
+        The same table Step1's viewer is given (`Step1ViewerBinding`): the
+        decisions, the corrected product, the ROI and the handoff revision.
+        Its key moves whenever any of them -- or the product on disk -- does.
+        """
+        loader = self.loader
+        shape = getattr(loader, "shape", None) if loader is not None else None
+        if not shape or len(shape) < 2 or int(shape[0]) <= 0:
+            return None
+        try:
+            stride = int(loader.overview_downsample())
+        except Exception:                                   # noqa: BLE001
+            stride = 32
+        path = str(self._corrected_zarr_path or "")
+        decisions = {str(k): str(v) for k, v in
+                     dict(self._corrected_decisions or {}).items()}
+        roi = self._active_roi or {}
+        bbox = roi.get("bbox_fullres")
+        bbox = (tuple(int(v) for v in bbox)
+                if bbox and len(bbox) == 4 else None)
+        name = str(roi.get("name") or "")
+        output = self.step0_output or {}
+        revision = ""
+        for field in ("channel_remap_config_hash", "handoff_hash",
+                      "step0_manifest_path"):
+            if output.get(field):
+                revision = str(output.get(field))
+                break
+        level0 = (int(shape[0]), int(shape[1]))
+        key = (os.path.abspath(str(getattr(loader, "filepath", "") or "")),
+               level0, stride, path, tuple(sorted(decisions.items())), bbox,
+               name, revision,
+               self._saved_product_stamp(path) if path else ())
+        memo_key, table = self._saved_stage_memo
+        if memo_key != key:
+            from ..viewer.step1_source import Step1SourceTable
+            table = Step1SourceTable(decisions=decisions,
+                                     corrected_zarr_path=path, roi_name=name,
+                                     roi_bbox=bbox, handoff_revision=revision)
+            self._saved_stage_memo = (key, table)
+        return {"key": key, "table": table, "level0_shape": level0,
+                "stride": stride}
+
     def tissue_render_snapshot(self, computed_only=True):
         """Everything Step1's whole-slide frame needs, as plain values.
 
@@ -2632,16 +2703,18 @@ class MainWindow(QMainWindow):
             return None
         arrays, loading = {}, []
         for ch in wanted:
-            arr = self._display.lowres_array(ch)
+            # THE SAVED STAGE: a corrected channel's saved product, never
+            # Step0's raw slide, all on one grid (`viewer/tissue_grid.py`)
+            arr = self._display.tissue_array(ch)
             if arr is None:
                 loading.append(ch)
             else:
                 arrays[ch] = arr
         if loading:
-            loading = list(self._display.ensure_lowres(loading))
+            loading = list(self._display.ensure_tissue_arrays(loading))
             for ch in wanted:
                 if ch not in arrays:
-                    arr = self._display.lowres_array(ch)
+                    arr = self._display.tissue_array(ch)
                     if arr is not None:
                         arrays[ch] = arr
         if not arrays:

@@ -1981,6 +1981,17 @@ class Block01DisplayServices(QObject):
         # for correctness did nothing about the memory.
         self._announced_lowres = {}
         self._announced_lowres_token = None
+        # THE SAVED STAGE for the downstream Tissue Preview (Step1-3): a
+        # corrected channel is drawn from its saved product, never from
+        # Step0's raw arrays. See `viewer/tissue_grid.py`.
+        self._saved_port = None
+        self._saved_key = None
+        self._saved_arrays = {}
+        self._saved_missing = set()
+        self._saved_worker = None
+        self._saved_cancel = None
+        self._saved_retired = []
+        self._grid_memo = {}
         # THE one public channel dock (B4-B). Built here, outside the stacked
         # pages, because a per-step list is what let Step0, Step1 and Step3
         # disagree about the same channel and lose the user's place on every
@@ -2761,6 +2772,177 @@ class Block01DisplayServices(QObject):
         self.coordinator.request_frame(kind="lowres", channel=channel)
         return True
 
+    # ── the downstream Tissue Preview: the SAVED stage, on one grid ────
+    def set_saved_stage_port(self, port):
+        """Register who says what the downstream steps' pixels are.
+
+        `port()` answers None (no slide) or a dict: `key` -- hashable, moves
+        whenever the saved product, the decisions, the ROI or the handoff
+        do -- `table` (a `Step1SourceTable`), `level0_shape` and `stride`
+        (the grid, `viewer.tissue_grid`).
+        """
+        self._saved_port = port
+
+    def _saved_stage(self):
+        port = self._saved_port
+        if port is None:
+            return None
+        try:
+            stage = port()
+        except Exception:                                   # noqa: BLE001
+            return None
+        if not stage:
+            return None
+        if stage.get("key") != self._saved_key:
+            # ANOTHER SAVE (or slide, ROI, handoff): every corrected array
+            # of the previous one goes, and its reader with it -- a late
+            # result carries the old key and is refused on arrival.
+            self._saved_key = stage.get("key")
+            self._saved_arrays = {}
+            self._saved_missing = set()
+            self._grid_memo = {}
+            self._stop_saved_worker()
+        return stage
+
+    @staticmethod
+    def _saved_corrected(stage, channel):
+        from ..viewer.step1_source import CORRECTED_DECISIONS
+        table = stage.get("table")
+        return table is not None and table.decision(channel) in CORRECTED_DECISIONS
+
+    def tissue_array(self, channel):
+        """`channel`'s array for a Step1-3 Tissue Preview, if RESIDENT.
+
+        A corrected channel's SAVED pixels; any other channel Step0's raw
+        array -- both on the one grid. Never reads.
+        """
+        stage = self._saved_stage()
+        if stage is None:
+            return self.lowres_array(channel)
+        if self._saved_corrected(stage, channel):
+            return self._saved_arrays.get(channel)
+        raw = self.lowres_array(channel)
+        if raw is None:
+            return None
+        memo = self._grid_memo.get(channel)
+        if memo is not None and memo[0] is raw:
+            return memo[1]
+        from ..viewer.tissue_grid import to_tissue_grid
+        out = to_tissue_grid(raw, stage["level0_shape"], stage["stride"])
+        self._grid_memo[channel] = (raw, out)
+        return out
+
+    def ensure_tissue_arrays(self, channels):
+        """`ensure_lowres` for a Step1-3 frame. Returns what is pending.
+
+        A corrected channel whose product is missing is NOT pending: it has
+        no picture, and waiting for one would hold the frame forever.
+        """
+        stage = self._saved_stage()
+        wanted = [ch for ch in (channels or []) if ch]
+        if stage is None:
+            return self.ensure_lowres(wanted)
+        corrected = [ch for ch in wanted if self._saved_corrected(stage, ch)]
+        raw = [ch for ch in wanted if ch not in corrected]
+        pending = list(self.ensure_lowres(raw)) if raw else []
+        for channel in corrected:
+            if channel in self._saved_arrays or channel in self._saved_missing:
+                continue
+            if self._submit_saved_read(stage, channel):
+                pending.append(channel)
+        return pending
+
+    def _submit_saved_read(self, stage, channel):
+        if self._closing:
+            return False
+        worker = self._saved_worker
+        if worker is None:
+            import threading
+            from ..viewer.tissue_grid import corrected_overview
+            table = stage["table"]
+            shape, stride = stage["level0_shape"], stage["stride"]
+            cancel = threading.Event()
+
+            def read(ch, _table=table, _shape=shape, _stride=stride,
+                     _cancel=cancel):
+                arr = corrected_overview(_table, ch, _shape, _stride,
+                                         cancelled=_cancel.is_set)
+                # An EMPTY array says "no product": the worker only emits
+                # arrays, and a missing channel must be heard once.
+                return np.zeros((0, 0), np.float32) if arr is None else arr
+
+            try:
+                worker = LowresReadWorker(read)
+                worker.THREAD_NAME = "saved-stage-read"
+                worker.done.connect(self._on_saved_read)
+                worker.failed.connect(
+                    lambda r, _key=self._saved_key: self._on_saved_failed(r, _key))
+                worker.start()
+            except Exception as exc:                        # noqa: BLE001
+                print(f"[Block01] saved-stage reader unavailable ({exc})")
+                return False
+            self._saved_worker = worker
+            self._saved_cancel = cancel
+        worker.submit(self._saved_key, channel)
+        return True
+
+    def _stop_saved_worker(self, wait_ms=0):
+        worker, self._saved_worker = self._saved_worker, None
+        cancel, self._saved_cancel = self._saved_cancel, None
+        if cancel is not None:
+            cancel.set()        # a runtime reduction stops at its next band
+        if worker is not None:
+            for signal in ("done", "failed"):
+                try:
+                    getattr(worker, signal).disconnect()
+                except (TypeError, RuntimeError):
+                    pass
+            # No join on the GUI thread for a mere Save: the reader stops at
+            # its next band and its result is refused by key anyway. It is
+            # kept so a close can wait for it.
+            worker.stop(timeout_ms=0)
+            self._saved_retired.append(worker)
+        self._saved_retired = [w for w in self._saved_retired if w.isRunning()]
+        for w in list(self._saved_retired) if wait_ms else ():
+            if not w.wait(wait_ms):
+                print("[Block01] a saved-stage reader is still running at close")
+
+    def _on_saved_read(self, result):
+        result = dict(result or {})
+        channel, array = result.get("channel"), result.get("array")
+        if not channel or array is None or result.get("token") != self._saved_key:
+            perf_trace.mark("tissue.drop", why="saved_key", kind="saved_read",
+                            channel=channel)
+            return
+        if getattr(array, "size", 0) == 0:
+            self._mark_saved_missing(channel)
+        else:
+            self._saved_arrays[channel] = array
+            tissue_log.note("saved.end", channel=channel,
+                            shape=getattr(array, "shape", None))
+        self.coordinator.request_frame(kind="saved", channel=channel)
+
+    def _on_saved_failed(self, result, key=None):
+        channel = dict(result or {}).get("channel")
+        if channel and key == self._saved_key:
+            # A read that failed is a channel with no picture, said once.
+            print(f"[Block01] saved-stage read failed for {channel}: "
+                  f"{dict(result or {}).get('error')}")
+            self._mark_saved_missing(channel)
+            self.coordinator.request_frame(kind="saved", channel=channel)
+
+    def _mark_saved_missing(self, channel):
+        """A corrected channel with no saved product draws as EMPTY: an
+        all-zero array on the grid, so the frame is redrawn without it
+        rather than the previous picture (or the raw slide) staying up."""
+        self._saved_missing.add(channel)
+        tissue_log.note("saved.missing", channel=channel)
+        stage = self._saved_stage()
+        if stage is not None:
+            from ..viewer.tissue_grid import tissue_grid
+            self._saved_arrays[channel] = np.zeros(
+                tissue_grid(stage["level0_shape"], stage["stride"]), np.float32)
+
     def lowres_read_pending(self, channel=None):
         worker = self._read_worker
         if worker is None:
@@ -2816,6 +2998,9 @@ class Block01DisplayServices(QObject):
         self._finalized = True
         self._closing = True
         self.coordinator.shutdown(reason)
+        # the saved-stage readers, current and retired: cancelled, and
+        # waited for (each stops at its next band)
+        self._stop_saved_worker(wait_ms=5000)
         for attr in ("_seed_worker", "_read_worker"):
             worker = getattr(self, attr, None)
             setattr(self, attr, None)

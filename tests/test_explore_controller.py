@@ -4672,3 +4672,37 @@ def test_work_owed_for_a_selection_with_no_floor_is_still_done(app):
     _pump(5)
 
     assert len(jobs) == 1, f"the owed floor was never computed: {jobs}"
+
+
+# ── CD45RO, 2026-10-11: the approximation says so ──────────────────────────
+
+def test_the_approximate_level_carries_the_badge_and_level0_does_not(app):
+    """A corrected view at a level coarser than 2x is the approximation
+    (viewer/correction_plan.py) and the badge says so; level 0 is exact and
+    shows nothing; raw (no method) shows nothing."""
+    from block01.viewer import correction_plan
+
+    ctrl, provider, scheduler, view = make_controller(app, settle_ms=5000)
+    ctrl.load_overview()
+    ctrl.set_selection(method="tophat", params=(10,))
+    ctrl._badge_preparing = False
+    ctrl.level = 1                                    # ds 4 -> approximate
+    assert ctrl.view_is_approximate()
+    ctrl._refresh_badge()
+    assert view.status_label.isVisible()
+    assert view.status_label.text() == correction_plan.APPROX_BADGE
+    # the key at that level is the approximation, with the scaled radius
+    key = ctrl._make_correction_key(0, 0)
+    assert key.params == (2,) and key.quality == "interactive"
+
+    ctrl.level = 0
+    assert not ctrl.view_is_approximate()
+    ctrl._refresh_badge()
+    assert not view.status_label.isVisible()
+
+    ctrl.level = 1
+    ctrl.set_selection(method=None)
+    ctrl._badge_preparing = False
+    ctrl._refresh_badge()
+    assert not view.status_label.isVisible()
+    ctrl.teardown()

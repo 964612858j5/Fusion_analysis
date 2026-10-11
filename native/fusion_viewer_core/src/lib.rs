@@ -6,8 +6,11 @@
 
 pub mod admit;
 pub mod batch;
+pub mod blosc;
 pub mod cache;
+pub mod cancel;
 pub mod clock;
+pub mod corrected;
 pub mod decode;
 pub mod error;
 pub mod fileid;
@@ -18,17 +21,21 @@ pub mod gpu_touch;
 pub mod gpu_warm;
 pub mod grow_probe;
 pub mod gl;
+pub mod lz4;
 pub mod manifest;
 pub mod notify;
 pub mod plan;
 pub mod pool;
 pub mod posread;
 pub mod reader;
+pub mod reduce;
 pub mod render;
 pub mod reserve;
 pub mod shader;
+pub mod step1_tile;
 pub mod trace;
 pub mod viewer;
 pub mod vt;
+pub mod zarr_v2;
 
 mod py;

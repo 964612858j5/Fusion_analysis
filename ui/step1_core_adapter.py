@@ -20,8 +20,8 @@ BACKEND_ENV = "BLOCK01_STEP1_BACKEND"
 BACKEND_PYTHON = "python"
 BACKEND_RUST = "rust"
 
-#: TIFF compression codes the Rust reader decodes (zstd comes later).
-RUST_COMPRESSIONS = (1, 5, 8, 32946)
+#: TIFF compression codes the Rust reader decodes.
+RUST_COMPRESSIONS = (1, 5, 8, 32946, 50000)
 
 _DECODER_CODES = {None: 1, "lzw_decode": 5, "zlib_decode": 8, "zstd_decode": 50000}
 
@@ -186,4 +186,89 @@ def build_raw_manifest(provider) -> Dict[str, Any]:
                             "stage": identity.stage},
         "dtype": str(np.dtype(provider._dtype)),
         "levels": levels,
+    }
+
+
+# ── R1: Step1's per-channel sources (plan docs/v16_5_r1_plan.md §2, §4.5) ──
+
+def _array_spec(array) -> Dict[str, Any]:
+    """One opened zarr v2 array as the core's `ArrayMeta` + identity: the
+    directory the opener resolved (not a path built here), its `.zarray`
+    as written, and the identity of `.zarray` / `.zattrs`, taken before
+    and after reading so a file changing meanwhile is caught."""
+    import json
+
+    store = getattr(array, "store", None)
+    root = getattr(store, "path", None)
+    if not root or type(store).__name__ != "DirectoryStore":
+        raise ValueError(f"{array!r}: not a directory store")
+    folder = os.path.join(str(root), str(getattr(array, "path", "") or ""))
+
+    def stats():
+        out = []
+        for name in (".zarray", ".zattrs"):
+            path = os.path.join(folder, name)
+            out.append(_identity(os.stat(path)) if os.path.exists(path) else None)
+        return out
+
+    before = stats()
+    with open(os.path.join(folder, ".zarray")) as fh:
+        meta = json.load(fh)
+    if stats() != before or before[0] is None:
+        raise ValueError(f"{folder}: changed while its manifest was being built")
+    compressor = meta.get("compressor") or {}
+    fill = meta.get("fill_value")
+    if fill is None:
+        raise ValueError(f"{folder}: no fill_value")
+    return {
+        "dir": folder,
+        "shape": [int(v) for v in meta["shape"]],
+        "chunks": [int(v) for v in meta["chunks"]],
+        "dtype": str(meta.get("dtype")),
+        "order": str(meta.get("order")),
+        "compressor": str(compressor.get("id", "")),
+        "cname": str(compressor.get("cname", "")),
+        "filters_none": meta.get("filters") is None,
+        "fill": float(fill),                  # "NaN" / "Infinity" parse too
+        "separator": str(meta.get("dimension_separator") or "."),
+        "zarray": before[0],
+        "zattrs": before[1],
+    }
+
+
+def build_corrected_manifest(table, raw_provider, strides) -> Dict[str, Any]:
+    """`Step1SourceTable` -> the core's `Step1Sources` (`Step1Reader`).
+
+    Every decision is the table's own (`source_of`, `region`,
+    `coarse_plane`, `missing`): nothing is re-decided here. `strides` are
+    the levels' `round(h0/hk)` values; a corrected channel lists the
+    persisted coarse plane the table accepts for each of them. A store the
+    core cannot take raises ValueError (the caller stays with Python)."""
+    from ..viewer.step1_source import (MAX_REDUCTION_ELEMENTS, SOURCE_CORRECTED,
+                                       SOURCE_MISSING)
+
+    reasons = {m.channel: m.reason for m in table.missing()}
+    channels = {}
+    for name in raw_provider.channel_names:
+        source = table.source_of(name)
+        if source == SOURCE_MISSING:
+            channels[name] = {"source": "missing", "reason": reasons.get(name, "")}
+        elif source == SOURCE_CORRECTED:
+            region = table.region(name)
+            planes = []
+            for stride in sorted({int(s) for s in strides if int(s) > 1}):
+                plane = table.coarse_plane(name, stride)
+                if plane is not None:
+                    planes.append({"stride": stride, "array": _array_spec(plane.array),
+                                   "origin": [int(plane.origin[0]), int(plane.origin[1])]})
+            channels[name] = {"source": "corrected", "product": _array_spec(region.array),
+                              "bbox": [int(v) for v in region.bbox], "planes": planes}
+        else:
+            channels[name] = {"source": "raw", "index": int(raw_provider.channel_index(name))}
+    roi = table.roi_bbox()
+    return {
+        "roi": None if roi is None else [int(v) for v in roi],
+        "revision": table.identity_token(),
+        "budget": int(MAX_REDUCTION_ELEMENTS),
+        "channels": channels,
     }

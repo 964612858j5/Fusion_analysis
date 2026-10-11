@@ -1,0 +1,58 @@
+# v16_5 R1 (docs/v16_5_r1_plan.md §2.7, master plan §6 / §10.7): build the
+# Rust viewer core's wheel on Linux and Windows and test the INSTALLED
+# wheel -- import, raw TIFF and Blosc decoding against tifffile/numcodecs,
+# the redraw notice. No GL, no server data, no performance gate.
+name: fusion_viewer_core
+
+on:
+  push:
+    branches: [v16_5]
+    paths:
+      - "native/**"
+      - "ui/step1_core_adapter.py"
+      - "tests/test_v16_5_*"
+      - ".github/workflows/fusion_viewer_core.yml"
+  pull_request:
+    branches: [v16_5]
+    paths:
+      - "native/**"
+      - "ui/step1_core_adapter.py"
+      - "tests/test_v16_5_*"
+      - ".github/workflows/fusion_viewer_core.yml"
+
+jobs:
+  wheel:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+      - name: Build the abi3 wheel
+        run: |
+          python -m pip install "maturin>=1.15,<2"
+          maturin build --release -m native/fusion_viewer_core/Cargo.toml -o dist
+      - name: Install the wheel into a clean environment
+        shell: bash
+        run: |
+          python -m venv /tmp/clean || python -m venv clean
+          if [ -d /tmp/clean ]; then V=/tmp/clean; else V=clean; fi
+          if [ -x "$V/bin/python" ]; then PY="$V/bin/python"; else PY="$V/Scripts/python.exe"; fi
+          "$PY" -m pip install dist/*.whl numpy tifffile imagecodecs "numcodecs<0.16" pytest
+          echo "CLEAN_PY=$PY" >> "$GITHUB_ENV"
+      - name: Test the installed wheel
+        shell: bash
+        run: |
+          cd tests
+          "$CLEAN_PY" -m pytest -q -p no:cacheprovider --noconftest --rootdir=. test_v16_5_r1_ci.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fusion_viewer_core-${{ matrix.os }}
+          path: dist/*.whl

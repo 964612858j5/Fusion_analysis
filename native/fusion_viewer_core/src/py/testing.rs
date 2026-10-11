@@ -59,9 +59,17 @@ fn grow_probe_for_test(get_proc: Bound<'_, PyAny>, layers: u32, storage: bool, w
     Ok(unsafe { crate::grow_probe::run(&gl, layers, storage, warm, count) })
 }
 
+/// `blosc::decode` of one frame (parity tests against numcodecs).
+#[pyfunction]
+fn blosc_decode_for_test<'py>(py: Python<'py>, frame: &[u8]) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+    let out = crate::blosc::decode(frame).map_err(crate::py::to_py_err)?;
+    Ok(pyo3::types::PyBytes::new(py, &out))
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(admit_for_test, m)?)?;
     m.add_function(wrap_pyfunction!(cover_for_test, m)?)?;
     m.add_function(wrap_pyfunction!(grow_probe_for_test, m)?)?;
+    m.add_function(wrap_pyfunction!(blosc_decode_for_test, m)?)?;
     Ok(())
 }

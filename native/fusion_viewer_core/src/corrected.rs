@@ -1,0 +1,82 @@
+//! Step1's per-channel sources, as Python resolved them (plan R1 §2,
+//! §4.5): `step1_core_adapter.build_corrected_manifest` turns a
+//! `Step1SourceTable` into this, and Rust never asks Python again.
+//!
+//! A corrected channel names the array `open_corrected_channel_array`
+//! opened and the persisted coarse planes Python accepted, each with the
+//! identity of its `.zarray` / `.zattrs` as Python saw them; `open` checks
+//! them and refuses a product that is not the one described. Assumed
+//! unchanged while it is viewed (a Save republishes the handoff and the
+//! manifest is rebuilt); a rewrite of chunks alone is not detected, as it
+//! is not for Python's zarr reads.
+
+use crate::error::{CoreError, Result};
+use crate::fileid::FileId;
+use crate::reduce::CorrectedRegion;
+use crate::zarr_v2::ArrayMeta;
+use std::collections::HashMap;
+use std::path::Path;
+
+/// One zarr array plus the identity of its two metadata files.
+pub struct ArraySpec {
+    pub meta: ArrayMeta,
+    pub zarray: FileId,
+    pub zattrs: Option<FileId>,
+}
+
+/// A persisted coarse plane for one stride (`CoarsePlane`): blocks of the
+/// level-0-anchored grid starting at `origin` (block coordinates).
+pub struct Plane {
+    pub array: ArrayMeta,
+    pub origin: [i64; 2],
+}
+
+pub enum Source {
+    Raw { index: usize },
+    Corrected { region: CorrectedRegion, planes: HashMap<usize, Plane> },
+    Missing { reason: String },
+}
+
+pub struct Step1Sources {
+    pub channels: HashMap<String, Source>,
+    /// the analysis region (y0, y1, x0, x1), level 0; None = whole slide
+    pub roi: Option<[i64; 4]>,
+    /// `Step1SourceTable.identity_token()`: cache keys carry it
+    pub revision: String,
+}
+
+/// Check that `spec`'s metadata files are still the ones Python described.
+pub fn verify(spec: &ArraySpec) -> Result<()> {
+    let check = |name: &str, expected: &FileId| -> Result<()> {
+        let path = spec.meta.dir.join(name);
+        let file = std::fs::File::open(&path)
+            .map_err(|e| CoreError::Identity(format!("{}: {e}", path.display())))?;
+        let seen = crate::fileid::of(&file).map_err(|e| CoreError::Identity(format!("{}: {e}", path.display())))?;
+        if !seen.matches(expected) {
+            return Err(CoreError::Identity(format!(
+                "{} changed after the manifest was built", path.display())));
+        }
+        Ok(())
+    };
+    check(".zarray", &spec.zarray)?;
+    if let Some(z) = &spec.zattrs {
+        check(".zattrs", z)?;
+    }
+    Ok(())
+}
+
+/// A corrected channel's sources, verified.
+pub fn corrected(product: ArraySpec, bbox: [i64; 4], planes: Vec<(usize, ArraySpec, [i64; 2])>)
+                 -> Result<Source> {
+    verify(&product)?;
+    let mut by_stride = HashMap::new();
+    for (stride, spec, origin) in planes {
+        verify(&spec)?;
+        by_stride.insert(stride, Plane { array: spec.meta, origin });
+    }
+    Ok(Source::Corrected { region: CorrectedRegion { array: product.meta, bbox }, planes: by_stride })
+}
+
+pub fn exists(dir: &Path) -> bool {
+    dir.join(".zarray").is_file()
+}

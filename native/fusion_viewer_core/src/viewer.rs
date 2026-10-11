@@ -35,6 +35,10 @@ pub struct Config {
     pub hot_upload_ms: f64,
     pub frame_budget_ms: f64,
     pub growth_quiet_s: f64,
+    /// byte bound of the reader result queue (`pool::RESULT_BYTES`)
+    pub result_bytes: usize,
+    /// test only: delay before each read (`pool::Shared::read_delay`)
+    pub test_read_delay_ms: f64,
     /// test only: request fine tiles channel by channel (the old order)
     pub legacy_order: bool,
 }
@@ -77,7 +81,7 @@ impl ViewerCore {
                                 max_fine_bytes_per_channel: cfg.max_fine_bytes_per_channel,
                                 total: Some(cfg.max_raw_texture_bytes as u64), texel_bytes: 1 };
         let planner = Planner::new(pyr.clone(), budgets, cfg.max_coarse_tiles);
-        let pool = Pool::start(Arc::new(source), pyr.clone(), roi, cfg.cpu_cache_bytes, cfg.threads,
+        let pool = Pool::start(Arc::new(source), pyr.clone(), roi, cfg.cpu_cache_bytes, cfg.threads, cfg.result_bytes, cfg.test_read_delay_ms,
                                notifier.clone(), Arc::clone(&trace));
         let roi_world = roi.map(|[y0, y1, x0, x1]| [x0 as f64, x1 as f64, y0 as f64, y1 as f64]);
         ViewerCore { cfg, pyr, roi_world, planner, pool, notifier, trace, gpu: None,

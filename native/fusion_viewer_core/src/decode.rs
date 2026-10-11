@@ -18,15 +18,17 @@ pub enum Compression {
     None,
     Lzw,
     Deflate,
+    Zstd,
 }
 
 impl Compression {
-    /// TIFF compression tag value -> supported codec (zstd comes later).
+    /// TIFF compression tag value -> supported codec.
     pub fn from_tiff(code: u32) -> Option<Self> {
         match code {
             1 => Some(Compression::None),
             5 => Some(Compression::Lzw),
             8 | 32946 => Some(Compression::Deflate),
+            50000 => Some(Compression::Zstd),
             _ => None,
         }
     }
@@ -72,6 +74,16 @@ fn decompress(raw: &[u8], compression: Compression, need: usize) -> Result<Vec<u
             Ok(out)
         }
         Compression::Lzw => lzw_exact(raw, need),
+        // pure Rust (no C toolchain on Windows; plan R1 §3): imagecodecs'
+        // zstd_decode decodes the whole frame, so does this
+        Compression::Zstd => {
+            let mut out = Vec::with_capacity(need);
+            ruzstd::decoding::StreamingDecoder::new(raw)
+                .map_err(|e| CoreError::Decode(format!("zstd: {e}")))?
+                .read_to_end(&mut out)
+                .map_err(|e| CoreError::Decode(format!("zstd: {e}")))?;
+            Ok(out)
+        }
     }
 }
 
@@ -108,8 +120,10 @@ fn swap_bytes(buf: &mut [u8], sample_bytes: usize) {
     }
 }
 
-/// Undo TIFF predictor 2 on native-endian unsigned/signed integer samples
-/// (wrapping adds, as numpy's integer cumsum in imagecodecs.delta_decode).
+/// Undo TIFF predictor 2 on native-endian samples by wrapping adds of their
+/// bit patterns, as imagecodecs.delta_decode does for integers AND floats
+/// (a float sample is summed as the same-width integer; codex probe, plan
+/// R1 §1).
 fn undo_horizontal(buf: &mut [u8], sample_bytes: usize, cols: usize) -> Result<()> {
     let row_bytes = cols * sample_bytes;
     if row_bytes == 0 {

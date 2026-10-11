@@ -52,6 +52,14 @@ impl ViewerCore {
             frame_budget_ms: cfg_f(config, "frame_budget_ms")?,
             growth_quiet_s: cfg_f(config, "growth_quiet_s")?,
             legacy_order: cfg_b(config, "legacy_order")?,
+            result_bytes: match config.get_item("result_bytes")? {
+                Some(v) => v.extract()?,
+                None => crate::pool::RESULT_BYTES,
+            },
+            test_read_delay_ms: match config.get_item("test_read_delay_ms")? {
+                Some(v) => v.extract()?,
+                None => 0.0,
+            },
         };
         let notifier = match notify_handle {
             Some(h) => Some(Arc::new(crate::notify::Notifier::borrow(h)?)),
@@ -173,8 +181,11 @@ impl ViewerCore {
         let d = PyDict::new(py);
         let sh = core.pool.shared().clone();
         d.set_item("reads", sh.reads.load(std::sync::atomic::Ordering::Relaxed))?;
+        d.set_item("stale", sh.stale.load(std::sync::atomic::Ordering::Relaxed))?;
+        d.set_item("pending_results", core.pool.pending_results())?;
         d.set_item("read_errors", sh.errors.load(std::sync::atomic::Ordering::Relaxed))?;
         d.set_item("cache_bytes", sh.cache.lock().unwrap().bytes())?;
+        d.set_item("cached_tiles", sh.cache.lock().unwrap().len())?;
         d.set_item("held_tiles", core.held.len())?;
         d.set_item("frames", core.frames)?;
         d.set_item("unavailable", core.planner.unavailable.iter().copied().collect::<Vec<_>>())?;

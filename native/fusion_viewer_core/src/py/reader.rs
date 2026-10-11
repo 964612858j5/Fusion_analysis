@@ -36,9 +36,11 @@ fn level(d: &Bound<'_, PyDict>) -> PyResult<LevelTable> {
     let compression = Compression::from_tiff(code)
         .ok_or_else(|| PyValueError::new_err(format!("compression {code} not supported")))?;
     let predictor: u32 = get("predictor")?.extract()?;
-    let kind: String = get("kind")?.extract()?;
-    if predictor == 2 && kind == "f" {
-        return Err(PyValueError::new_err("predictor 2 on float samples not supported"));
+    let sample_bytes: usize = get("sample_bytes")?.extract()?;
+    // predictor 2 undoes bit-pattern differences of 1/2/4-byte samples,
+    // floats included (as imagecodecs); 8-byte samples stay with Python
+    if predictor == 2 && !matches!(sample_bytes, 1 | 2 | 4) {
+        return Err(PyValueError::new_err(format!("predictor 2 on {sample_bytes}-byte samples not supported")));
     }
     if predictor != 1 && predictor != 2 {
         return Err(PyValueError::new_err(format!("predictor {predictor} not supported")));
@@ -52,7 +54,7 @@ fn level(d: &Bound<'_, PyDict>) -> PyResult<LevelTable> {
         format: BlockFormat {
             compression,
             horizontal_predictor: predictor == 2,
-            sample_bytes: get("sample_bytes")?.extract()?,
+            sample_bytes,
             big_endian: get("big_endian")?.extract()?,
         },
         channels: get("channels")?.extract()?,

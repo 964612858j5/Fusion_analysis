@@ -1,9 +1,10 @@
 //! Python bindings. Each file wraps one core module; no logic lives here.
 
+mod corrected;
 mod gil;
 mod gl;
 mod notify;
-mod reader;
+pub(crate) mod reader;
 mod testing;
 mod viewer;
 
@@ -17,6 +18,9 @@ fn fusion_viewer_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<gl::GlCore>()?;
     m.add_class::<notify::Notifier>()?;
     m.add_class::<viewer::ViewerCore>()?;
+    m.add_class::<corrected::Step1Reader>()?;
+    m.add_class::<corrected::ZarrArray>()?;
+    m.add_class::<corrected::CancelToken>()?;
     gil::register(m)?;
     testing::register(m)?;
     Ok(())

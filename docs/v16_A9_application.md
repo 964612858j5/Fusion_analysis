@@ -3555,3 +3555,7 @@ codex 的意见已逐条对照代码核实，采纳如下：
 - 原有 37 个模块，加上 `test_step1_source_table`、`test_v16_a9p_source_parity`、`test_step1_coarse_plane`：除冻结点上已知的 2 条外，结果和改前相同。
 - R1 测试：decode 170 条（全组合 168 + 另 2 条，跳过 24）、corrected 12 条、step1_tile 17 条、cancel 4 条、ci 41 条，全部通过。
 - 每轮修复后，S-Raw 的逐像素一致和生命周期测试（11 条）都重跑过，全部通过。
+
+### 49.8 自动构建（关口 7：通过）
+- 推送 d416a98 后触发 GitHub Actions 第 38176773273 次运行：Linux（ubuntu-latest）和 Windows（windows-latest）两个任务全部通过。每个任务都包括：编 abi3 wheel、装进干净环境、跑 `test_v16_5_r1_ci.py`、保存 wheel。
+- 各步骤的通过状态是从公开接口查到的。逐条测试日志要登录才能下载，这里没有看到。pytest 一条测试都没收集到时会以失败退出，所以"测试"这一步通过，说明测试确实跑了；但被跳过的条数无法确认（本机是 41 条通过、12 条跳过，跳过的是 tifffile 写不出的组合）。

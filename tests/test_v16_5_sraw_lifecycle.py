@@ -21,7 +21,8 @@ PROBE = ROOT / "scripts" / "sraw_lifecycle_probe.py"
 
 
 @pytest.mark.parametrize("name", ["step1_gpu.vert", "step1_gpu.frag", "step1_gpu_vt.frag",
-                                  "step1_gpu_mask.vert", "step1_gpu_mask.frag"])
+                                  "step1_gpu_mask.vert", "step1_gpu_mask.frag",
+                                  "step1_gpu_labels.frag"])         # R3: Step3's masks
 def test_a_shader_copies_are_identical(name):
     ours = (ROOT / "native" / "fusion_viewer_core" / "shaders" / name).read_bytes()
     assert ours == (ROOT / "ui" / "shaders" / name).read_bytes(), name

@@ -116,8 +116,12 @@ class CoreLabelSurface:
         self.core.set_labels(sent)
 
     def _labels_follow_ratio(self) -> None:
-        """A new device pixel ratio changes the outline radius: send again."""
+        """A new device pixel ratio changes the outline radius: send again
+        (the snapshot of L1, or -- R3b -- the core's own masks' styles)."""
         ratio = float(self.devicePixelRatioF()) or 1.0
+        seen, self._ratio_seen = getattr(self, "_ratio_seen", None), ratio
+        if seen is not None and ratio != seen and getattr(self, "on_label_ratio", None) is not None:
+            self.on_label_ratio()
         if self._label_ratio is not None and ratio != self._label_ratio and self._label_snapshot.layers:
             self._send_labels()
 

@@ -8,6 +8,7 @@
 //!   paint:N  frame N reports an error
 //!   reinit   every GL initialisation after the first fails
 //!   init     the first GL initialisation fails (the mount falls back at start)
+//!   label:N  the first N label tile reads fail (Step3's masks, R3b)
 
 use crate::cache::Key;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -21,6 +22,7 @@ enum Kind {
     Paint(u64),
     Reinit,
     Init,
+    Label(u32),
 }
 
 #[derive(Debug)]
@@ -40,6 +42,7 @@ impl Faults {
             "paint" => Kind::Paint(n),
             "reinit" => Kind::Reinit,
             "init" => Kind::Init,
+            "label" => Kind::Label(n as u32),
             _ => Kind::None,
         };
         Faults { kind, failed: AtomicU32::new(0), victim: Mutex::new(None) }
@@ -63,6 +66,11 @@ impl Faults {
             Kind::All(n) => self.take_one(n),
             _ => false,
         }
+    }
+
+    /// Does this label tile read fail?
+    pub fn label_fails(&self) -> bool {
+        matches!(self.kind, Kind::Label(n) if self.take_one(n))
     }
 
     /// One more failure while fewer than `n` have happened.

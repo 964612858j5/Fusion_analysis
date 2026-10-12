@@ -46,7 +46,7 @@ impl ViewerCore {
         }
         drop(cache);
         let one_tile = crate::geom::TILE * crate::geom::TILE * 4;
-        let worker_allowance = self.cfg.threads.clamp(1, 6) * WORKER_MEMORY_BYTES;
+        let worker_allowance = self.cfg.threads.clamp(1, 6) * WORKER_MEMORY_BYTES + self.label_read_bound();
         let label_copies = self.labels.copy_bytes();
         let bound = self.cfg.cpu_cache_bytes + self.cfg.corrected_cache_bytes
             + self.pool.result_allowance() + one_tile + worker_allowance

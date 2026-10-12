@@ -62,8 +62,11 @@ def s_lifecycle(rig, out, mask_dir):
     mount = rig.mount
     binding = mount.label_binding
     out["binding_made"] = binding is not None
+    out["label_binding"] = type(binding).__name__
     mount.set_mask_sources(_source(mask_dir, rig.shape))
     out["shown"] = _wait(rig, lambda: _shown(rig))
+    out["l1_reason"] = getattr(binding, "l1_reason", None)
+    out["core_read"] = binding.stats().get("accepted", 0)
     mount.pause_requests()
     out["paused"] = binding.paused
     mount.resume_requests()
@@ -77,8 +80,10 @@ def s_lifecycle(rig, out, mask_dir):
     mount.close()
     closing_threads.wait_all(5.0)
     out["last_thread_ended"] = last.stats()["thread_alive"] is False
-    out["ok"] = all(out[k] for k in ("binding_made", "shown", "paused", "resumed", "new_binding",
-                                     "old_thread_ended", "last_thread_ended"))
+    out["ok"] = (all(out[k] for k in ("binding_made", "shown", "paused", "resumed", "new_binding",
+                                      "old_thread_ended", "last_thread_ended"))
+                 and out["label_binding"] == "CoreLabelBinding" and out["l1_reason"] is None
+                 and out["core_read"] > 0)
 
 
 def s_fallback(rig, out, mask_dir):

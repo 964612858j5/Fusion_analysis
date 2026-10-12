@@ -62,13 +62,16 @@ def main():
         box = mount.host.stack.view.view_box
         start = (w * 0.3, w * 0.3 + 3000, h * 0.3, h * 0.3 + 3000)
 
-        rec = {"paint": [], "set": [], "send": [], "gaps": []}
+        rec = {"paint": [], "set": [], "send": [], "gaps": [], "label": []}
         paint = layer.paintGL
 
         def timed_paint():
             t = time.perf_counter()
             paint()
             rec["paint"].append((time.perf_counter() - t) * 1000)
+            report = getattr(layer, "last_report", None) or {}
+            if "label_ms" in report:                         # R3b: the core's own count
+                rec["label"].append(float(report["label_ms"]))
         layer.paintGL = timed_paint
         if hasattr(layer, "_send_labels"):
             send = layer._send_labels
@@ -102,17 +105,60 @@ def main():
             stable(rig)
             for k in rec:
                 rec[k].clear()
+            lb = mount.label_binding
+            before = dict(lb.stats()) if lb is not None else {}
             beat["last"] = time.perf_counter()
             heart.start()
             for _ in range(60):                             # drag right
                 box.translateBy(x=40.0)
                 rig.pump(0.016)
-            for f in [0.92] * 12 + [1.08] * 12:            # zoom in, then out
+            for i, f in enumerate([0.92] * 12 + [1.08] * 12):  # zoom in, then out
                 box.scaleBy((f, f))
+                if i == 23:
+                    last_change = time.perf_counter()   # the camera's last change
                 rig.pump(0.016)
-            rig.pump(1.5)                                   # the masks catch up
+            # from the camera's last change: until every wanted tile is held,
+            # nothing queued or read, no label upload left for a later paint
+            # -- and then a frame presented (on screen), at most 5 s
+            quiet = last_change
+            caught = None
+            presents = [0]
+            layer.frameSwapped.connect(lambda: presents.__setitem__(0, presents[0] + 1))
+
+            def complete():
+                if lb is None:
+                    return True
+                st = lb.stats()
+                if st.get("queued") or st.get("reading") or st.get("pending_bytes"):
+                    return False
+                if hasattr(lb, "_wanted"):                  # Python: every wanted tile resident
+                    return all(k in lb._resident for k in lb._wanted)
+                core_st = layer.core.core_label_stats()
+                if (layer.last_report or {}).get("label_deferred", 0):
+                    return False                            # label uploads still to come
+                return set(map(tuple, core_st["wanted_keys"])) <= set(map(tuple, core_st["held_keys"]))
+            done_at = None
+            while time.perf_counter() - quiet < 5.0:
+                layer.update()
+                rig.pump(0.005)
+                if done_at is None and complete():
+                    done_at = presents[0]                  # the next present shows it
+                elif done_at is not None and presents[0] > done_at:
+                    caught = (time.perf_counter() - quiet) * 1000
+                    break
+            rig.pump(0.5)
             heart.stop()
-            return {"paints": len(rec["paint"]), "paint_p50": round(_pct(rec["paint"], 0.5), 3),
+            after = dict(lb.stats()) if lb is not None else {}
+            moved = {k: int(after.get(k, 0) or 0) - int(before.get(k, 0) or 0)
+                     for k in ("requested", "read", "accepted", "stale_dropped", "late_dropped")}
+            core = getattr(layer, "core", None)
+            core_stats = dict(core.core_label_stats()) if hasattr(core, "core_label_stats") else {}
+            moved["split_ms"] = core_stats.get("split_ms")
+            moved["uploads_total"] = core_stats.get("uploads")
+            return {"catch_up_ms": None if caught is None else round(caught, 1), "label_frames": len(rec["label"]),
+                    "label_p50": round(_pct(rec["label"], 0.5), 3), "label_p95": round(_pct(rec["label"], 0.95), 3),
+                    "label_max": round(max(rec["label"] or [0]), 3), "binding": type(lb).__name__,
+                    "l1": getattr(lb, "l1_reason", None), **moved,"paints": len(rec["paint"]), "paint_p50": round(_pct(rec["paint"], 0.5), 3),
                     "paint_p95": round(_pct(rec["paint"], 0.95), 3),
                     "paint_max": round(max(rec["paint"] or [0]), 3),
                     "sets": len(rec["set"]), "set_p95": round(_pct(rec["set"], 0.95), 3),

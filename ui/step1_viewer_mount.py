@@ -597,7 +597,11 @@ class Step1WholeSlideMount(QtCore.QObject):
         if not self._labels_wanted or not getattr(layer, "labels_enabled", False):
             return False
         provider, controller = stack.provider, stack.controller
-        self.label_binding = Step3LabelBinding(
+        # R3b: on the Rust layer the core plans and reads the masks
+        from .step1_core_layer import Step1CoreLayer
+        from .step3_core_labels import CoreLabelBinding
+        binding_class = CoreLabelBinding if isinstance(layer, Step1CoreLayer) else Step3LabelBinding
+        self.label_binding = binding_class(
             controller=controller, layer=layer,
             level_shapes=[provider.level_shape(level) for level in range(provider.num_levels)],
             tile_size=controller.grid.tile_size, parent=self)

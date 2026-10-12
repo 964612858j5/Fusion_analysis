@@ -2,7 +2,7 @@
 
 use crate::plan::View;
 use crate::vt::RowParams;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use std::cell::RefCell;
@@ -12,22 +12,6 @@ use std::sync::Arc;
 #[pyclass(unsendable)]
 pub struct ViewerCore {
     inner: RefCell<crate::viewer::ViewerCore>,
-}
-
-fn cfg_item<'py>(d: &Bound<'py, PyDict>, k: &str) -> PyResult<Bound<'py, PyAny>> {
-    d.get_item(k)?.ok_or_else(|| PyValueError::new_err(format!("config needs '{k}'")))
-}
-
-fn cfg_u(d: &Bound<'_, PyDict>, k: &str) -> PyResult<usize> {
-    cfg_item(d, k)?.extract::<usize>()
-}
-
-fn cfg_f(d: &Bound<'_, PyDict>, k: &str) -> PyResult<f64> {
-    cfg_item(d, k)?.extract::<f64>()
-}
-
-fn cfg_b(d: &Bound<'_, PyDict>, k: &str) -> PyResult<bool> {
-    cfg_item(d, k)?.extract::<bool>()
 }
 
 #[pymethods]
@@ -53,39 +37,7 @@ impl ViewerCore {
                  crate::reduce::MAX_REDUCTION_ELEMENTS)
             }
         };
-        let cfg = crate::viewer::Config {
-            max_raw_texture_bytes: cfg_u(config, "max_raw_texture_bytes")?,
-            max_fine_tiles: cfg_u(config, "max_fine_tiles")?,
-            max_fine_bytes_per_channel: cfg_u(config, "max_fine_bytes_per_channel")? as u64,
-            max_coarse_bytes_per_channel: match config.get_item("max_coarse_bytes_per_channel")? {
-                Some(v) if !v.is_none() => Some(v.extract()?),
-                _ => None,
-            },
-            max_coarse_tiles: cfg_u(config, "max_coarse_tiles")?,
-            cpu_cache_bytes: cfg_u(config, "cpu_cache_bytes")?,
-            corrected_cache_bytes: match config.get_item("corrected_cache_bytes")? {
-                Some(v) => v.extract()?,
-                None => 2048 * 1024 * 1024,      // STEP1_VIEWER_CORRECTED_CACHE_BYTES
-            },
-            threads: cfg_u(config, "threads")?,
-            input_hot_s: cfg_f(config, "input_hot_s")?,
-            hot_upload_ms: cfg_f(config, "hot_upload_ms")?,
-            frame_budget_ms: cfg_f(config, "frame_budget_ms")?,
-            growth_quiet_s: cfg_f(config, "growth_quiet_s")?,
-            legacy_order: cfg_b(config, "legacy_order")?,
-            result_bytes: match config.get_item("result_bytes")? {
-                Some(v) => v.extract()?,
-                None => crate::pool::RESULT_BYTES,
-            },
-            test_read_delay_ms: match config.get_item("test_read_delay_ms")? {
-                Some(v) => v.extract()?,
-                None => 0.0,
-            },
-            test_block_units: match config.get_item("test_block_units")? {
-                Some(v) if !v.is_none() => Some(v.extract()?),
-                _ => None,
-            },
-        };
+        let cfg = super::config::parse(config)?;
         let notifier = match notify_handle {
             Some(h) => Some(Arc::new(crate::notify::Notifier::borrow(h)?)),
             None => None,
@@ -164,6 +116,7 @@ impl ViewerCore {
         for (k, v) in [("frame", r.frame as f64), ("channels", r.channels as f64), ("planes", r.planes as f64),
                        ("received", r.received as f64), ("uploads", r.uploads as f64),
                        ("deferred", r.deferred as f64), ("deferred_growth", r.deferred_growth as f64),
+                       ("label_deferred", r.label_deferred as f64),
                        ("level", r.level as f64), ("ideal", r.ideal as f64), ("wanted", r.wanted as f64),
                        ("shown", r.shown as f64), ("view_id", r.view_id as f64),
                        ("drain_ms", r.drain_ms), ("upload_ms", r.upload_ms), ("draw_ms", r.draw_ms),
@@ -176,6 +129,7 @@ impl ViewerCore {
         d.set_item("error", r.error)?;
         d.set_item("read_failure", r.read_failure)?;
         d.set_item("retry_ms", r.retry_ms)?;
+        d.set_item("label_ms", r.label_ms)?;
         Ok(d)
     }
 
@@ -240,6 +194,35 @@ impl ViewerCore {
     /// current); False when no picture is composed yet.
     fn draw_labels(&self, fbo: u32, w: i32, h: i32) -> PyResult<bool> {
         crate::frame::draw_labels(&mut self.inner.borrow_mut(), fbo, w, h).map_err(PyRuntimeError::new_err)
+    }
+
+    /// R3b: the masks the core plans and reads -- `[cell, nucleus]`, each
+    /// a source dict or None; None for no masks. ValueError: a layout the
+    /// core does not read (the binding then keeps the masks with Python).
+    #[pyo3(signature = (kinds=None))]
+    fn set_label_sources(&self, kinds: Option<Vec<Option<Bound<'_, PyDict>>>>) -> PyResult<()> {
+        let parsed = match kinds {
+            None => None,
+            Some(k) => {
+                let mut out: [Option<crate::label_source::KindSource>; 2] = [None, None];
+                for (i, d) in k.iter().enumerate().take(2) {
+                    out[i] = d.as_ref().map(super::label_source::kind).transpose()?;
+                }
+                Some(out)
+            }
+        };
+        self.inner.borrow_mut().set_label_sources(parsed);
+        Ok(())
+    }
+
+    /// R3b: one mask's style (kind 0 cell, 1 nucleus).
+    fn set_label_style(&self, kind: usize, visible: bool, color: [f32; 3], alpha: f32, radius: i32, fill: bool) {
+        let style = crate::viewer::labels::Style { visible, color, alpha, radius: radius.clamp(0, 8), fill };
+        self.inner.borrow_mut().set_label_style(kind.min(1), style);
+    }
+
+    fn core_label_stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        super::label_source::stats(py, &self.inner.borrow())
     }
 
     fn label_stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {

@@ -52,7 +52,9 @@ pub struct Config {
 }
 
 mod failures;
+mod formats;
 mod gl_life;
+pub mod labels;
 mod memory;
 
 pub struct Gpu {
@@ -102,6 +104,8 @@ pub struct ViewerCore {
     pub attaches: u32,
     /// Step3's masks (`label_store`)
     pub labels: crate::label_store::Labels,
+    /// Step3's masks planned and read here (R3b; `labels`)
+    pub lab: labels::LabelState,
 }
 
 impl ViewerCore {
@@ -132,7 +136,8 @@ impl ViewerCore {
                      display: Vec::new(), smooth: true, fusion: false, polygon: None, raw_kind,
                      last_input: -1e9, paused: false,
                      held: HashMap::new(), frames: 0, last_error: String::new(),
-                     issued: Default::default(), faults, attaches: 0, labels: Default::default() }
+                     issued: Default::default(), faults, attaches: 0, labels: Default::default(),
+                     lab: Default::default() }
     }
 
     /// The rows drawn and their display parameters (Overlay: one per
@@ -166,6 +171,7 @@ impl ViewerCore {
         }
         self.planner.set_view(view);
         self.issue();
+        self.plan_labels();
     }
 
     pub fn input_hot(&self) -> bool {
@@ -238,41 +244,9 @@ impl ViewerCore {
     pub fn pause(&mut self) {
         self.paused = true;
         self.pool.set_jobs(Vec::new());
-    }
-
-    /// How a channel's tiles are stored (None: missing, never drawn).
-    pub fn format_of(&self, c: Ch) -> Option<crate::family::Format> {
-        use crate::corrected::Source;
-        use crate::family::Format;
-        use crate::step1_tile::RawKind;
-        match self.sources.of(c)? {
-            Source::Raw { .. } => Some(match self.raw_kind {
-                RawKind::U8 => Format::U8,
-                RawKind::U16 => Format::U16,
-                _ => Format::F32,
-            }),
-            Source::Corrected { .. } => Some(Format::F32),
-            Source::Missing { .. } => None,
+        if let Some(p) = self.lab.pool.as_ref() {
+            p.clear_jobs();
         }
-    }
-
-    /// The admission total (`_total_budget`): the budget less one block
-    /// of each format the drawn channels use.
-    fn update_total(&mut self) {
-        let Some(g) = self.gpu.as_ref() else { return };
-        // `_total_budget`: one block of the slide's own format, and one of
-        // float32 when any drawn channel is not raw
-        let raw = match self.raw_kind {
-            crate::step1_tile::RawKind::U8 => crate::family::Format::U8,
-            crate::step1_tile::RawKind::U16 => crate::family::Format::U16,
-            _ => crate::family::Format::F32,
-        };
-        let mut formats = vec![raw];
-        if self.display.iter().any(|(c, _)| !matches!(self.sources.of(*c), Some(crate::corrected::Source::Raw { .. }))) {
-            formats.push(crate::family::Format::F32);
-        }
-        let total = self.cfg.max_raw_texture_bytes.saturating_sub(g.store.slack_bytes(&formats));
-        self.planner.set_total(Some(total as u64));
     }
 
     pub fn resume(&mut self) {
@@ -285,12 +259,14 @@ impl ViewerCore {
         }
         self.planner.set_active(active);
         self.issue();
+        self.plan_labels();
     }
 
     /// Stop: no notice, no read after this (the Python side then closes
     /// the socket pair). Never waits for a read under way.
     pub fn close(&mut self) {
         self.pool.close();
+        self.close_labels();
         if let Some(n) = &self.notifier {
             n.close();
         }

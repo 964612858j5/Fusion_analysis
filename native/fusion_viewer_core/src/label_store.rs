@@ -92,6 +92,14 @@ impl Labels {
         }
     }
 
+    /// Drop plane `id`'s copy (the core's own label planner released it).
+    pub fn remove(&mut self, id: u64) {
+        if let Some((old, t)) = self.copies.remove(&id) {
+            self.order.remove(&t);
+            self.bytes -= old.bytes();
+        }
+    }
+
     pub fn plane(&mut self, id: u64) -> Option<Arc<Plane>> {
         self.tick += 1;
         let tick = self.tick;

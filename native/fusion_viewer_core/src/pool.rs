@@ -102,6 +102,12 @@ pub struct Pool {
 /// (`wait_closing`).
 static CLOSING: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
 
+/// Another reader of the core told to stop (Step3's label reader, R3b):
+/// the program's exit waits for it with the rest.
+pub fn register_closing(handle: std::thread::JoinHandle<()>) {
+    CLOSING.lock().unwrap().push(handle);
+}
+
 /// Wait at most `timeout_s` for the readers of every closed pool; returns
 /// how many are still running then (left to the OS).
 pub fn wait_closing(timeout_s: f64) -> usize {

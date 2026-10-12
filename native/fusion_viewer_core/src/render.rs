@@ -12,6 +12,7 @@ use glow::HasContext;
 use std::collections::HashMap;
 
 mod finalize;
+mod label_textures;
 pub mod labels;
 mod output;
 mod programs;
@@ -55,7 +56,7 @@ pub struct Render {
     dummy_f: glow::Texture,
     loc: HashMap<String, glow::UniformLocation>,
     /// Step3's masks (`labels`), made the first time masks are drawn
-    labels: Option<labels::LabelGpu>,
+    labels: Option<label_textures::LabelGpu>,
 }
 
 pub(crate) fn f4(v: &[[f32; 4]]) -> &[u8] {

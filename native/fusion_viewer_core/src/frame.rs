@@ -20,6 +20,8 @@ pub struct FrameReport {
     pub uploads: usize,
     pub deferred: usize,
     pub deferred_growth: usize,
+    /// of `deferred`: Step3 label textures left for a later paint
+    pub label_deferred: usize,
     /// (admitted level, target tiles wanted, of them on the GPU, view id)
     pub level: i64,
     pub ideal: i64,
@@ -46,6 +48,8 @@ pub struct FrameReport {
     pub retry_ms: f64,
     /// `final` was composed again (else only masks, or nothing, changed)
     pub composed: bool,
+    /// GUI-thread time on Step3's masks since the last report (R3b gate)
+    pub label_ms: f64,
 }
 
 /// What each channel draws now (coarse first, then fine coarse to fine),
@@ -137,6 +141,7 @@ pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) ->
         rep.error = "injected paint failure (test)".into();
         return rep;
     }
+    core.drain_labels();                    // Step3's masks that landed (R3b)
     // 1. the tiles that landed (never waiting for one that has not)
     let results = core.pool.take_results(usize::MAX);
     rep.received = results.len();
@@ -233,5 +238,6 @@ pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) ->
     }
     rep.view_id = view_plan.map_or(0, |v| v.epoch);
     rep.total_ms = started.elapsed().as_secs_f64() * 1000.0;
+    rep.label_ms = std::mem::take(&mut core.lab.gui_ms);
     rep
 }

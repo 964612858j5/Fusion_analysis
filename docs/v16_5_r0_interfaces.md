@@ -213,3 +213,20 @@ Python 每次只交一个轻量的不可变快照，不参与逐块的读取和�
 - `utils/closing_threads.py`：`register(thread)`、`wait_all(秒)`，程序退出时共用 1 秒。
 
 **测试开关**：`BLOCK01_RUST_TEST_FAULT`，取值 `tile:N` / `all:N` / `paint:N` / `reinit` / `init`，只在测试里用。
+
+**R3b 起：核心自己规划和读取 Step3 标签**（`docs/v16_5_r3b_plan.md`）：
+
+| 接口 | 含义 |
+|---|---|
+| `ViewerCore.set_label_sources(kinds)` | `[细胞, 细胞核]`，每项为 None 或 `step3_core_label_source.describe` 给出的说明（第 0 级和金字塔各级的路径、形状、分块、压缩方式、包围框原点）；None 表示不显示标签。换数据源就进入新的一代，旧一代的块和结果全部丢弃 |
+| `ViewerCore.set_label_style(kind, visible, color, alpha, radius, fill)` | 一种掩膜的外观；从隐藏变成显示会重新规划 |
+| `ViewerCore.core_label_stats()` | `requested`、`read`、`accepted`、`stale_dropped`、`late_dropped`、`pushes`（交给绘制的次数）、`resident`、`reading`、`queued`、`resident_bytes`、`pending_bytes`、`budget_bytes`、`target_level`、`generation`、`thread_alive`、`note`（预算说明）、`last_error`、`wanted`、`wanted_keys` / `held_keys`（（代, 种类, 层, 列, 行））、`split_ms`（规划、取结果、合成的累计毫秒）、`radius`、`uploads` |
+| 每帧报告 `label_ms` | 上一帧以来界面线程上全部标签工作（规划、取结果、上传、合成），毫秒 |
+| 每帧报告 `label_deferred` | 这一帧没来得及上传、留到下一帧的标签纹理数（也计入 `deferred`） |
+| `CoreLabelBinding.mask_status()` | 同 `Step3LabelBinding`，另有 `l1`：None 表示核心在读；否则是转给 Python 读的原因 |
+| `CoreLabelBinding.l1_reason` | 同上 |
+
+- 核心自己的平面编号从 2^48 起，L1 交接来的平面不会和它相撞。
+- 内存上限另计标签读线程的临时内存：取这个查看器用过的数据源中最大的一份，不会缩小。
+- 测试开关：`BLOCK01_RUST_TEST_FAULT=label:N`（前 N 次读标签都出错）、`BLOCK01_RUST_TEST_LABEL_DELAY_MS`（每次读标签前等待），只在测试里用。
+- 测试函数：`fusion_viewer_core.plan_labels_for_test(...)`、`read_label_tile_for_test(...)`。

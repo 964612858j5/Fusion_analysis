@@ -1,8 +1,10 @@
 //! Python bindings. Each file wraps one core module; no logic lives here.
 
+mod config;
 pub(crate) mod corrected;
 mod gil;
 mod gl;
+mod label_source;
 mod labels;
 mod notify;
 pub(crate) mod reader;
@@ -17,6 +19,9 @@ fn fusion_viewer_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(monotonic, m)?)?;
     m.add_function(wrap_pyfunction!(wait_closing, m)?)?;
+    m.add_function(wrap_pyfunction!(label_source::plan_labels_for_test, m)?)?;
+    m.add_function(wrap_pyfunction!(label_source::check_label_array, m)?)?;
+    m.add_function(wrap_pyfunction!(label_source::read_label_tile_for_test, m)?)?;
     m.add_class::<reader::RawReader>()?;
     m.add_class::<gl::GlCore>()?;
     m.add_class::<notify::Notifier>()?;

@@ -355,7 +355,9 @@ class Step3LabelBinding(QtCore.QObject):
         else:
             cx = cy = 0.0
             view = None
-        order = lambda t: (t[0] - cx) ** 2 + (t[1] - cy) ** 2   # noqa: E731
+        # nearest the centre first; ties by row, then column (R3b: a fixed
+        # order, the same as the Rust core's planner)
+        order = lambda t: ((t[0] - cx) ** 2 + (t[1] - cy) ** 2, t[1], t[0])   # noqa: E731
 
         gen = self._generation
         target_vis, target_ring = [], []

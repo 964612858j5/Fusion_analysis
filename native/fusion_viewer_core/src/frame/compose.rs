@@ -11,6 +11,12 @@ use crate::plan::Ch;
 use crate::viewer::ViewerCore;
 use crate::vt::RowParams;
 
+/// Time a paint may spend uploading Step3's label textures (R3b gate):
+/// at least one goes, the rest wait for the next paint. A new texture
+/// costs 0.5-2 ms, a reused one 0.3 ms: at 1 ms a screen of new tiles
+/// took ~8 paints (~200 ms) to show; at 3 ms ~65 ms, Python's 80-110.
+const LABEL_UPLOAD_MS: f64 = 3.0;
+
 /// Everything `final` is composed from.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ComposeKey {
@@ -79,11 +85,23 @@ pub(super) fn draw(core: &mut ViewerCore, rep: &mut FrameReport, fbo: u32, w: i3
             core.labels.image_submissions += 1;
         }
         if composed || core.labels.dirty {
-            if let Err(e) = render.compose_labels(gl, &mut core.labels, v32, &clip) {
-                rep.error = e;
-                return None;
+            let t = std::time::Instant::now();
+            // label uploads within ~3 ms a paint: the rest come next paint
+            let budget = Some(std::time::Duration::from_secs_f64(LABEL_UPLOAD_MS / 1000.0));
+            match render.compose_labels(gl, &mut core.labels, v32, &clip, budget) {
+                Err(e) => {
+                    rep.error = e;
+                    return None;
+                }
+                Ok((_passes, left)) => {
+                    core.labels.dirty = left > 0;
+                    rep.deferred += left;
+                    rep.label_deferred = left;
+                }
             }
-            core.labels.dirty = false;
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            core.lab.gui_ms += ms;
+            core.lab.split_ms[2] += ms;
         }
         render.blit(gl, fbo, w, h, core.labels.shown);
     }
@@ -100,8 +118,8 @@ pub fn draw_labels(core: &mut ViewerCore, fbo: u32, w: i32, h: i32) -> Result<bo
     let Some((view, clip)) = gpu.composed_for.clone().filter(|_| gpu.composed.is_some()) else { return Ok(false) };
     let (gl, render) = (&gpu.gl, &mut gpu.render);
     unsafe {
-        render.compose_labels(gl, &mut core.labels, view, &clip)?;
-        core.labels.dirty = false;
+        let (_passes, left) = render.compose_labels(gl, &mut core.labels, view, &clip, None)?;
+        core.labels.dirty = left > 0;
         render.blit(gl, fbo, w, h, core.labels.shown);
     }
     Ok(true)

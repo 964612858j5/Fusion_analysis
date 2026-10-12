@@ -20,6 +20,8 @@ Scenario: a JSON list of actions --
   {"do": "pause", "ms": 500}
   {"do": "winstate", "value": "max"}        (or "normal"; A9 M0)
   {"do": "mark", "label": "..."}
+  {"do": "activate"}                         (§51: main window active, then
+      wait_ms, default 1000)
   {"do": "repeat", "n": 20, "body": [ ... ]}
   {"do": "xwheel", "pattern": "+4@30,w300,-4@30"}   (§30 F6: REAL system
       wheel notches from a separate XTest process, see a9_xwheel.py)
@@ -473,6 +475,21 @@ class Driver(QtCore.QObject):
         released = gpu_memory.release_hidden("a9")
         perf_trace.mark("a9.gpurelease", released=released)
         self._next(0)
+
+    def _do_activate(self, a, _t):
+        """§51: the main window active before the gestures. Whichever window
+        held focus last (the Tissue Preview is raised on a step change) is
+        otherwise left to chance, and the first click that re-activates the
+        main window carries that one-time cost into the gesture's numbers."""
+        self.w.raise_()
+        self.w.activateWindow()
+
+        def record():
+            active = QtWidgets.QApplication.activeWindow()
+            perf_trace.mark("a9.activate", ok=active is self.w,
+                            active=type(active).__name__ if active is not None else None)
+            self._next(0)
+        QtCore.QTimer.singleShot(int(a.get("wait_ms", 1000)), record)
 
     def _do_drag(self, a, _t):
         target, pos = self._viewer()

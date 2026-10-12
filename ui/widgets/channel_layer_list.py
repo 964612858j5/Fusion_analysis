@@ -20,6 +20,8 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtCore import Qt, pyqtSignal
 
+from .activation_quiet import quiet_activation
+
 
 class _ChannelRow(QtWidgets.QWidget):
     """Compact single-channel row widget. Fixed, never needs horizontal scroll."""
@@ -153,6 +155,8 @@ class ChannelLayerList(QtWidgets.QWidget):
             "QListWidget::item:selected:hover{background:#1a2b3e;}"
         )
         self._list.currentItemChanged.connect(self._on_current_changed)
+        # A9 §51: no repaint of every row when the window regains focus
+        quiet_activation(self._list)
         lay.addWidget(self._list, stretch=1)
 
     def set_channels(self, channels):

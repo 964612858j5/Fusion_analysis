@@ -36,6 +36,7 @@ from PyQt5 import QtGui, QtWidgets
 from PyQt5.QtCore import Qt, QEvent, QObject, pyqtSignal
 
 from . import template
+from ..activation_quiet import quiet_activation
 
 #: The steps whose public channel editing happens in this dock.
 STEP0, STEP1, STEP2, STEP3 = 0, 1, 2, 3
@@ -569,6 +570,8 @@ class GlobalChannelDock(QtWidgets.QWidget):
         template.apply_list_style(self.list_widget)
         self.list_widget.setSelectionMode(QtWidgets.QListWidget.SingleSelection)
         self.list_widget.currentItemChanged.connect(self._on_current_item)
+        # A9 §51: no repaint of every row when the window regains focus
+        quiet_activation(self.list_widget)
         lay.addWidget(self.list_widget, stretch=1)
 
         self.tool_area = QtWidgets.QVBoxLayout()

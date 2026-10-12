@@ -12,6 +12,7 @@ use glow::HasContext;
 use std::collections::HashMap;
 
 mod finalize;
+pub mod labels;
 mod output;
 mod programs;
 mod upload;
@@ -53,6 +54,8 @@ pub struct Render {
     dummy_u: glow::Texture,
     dummy_f: glow::Texture,
     loc: HashMap<String, glow::UniformLocation>,
+    /// Step3's masks (`labels`), made the first time masks are drawn
+    labels: Option<labels::LabelGpu>,
 }
 
 pub(crate) fn f4(v: &[[f32; 4]]) -> &[u8] {
@@ -86,7 +89,8 @@ impl Render {
             let dummy_f = dummy(glow::R32F, glow::RED, glow::FLOAT, &[0, 0, 0, 0])?;
             Ok(Render { progs, vao, units: u + f, u_blocks: u, f_blocks: f, accum: None, fin: None,
                         size: (0, 0), last_rows: 0, pages: None, pages_shape: (0, 0, 0), meta: None, params: None,
-                        params_rows: 0, params_last: Vec::new(), dummy_u, dummy_f, loc: HashMap::new() })
+                        params_rows: 0, params_last: Vec::new(), dummy_u, dummy_f, loc: HashMap::new(),
+                        labels: None })
         }
     }
 
@@ -117,10 +121,11 @@ impl Render {
         }
     }
 
-    /// (Re)allocate `accum` and `final` at the device size.
-    pub unsafe fn ensure_targets(&mut self, gl: &glow::Context, w: i32, h: i32) -> Result<(), String> {
+    /// (Re)allocate `accum` and `final` at the device size. True when
+    /// they were made now (nothing composed in them yet).
+    pub unsafe fn ensure_targets(&mut self, gl: &glow::Context, w: i32, h: i32) -> Result<bool, String> {
         if (w, h) == self.size && self.fin.is_some() {
-            return Ok(());
+            return Ok(false);
         }
         unsafe {
             self.drop_targets(gl);
@@ -144,7 +149,7 @@ impl Render {
             }
         }
         self.size = (w, h);
-        Ok(())
+        Ok(true)
     }
 
     /// Delete the composition targets (rebuilt by the next paint).
@@ -158,11 +163,14 @@ impl Render {
                 }
             }
         }
+        unsafe { self.drop_label_targets(gl) };
         self.size = (0, 0);
     }
 
+    /// The targets, Step3's included, and the mask textures.
     pub fn target_bytes(&self) -> usize {
-        (self.size.0.max(0) * self.size.1.max(0)) as usize * (16 + 4 + 1)
+        let masks = self.labels.as_ref().map_or(0, |l| l.target_bytes() + l.bytes);
+        (self.size.0.max(0) * self.size.1.max(0)) as usize * (16 + 4 + 1) + masks
     }
 
     pub(super) fn uloc(&mut self, gl: &glow::Context, prog: glow::Program, name: &str) -> Option<glow::UniformLocation> {
@@ -251,6 +259,9 @@ impl Render {
             }
             gl.delete_texture(self.dummy_u);
             gl.delete_texture(self.dummy_f);
+            if let Some(mut l) = self.labels.take() {
+                l.destroy(gl);
+            }
             gl.delete_vertex_array(self.vao);
             self.progs.destroy(gl);
         }

@@ -370,7 +370,12 @@ def test_dispose_ends_the_thread_and_clears_the_layer(app, tmp_path):
     b.set_sources(srcs)
     ctl.move(0, {(3, 3)})
     out = b.dispose()
-    assert out["thread_alive"] is False
+    assert out["already_disposed"] is False
+    # R3 plan §2.5: dispose does not wait; the thread is listed for the
+    # program's exit, which waits for it (here: as the exit would)
+    from block01.utils import closing_threads
+    closing_threads.wait_all(5.0)
+    assert b.stats()["thread_alive"] is False
     assert layer.last.layers == ()
     before = b.stats()["accepted"]
     ctl.move(0, {(4, 4)})

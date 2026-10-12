@@ -31,7 +31,10 @@ pub struct Config {
     /// `max_coarse_plane_bytes_per_channel` (None: no limit)
     pub max_coarse_bytes_per_channel: Option<u64>,
     pub max_coarse_tiles: usize,
+    /// the CPU cache's two allowances (`STEP1_VIEWER_RAW_CACHE_BYTES`,
+    /// `STEP1_VIEWER_CORRECTED_CACHE_BYTES`)
     pub cpu_cache_bytes: usize,
+    pub corrected_cache_bytes: usize,
     pub threads: usize,
     pub input_hot_s: f64,
     pub hot_upload_ms: f64,
@@ -48,13 +51,19 @@ pub struct Config {
     pub legacy_order: bool,
 }
 
+mod failures;
 mod gl_life;
+mod memory;
 
 pub struct Gpu {
     pub gl: glow::Context,
     pub store: Store,
     pub vt: Vt,
     pub render: Render,
+    /// what the picture in `final` was composed from (`frame::compose`)
+    pub composed: Option<crate::frame::ComposeKey>,
+    /// the view and clip `final` was composed for (masks drawn alone use them)
+    pub composed_for: Option<([f32; 4], crate::render::Clip)>,
 }
 
 pub struct ViewerCore {
@@ -87,6 +96,12 @@ pub struct ViewerCore {
     pub last_error: String,
     /// keys asked for and still owed: only a NEW want is a trace "req"
     issued: std::collections::HashSet<Key>,
+    /// test-only fault injection (`fault`); inert in the product
+    pub faults: Arc<crate::fault::Faults>,
+    /// GL initialisations so far (`attach_gl`)
+    pub attaches: u32,
+    /// Step3's masks (`label_store`)
+    pub labels: crate::label_store::Labels,
 }
 
 impl ViewerCore {
@@ -108,15 +123,16 @@ impl ViewerCore {
         let mut planner = planner;
         planner.unavailable.extend(missing);              // drawn by nobody, read by nobody
         let sources = Arc::new(sources);
+        let faults = Arc::new(crate::fault::Faults::from_env());
         let pool = Pool::start(Arc::new(source), pyr.clone(), Arc::clone(&sources), raw_kind, budget,
-                               cfg.cpu_cache_bytes, cfg.threads, cfg.result_bytes, cfg.test_read_delay_ms,
-                               notifier.clone(), Arc::clone(&trace));
+                               [cfg.cpu_cache_bytes, cfg.corrected_cache_bytes], cfg.threads, cfg.result_bytes, cfg.test_read_delay_ms,
+                               notifier.clone(), Arc::clone(&trace), Arc::clone(&faults));
         let roi_world = roi.map(|[y0, y1, x0, x1]| [x0 as f64, x1 as f64, y0 as f64, y1 as f64]);
         ViewerCore { cfg, pyr, roi_world, planner, pool, sources, notifier, trace, gpu: None,
                      display: Vec::new(), smooth: true, fusion: false, polygon: None, raw_kind,
                      last_input: -1e9, paused: false,
                      held: HashMap::new(), frames: 0, last_error: String::new(),
-                     issued: Default::default() }
+                     issued: Default::default(), faults, attaches: 0, labels: Default::default() }
     }
 
     /// The rows drawn and their display parameters (Overlay: one per

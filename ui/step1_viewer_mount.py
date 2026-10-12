@@ -340,8 +340,6 @@ class Step1WholeSlideMount(QtCore.QObject):
         why = adapter.core_unavailable_reason()
         if not why and (not self._gpu_wanted or gpu_layer_factory is not None):
             why = "this viewer does not take the GPU path"
-        if not why and self._labels_wanted:
-            why = "this viewer draws masks (not in the Rust thin slice)"
         if why:
             self._rust_refused = why
             _log.warning("Step1 Rust backend not used: %s", why)
@@ -406,6 +404,7 @@ class Step1WholeSlideMount(QtCore.QObject):
         self._gpu_reason = ""
         self._gpu_seed_requested.clear()
         binding.source_changed()
+        self._start_label_binding(stack, layer)        # R3: Step3's masks, drawn by the core
         return True
 
     def _rust_unsupported(self, why):
@@ -417,6 +416,7 @@ class Step1WholeSlideMount(QtCore.QObject):
             return False
         _log.warning("Step1 Rust backend hands over to the Python GPU path: %s", why)
         self._rust_refused = why
+        self._adopt_label_sources()
         stack = self.host.stack
         was_active, paused = self._active, self._paused
         self._stop_gpu_backend(restore_controller=False)
@@ -634,6 +634,19 @@ class Step1WholeSlideMount(QtCore.QObject):
             print(f"[Step3] masks not drawn: {self.mask_status()['reason']}")
         self.mask_status_changed.emit()
         return self.label_binding is not None
+
+    def _adopt_label_sources(self):
+        """R3 (runtime fallback): the masks as the binding about to go knows
+        them -- a zoomed-out pyramid it built is in them -- so the next
+        binding uses that pyramid instead of refusing an unknown one."""
+        binding = self.label_binding
+        if binding is None or not self._mask_sources:
+            return
+        latest = binding.sources()
+        for kind, source in list(self._mask_sources.items()):
+            now = latest.get(kind)
+            if source is not None and now is not None and now.mask_path == source.mask_path:
+                self._mask_sources[kind] = now
 
     def mask_sources(self):
         """The masks last set (None for none): what the owner compares a

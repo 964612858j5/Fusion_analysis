@@ -61,6 +61,13 @@ def main():
     finally:
         if watchdog is not None:
             watchdog.stop()
+        # R3 plan §2.5: reader threads told to stop (closed or fallen-back
+        # viewers) get one shared second in all, then are left to the OS
+        from .utils import closing_threads
+        left = closing_threads.wait_all()
+        if left["python_left"] or left["rust_left"]:
+            print(f"[Block01] at exit, reader threads still running (left to the OS): "
+                  f"{left['python_left']} + {left['rust_left']} Rust")
 
 
 if __name__ == "__main__":

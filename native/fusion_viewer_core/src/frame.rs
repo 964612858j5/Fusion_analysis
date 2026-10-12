@@ -3,10 +3,12 @@
 //! GUI thread, GIL held.
 
 use crate::clock::monotonic;
-use crate::geom::roi_scissor_box;
 use crate::viewer::ViewerCore;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
+
+mod compose;
+pub use compose::{draw_labels, ComposeKey};
 
 /// What one frame did, for the Python side's measurement and pacing.
 #[derive(Debug, Default)]
@@ -35,12 +37,20 @@ pub struct FrameReport {
     pub upload_ms: f64,
     pub draw_ms: f64,
     pub total_ms: f64,
+    /// any error stops the frame before the blit: it is never shown, and
+    /// the binding falls back (R3 plan §2.5)
     pub error: String,
+    /// the reads are given up (`viewer::failures`): why
+    pub read_failure: String,
+    /// a failed read is retried in this many ms: paint again then
+    pub retry_ms: f64,
+    /// `final` was composed again (else only masks, or nothing, changed)
+    pub composed: bool,
 }
 
 /// What each channel draws now (coarse first, then fine coarse to fine),
 /// against what is on the GPU at this moment.
-fn drawn_rows(core: &mut ViewerCore) -> Vec<(crate::plan::Ch, Vec<crate::geom::TileAt>)> {
+pub(crate) fn drawn_rows(core: &mut ViewerCore) -> Vec<(crate::plan::Ch, Vec<crate::geom::TileAt>)> {
     let Some(gpu) = core.gpu.as_ref() else { return Vec::new() };
     let store = &gpu.store;
     let on_gpu = |c, t| store.is_resident(&(c, t));
@@ -117,6 +127,16 @@ pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) ->
     core.frames += 1;
     let hot = core.input_hot();
     let budget = Duration::from_secs_f64(core.cfg.frame_budget_ms / 1000.0);
+    let reads = core.check_reads();
+    rep.retry_ms = reads.retry_ms.unwrap_or(0.0);
+    if let Some(why) = reads.give_up {
+        rep.read_failure = why;                // given up: this frame is not drawn either
+        return rep;
+    }
+    if core.faults.paint_fails(rep.frame) {
+        rep.error = "injected paint failure (test)".into();
+        return rep;
+    }
     // 1. the tiles that landed (never waiting for one that has not)
     let results = core.pool.take_results(usize::MAX);
     rep.received = results.len();
@@ -178,47 +198,16 @@ pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) ->
     if let Some(e) = prep.error {
         rep.error = e.clone();
         core.last_error = e;
+        return rep;                          // not drawn, not shown
     }
     rep.upload_ms = t_up.elapsed().as_secs_f64() * 1000.0;
     // 4. what is drawn, again against what is on the GPU NOW (a finer
     // stand-in goes the moment its target cells are uploaded); with the
     // base layers over budget nothing new is drawn: the last frame stays
     let t_draw = Instant::now();
-    let rows = if base_overflow { Vec::new() } else { drawn_rows(core) };
     rep.base_overflow = base_overflow;
-    let gpu = core.gpu.as_mut().unwrap();
-    if !base_overflow {
-        gpu.vt.sync_pages(&rows, &gpu.store);
-    }
-    gpu.vt.sync_meta(&mut gpu.store);
-    // the display's rows in order (a channel may have several, Fusion
-    // groups), those of channels drawn now
-    let drawn: std::collections::HashSet<_> = rows.iter().map(|(c, _)| *c).collect();
-    let params_rows: Vec<_> = core.display.iter().filter(|(c, _)| drawn.contains(c)).copied().collect();
-    let params = if base_overflow { Vec::new() } else { gpu.vt.params(&params_rows) };
-    let (gl, render) = (&gpu.gl, &mut gpu.render);
-    unsafe {
-        if let Err(e) = render.ensure_targets(gl, w.max(1), h.max(1)) {
-            rep.error = e;
-            return rep;
-        }
-        if !base_overflow {
-            if let Err(e) = render.upload(gl, &mut gpu.vt, &params) {
-                rep.error = e;
-                return rep;
-            }
-        }
-        let v32 = [view[0] as f32, view[1] as f32, view[2] as f32, view[3] as f32];
-        let clip = crate::render::Clip { scissor: roi_scissor_box(view, core.roi_world, render.size),
-                                         polygon: core.polygon.clone() };
-        let rows_drawn = if base_overflow { render.last_rows } else { params_rows.len() };
-        if let Err(e) = render.compose(gl, &gpu.vt, &gpu.store, rows_drawn, v32, core.smooth, core.fusion, &clip) {
-            rep.error = e;
-            return rep;
-        }
-        render.last_rows = rows_drawn;
-        render.blit(gl, fbo, w, h);
-    }
+    let Some(rows) = compose::draw(core, &mut rep, fbo, w, h, view, base_overflow) else { return rep };
+    let gpu = core.gpu.as_ref().unwrap();
     rep.draw_ms = t_draw.elapsed().as_secs_f64() * 1000.0;
     // 5. what this frame owes and shows (the A9 coverage record)
     rep.channels = rows.len();

@@ -44,6 +44,7 @@ import numpy as np
 from PyQt5 import QtCore
 
 from ..core import step3_masks
+from ..utils import closing_threads
 from .step1_gpu_layer import (LABEL_OUTLINE, LABEL_TEXTURE_BYTES, LabelLayer,
                               LabelPlane, LabelSnapshot, Step1GpuLayerError)
 
@@ -236,9 +237,17 @@ class Step3LabelBinding(QtCore.QObject):
     def paused(self) -> bool:
         return self._paused
 
-    def dispose(self, timeout: float = 10.0) -> Dict[str, Any]:
-        """End the thread (and wait for it), let the camera go, clear the
-        layer's masks. Idempotent."""
+    def sources(self) -> Dict[str, Any]:
+        """The masks as this binding knows them now: a pyramid it built is
+        in them (R3: a fallback's new binding starts from these)."""
+        return dict(self._sources)
+
+    def dispose(self, timeout: float = 0.0) -> Dict[str, Any]:
+        """Tell the thread to end, let the camera go, clear the layer's
+        masks. Idempotent. The thread is NOT waited for (R3 plan §2.5:
+        closing or a fallback never blocks the GUI on a read under way);
+        it is listed in `closing_threads`, which the program's exit waits
+        for. `timeout` > 0 waits that long (tests)."""
         if self._disposed:
             return {"already_disposed": True, "thread_alive": self._thread.is_alive()}
         self._disposed = True
@@ -249,7 +258,10 @@ class Step3LabelBinding(QtCore.QObject):
             self._cancel_generation = self._generation
             self._jobs = []
             self._cv.notify_all()
-        self._thread.join(timeout)
+        if timeout > 0:
+            self._thread.join(timeout)
+        if self._thread.is_alive():
+            closing_threads.register(self._thread)
         self._resident.clear()
         try:
             if getattr(self.layer, "labels_enabled", False):

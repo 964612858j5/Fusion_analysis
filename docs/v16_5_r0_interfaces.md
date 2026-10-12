@@ -177,3 +177,39 @@ Python 每次只交一个轻量的不可变快照，不参与逐块的读取和�
 `ViewerCore.stats()` 另有（只供诊断和测试）：`reads`、`stale`、`pending_results`、`cache_bytes`、`cached_tiles`、`gpu_tiles`、`gpu_live_blocks`（按格式）、`gpu_target_blocks`（按格式）、`sampler_split`（整数块数，浮点块数）。
 
 画布每帧报告（`paint()` 返回的字典）另有 `reserving`（还在预留块）和 `capacity_exceeded`（某个采样器族装不下、又没有可挤占的块；绑定据此换回旧画布）。
+
+## 11. R3 起：新增的字段和接口
+
+**`ViewerCore.stats()` 的内存分项**（R3 计划 §2.3；一个块在缓存、结果队列、规划器里只计一次）：
+
+| 键 | 含义 |
+|---|---|
+| `cache_raw_bytes` / `cache_corrected_bytes` | CPU 缓存的两个额度各自占用（原始 512 MB、校正 2 GB，同 Python） |
+| `queue_extra_bytes` | 结果队列里、已不在缓存中的块 |
+| `held_extra_bytes` | 规划器手里、既不在缓存也不在队列的块 |
+| `label_copy_bytes` | Step3 标签平面在核心里的副本（上限 256 MB） |
+| `worker_allowance_bytes` | 读线程工作内存的额度（每线程 32 MB，只计入上限） |
+| `cpu_bytes` | 以上实际占用之和 |
+| `cpu_bound_bytes` | 上限：两个缓存额度 + 结果队列额度 + 一块 + 读线程额度 + 准入总额度（规划器手里最多这么多）+ 标签副本额度 |
+
+**每帧报告**另有：`read_failure`（读图已放弃的原因：这一帧不画，绑定换回旧画布）、`retry_ms`（多久后重试失败的块；画布到时再画一帧）。`error` 非空时这一帧同样不画、不上屏。
+
+**`gpu_bytes()`**：Rust 按实际分配计，含 Step3 的 `ids`、`shown` 两个目标和标签纹理；Python 的 `gpu_bytes` 不含 `ids`、`shown`。`release_to_coarse` 两边相同：只留上一次画面在画通道的最粗级块，删掉合成目标，标签纹理保留。
+
+**Step3 标签**（`Step1CoreLayer` 混入 `ui/step1_core_labels.py`）：
+
+| 接口 | 含义 |
+|---|---|
+| `labels_enabled` | 这个画布是否画标签（Step3 那种查看器为真） |
+| `set_labels(LabelSnapshot)` | 同 `Step1GpuLayer.set_labels`：先校验，超出 256 MB 预算就拒绝；然后在现有画面上立刻只画标签（`ViewerCore.draw_labels`），不重新合成通道 |
+| `label_stats()` | `image_submissions`、`label_compositions`、`label_passes`、`shown`、`cache`（`budget_bytes`、`copy_bytes`、`bytes`、`uploads`、`evictions`） |
+| `readback_label_ids_for_test()` / `readback_shown_for_test()` | 最后一层的屏幕 id 图 / 实际呈现的画面，行从上到下 |
+
+核心接口：`labels_missing(ids)`（核心还没有副本的平面编号）、`set_labels(layers)`（层：平面列表、颜色、透明度、轮廓半径、是否填充；平面：编号、世界矩形、字节或 None、行、列）、`draw_labels(fbo, w, h)`、`label_stats()`、`readback_label_ids()`、`readback_final(shown)`。
+
+**回退和关闭**：
+- 画布：`on_failure`（绑定的回退入口）、`failed`（失败原因，非空后不再画）；
+- 模块函数 `fusion_viewer_core.wait_closing(秒)`：等已关闭查看器的读线程，返回还在跑的个数；
+- `utils/closing_threads.py`：`register(thread)`、`wait_all(秒)`，程序退出时共用 1 秒。
+
+**测试开关**：`BLOCK01_RUST_TEST_FAULT`，取值 `tile:N` / `all:N` / `paint:N` / `reinit` / `init`，只在测试里用。

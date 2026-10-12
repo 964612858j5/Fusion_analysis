@@ -3,8 +3,10 @@
 pub(crate) mod corrected;
 mod gil;
 mod gl;
+mod labels;
 mod notify;
 pub(crate) mod reader;
+mod stats;
 mod testing;
 mod viewer;
 
@@ -14,6 +16,7 @@ use pyo3::prelude::*;
 fn fusion_viewer_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(monotonic, m)?)?;
+    m.add_function(wrap_pyfunction!(wait_closing, m)?)?;
     m.add_class::<reader::RawReader>()?;
     m.add_class::<gl::GlCore>()?;
     m.add_class::<notify::Notifier>()?;
@@ -30,6 +33,13 @@ fn fusion_viewer_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[pyfunction]
 fn monotonic() -> f64 {
     crate::clock::monotonic()
+}
+
+/// The program's exit: wait at most `timeout_s` for the readers of closed
+/// viewers (GIL released); how many are still running then.
+#[pyfunction]
+fn wait_closing(py: Python<'_>, timeout_s: f64) -> usize {
+    py.detach(|| crate::pool::wait_closing(timeout_s))
 }
 
 pub(crate) fn to_py_err(e: crate::error::CoreError) -> PyErr {

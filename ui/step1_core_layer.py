@@ -25,6 +25,7 @@ from ..utils import perf_trace
 from ..utils import tile_trace
 from ..viewer import coverage_probe
 from ..viewer import read_ledger
+from .step1_core_labels import CoreLabelSurface
 
 #: Block A9-O2: a frame slot (~60 Hz) for work the last paint left over
 FRAME_MS = 16
@@ -34,12 +35,16 @@ class Step1CoreLayerError(RuntimeError):
     pass
 
 
-class Step1CoreLayer(QtWidgets.QOpenGLWidget):
-    """The Rust-drawn Step1 picture; the mount's `gpu_layer` in Rust mode."""
+class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
+    """The Rust-drawn Step1 picture; the mount's `gpu_layer` in Rust mode.
+    With `labels`, Step3's masks too (`CoreLabelSurface`, R3)."""
 
-    def __init__(self, core, notice_socket=None, parent=None):
+    def __init__(self, core, notice_socket=None, parent=None, labels=False):
         super().__init__(parent)
         self.core = core
+        self._disposed = False
+        self._initialized = False
+        self._init_labels(labels)
         self._initialized = False
         self._init_error: Optional[Exception] = None
         self._disposed = False
@@ -57,10 +62,16 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget):
         self.on_smooth_changed = None
         #: the binding's fallback when a picture needs more blocks than one pass binds
         self.on_capacity = None
+        #: the binding's fallback at run time (R3 plan §2.5): failed reads
+        #: given up, a paint error, a GL re-initialisation that failed
+        self.on_failure = None
+        self._failed = ""
+        self._ever_initialized = False
         #: set by the binding: the number of channels the frame should draw
         self.expected_channels = lambda: 0
         self.last_report: Dict[str, Any] = {}
         self._reads_seen = 0
+        self._pressure_pending = False
         self._a9_frame = 0
         self._a9_pending = None
         self._sockets = notice_socket          # (read end, write end), owned here
@@ -94,8 +105,6 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget):
     @property
     def tile_arrays_active(self) -> bool:
         return True
-
-    labels_enabled = False
 
     def attach(self, view_adapter) -> None:
         """Sibling overlay on the existing view (as `Step1GpuLayer.attach`)."""
@@ -178,21 +187,13 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget):
         return 0
 
     def set_smooth(self, smooth: bool) -> None:
+        if bool(smooth) == self.smooth:
+            return
         self.smooth = bool(smooth)
         hook = self.on_smooth_changed
         if hook is not None:
             hook()
         self.update()
-
-    # ── Step3's surface: not in the thin slice ────────────────────────
-    def set_labels(self, _snapshot):
-        raise Step1CoreLayerError("labels are not drawn by the Rust layer yet")
-
-    def label_stats(self) -> Dict[str, Any]:
-        return {}
-
-    def readback_label_ids_for_test(self):
-        raise Step1CoreLayerError("labels are not drawn by the Rust layer yet")
 
     # ── Qt lifecycle ──────────────────────────────────────────────────
     @perf_trace.timed("gpu.init")
@@ -209,12 +210,15 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget):
                 return int(pointer) if pointer else 0
 
             self.core.attach_gl(get_proc)
+            self._ever_initialized = True
             fmt = context.format()
             self._capabilities = {"backend": "rust", "gl_version": f"{fmt.majorVersion()}.{fmt.minorVersion()}",
                                   "core": dict(self.core.stats())}
             self._initialized = True
         except Exception as exc:                            # noqa: BLE001 -- reported, fallback
             self._init_error = exc
+            if self._ever_initialized:                      # a reparent's new context failed
+                self._fail(f"GL re-initialisation failed: {exc}")
 
     def _context_going(self) -> None:
         """`aboutToBeDestroyed`: release the core's names in that context;
@@ -242,7 +246,7 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget):
     def paintGL(self) -> None:  # noqa: N802
         if tile_trace.ON:
             tile_trace.stamp("paint")
-        if not self._initialized or self._disposed or self.hidden:
+        if not self._initialized or self._disposed or self.hidden or self._failed:
             return
         view = self._view_rect()
         if view is None:
@@ -250,17 +254,42 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget):
         ratio = float(self.devicePixelRatioF()) or 1.0
         width = int(round(self.width() * ratio))
         height = int(round(self.height() * ratio))
+        self._labels_follow_ratio()
         report = self.core.paint(self.defaultFramebufferObject(), max(1, width),
                                  max(1, height), view)
         self.last_report = report
         if report.get("error"):
             perf_trace.mark("gpu.core_error", error=str(report["error"])[:160].replace(" ", "_"))
+            self._fail(f"paint failed: {report['error']}")   # this frame was not shown
+            return
+        if report.get("read_failure"):
+            self._fail(f"reads failed: {report['read_failure']}")
+            return
         if report.get("capacity_exceeded") and self.on_capacity is not None:
             QtCore.QTimer.singleShot(0, self.on_capacity)
         if (report.get("deferred", 0) or report.get("reserving")) and not self._again.isActive():
             self._again.start(FRAME_MS)                 # the rest (or the next reserved block) next slot
+        elif report.get("retry_ms") and not self._again.isActive():
+            self._again.start(max(1, int(report["retry_ms"]) + 1))   # a failed read is due again
         self._note_reads()
         self._a9_note_frame(report)
+
+    def _fail(self, why: str) -> None:
+        """Stop drawing now (the last complete picture stays on screen);
+        the binding swaps to the Python path on the next event-loop turn,
+        never inside this paint (R3 plan §2.5)."""
+        if self._failed:
+            return
+        self._failed = why
+        self.hidden = True
+        perf_trace.mark("gpu.core_failed", why=why[:160].replace(" ", "_"))
+        hook = self.on_failure
+        if hook is not None:
+            QtCore.QTimer.singleShot(0, lambda: hook(why))
+
+    @property
+    def failed(self) -> str:
+        return self._failed
 
     # ── notices from the core ─────────────────────────────────────────
     def _on_notice(self, *_args) -> None:
@@ -306,6 +335,12 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget):
             tile_trace.stamp("cov", level=None if state[0] < 0 else state[0], wanted=state[1],
                              shown=state[2], vp=state[3])
         growths = self.core.drain_growths()
+        if growths and not self._pressure_pending:
+            # A9 §36 / R3 plan §2.2: the viewers grew -- hidden ones give
+            # back if over target. Not here: releasing another viewer makes
+            # ITS context current, so after this paint.
+            self._pressure_pending = True
+            QtCore.QTimer.singleShot(0, self._pressure_check)
         if perf_trace.enabled():
             for at, layers, alloc_ms, warm_ms, status, error in growths:   # §48: block creation
                 perf_trace.mark("gpu.grow", frame=self._a9_frame, at=round(at, 6), layers=layers,
@@ -318,6 +353,13 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget):
                             paint_ms=round(float(report.get("total_ms", 0.0)), 3),
                             upload_ms=round(float(report.get("upload_ms", 0.0)), 3),
                             draw_ms=round(float(report.get("draw_ms", 0.0)), 3), backend="rust")
+
+    def _pressure_check(self) -> None:
+        self._pressure_pending = False
+        if self._disposed:
+            return
+        from . import gpu_memory
+        gpu_memory.on_layer_active(self)
 
     def _presented(self) -> None:
         if tile_trace.ON:
@@ -394,6 +436,11 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget):
         else:
             self.core.forget_gl()
         self._initialized = False
+        # what is left after the release (Step1GpuLayer's keys: 0 when clean)
+        left = dict(self.core.stats())
+        remaining = {"raw_textures_remaining": int(left.get("gpu_tiles", 0)),
+                     "transient_targets_remaining": int(self.core.gpu_bytes() > 0),
+                     "cache_bytes": int(self.core.gpu_bytes())}
         self._disposed = True
         if self._sockets is not None:
             for end in self._sockets:
@@ -402,8 +449,7 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget):
                 except OSError:
                     pass
             self._sockets = None
-        return {"already_disposed": False, "raw_textures_remaining": 0,
-                "transient_targets_remaining": 0, "cache_bytes": 0, "threads_created": 0}
+        return {"already_disposed": False, "threads_created": 0, **remaining}
 
 
 def notice_pair():

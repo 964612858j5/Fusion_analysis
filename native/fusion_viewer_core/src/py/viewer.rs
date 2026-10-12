@@ -63,6 +63,10 @@ impl ViewerCore {
             },
             max_coarse_tiles: cfg_u(config, "max_coarse_tiles")?,
             cpu_cache_bytes: cfg_u(config, "cpu_cache_bytes")?,
+            corrected_cache_bytes: match config.get_item("corrected_cache_bytes")? {
+                Some(v) => v.extract()?,
+                None => 2048 * 1024 * 1024,      // STEP1_VIEWER_CORRECTED_CACHE_BYTES
+            },
             threads: cfg_u(config, "threads")?,
             input_hot_s: cfg_f(config, "input_hot_s")?,
             hot_upload_ms: cfg_f(config, "hot_upload_ms")?,
@@ -170,6 +174,8 @@ impl ViewerCore {
         d.set_item("reserving", r.reserving)?;
         d.set_item("capacity_exceeded", r.capacity_exceeded)?;
         d.set_item("error", r.error)?;
+        d.set_item("read_failure", r.read_failure)?;
+        d.set_item("retry_ms", r.retry_ms)?;
         Ok(d)
     }
 
@@ -207,53 +213,46 @@ impl ViewerCore {
         self.inner.borrow_mut().release_to_coarse()
     }
 
+    /// (channel, level) of every tile on the GPU (tests: what a release kept).
+    fn gpu_slots(&self) -> Vec<(u16, u8)> {
+        let core = self.inner.borrow();
+        core.gpu.as_ref().map_or(Vec::new(), |g| g.store.slots.keys().map(|k| (k.0, k.1.level)).collect())
+    }
+
     fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let mut core = self.inner.borrow_mut();
-        let d = PyDict::new(py);
-        let sh = core.pool.shared().clone();
-        d.set_item("reads", sh.reads.load(std::sync::atomic::Ordering::Relaxed))?;
-        d.set_item("stale", sh.stale.load(std::sync::atomic::Ordering::Relaxed))?;
-        d.set_item("pending_results", core.pool.pending_results())?;
-        d.set_item("read_errors", sh.errors.load(std::sync::atomic::Ordering::Relaxed))?;
-        d.set_item("cache_bytes", sh.cache.lock().unwrap().bytes())?;
-        d.set_item("cached_tiles", sh.cache.lock().unwrap().len())?;
-        d.set_item("held_tiles", core.held.len())?;
-        d.set_item("frames", core.frames)?;
-        d.set_item("unavailable", core.planner.unavailable.iter().copied().collect::<Vec<_>>())?;
-        // per active channel (`coarse_channels` / `coarse_pending` / `fine_channels`)
-        let drawn: Vec<u16> = core.planner.active().iter().copied()
-            .filter(|c| !core.planner.unavailable.contains(c)).collect();
-        let (done, pending): (Vec<u16>, Vec<u16>) = drawn.iter().partition(|c| core.planner.coarse_complete(**c));
-        d.set_item("coarse_complete", done)?;
-        d.set_item("coarse_pending", pending)?;
-        d.set_item("fine_held", drawn.iter().copied().filter(|c| core.planner.has_fine(*c)).collect::<Vec<_>>())?;
-        let mut last = core.last_error.clone();
-        let read_err = sh.last_error.lock().unwrap().clone();
-        if last.is_empty() { last = read_err; }
-        d.set_item("last_error", last)?;
-        if let Some(a) = core.planner.admission().cloned() {
-            d.set_item("ideal_level", a.ideal)?;
-            d.set_item("admitted_level", a.level)?;
-            d.set_item("resolution_limited", a.limited())?;
-            d.set_item("base_overflow_channels",
-                       if a.base_overflow { core.planner.active().len() } else { 0 })?;
-        }
-        if let Some(g) = core.gpu.as_ref() {
-            d.set_item("gpu_tiles", g.store.slots.len())?;
-            d.set_item("gpu_blocks", g.store.blocks.len())?;
-            let fmt = |f: crate::family::Format| format!("{f:?}").to_lowercase();
-            let live: std::collections::HashMap<String, usize> = crate::family::ALL.iter()
-                .map(|f| (fmt(*f), g.store.live_blocks(*f))).collect();
-            let targets: std::collections::HashMap<String, usize> = g.store.targets.iter()
-                .map(|(f, n)| (fmt(*f), *n)).collect();
-            d.set_item("gpu_live_blocks", live)?;
-            d.set_item("gpu_target_blocks", targets)?;
-            d.set_item("sampler_split", (g.render.u_blocks, g.render.f_blocks))?;
-            d.set_item("gpu_uploads", g.store.uploads)?;
-            d.set_item("gpu_evictions", g.store.evictions)?;
-            d.set_item("u_blocks", g.render.u_blocks)?;
-        }
-        Ok(d)
+        super::stats::stats(py, &mut self.inner.borrow_mut())
+    }
+
+    // ── Step3's masks (R3 plan §2.1; `super::labels`) ──
+    /// The plane ids among `ids` the core holds no copy of.
+    fn labels_missing(&self, ids: Vec<u64>) -> Vec<u64> {
+        let core = self.inner.borrow();
+        ids.into_iter().filter(|id| !core.labels.has(*id)).collect()
+    }
+
+    /// A new mask snapshot: layers of (planes, colour, alpha, radius, fill),
+    /// a plane (id, world rect, ids bytes or None when already held, rows, cols).
+    fn set_labels<'py>(&self, layers: Vec<super::labels::LayerIn<'py>>) -> PyResult<()> {
+        super::labels::set(&mut self.inner.borrow_mut(), layers)
+    }
+
+    /// The snapshot drawn now over the picture as it stands (context
+    /// current); False when no picture is composed yet.
+    fn draw_labels(&self, fbo: u32, w: i32, h: i32) -> PyResult<bool> {
+        crate::frame::draw_labels(&mut self.inner.borrow_mut(), fbo, w, h).map_err(PyRuntimeError::new_err)
+    }
+
+    fn label_stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        super::labels::stats(py, &self.inner.borrow())
+    }
+
+    /// The last layer's screen id image as top-down native u32 bytes.
+    fn readback_label_ids<'py>(&self, py: Python<'py>) -> Option<(Bound<'py, PyBytes>, i32, i32)> {
+        let core = self.inner.borrow();
+        let g = core.gpu.as_ref()?;
+        let ids = unsafe { g.render.readback_ids(&g.gl) };
+        let bytes: Vec<u8> = ids.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        Some((PyBytes::new(py, &bytes), g.render.size.0, g.render.size.1))
     }
 
     /// The stage records so far, `(t, stage, (c, level, tx, ty) | None, {extra})`.
@@ -281,11 +280,13 @@ impl ViewerCore {
         Ok(out)
     }
 
-    /// `final` as top-down RGBA8 bytes (tests; context current).
-    fn readback_final<'py>(&self, py: Python<'py>) -> Option<(Bound<'py, PyBytes>, i32, i32)> {
+    /// `final` (with `shown`: what is presented, the masks over it) as
+    /// top-down RGBA8 bytes (tests; context current).
+    #[pyo3(signature = (shown=false))]
+    fn readback_final<'py>(&self, py: Python<'py>, shown: bool) -> Option<(Bound<'py, PyBytes>, i32, i32)> {
         let core = self.inner.borrow();
         let g = core.gpu.as_ref()?;
-        let px = unsafe { g.render.readback(&g.gl) };
+        let px = unsafe { g.render.readback(&g.gl, shown && core.labels.shown) };
         Some((PyBytes::new(py, &px), g.render.size.0, g.render.size.1))
     }
 }

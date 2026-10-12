@@ -95,6 +95,7 @@ impl Store {
                 b.vt_index = free;
                 let layers: Vec<u32> = b.owners.keys().copied().collect();
                 self.dirty.extend(layers.into_iter().map(|l| (i, l)));
+                self.generation += 1;                    // a composition must see the new numbers
             }
         }
         self.caps = caps;

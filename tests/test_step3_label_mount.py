@@ -148,6 +148,8 @@ def test_step3s_viewer_draws_masks_and_follows_its_lifecycle(app, tmp_path):
         mount.source_changed("test")
         rig_mod._settle(app)
         assert mount.label_binding is not binding
+        from block01.utils import closing_threads       # R3 §2.5: not waited for at close
+        closing_threads.wait_all(5.0)
         assert binding.stats()["thread_alive"] is False
         if mount.label_binding is not None:
             assert mount.label_binding.mask_status()["cell"]["source"] is False
@@ -155,6 +157,7 @@ def test_step3s_viewer_draws_masks_and_follows_its_lifecycle(app, tmp_path):
         last = mount.label_binding
         mount.close()
         assert mount.label_binding is None
+        closing_threads.wait_all(5.0)
         if last is not None:
             assert last.stats()["thread_alive"] is False
     finally:

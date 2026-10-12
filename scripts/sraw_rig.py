@@ -16,12 +16,14 @@ PALETTE = ["#0000ff", "#00ff00", "#ff0000", "#ffff00", "#ff00ff", "#00ffff"]
 
 
 def open_rig(backend, slide, *, channels=(), roi=None, size=530, smooth=1,
-             decisions=None, zarr="", polygon=None, groups=None, nucleus=None, gpu_bytes=None):
+             decisions=None, zarr="", polygon=None, groups=None, nucleus=None, gpu_bytes=None,
+             labels=False):
     """`decisions` / `zarr`: the corrected product (R2); `polygon`: the
     region's (x, y) points; `groups` {name: {channel: weight}} and
     `nucleus` channel: the Fusion configuration (default: the first chosen
     channel is the nucleus, the rest one group); `gpu_bytes`: a smaller
-    GPU texture budget for this process (tests: small blocks)."""
+    GPU texture budget for this process (tests: small blocks); `labels`:
+    Step3's kind of viewer, which draws masks (R3)."""
     os.environ["BLOCK01_STEP1_BACKEND"] = backend
     os.environ["BLOCK01_SMOOTH"] = str(int(smooth))
     sys.path[:0] = [os.path.dirname(_REPO), _REPO]
@@ -36,6 +38,11 @@ def open_rig(backend, slide, *, channels=(), roi=None, size=530, smooth=1,
     from block01.ui.step1_viewer_host import Step1ViewerHost
     from block01.ui.step1_viewer_mount import Step1WholeSlideMount
     from block01.viewer.raw_tile_provider import RawTileProvider
+    # conftest (imported above) starts every test process with Smooth off;
+    # the probe's own setting wins, before any layer exists (R3: before
+    # this, `smooth=1` probes drew without smoothing)
+    from block01.ui import gpu_memory
+    gpu_memory.set_smooth(bool(smooth))
     if gpu_bytes:
         from block01.ui import step1_viewer_mount
         step1_viewer_mount.DEMO_GPU_RAW_TEXTURE_BYTES = int(gpu_bytes)
@@ -75,7 +82,7 @@ def open_rig(backend, slide, *, channels=(), roi=None, size=530, smooth=1,
     host.resize(size, size)
     host.show()
     app.processEvents()
-    mount = Step1WholeSlideMount(window, host=host, gpu=True)
+    mount = Step1WholeSlideMount(window, host=host, gpu=True, labels=labels)
     mount.open(chosen[0])
     mount.activate()
 

@@ -12,6 +12,10 @@ use crate::vt::Vt;
 impl ViewerCore {
     /// GL resources for the current context (`initializeGL`).
     pub fn attach_gl(&mut self, gl: glow::Context, max_layers: usize) -> Result<(), String> {
+        self.attaches += 1;
+        if self.faults.reinit_fails(self.attaches) {
+            return Err("injected GL initialisation failure (test)".into());
+        }
         let mut render = unsafe { Render::new(&gl)? };
         if let Some(n) = self.cfg.test_block_units.filter(|n| *n >= 2 && *n < render.units) {
             render.units = n;
@@ -21,7 +25,7 @@ impl ViewerCore {
         let store = Store::new(self.cfg.max_raw_texture_bytes, max_layers, caps);
         let width = crate::family::ALL.iter().map(|f| store.layers(*f) as usize).max().unwrap_or(1);
         let vt = Vt::new(&self.pyr, caps, width);
-        self.gpu = Some(Gpu { gl, store, vt, render });
+        self.gpu = Some(Gpu { gl, store, vt, render, composed: None, composed_for: None });
         self.update_total();
         Ok(())
     }
@@ -43,13 +47,15 @@ impl ViewerCore {
         self.gpu.as_ref().map_or(0, |g| g.store.allocated_bytes() + g.render.target_bytes())
     }
 
-    /// Keep only the complete coarse on the GPU (`release_to_coarse`).
+    /// Keep only the coarse of the channels drawn last on the GPU
+    /// (`Step1GpuLayer.release_to_coarse`: the last scene's coarse planes).
     pub fn release_to_coarse(&mut self) -> usize {
         let before = self.gpu_bytes();
         let coarsest = self.pyr.coarsest();
+        let drawn: std::collections::HashSet<u16> = self.display.iter().map(|(c, _)| *c).collect();
         if let Some(g) = self.gpu.as_mut() {
-            let keep: std::collections::HashSet<Key> =
-                g.store.slots.keys().filter(|k| k.1.level == coarsest).copied().collect();
+            let keep: std::collections::HashSet<Key> = g.store.slots.keys()
+                .filter(|k| k.1.level == coarsest && drawn.contains(&k.0)).copied().collect();
             g.store.release_except(&g.gl, &keep);
             g.vt.forget();
             unsafe { g.render.drop_targets(&g.gl) };

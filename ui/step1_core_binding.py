@@ -53,6 +53,7 @@ def core_config(budgets, *, legacy_order=False) -> Dict[str, Any]:
         "max_coarse_bytes_per_channel": (None if budgets.max_coarse_plane_bytes_per_channel is None
                                          else int(budgets.max_coarse_plane_bytes_per_channel)),
         "cpu_cache_bytes": int(_tiers.STEP1_VIEWER_RAW_CACHE_BYTES),
+        "corrected_cache_bytes": int(_tiers.STEP1_VIEWER_CORRECTED_CACHE_BYTES),
         "threads": READER_THREADS,
         "input_hot_s": INPUT_HOT_S,
         "hot_upload_ms": HOT_UPLOAD_MS,
@@ -100,6 +101,7 @@ class Step1CoreBinding(QtCore.QObject):
         layer.on_smooth_changed = self.refresh_display
         layer.on_capacity = lambda: self._fallback(
             "the drawn channels need more GPU blocks of one format than one pass can bind")
+        layer.on_failure = self._fallback
         self._connect_controller()
 
     # ── the mount's lifecycle calls ───────────────────────────────────
@@ -365,7 +367,7 @@ def build(mount, stack, budgets, *, legacy_order=None):
         for end in sockets:
             end.close()
         raise
-    layer = Step1CoreLayer(core, sockets)
+    layer = Step1CoreLayer(core, sockets, labels=bool(getattr(mount, "_labels_wanted", False)))
     binding_args = dict(stack=stack, layer=layer, core=core, channel_names=raw.channel_names,
                         build_display_snapshot=mount._gpu_display_snapshot,
                         build_viewport_snapshot=mount._gpu_viewport_snapshot,

@@ -15,7 +15,7 @@
 use crate::cache::{Cache, Key, Tile};
 use crate::geom::{Pyramid, TILE};
 use crate::notify::Notifier;
-use crate::reader::{RawSource, Region};
+use crate::reader::RawSource;
 use crate::trace::Trace;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -52,8 +52,11 @@ pub struct Shared {
     pub last_error: Mutex<String>,
     source: Arc<RawSource>,
     pyr: Pyramid,
-    /// the analysis region `(y0, y1, x0, x1)` in level-0 pixels
-    roi: Option<[i64; 4]>,
+    /// per channel: raw / corrected / missing, and the analysis region
+    sources: Arc<crate::corrected::Step1Sources>,
+    raw_kind: crate::step1_tile::RawKind,
+    /// the corrected reduction's slab budget (level-0 pixels)
+    budget: usize,
     pub cache: Mutex<Cache>,
     notifier: Option<Arc<Notifier>>,
     trace: Arc<Trace>,
@@ -65,7 +68,8 @@ pub struct Pool {
 
 impl Pool {
     #[allow(clippy::too_many_arguments)]
-    pub fn start(source: Arc<RawSource>, pyr: Pyramid, roi: Option<[i64; 4]>, cache_bytes: usize,
+    pub fn start(source: Arc<RawSource>, pyr: Pyramid, sources: Arc<crate::corrected::Step1Sources>,
+                 raw_kind: crate::step1_tile::RawKind, budget: usize, cache_bytes: usize,
                  threads: usize, result_bytes: usize, read_delay_ms: f64,
                  notifier: Option<Arc<Notifier>>, trace: Arc<Trace>) -> Pool {
         // the CPU allowance covers the cache AND the tiles waiting in the
@@ -82,7 +86,7 @@ impl Pool {
             reads: AtomicUsize::new(0), stale: AtomicUsize::new(0), errors: AtomicUsize::new(0),
             max_result_bytes: result_bytes,
             read_delay: std::time::Duration::from_secs_f64(read_delay_ms.max(0.0) / 1000.0),
-            last_error: Mutex::new(String::new()), source, pyr, roi,
+            last_error: Mutex::new(String::new()), source, pyr, sources, raw_kind, budget,
             cache: Mutex::new(Cache::new(cache_bytes)), notifier, trace,
         });
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
@@ -173,13 +177,20 @@ fn worker(s: Arc<Shared>) {
                     std::thread::sleep(s.read_delay);
                 }
                 let (w0, c0) = (crate::clock::monotonic(), crate::clock::thread_cpu());
-                let got = read_tile(&s, key);
+                let still = || s.queue.lock().unwrap().wanted.contains(&key);
+                let got = read_tile(&s, key, &still);
                 let timing = |err: bool, stale: bool| vec![
                     ("wall_ms", (crate::clock::monotonic() - w0) * 1000.0),
                     ("cpu_ms", (crate::clock::thread_cpu() - c0) * 1000.0),
                     ("err", err as i32 as f64), ("stale", stale as i32 as f64)];
                 match got {
-                    Ok(t) => {
+                    Ok(None) => {                    // cancelled: the plan left it
+                        s.queue.lock().unwrap().reading.remove(&key);
+                        s.trace.stamp("read", Some(key), timing(false, true));
+                        s.stale.fetch_add(1, Ordering::Relaxed);
+                        None
+                    }
+                    Ok(Some(t)) => {
                         let t = Arc::new(t);
                         s.reads.fetch_add(1, Ordering::Relaxed);
                         // still wanted? Decided, and the tile cached or the
@@ -243,45 +254,34 @@ fn worker(s: Arc<Shared>) {
     }
 }
 
-/// `Step1TileProvider.read_tile_native` for a raw uint8 channel: the tile
-/// cut at the level's edge, clipped to the region in that level's pixels
-/// (`Step1SourceTable.clip_to_roi`), zero outside the clip.
-pub fn read_tile(s: &Shared, (c, t): Key) -> crate::error::Result<Tile> {
+/// `Step1TileProvider.read_tile_native` for one key (`step1_tile::read`):
+/// the tile cut at the level's edge, in its own format with its validity.
+/// None when `wanted` turned false during a long (corrected) read.
+pub fn read_tile(s: &Shared, (c, t): Key, wanted: &dyn Fn() -> bool)
+                 -> crate::error::Result<Option<Tile>> {
+    use crate::error::CoreError;
+    use crate::step1_tile::{Valid, Values};
     let (rows, cols) = s.pyr.tile_shape(t);
     let (y0, x0) = (t.ty as i64 * TILE as i64, t.tx as i64 * TILE as i64);
     let rect = [y0, y0 + rows as i64, x0, x0 + cols as i64];
-    let mut data = vec![0u8; rows * cols];
-    let Some([cy0, cy1, cx0, cx1]) = clip_to_roi(rect, s.roi, s.pyr.ds_planning(t.level) as i64)
-    else {
-        return Ok(Tile { rows, cols, data, valid: None });
-    };
-    let px = s.source.read_region(&Region { channel: c as usize, level: t.level as usize,
-        y0: cy0 as usize, y1: cy1 as usize, x0: cx0 as usize, x1: cx1 as usize })?;
-    let w = (cx1 - cx0) as usize;
-    for (i, row) in px.chunks_exact(w.max(1)).enumerate() {
-        let at = ((cy0 - y0) as usize + i) * cols + (cx0 - x0) as usize;
-        data[at..at + w].copy_from_slice(row);
+    let source = s.sources.of(c).ok_or_else(|| CoreError::Bounds(format!("channel {c} has no source")))?;
+    if let crate::corrected::Source::Missing { reason } = source {
+        return Err(CoreError::Bounds(format!("channel {c} is missing: {reason}")));
     }
-    let valid = [(cy0 - y0) as u32, (cy1 - y0) as u32, (cx0 - x0) as u32, (cx1 - x0) as u32];
-    Ok(Tile { rows, cols, data, valid: Some(valid) })
-}
-
-/// `rect` = `(y0, y1, x0, x1)` in level pixels cut to the region, taken
-/// outward into level pixels with `stride` (floor start, ceil end).
-pub fn clip_to_roi(rect: [i64; 4], roi: Option<[i64; 4]>, stride: i64) -> Option<[i64; 4]> {
-    let [y0, y1, x0, x1] = rect;
-    let Some([mut by0, mut by1, mut bx0, mut bx1]) = roi else {
-        return if y1 > y0 && x1 > x0 { Some(rect) } else { None };
+    let Some(read) = crate::step1_tile::read(source, &s.source, s.raw_kind, s.sources.roi, t.level as usize, rect,
+                                             s.pyr.ds_planning(t.level) as usize, TILE, s.budget, wanted)?
+    else { return Ok(None) };
+    let (format, data) = match read.values {
+        Values::U8(v) => (crate::family::Format::U8, v),
+        Values::U16(v) => (crate::family::Format::U16, v.iter().flat_map(|x| x.to_ne_bytes()).collect()),
+        Values::F32(v) => (crate::family::Format::F32, v.iter().flat_map(|x| x.to_ne_bytes()).collect()),
     };
-    let s = stride.max(1);
-    if s > 1 {
-        by0 = by0.div_euclid(s);
-        bx0 = bx0.div_euclid(s);
-        by1 = -((-by1).div_euclid(s));
-        bx1 = -((-bx1).div_euclid(s));
-    }
-    let (cy0, cy1, cx0, cx1) = (y0.max(by0), y1.min(by1), x0.max(bx0), x1.min(bx1));
-    if cy1 <= cy0 || cx1 <= cx0 { None } else { Some([cy0, cy1, cx0, cx1]) }
+    let valid = match read.valid {
+        Valid::Nothing => None,
+        Valid::Rect(r) => Some([r[0] as u32, r[1] as u32, r[2] as u32, r[3] as u32]),
+        Valid::Finite => Some([0, read.rows as u32, 0, read.cols as u32]),
+    };
+    Ok(Some(Tile { rows: read.rows, cols: read.cols, format, data, valid }))
 }
 
 impl Shared {

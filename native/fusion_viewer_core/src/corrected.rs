@@ -39,10 +39,33 @@ pub enum Source {
 
 pub struct Step1Sources {
     pub channels: HashMap<String, Source>,
+    /// the slide's channel index -> its name in `channels`
+    pub names: HashMap<u16, String>,
     /// the analysis region (y0, y1, x0, x1), level 0; None = whole slide
     pub roi: Option<[i64; 4]>,
     /// `Step1SourceTable.identity_token()`: cache keys carry it
     pub revision: String,
+}
+
+impl Step1Sources {
+    /// Every channel raw, as the thin slice read them (no table given).
+    pub fn all_raw(channels: usize, roi: Option<[i64; 4]>) -> Self {
+        let names: HashMap<u16, String> = (0..channels).map(|i| (i as u16, i.to_string())).collect();
+        let channels = names.iter().map(|(i, n)| (n.clone(), Source::Raw { index: *i as usize })).collect();
+        Step1Sources { channels, names, roi, revision: String::new() }
+    }
+
+    pub fn of(&self, ch: u16) -> Option<&Source> {
+        self.names.get(&ch).and_then(|n| self.channels.get(n))
+    }
+
+    /// Why `ch` cannot be drawn, if its product is missing.
+    pub fn missing(&self, ch: u16) -> Option<&str> {
+        match self.of(ch) {
+            Some(Source::Missing { reason }) => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 /// Check that `spec`'s metadata files are still the ones Python described.

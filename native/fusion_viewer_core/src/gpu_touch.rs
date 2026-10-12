@@ -14,10 +14,14 @@ use glow::HasContext;
 
 const VS: &str = "#version 330 core\nvoid main() { vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
 const FS: &str = "#version 330 core\nuniform usampler2DArray u_t; out vec4 o;\nvoid main() { o = vec4(float(texelFetch(u_t, ivec3(0, 0, 0), 0).r) / 255.0); }\n";
+/// the same for the float family (R32F blocks)
+const FS_F: &str = "#version 330 core\nuniform sampler2DArray u_t; out vec4 o;\nvoid main() { o = vec4(texelFetch(u_t, ivec3(0, 0, 0), 0).r); }\n";
 
 /// The 1x1 target and the program, made once per context.
 pub struct TouchKit {
     program: glow::Program,
+    /// the float family's program
+    program_f: glow::Program,
     vao: glow::VertexArray,
     fbo: glow::Framebuffer,
     color: glow::Texture,
@@ -40,6 +44,10 @@ impl TouchKit {
     unsafe fn build(gl: &glow::Context) -> Result<TouchKit, String> {
         unsafe {
             let program = crate::shader::link(gl, VS, FS)?;
+            let program_f = match crate::shader::link(gl, VS, FS_F) {
+                Ok(p) => p,
+                Err(e) => { gl.delete_program(program); return Err(e); }
+            };
             let vao = gl.create_vertex_array();
             let color = gl.create_texture();
             let fbo = gl.create_framebuffer();
@@ -47,13 +55,14 @@ impl TouchKit {
             let (Ok(vao), Ok(color), Ok(fbo), Ok(attach)) =
                 (vao.clone(), color.clone(), fbo.clone(), attach.clone()) else {
                 gl.delete_program(program);
+                gl.delete_program(program_f);
                 if let Ok(v) = vao { gl.delete_vertex_array(v); }
                 if let Ok(t) = color { gl.delete_texture(t); }
                 if let Ok(f) = fbo { gl.delete_framebuffer(f); }
                 if let Ok(f) = attach { gl.delete_framebuffer(f); }
                 return Err("the first-use draw could not be built".into());
             };
-            let kit = TouchKit { program, vao, fbo, color, attach };
+            let kit = TouchKit { program, program_f, vao, fbo, color, attach };
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(color));
             gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, 1, 1, 0, glow::RGBA,
@@ -62,8 +71,10 @@ impl TouchKit {
             gl.framebuffer_texture_2d(glow::DRAW_FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D,
                                       Some(color), 0);
             let complete = gl.check_framebuffer_status(glow::DRAW_FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
-            gl.use_program(Some(program));
-            gl.uniform_1_i32(gl.get_uniform_location(program, "u_t").as_ref(), 0);
+            for p in [program, program_f] {
+                gl.use_program(Some(p));
+                gl.uniform_1_i32(gl.get_uniform_location(p, "u_t").as_ref(), 0);
+            }
             if !complete || gl.get_error() != glow::NO_ERROR {
                 while gl.get_error() != glow::NO_ERROR {}
                 kit.destroy(gl);
@@ -78,7 +89,10 @@ impl TouchKit {
     /// Returns what it saw, for the record (errors are then cleared): the
     /// attachment's framebuffer status (complete or not; nothing renders
     /// into it) and the first GL error raised while touching (0: none).
-    pub unsafe fn touch(&self, gl: &glow::Context, tex: glow::Texture, layers: u32) -> (u32, u32) {
+    pub unsafe fn touch(&self, gl: &glow::Context, tex: glow::Texture, layers: u32,
+                        format: crate::family::Format) -> (u32, u32) {
+        let (_internal, fmt, typ) = format.gl();
+        let zero = [0u8; 4];
         unsafe {
             let saved = Saved::take(gl);
             gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.attach));
@@ -89,12 +103,12 @@ impl TouchKit {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(tex));
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-            gl.tex_sub_image_3d(glow::TEXTURE_2D_ARRAY, 0, 0, 0, 0, 1, 1, 1, glow::RED_INTEGER,
-                                glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&[0u8])));
+            gl.tex_sub_image_3d(glow::TEXTURE_2D_ARRAY, 0, 0, 0, 0, 1, 1, 1, fmt, typ,
+                                glow::PixelUnpackData::Slice(Some(&zero[..format.bytes()])));
             gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.fbo));
             gl.viewport(0, 0, 1, 1);
             gl.disable(glow::SCISSOR_TEST);
-            gl.use_program(Some(self.program));
+            gl.use_program(Some(if format.family() == 1 { self.program_f } else { self.program }));
             gl.bind_vertex_array(Some(self.vao));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             gl.finish();
@@ -108,6 +122,7 @@ impl TouchKit {
     pub unsafe fn destroy(self, gl: &glow::Context) {
         unsafe {
             gl.delete_program(self.program);
+            gl.delete_program(self.program_f);
             gl.delete_vertex_array(self.vao);
             gl.delete_framebuffer(self.fbo);
             gl.delete_framebuffer(self.attach);

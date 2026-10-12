@@ -46,7 +46,9 @@ pub struct Planner {
     view: Option<View>,
     consumed: Option<u64>,
     epoch: u64,
-    admission: Option<(Option<View>, usize, Admission)>,
+    admission: Option<(Option<View>, Vec<u64>, Admission)>,
+    /// bytes per texel per channel (`set_texels`)
+    texels: HashMap<Ch, u64>,
     /// channels refused (coarse over budget); never drawn
     pub unavailable: HashSet<Ch>,
 }
@@ -55,7 +57,7 @@ impl Planner {
     pub fn new(pyr: Pyramid, budgets: Budgets, max_coarse_tiles: usize) -> Self {
         Planner { pyr, budgets, max_coarse_tiles, active: Vec::new(), coarse: HashMap::new(),
                   fine: HashMap::new(), plans: HashMap::new(), view: None, consumed: None,
-                  epoch: 0, admission: None, unavailable: HashSet::new() }
+                  epoch: 0, admission: None, texels: HashMap::new(), unavailable: HashSet::new() }
     }
 
     /// The total budget admission uses (the raw budget less the GPU
@@ -65,6 +67,18 @@ impl Planner {
         self.admission = None;
     }
 
+    /// Bytes per texel of each channel (`_pixel_bytes`; 1 when not told).
+    pub fn set_texels(&mut self, texels: HashMap<Ch, u64>) {
+        if texels != self.texels {
+            self.texels = texels;
+            self.admission = None;
+        }
+    }
+
+    fn texel(&self, c: Ch) -> u64 {
+        self.texels.get(&c).copied().unwrap_or(1)
+    }
+
     pub fn active(&self) -> &[Ch] {
         &self.active
     }
@@ -72,11 +86,12 @@ impl Planner {
     /// The admission for the current view and active set (memoised).
     pub fn admission(&mut self) -> Option<&Admission> {
         let view = self.view?;
-        let n = self.active.iter().filter(|c| !self.unavailable.contains(c)).count();
-        let stale = !matches!(&self.admission, Some((v, k, _)) if *v == Some(view) && *k == n);
+        let texels: Vec<u64> = self.active.iter().filter(|c| !self.unavailable.contains(c))
+            .map(|c| self.texel(*c)).collect();
+        let stale = !matches!(&self.admission, Some((v, k, _)) if *v == Some(view) && *k == texels);
         if stale {
-            let a = admit(&self.pyr, view.level, view.bbox_l0, n, &self.budgets);
-            self.admission = Some((Some(view), n, a));
+            let a = admit(&self.pyr, view.level, view.bbox_l0, &texels, &self.budgets);
+            self.admission = Some((Some(view), texels, a));
         }
         self.admission.as_ref().map(|(_, _, a)| a)
     }
@@ -105,7 +120,8 @@ impl Planner {
         }
         let (across, down) = self.pyr.grid(self.pyr.coarsest());
         let n = (across * down) as usize;
-        if n > self.max_coarse_tiles {
+        let bytes = n as u64 * (crate::geom::TILE * crate::geom::TILE) as u64 * self.texel(c);
+        if n > self.max_coarse_tiles || self.budgets.max_coarse_bytes.is_some_and(|m| bytes > m) {
             self.unavailable.insert(c);
             return;
         }
@@ -131,6 +147,11 @@ impl Planner {
         self.coarse.get(&c).is_some_and(|k| k.got.len() == k.expected)
     }
 
+    /// Does `c` hold fine tiles (delivered and kept for the current view)?
+    pub fn has_fine(&self, c: Ch) -> bool {
+        self.fine.get(&c).is_some_and(|m| !m.is_empty())
+    }
+
     /// One channel's fine for the current view (`_plan_fine_for_channel`).
     fn plan_channel(&mut self, c: Ch) {
         if self.unavailable.contains(&c) || !self.coarse.contains_key(&c) || self.view.is_none() {
@@ -145,7 +166,7 @@ impl Planner {
             let ideal = self.pyr.cover(view.bbox_l0, view.level);
             self.pyr.tiles_world_rect(view.level, &ideal)
         };
-        let carry = self.budgets.max_fine_bytes_per_channel.saturating_sub(a.fine_bytes).min(a.carry);
+        let carry = a.carry(self.texel(c));
         let target: HashSet<TileAt> = keys.iter().copied().collect();
         self.retain(c, &target, viewport, level, carry);
         let resident = self.fine.get(&c);
@@ -182,7 +203,7 @@ impl Planner {
         let mut total = 0u64;
         for t in carried {
             let (rows, cols) = self.pyr.tile_shape(t);
-            let size = (rows * cols) as u64 * self.budgets.texel_bytes;
+            let size = (rows * cols) as u64 * self.texel(c);
             if total + size > carry {
                 break;
             }
@@ -236,72 +257,9 @@ impl Planner {
     pub fn view(&self) -> Option<View> {
         self.view
     }
-
-    /// Everything still owed, coarse first, then fine (unordered within).
-    pub fn wanted(&self) -> (Vec<(Ch, TileAt)>, Vec<(Ch, TileAt)>) {
-        let coarsest = self.pyr.coarsest();
-        let (across, down) = self.pyr.grid(coarsest);
-        let mut coarse = Vec::new();
-        for &c in &self.active {
-            if let Some(k) = self.coarse.get(&c) {
-                for ty in 0..down {
-                    for tx in 0..across {
-                        let t = TileAt { level: coarsest, tx, ty };
-                        if !k.got.contains(&t) {
-                            coarse.push((c, t));
-                        }
-                    }
-                }
-            }
-        }
-        let mut fine = Vec::new();
-        for &c in &self.active {
-            if let Some(p) = self.plans.get(&c) {
-                fine.extend(p.expected.iter().map(|&t| (c, t)));
-            }
-        }
-        (coarse, fine)
-    }
-
-    /// The tiles of channel `c` worth drawing, coarse first then fine
-    /// coarsest-level first (`_publish_body` + `_drawn_fine`): a finer
-    /// stand-in is left out once every target cell it touches is on the
-    /// GPU. Empty while the channel's coarse is incomplete.
-    pub fn drawn(&mut self, c: Ch, on_gpu: &dyn Fn(Ch, TileAt) -> bool) -> Vec<TileAt> {
-        if !self.coarse_complete(c) {
-            return Vec::new();
-        }
-        let coarsest = self.pyr.coarsest();
-        let (across, down) = self.pyr.grid(coarsest);
-        let mut out: Vec<TileAt> = (0..down)
-            .flat_map(|ty| (0..across).map(move |tx| TileAt { level: coarsest, tx, ty })).collect();
-        let a = self.admission().cloned();
-        let Some(fine) = self.fine.get(&c) else { return out };
-        let mut tiles: Vec<TileAt> = fine.keys().copied().collect();
-        tiles.sort_by_key(|t| (std::cmp::Reverse(t.level), t.ty, t.tx));
-        if let Some(a) = a.filter(|a| !a.coarse_only) {
-            let covered: HashSet<(u32, u32)> = tiles.iter()
-                .filter(|t| t.level == a.level && on_gpu(c, **t)).map(|t| (t.tx, t.ty)).collect();
-            if !covered.is_empty() {
-                let (ds_y, ds_x) = self.pyr.ds_yx(a.level);
-                let (cw, ch) = (crate::geom::TILE as f64 * ds_x, crate::geom::TILE as f64 * ds_y);
-                tiles.retain(|t| {
-                    if t.level >= a.level {
-                        return true;
-                    }
-                    let r = self.pyr.tile_world_rect(*t).unwrap();
-                    let (cx0, cx1) = ((r[0] / cw).floor() as i64, (r[1] / cw).ceil() as i64 - 1);
-                    let (cy0, cy1) = ((r[2] / ch).floor() as i64, (r[3] / ch).ceil() as i64 - 1);
-                    !(cx0..=cx1).all(|x| (cy0..=cy1).all(|y| {
-                        x >= 0 && y >= 0 && covered.contains(&(x as u32, y as u32))
-                    }))
-                });
-            }
-        }
-        out.extend(tiles);
-        out
-    }
 }
+
+mod draw;
 
 #[cfg(test)]
 #[path = "plan_tests.rs"]

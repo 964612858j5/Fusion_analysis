@@ -8,20 +8,24 @@ use pyo3::types::PyDict;
 
 /// `admit` for `shapes` ((h, w) per level), as a dict.
 #[pyfunction]
-#[pyo3(signature = (shapes, ideal, bbox_l0, channels, max_fine_tiles, max_fine_bytes, total))]
+#[pyo3(signature = (shapes, ideal, bbox_l0, channels, max_fine_tiles, max_fine_bytes, total, texels=None))]
 fn admit_for_test<'py>(py: Python<'py>, shapes: Vec<(usize, usize)>, ideal: u8, bbox_l0: [i64; 4],
                        channels: usize, max_fine_tiles: usize, max_fine_bytes: u64,
-                       total: Option<u64>) -> PyResult<Bound<'py, PyDict>> {
+                       total: Option<u64>, texels: Option<Vec<u64>>) -> PyResult<Bound<'py, PyDict>> {
     let p = Pyramid { shapes };
-    let b = Budgets { max_fine_tiles, max_fine_bytes_per_channel: max_fine_bytes, total, texel_bytes: 1 };
-    let a = admit(&p, ideal, bbox_l0, channels, &b);
+    let b = Budgets { max_fine_tiles, max_fine_bytes_per_channel: max_fine_bytes, total, max_coarse_bytes: None };
+    // `texels` per channel; without, `channels` uint8 channels
+    let texels = texels.unwrap_or_else(|| vec![1; channels]);
+    let a = admit(&p, ideal, bbox_l0, &texels, &b);
     let d = PyDict::new(py);
     d.set_item("ideal", a.ideal)?;
     d.set_item("level", a.level)?;
     d.set_item("tiles", a.tiles.clone())?;
     d.set_item("coarse_only", a.coarse_only)?;
-    d.set_item("fine_bytes", a.fine_bytes)?;
-    d.set_item("carry", a.carry)?;
+    d.set_item("fine_bytes", a.fine_bytes(texels.first().copied().unwrap_or(1)))?;
+    d.set_item("carry", a.carry(texels.first().copied().unwrap_or(1)))?;
+    d.set_item("fine_bytes_per_channel", texels.iter().map(|t| a.fine_bytes(*t)).collect::<Vec<_>>())?;
+    d.set_item("carry_per_channel", texels.iter().map(|t| a.carry(*t)).collect::<Vec<_>>())?;
     d.set_item("rect", a.rect.map(|r| (r[0], r[1], r[2], r[3])))?;
     Ok(d)
 }
@@ -66,10 +70,17 @@ fn blosc_decode_for_test<'py>(py: Python<'py>, frame: &[u8]) -> PyResult<Bound<'
     Ok(pyo3::types::PyBytes::new(py, &out))
 }
 
+/// `zarr_v2::CHUNKS_DECODED`: chunk files decoded so far in this process.
+#[pyfunction]
+fn chunks_decoded_for_test() -> u64 {
+    crate::zarr_v2::CHUNKS_DECODED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(admit_for_test, m)?)?;
     m.add_function(wrap_pyfunction!(cover_for_test, m)?)?;
     m.add_function(wrap_pyfunction!(grow_probe_for_test, m)?)?;
     m.add_function(wrap_pyfunction!(blosc_decode_for_test, m)?)?;
+    m.add_function(wrap_pyfunction!(chunks_decoded_for_test, m)?)?;
     Ok(())
 }

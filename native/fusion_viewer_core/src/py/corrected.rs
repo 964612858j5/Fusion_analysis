@@ -60,6 +60,27 @@ fn source(d: &Bound<'_, PyDict>) -> PyResult<Source> {
     }
 }
 
+/// `build_raw_manifest`'s dtype and `build_corrected_manifest` -> the
+/// raw sample kind, the verified per-channel sources and the slab budget
+/// (shared with `ViewerCore`).
+pub(crate) fn parse(raw: &Bound<'_, PyDict>, sources: &Bound<'_, PyDict>)
+                    -> PyResult<(RawKind, Step1Sources, usize)> {
+    let dtype: String = item(raw, "dtype")?.extract()?;
+    let raw_kind = RawKind::parse(&dtype)
+        .ok_or_else(|| PyValueError::new_err(format!("raw dtype {dtype} not taken")))?;
+    let (mut channels, mut names) = (HashMap::new(), HashMap::new());
+    for (name, d) in item(sources, "channels")?.cast_into::<PyDict>()?.iter() {
+        let (name, d) = (name.extract::<String>()?, d.cast::<PyDict>()?.clone());
+        names.insert(item(&d, "index")?.extract::<u16>()?, name.clone());
+        channels.insert(name, source(&d)?);
+    }
+    let roi = item(sources, "roi")?;
+    Ok((raw_kind,
+        Step1Sources { channels, names, roi: if roi.is_none() { None } else { Some(roi.extract()?) },
+                       revision: item(sources, "revision")?.extract()? },
+        item(sources, "budget")?.extract()?))
+}
+
 #[pyclass]
 pub struct CancelToken {
     inner: Cancel,
@@ -112,21 +133,8 @@ impl Step1Reader {
     /// `raw`: `build_raw_manifest`; `sources`: `build_corrected_manifest`.
     #[new]
     fn new(raw: &Bound<'_, PyDict>, sources: &Bound<'_, PyDict>) -> PyResult<Self> {
-        let dtype: String = item(raw, "dtype")?.extract()?;
-        let raw_kind = RawKind::parse(&dtype)
-            .ok_or_else(|| PyValueError::new_err(format!("raw dtype {dtype} not taken")))?;
-        let mut channels = HashMap::new();
-        for (name, d) in item(sources, "channels")?.cast_into::<PyDict>()?.iter() {
-            channels.insert(name.extract::<String>()?, source(d.cast::<PyDict>()?)?);
-        }
-        let roi = item(sources, "roi")?;
-        Ok(Step1Reader {
-            raw: crate::py::reader::open_source(raw)?,
-            raw_kind,
-            sources: Step1Sources { channels, roi: if roi.is_none() { None } else { Some(roi.extract()?) },
-                                    revision: item(sources, "revision")?.extract()? },
-            budget: item(sources, "budget")?.extract()?,
-        })
+        let (raw_kind, sources, budget) = parse(raw, sources)?;
+        Ok(Step1Reader { raw: crate::py::reader::open_source(raw)?, raw_kind, sources, budget })
     }
 
     /// Throughput run on `threads` Rust threads (no Python between tiles,

@@ -9,6 +9,11 @@
 
 use crate::error::{CoreError, Result};
 use std::io::ErrorKind;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Chunk files decoded since the process started (tests check that a
+/// reduction decodes each chunk once).
+pub static CHUNKS_DECODED: AtomicU64 = AtomicU64::new(0);
 use std::path::PathBuf;
 
 /// What a `.zarray` says, already checked to be the one layout taken.
@@ -60,6 +65,7 @@ impl ArrayMeta {
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(vec![self.fill; n]),
             Err(e) => return Err(CoreError::Io(format!("{}: {e}", self.chunk_path(cy, cx).display()))),
         };
+        CHUNKS_DECODED.fetch_add(1, Ordering::Relaxed);
         let mut values = vec![0f32; n];
         // the chunk's bytes go straight into the f32 buffer (little-endian
         // f32 is the host's own layout on the platforms built for)

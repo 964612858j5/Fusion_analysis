@@ -2,7 +2,7 @@
 //! stage of `gpu_store::new_block` separately (docs §47.4: the 100-150 ms
 //! GUI stall when the store grows). No product code calls it.
 
-use crate::gpu_store::create_block_texture;
+use crate::family::Format;
 use crate::geom::TILE;
 use glow::HasContext;
 use std::time::Instant;
@@ -88,15 +88,15 @@ pub unsafe fn run(gl: &glow::Context, layers: u32, storage: bool, warm: Warm, co
             gl.finish();
             s[0] = ms(t);
             let t = Instant::now();
-            let Ok(tex) = create_block_texture(gl, layers, storage) else { break };
+            let Ok(tex) = crate::gpu_block::create_texture(gl, Format::U8, layers, storage) else { break };
             s[1] = ms(t);
             let t = Instant::now();
             gl.finish();
             s[2] = ms(t);
             let t = Instant::now();
             match warm {
-                Warm::Old => crate::gpu_warm::warm(gl, tex, layers),
-                Warm::Touch => { kit.touch(gl, tex, layers); }
+                Warm::Old => crate::gpu_warm::warm(gl, tex, layers, Format::U8),
+                Warm::Touch => { kit.touch(gl, tex, layers, Format::U8); }
                 Warm::None => {}
             }
             s[3] = ms(t);

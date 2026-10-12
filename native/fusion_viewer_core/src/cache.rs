@@ -6,12 +6,15 @@ use crate::geom::TileAt;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-/// One decoded tile: native uint8 samples of its real (edge-cut) shape and
-/// its valid rectangle `(y0, y1, x0, x1)`, tile-local; zero elsewhere.
+/// One decoded tile of its real (edge-cut) shape, its samples in `format`
+/// (native-endian bytes): u8 / u16 with their valid rectangle `(y0, y1, x0,
+/// x1)`, tile-local, zero elsewhere; f32 valid where finite (NaN outside),
+/// its rectangle then the whole tile.
 #[derive(Debug)]
 pub struct Tile {
     pub rows: usize,
     pub cols: usize,
+    pub format: crate::family::Format,
     pub data: Vec<u8>,
     /// None: no valid pixel (wholly outside the region)
     pub valid: Option<[u32; 4]>,

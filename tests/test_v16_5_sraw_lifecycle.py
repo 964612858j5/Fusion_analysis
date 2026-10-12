@@ -20,7 +20,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 PROBE = ROOT / "scripts" / "sraw_lifecycle_probe.py"
 
 
-@pytest.mark.parametrize("name", ["step1_gpu.vert", "step1_gpu.frag", "step1_gpu_vt.frag"])
+@pytest.mark.parametrize("name", ["step1_gpu.vert", "step1_gpu.frag", "step1_gpu_vt.frag",
+                                  "step1_gpu_mask.vert", "step1_gpu_mask.frag"])
 def test_a_shader_copies_are_identical(name):
     ours = (ROOT / "native" / "fusion_viewer_core" / "shaders" / name).read_bytes()
     assert ours == (ROOT / "ui" / "shaders" / name).read_bytes(), name
@@ -44,13 +45,60 @@ def slide(tmp_path_factory):
 
 @pytest.mark.skipif(os.environ.get("BLOCK01_REQUIRE_STEP1_GPU") != "1",
                     reason="GPU tests require BLOCK01_REQUIRE_STEP1_GPU=1")
-@pytest.mark.parametrize("scenario", ["pause_resume", "fusion_fallback", "source_change",
-                                      "partial_roi", "close"])
+@pytest.mark.parametrize("scenario", ["pause_resume", "fusion_stays_rust", "source_change",
+                                      "partial_roi_stays_rust", "close"])
 def test_b_lifecycle(scenario, slide):
     pytest.importorskip("fusion_viewer_core")
     proc = subprocess.run([sys.executable, str(PROBE), scenario, "--slide", slide],
                           capture_output=True, text=True, timeout=300, env=dict(os.environ))
     lines = [l for l in proc.stdout.splitlines() if l.startswith("{")]
     assert lines, f"{scenario}: no result\n{proc.stdout[-2000:]}\n{proc.stderr[-3000:]}"
+    result = json.loads(lines[-1])
+    assert result.get("ok") is True and proc.returncode == 0, result
+
+
+@pytest.mark.skipif(os.environ.get("BLOCK01_REQUIRE_STEP1_GPU") != "1",
+                    reason="GPU tests require BLOCK01_REQUIRE_STEP1_GPU=1")
+def test_c_sampler_capacity_hands_over_to_python(tmp_path):
+    """R2 plan §2.3: the core binds two blocks only (test switch), the
+    corrected channels need more float blocks at level 0 than that: the
+    picture goes to the Python GPU path, which starts its scheduler."""
+    pytest.importorskip("fusion_viewer_core")
+    synth = ROOT / "scripts" / "r2_synth_project.py"
+    made = subprocess.run([sys.executable, str(synth), str(tmp_path / "p"), "--extra", "6"], capture_output=True,
+                          text=True, timeout=300, env=dict(os.environ))
+    assert made.returncode == 0, made.stderr[-2000:]
+    env = dict(os.environ, BLOCK01_RUST_TEST_BLOCK_UNITS="2")
+    proc = subprocess.run([sys.executable, str(PROBE), "capacity_fallback", "--project",
+                           str(tmp_path / "p" / "project.json")],
+                          capture_output=True, text=True, timeout=300, env=env)
+    lines = [l for l in proc.stdout.splitlines() if l.startswith("{")]
+    assert lines, f"no result\n{proc.stdout[-2000:]}\n{proc.stderr[-3000:]}"
+    result = json.loads(lines[-1])
+    assert result.get("ok") is True and proc.returncode == 0, result
+
+
+@pytest.mark.skipif(os.environ.get("BLOCK01_REQUIRE_STEP1_GPU") != "1",
+                    reason="GPU tests require BLOCK01_REQUIRE_STEP1_GPU=1")
+@pytest.mark.parametrize("units", ["4", ""])
+def test_d_switching_raw_to_corrected_gives_blocks_back(tmp_path, units):
+    """codex R2 review: a small GPU budget (24 MiB: 6 MiB blocks; test
+    switch), four samplers or the normal count; raw channels fill integer
+    blocks, then only corrected channels are shown: the raw blocks are
+    given back, the samplers move to the float family, the picture stays
+    Rust, the core reports no error, and blocks reserved ahead stop being
+    asked for once out of reach (stable waits for `reserving` to end: the
+    build before the fix repainted forever with the normal count)."""
+    pytest.importorskip("fusion_viewer_core")
+    synth = ROOT / "scripts" / "r2_synth_project.py"
+    made = subprocess.run([sys.executable, str(synth), str(tmp_path / "p"), "--extra-raw", "6"],
+                          capture_output=True, text=True, timeout=300, env=dict(os.environ))
+    assert made.returncode == 0, made.stderr[-2000:]
+    env = dict(os.environ, BLOCK01_RUST_TEST_BLOCK_UNITS=units)
+    proc = subprocess.run([sys.executable, str(PROBE), "format_switch", "--project",
+                           str(tmp_path / "p" / "project.json"), "--gpu-bytes", str(24 << 20)],
+                          capture_output=True, text=True, timeout=300, env=env)
+    lines = [l for l in proc.stdout.splitlines() if l.startswith("{")]
+    assert lines, f"no result\n{proc.stdout[-2000:]}\n{proc.stderr[-3000:]}"
     result = json.loads(lines[-1])
     assert result.get("ok") is True and proc.returncode == 0, result

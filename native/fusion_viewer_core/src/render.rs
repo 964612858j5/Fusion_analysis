@@ -1,7 +1,8 @@
 //! GL drawing in Qt's context: the single-pass virtual texture into an
-//! RGBA32F `accum`, Overlay's final pass into RGBA8 `final` (clipped to
-//! the region rectangle when there is one), and a NEAREST blit of `final`
-//! to Qt's framebuffer -- `Step1GpuLayer._render_vt`, `_finalize`,
+//! RGBA32F `accum` (Overlay or Fusion), the final pass for the mode into
+//! RGBA8 `final` (clipped to the region rectangle and, when there is one,
+//! the region polygon through `final`'s stencil), and a NEAREST blit of
+//! `final` to Qt's framebuffer -- `Step1GpuLayer._render_vt`, `_finalize`,
 //! `paintGL`. Every state touched is put back to the GL default.
 
 use crate::gpu_store::Store;
@@ -10,17 +11,32 @@ use crate::vt::{Vt, MAX_LEVELS};
 use glow::HasContext;
 use std::collections::HashMap;
 
+mod finalize;
+mod output;
+mod programs;
 mod upload;
+
+/// How the final pass is cut to the region: the rectangle's pixels and,
+/// for a polygon region, its points (level-0 world x, y).
+#[derive(Clone, Debug, Default)]
+pub struct Clip {
+    pub scissor: Option<[i32; 4]>,
+    pub polygon: Option<Vec<[f32; 2]>>,
+}
 
 struct Target {
     fbo: glow::Framebuffer,
     tex: glow::Texture,
+    /// `final` only: its stencil (the polygon mask)
+    stencil: Option<glow::Renderbuffer>,
 }
 
 pub struct Render {
-    vt_prog: glow::Program,
-    final_prog: glow::Program,
+    progs: programs::Programs,
     vao: glow::VertexArray,
+    /// texture units the single pass may use for blocks (the rest hold the
+    /// page, meta and parameter tables)
+    pub units: usize,
     pub u_blocks: usize,
     pub f_blocks: usize,
     accum: Option<Target>,
@@ -48,11 +64,11 @@ impl Render {
         unsafe {
             let units = gl.get_parameter_i32(glow::MAX_TEXTURE_IMAGE_UNITS);
             let (u, f) = shader::sampler_split(units);
-            let vt_prog = shader::link(gl, shader::VERT, &shader::vt_source(u, f))?;
-            let final_prog = match shader::link(gl, shader::VERT, &shader::with_define("PASS_FINAL_OVERLAY")) {
-                Ok(p) => p,
-                Err(e) => { gl.delete_program(vt_prog); return Err(e); }
-            };
+            let mut progs = programs::Programs::new(gl)?;
+            if let Err(e) = progs.vt(gl, (u, f)) {
+                progs.destroy(gl);
+                return Err(e);
+            }
             let vao = gl.create_vertex_array()?;
             let dummy = |internal: u32, fmt: u32, typ: u32, bytes: &[u8]| -> Result<glow::Texture, String> {
                 let t = gl.create_texture()?;
@@ -68,10 +84,18 @@ impl Render {
             };
             let dummy_u = dummy(glow::R8UI, glow::RED_INTEGER, glow::UNSIGNED_BYTE, &[0])?;
             let dummy_f = dummy(glow::R32F, glow::RED, glow::FLOAT, &[0, 0, 0, 0])?;
-            Ok(Render { vt_prog, final_prog, vao, u_blocks: u, f_blocks: f, accum: None, fin: None,
+            Ok(Render { progs, vao, units: u + f, u_blocks: u, f_blocks: f, accum: None, fin: None,
                         size: (0, 0), last_rows: 0, pages: None, pages_shape: (0, 0, 0), meta: None, params: None,
                         params_rows: 0, params_last: Vec::new(), dummy_u, dummy_f, loc: HashMap::new() })
         }
+    }
+
+    /// Use `split` (integer, float blocks) from now on; its program is
+    /// compiled the first time.
+    pub unsafe fn set_split(&mut self, gl: &glow::Context, split: (usize, usize)) -> Result<(), String> {
+        unsafe { self.progs.vt(gl, split)? };
+        (self.u_blocks, self.f_blocks) = split;
+        Ok(())
     }
 
     unsafe fn target(gl: &glow::Context, internal: u32, fmt: u32, typ: u32, w: i32, h: i32) -> Result<Target, String> {
@@ -89,7 +113,7 @@ impl Render {
             if !ok {
                 return Err("composition framebuffer incomplete".into());
             }
-            Ok(Target { fbo, tex })
+            Ok(Target { fbo, tex, stencil: None })
         }
     }
 
@@ -101,7 +125,23 @@ impl Render {
         unsafe {
             self.drop_targets(gl);
             self.accum = Some(Self::target(gl, glow::RGBA32F, glow::RGBA, glow::FLOAT, w, h)?);
-            self.fin = Some(Self::target(gl, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE, w, h)?);
+            let mut fin = Self::target(gl, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE, w, h)?;
+            // the polygon mask lives on `final` only (`_ensure_targets`)
+            let bound_rb = gl.get_parameter_i32(glow::RENDERBUFFER_BINDING);   // Qt's, put back
+            let rb = gl.create_renderbuffer()?;
+            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(rb));
+            gl.renderbuffer_storage(glow::RENDERBUFFER, glow::STENCIL_INDEX8, w, h);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fin.fbo));
+            gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::STENCIL_ATTACHMENT, glow::RENDERBUFFER, Some(rb));
+            gl.bind_renderbuffer(glow::RENDERBUFFER,
+                                 std::num::NonZeroU32::new(bound_rb as u32).map(glow::NativeRenderbuffer));
+            fin.stencil = Some(rb);
+            let ok = gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.fin = Some(fin);
+            if !ok {
+                return Err("final framebuffer incomplete with its stencil".into());
+            }
         }
         self.size = (w, h);
         Ok(())
@@ -113,16 +153,19 @@ impl Render {
             unsafe {
                 gl.delete_framebuffer(t.fbo);
                 gl.delete_texture(t.tex);
+                if let Some(rb) = t.stencil {
+                    gl.delete_renderbuffer(rb);
+                }
             }
         }
         self.size = (0, 0);
     }
 
     pub fn target_bytes(&self) -> usize {
-        (self.size.0.max(0) * self.size.1.max(0)) as usize * (16 + 4)
+        (self.size.0.max(0) * self.size.1.max(0)) as usize * (16 + 4 + 1)
     }
 
-    fn uloc(&mut self, gl: &glow::Context, prog: glow::Program, name: &str) -> Option<glow::UniformLocation> {
+    pub(super) fn uloc(&mut self, gl: &glow::Context, prog: glow::Program, name: &str) -> Option<glow::UniformLocation> {
         let key = format!("{}:{name}", prog.0);
         if let Some(l) = self.loc.get(&key) {
             return Some(l.clone());
@@ -132,14 +175,16 @@ impl Render {
         Some(l)
     }
 
-    /// The single pass into `accum`, then the final pass into `final`.
-    /// `view`: world rect (x0, x1, y0, y1); `scissor`: the region's pixels.
+    /// The single pass into `accum` (Overlay, or Fusion when `fusion`),
+    /// then the mode's final pass into `final`, cut by `clip` (`_finalize`).
+    /// `view`: world rect (x0, x1, y0, y1).
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn compose(&mut self, gl: &glow::Context, vt: &Vt, store: &Store, rows: usize,
-                          view: [f32; 4], smooth: bool, scissor: Option<[i32; 4]>) {
+                          view: [f32; 4], smooth: bool, fusion: bool, clip: &Clip) -> Result<(), String> {
         let (Some(accum), Some(fin)) = (self.accum.as_ref().map(|t| (t.fbo, t.tex)),
-                                        self.fin.as_ref().map(|t| t.fbo)) else { return };
+                                        self.fin.as_ref().map(|t| t.fbo)) else { return Ok(()) };
         let (w, h) = self.size;
-        let p = self.vt_prog;
+        let p = unsafe { self.progs.vt(gl, (self.u_blocks, self.f_blocks))? };
         let (la, lb) = vt.level_uniforms();
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(accum.0));
@@ -153,7 +198,7 @@ impl Render {
             let l = self.uloc(gl, p, "u_rows");
             gl.uniform_1_i32(l.as_ref(), rows as i32);
             let l = self.uloc(gl, p, "u_fusion");
-            gl.uniform_1_i32(l.as_ref(), 0);
+            gl.uniform_1_i32(l.as_ref(), fusion as i32);
             let l = self.uloc(gl, p, "u_smooth");
             gl.uniform_1_i32(l.as_ref(), smooth as i32);
             let l = self.uloc(gl, p, "u_level_a");
@@ -162,11 +207,12 @@ impl Render {
             gl.uniform_2_i32_slice(l.as_ref(), &lb[..MAX_LEVELS * 2]);
             let mut units: Vec<(String, u32, glow::Texture)> = Vec::new();
             for i in 0..self.u_blocks {
-                let t = store.texture(i).unwrap_or(self.dummy_u);
+                let t = store.texture_of(0, i).unwrap_or(self.dummy_u);
                 units.push((format!("u_u{i}"), glow::TEXTURE_2D_ARRAY, t));
             }
             for i in 0..self.f_blocks {
-                units.push((format!("u_f{i}"), glow::TEXTURE_2D_ARRAY, self.dummy_f));
+                let t = store.texture_of(1, i).unwrap_or(self.dummy_f);
+                units.push((format!("u_f{i}"), glow::TEXTURE_2D_ARRAY, t));
             }
             for (name, kind, t) in [("u_pages", glow::TEXTURE_2D_ARRAY, self.pages),
                                     ("u_meta", glow::TEXTURE_2D, self.meta),
@@ -188,67 +234,13 @@ impl Render {
                 gl.bind_texture(*kind, None);
             }
             gl.active_texture(glow::TEXTURE0);
-            // final: Overlay's clamp + opaque alpha, cut to the region
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fin));
-            gl.viewport(0, 0, w, h);
-            if let Some(s) = scissor {
-                gl.clear_color(0.0, 0.0, 0.0, 0.0);
-                gl.clear(glow::COLOR_BUFFER_BIT);
-                if s[2] <= 0 || s[3] <= 0 {
-                    gl.bind_vertex_array(None);
-                    gl.use_program(None);
-                    return;
-                }
-                gl.enable(glow::SCISSOR_TEST);
-                gl.scissor(s[0], s[1], s[2], s[3]);
-            }
-            let fp = self.final_prog;
-            gl.use_program(Some(fp));
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(accum.1));
-            let l = self.uloc(gl, fp, "u_input");
-            gl.uniform_1_i32(l.as_ref(), 0);
-            gl.draw_arrays(glow::TRIANGLES, 0, 3);
-            gl.bind_texture(glow::TEXTURE_2D, None);
-            gl.disable(glow::SCISSOR_TEST);
             gl.bind_vertex_array(None);
             gl.use_program(None);
+            self.finalize(gl, fin, accum.1, view, fusion, clip);
         }
+        Ok(())
     }
 
-    /// `final` to Qt's framebuffer at device size (NEAREST), leaving the
-    /// draw and read framebuffers bound to `fbo`.
-    pub unsafe fn blit(&self, gl: &glow::Context, fbo: u32, w: i32, h: i32) {
-        let Some(fin) = &self.fin else { return };
-        let target = std::num::NonZeroU32::new(fbo).map(glow::NativeFramebuffer);
-        unsafe {
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(fin.fbo));
-            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, target);
-            gl.blit_framebuffer(0, 0, self.size.0, self.size.1, 0, 0, w, h,
-                                glow::COLOR_BUFFER_BIT, glow::NEAREST);
-            gl.bind_framebuffer(glow::FRAMEBUFFER, target);
-        }
-    }
-
-    /// `final` as RGBA8 rows, top row first (`readback_rgba_for_test`).
-    pub unsafe fn readback(&self, gl: &glow::Context) -> Vec<u8> {
-        let Some(fin) = &self.fin else { return Vec::new() };
-        let (w, h) = (self.size.0 as usize, self.size.1 as usize);
-        let mut px = vec![0u8; w * h * 4];
-        unsafe {
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(fin.fbo));
-            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
-            gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE,
-                           glow::PixelPackData::Slice(Some(&mut px)));
-            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-        }
-        let mut out = vec![0u8; px.len()];
-        for y in 0..h {
-            out[y * w * 4..(y + 1) * w * 4].copy_from_slice(&px[(h - 1 - y) * w * 4..(h - y) * w * 4]);
-        }
-        out
-    }
 
     /// Delete every name (context current).
     pub unsafe fn destroy(&mut self, gl: &glow::Context) {
@@ -260,8 +252,7 @@ impl Render {
             gl.delete_texture(self.dummy_u);
             gl.delete_texture(self.dummy_f);
             gl.delete_vertex_array(self.vao);
-            gl.delete_program(self.vt_prog);
-            gl.delete_program(self.final_prog);
+            self.progs.destroy(gl);
         }
     }
 }

@@ -15,7 +15,13 @@ _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PALETTE = ["#0000ff", "#00ff00", "#ff0000", "#ffff00", "#ff00ff", "#00ffff"]
 
 
-def open_rig(backend, slide, *, channels=(), roi=None, size=530, smooth=1):
+def open_rig(backend, slide, *, channels=(), roi=None, size=530, smooth=1,
+             decisions=None, zarr="", polygon=None, groups=None, nucleus=None, gpu_bytes=None):
+    """`decisions` / `zarr`: the corrected product (R2); `polygon`: the
+    region's (x, y) points; `groups` {name: {channel: weight}} and
+    `nucleus` channel: the Fusion configuration (default: the first chosen
+    channel is the nucleus, the rest one group); `gpu_bytes`: a smaller
+    GPU texture budget for this process (tests: small blocks)."""
     os.environ["BLOCK01_STEP1_BACKEND"] = backend
     os.environ["BLOCK01_SMOOTH"] = str(int(smooth))
     sys.path[:0] = [os.path.dirname(_REPO), _REPO]
@@ -30,6 +36,9 @@ def open_rig(backend, slide, *, channels=(), roi=None, size=530, smooth=1):
     from block01.ui.step1_viewer_host import Step1ViewerHost
     from block01.ui.step1_viewer_mount import Step1WholeSlideMount
     from block01.viewer.raw_tile_provider import RawTileProvider
+    if gpu_bytes:
+        from block01.ui import step1_viewer_mount
+        step1_viewer_mount.DEMO_GPU_RAW_TEXTURE_BYTES = int(gpu_bytes)
 
     raw = RawTileProvider(slide)
     names = list(raw.channel_names)
@@ -39,9 +48,10 @@ def open_rig(backend, slide, *, channels=(), roi=None, size=530, smooth=1):
     identity = DatasetIdentity(path=slide, fingerprint="sraw")
     domain = FusionDomainModel()
     domain.bind_dataset(identity)
+    fusion_groups = groups or {"markers": {c: 1.0 for c in chosen[1:]}}
     domain.prepare_restore(identity, {
-        "groups": {"markers": {"group_weight": 1.0, "channels": {c: 1.0 for c in chosen[1:]}}},
-        "nucleus": {"channel": chosen[0], "weight": 1.0}, "enabled": list(chosen)})
+        "groups": {g: {"group_weight": 1.0, "channels": dict(chs)} for g, chs in fusion_groups.items()},
+        "nucleus": {"channel": nucleus or chosen[0], "weight": 1.0}, "enabled": list(chosen)})
     domain.commit_restore("probe")
     domain.install_committed_snapshot({"hash": "one", "fusion_config": domain.effective_config()})
     state = ChannelDisplayState()
@@ -56,9 +66,10 @@ def open_rig(backend, slide, *, channels=(), roi=None, size=530, smooth=1):
     window = SimpleNamespace(
         _display=SimpleNamespace(state=state, fusion=domain,
                                  request_mapping_seed=lambda *a, **k: True),
-        loader=SimpleNamespace(filepath=slide), _corrected_decisions={},
-        _corrected_zarr_path="/tmp/sraw-none.zarr",
-        _active_roi={"name": "ROI_1", "bbox_fullres": list(roi or [0, h0, 0, w0])},
+        loader=SimpleNamespace(filepath=slide), _corrected_decisions=dict(decisions or {}),
+        _corrected_zarr_path=zarr or "/tmp/sraw-none.zarr",
+        _active_roi={"name": "ROI_1", "bbox_fullres": list(roi or [0, h0, 0, w0]),
+                     **({"polygon_fullres": [list(p) for p in polygon]} if polygon else {})},
         step0_output={"channel_remap_config_hash": "r1"})
     host = Step1ViewerHost()
     host.resize(size, size)
@@ -85,7 +96,7 @@ def busy(rig):
         return True
     if type(binding).__name__ == "Step1CoreBinding":
         report = mount.gpu_layer.last_report or {}
-        return (not binding.idle() or report.get("deferred", 1)
+        return (not binding.idle() or report.get("deferred", 1) or report.get("reserving")
                 or report.get("shown", 0) < report.get("wanted", 0))
     stats = binding.stats()
     return (not mount.host.stack.scheduler.idle() or stats.get("deferred_uploads")

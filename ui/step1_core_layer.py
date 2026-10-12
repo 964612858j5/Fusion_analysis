@@ -55,6 +55,8 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget):
         self.smooth = gpu_memory.smooth_pixels()
         #: set by the binding: called when Smooth changes
         self.on_smooth_changed = None
+        #: the binding's fallback when a picture needs more blocks than one pass binds
+        self.on_capacity = None
         #: set by the binding: the number of channels the frame should draw
         self.expected_channels = lambda: 0
         self.last_report: Dict[str, Any] = {}
@@ -253,6 +255,8 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget):
         self.last_report = report
         if report.get("error"):
             perf_trace.mark("gpu.core_error", error=str(report["error"])[:160].replace(" ", "_"))
+        if report.get("capacity_exceeded") and self.on_capacity is not None:
+            QtCore.QTimer.singleShot(0, self.on_capacity)
         if (report.get("deferred", 0) or report.get("reserving")) and not self._again.isActive():
             self._again.start(FRAME_MS)                 # the rest (or the next reserved block) next slot
         self._note_reads()

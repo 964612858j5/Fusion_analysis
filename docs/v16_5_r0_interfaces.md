@@ -22,7 +22,7 @@
 | 使用方 | 成员 | S-Raw 实现 | 以后实现 |
 |---|---|---|---|
 | 挂载 | `initialized`、`init_error`、`attach`、`submit`、`is_resident`、`environment_report`、`cache_stats`、`dispose`、`hidden`、`hold_growth`、`upload_budget_ms` | 全部（`hold_growth`、`upload_budget_ms` 只接收，不起作用） | — |
-| 挂载 stats | unavailable、last_error、base_overflow_channels、resolution_limited、admitted_level、ideal_level、覆盖情况 | 只做 admitted_level、ideal_level、覆盖情况、last_error | 完整读图、完整绘制阶段补齐 |
+| 挂载 stats | unavailable、last_error、base_overflow_channels、resolution_limited、admitted_level、ideal_level、覆盖情况 | R2 起全部（对照见 §10） | — |
 | gpu_memory | `gpu_bytes`、`release_to_coarse`、`set_smooth`、`prepare_headroom` | `gpu_bytes`、`set_smooth` | Step3 和生命周期阶段 |
 | Step3 | `set_labels`、`label_stats`、`readback_label_ids_for_test` | 不做（调用时报"未实现"） | Step3 和生命周期阶段 |
 | Qt | initializeGL、resizeGL、paintGL、上下文销毁回调 | 全部 | — |
@@ -154,3 +154,26 @@ Python 每次只交一个轻量的不可变快照，不参与逐块的读取和�
 - 每次 paint 后，把自己动过的状态恢复成 GL 默认值：程序 0、VAO 0、数组缓冲 0、纹理单元 0 且不绑定纹理、混合 / 裁剪 / 模板 / 深度关闭、解包对齐 4。绘制帧缓冲保持 Qt 给的那个。热路径不做查询。
 - 和别的绘制者共存的约定：每个绘制者进出时，状态都是上面那组默认值。
 - 资源释放：接 `aboutToBeDestroyed`，在其中 `makeCurrent` 后释放（实测此时上下文确实是当前的）；新上下文在下一次 initializeGL 里重建。
+
+## 10. R2 起：状态字段对照（`Step1CoreBinding.stats()` / 画布 / `ViewerCore.stats()`）
+
+挂载、主窗口和 A9 工具读到的键，键名和含义同 Python 路径（`Step1GpuBinding.stats()`、`Step1GpuLayer._submission`）。"来源"一列说明 Rust 路径的值从哪里来。
+
+| 键 | 含义 | Rust 路径的来源 |
+|---|---|---|
+| `unavailable` | {通道: 原因}：缺失产品写缺失原因（`MissingProduct.reason`），粗层超额写 "coarse budget refused" | 核心规划器的 unavailable 加上 `Step1SourceTable.missing()` |
+| `missing_windows` | 有权重但没有显示窗口、因此不画的通道 | 绑定组装行时得出（`_rows`） |
+| `roi_polygon_error` | 多边形被 `sanitize_roi_polygon` 拒绝的原因（空串：没有拒绝） | 绑定 `_apply_polygon` |
+| `ideal_level` / `admitted_level` / `resolution_limited` | 准入的理想级、实际级、是否受限 | `ViewerCore.stats()` |
+| `base_overflow_channels` | 完整粗层就超出总额度时的通道数 | `ViewerCore.stats()` |
+| `deferred_uploads` | 已在 CPU、还没上 GPU 的块数 | 最近一帧的 `deferred` |
+| `last_error` | 最近的读图或绘制错误 | `ViewerCore.stats()` |
+| `unsupported` | 换回旧画布的原因（空串：仍由 Rust 画） | 绑定 `_fallback` |
+| `coarse_channels` | 完整粗层已到齐的通道 | `ViewerCore.stats()` 的 `coarse_complete`（在画且不缺失的通道） |
+| `coarse_pending` | 完整粗层还没到齐的通道 | `ViewerCore.stats()` 的 `coarse_pending` |
+| `fine_channels` | Python：已发布细图块的通道。Rust：手里有为当前视野保留的细图块（已送达）的通道；不含"已请求、还没到"的。两者在画面稳定时一致，加载过程中 Rust 可能早一帧出现（块到了但还没上 GPU） | `ViewerCore.stats()` 的 `fine_held` |
+| `backend` | `"rust"` | 固定 |
+
+`ViewerCore.stats()` 另有（只供诊断和测试）：`reads`、`stale`、`pending_results`、`cache_bytes`、`cached_tiles`、`gpu_tiles`、`gpu_live_blocks`（按格式）、`gpu_target_blocks`（按格式）、`sampler_split`（整数块数，浮点块数）。
+
+画布每帧报告（`paint()` 返回的字典）另有 `reserving`（还在预留块）和 `capacity_exceeded`（某个采样器族装不下、又没有可挤占的块；绑定据此换回旧画布）。

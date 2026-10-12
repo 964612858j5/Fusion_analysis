@@ -5,17 +5,20 @@
 //! * Blocks are anchored at the level-0 origin; output block (i, j) of the
 //!   rectangle is level-0 block (y0 // s + i, x0 // s + j).
 //! * Only the rectangle's overlap with the product's region is read, in
-//!   slabs whose rows and columns step to block boundaries
-//!   (`_slab_geometry`: at most `budget` level-0 pixels with a block of
-//!   padding on each axis); a slab's blocks come from where it was
-//!   actually read.
+//!   slabs on the PRODUCT's chunk grid (user ruling 2026-10-12, R2 plan
+//!   §2.2): whole chunks, at most `budget` level-0 pixels, so a chunk is
+//!   decoded once per request. Blocks crossing a slab edge receive from
+//!   both slabs; a slab's blocks come from where it was actually read.
+//!   (Python walks `_slab_geometry`'s block-stepped slabs; the sums differ
+//!   only in their order.)
 //! * A block's count is its number of real samples (`_span_per_block`); a
 //!   NaN sample counts, so its block's mean is NaN. Sums are float64, the
 //!   mean is cast to float32; a block with no sample is 0 and not valid.
 //! * Stride 1 within the budget is a copy, not a reduction.
 //!
 //! The summation order differs from numpy's, so results agree within the
-//! plan's tolerance, not bit for bit; counts and validity are exact.
+//! plan's tolerance |a-b| <= 1e-6 + 1e-6|b|, not bit for bit; counts and
+//! validity are exact.
 //! `wanted` is asked between slabs: false returns None (cancelled).
 
 use crate::error::Result;
@@ -93,14 +96,21 @@ fn isqrt(v: usize) -> usize {
     r
 }
 
-/// `_slab_geometry`: (rows, band) in level-0 pixels, whole blocks.
-pub fn slab_geometry(stride: usize, budget: usize) -> (usize, usize) {
-    let budget = budget.max(1);
-    let blocks = (budget / (stride * stride)).max(1);
-    let side = isqrt(blocks).max(1);
-    let band_blocks = side.saturating_sub(1).max(1);
-    let rows_blocks = (blocks / (band_blocks + 1)).saturating_sub(1).max(1);
-    (rows_blocks * stride, band_blocks * stride)
+/// (rows, columns) of one slab on the product's chunk grid: k x k whole
+/// chunks, the largest k that keeps a slab within `budget` pixels. A chunk
+/// larger than the budget (only with test budgets) is cut into bands of
+/// whole rows, then re-decoded per band.
+pub fn slab_on_chunks(chunks: [usize; 2], budget: usize) -> (usize, usize) {
+    let [ch, cw] = chunks;
+    let per = (ch * cw).max(1);
+    if per <= budget {
+        let k = isqrt(budget / per).max(1);
+        // widen along x while it still fits (a 2x3 grid beats 2x2)
+        let kx = (budget / (per * k)).max(k);
+        (k * ch, kx * cw)
+    } else {
+        ((budget / cw.max(1)).clamp(1, ch), cw)
+    }
 }
 
 /// `_span_per_block`: real samples of `length` from `front` per block.
@@ -150,14 +160,19 @@ pub fn reduce(region: Option<&CorrectedRegion>, rect: [i64; 4], stride: usize, b
         let [by0, by1, bx0, bx1] = r.bbox;
         let (oy0, oy1, ox0, ox1) = (y0.max(by0), y1.min(by1), x0.max(bx0), x1.min(bx1));
         if oy1 > oy0 && ox1 > ox0 {
-            let (rows, band) = slab_geometry(s, budget);
+            // slabs on the PRODUCT's chunk grid (it starts at the region's
+            // level-0 origin), so a chunk is decoded once per request; the
+            // level-0-anchored blocks that straddle two slabs simply receive
+            // from both (`accumulate` counts real samples by placement)
+            let (rows, band) = slab_on_chunks(r.array.chunks, budget);
             let (base_by, base_bx) = (y0.div_euclid(si), x0.div_euclid(si));
+            let (rows, band) = (rows as i64, band as i64);
             let mut cy = oy0;
             while cy < oy1 {
-                let stop_y = oy1.min(cy.div_euclid(si) * si + rows as i64);
+                let stop_y = oy1.min(by0 + ((cy - by0).div_euclid(rows) + 1) * rows);
                 let mut cx = ox0;
                 while cx < ox1 {
-                    let stop_x = ox1.min(cx.div_euclid(si) * si + band as i64);
+                    let stop_x = ox1.min(bx0 + ((cx - bx0).div_euclid(band) + 1) * band);
                     if !wanted() {
                         return Ok(None);
                     }
@@ -220,11 +235,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slab_geometry_matches_python() {
-        // values from step1_source._slab_geometry
-        assert_eq!(slab_geometry(1, 4 * 1024 * 1024), (2047, 2047));
-        assert_eq!(slab_geometry(32, 4 * 1024 * 1024), (2016, 2016));
-        assert_eq!(slab_geometry(64, 4 * 1024 * 1024), (1984, 1984));
-        assert_eq!(slab_geometry(3, 100), (6, 6));
+    fn slabs_follow_the_chunks() {
+        assert_eq!(slab_on_chunks([1024, 1024], 4 * 1024 * 1024), (2048, 2048));
+        assert_eq!(slab_on_chunks([1024, 1024], 3 * 1024 * 1024), (1024, 3072));
+        assert_eq!(slab_on_chunks([300, 250], 5000), (20, 250));
+        assert_eq!(slab_on_chunks([300, 250], 997), (3, 250));
     }
+
 }

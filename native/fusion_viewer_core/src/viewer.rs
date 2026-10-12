@@ -28,6 +28,8 @@ pub struct Config {
     pub max_raw_texture_bytes: usize,
     pub max_fine_tiles: usize,
     pub max_fine_bytes_per_channel: u64,
+    /// `max_coarse_plane_bytes_per_channel` (None: no limit)
+    pub max_coarse_bytes_per_channel: Option<u64>,
     pub max_coarse_tiles: usize,
     pub cpu_cache_bytes: usize,
     pub threads: usize,
@@ -39,9 +41,14 @@ pub struct Config {
     pub result_bytes: usize,
     /// test only: delay before each read (`pool::Shared::read_delay`)
     pub test_read_delay_ms: f64,
+    /// test only: bind at most this many blocks in the single pass (to
+    /// reach the sampler-capacity fallback on a small project)
+    pub test_block_units: Option<usize>,
     /// test only: request fine tiles channel by channel (the old order)
     pub legacy_order: bool,
 }
+
+mod gl_life;
 
 pub struct Gpu {
     pub gl: glow::Context,
@@ -52,6 +59,8 @@ pub struct Gpu {
 
 pub struct ViewerCore {
     pub cfg: Config,
+    /// what each channel's pixels are (raw / corrected / missing)
+    pub sources: Arc<crate::corrected::Step1Sources>,
     pub pyr: Pyramid,
     /// the region `(y0, y1, x0, x1)` (level 0) and as a world rect
     pub roi_world: Option<[f64; 4]>,
@@ -60,8 +69,16 @@ pub struct ViewerCore {
     pub notifier: Option<Arc<Notifier>>,
     pub trace: Arc<Trace>,
     pub gpu: Option<Gpu>,
+    /// the rows drawn, in order (Fusion: a channel may have several)
     pub display: Vec<(Ch, RowParams)>,
     pub smooth: bool,
+    /// Fusion (else Overlay)
+    pub fusion: bool,
+    /// the region polygon (level-0 world x, y), already checked by Python
+    /// (`sanitize_roi_polygon`); None: the rectangle alone clips
+    pub polygon: Option<Vec<[f32; 2]>>,
+    /// the slide's sample type (what a raw channel is stored as)
+    pub raw_kind: crate::step1_tile::RawKind,
     pub last_input: f64,
     pub paused: bool,
     /// tiles delivered to the planner and still held by it
@@ -73,28 +90,50 @@ pub struct ViewerCore {
 }
 
 impl ViewerCore {
-    pub fn new(source: RawSource, cfg: Config, roi: Option<[i64; 4]>,
+    /// `sources`: per channel raw / corrected / missing and the region
+    /// (`build_corrected_manifest`); `raw_kind`: the slide's sample type.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(source: RawSource, cfg: Config, sources: crate::corrected::Step1Sources,
+               raw_kind: crate::step1_tile::RawKind, budget: usize,
                notifier: Option<Arc<Notifier>>, trace: Arc<Trace>) -> ViewerCore {
+        let roi = sources.roi;
+        let missing: Vec<Ch> = sources.names.keys().copied().filter(|c| sources.missing(*c).is_some()).collect();
         let shapes = source.manifest().levels.iter().map(|l| (l.height, l.width)).collect();
         let pyr = Pyramid { shapes };
         let budgets = Budgets { max_fine_tiles: cfg.max_fine_tiles,
                                 max_fine_bytes_per_channel: cfg.max_fine_bytes_per_channel,
-                                total: Some(cfg.max_raw_texture_bytes as u64), texel_bytes: 1 };
+                                total: Some(cfg.max_raw_texture_bytes as u64),
+                                max_coarse_bytes: cfg.max_coarse_bytes_per_channel };
         let planner = Planner::new(pyr.clone(), budgets, cfg.max_coarse_tiles);
-        let pool = Pool::start(Arc::new(source), pyr.clone(), roi, cfg.cpu_cache_bytes, cfg.threads, cfg.result_bytes, cfg.test_read_delay_ms,
+        let mut planner = planner;
+        planner.unavailable.extend(missing);              // drawn by nobody, read by nobody
+        let sources = Arc::new(sources);
+        let pool = Pool::start(Arc::new(source), pyr.clone(), Arc::clone(&sources), raw_kind, budget,
+                               cfg.cpu_cache_bytes, cfg.threads, cfg.result_bytes, cfg.test_read_delay_ms,
                                notifier.clone(), Arc::clone(&trace));
         let roi_world = roi.map(|[y0, y1, x0, x1]| [x0 as f64, x1 as f64, y0 as f64, y1 as f64]);
-        ViewerCore { cfg, pyr, roi_world, planner, pool, notifier, trace, gpu: None,
-                     display: Vec::new(), smooth: true, last_input: -1e9, paused: false,
+        ViewerCore { cfg, pyr, roi_world, planner, pool, sources, notifier, trace, gpu: None,
+                     display: Vec::new(), smooth: true, fusion: false, polygon: None, raw_kind,
+                     last_input: -1e9, paused: false,
                      held: HashMap::new(), frames: 0, last_error: String::new(),
                      issued: Default::default() }
     }
 
-    /// The drawn channels (sorted by name) and their display parameters.
-    pub fn set_display(&mut self, rows: Vec<(Ch, RowParams)>, smooth: bool) {
+    /// The rows drawn and their display parameters (Overlay: one per
+    /// channel; Fusion: groups in order, then the nucleus), the mode.
+    pub fn set_display(&mut self, rows: Vec<(Ch, RowParams)>, smooth: bool, fusion: bool) {
         self.smooth = smooth;
-        let active: Vec<Ch> = rows.iter().map(|r| r.0).collect();
+        self.fusion = fusion;
+        let mut active: Vec<Ch> = Vec::new();
+        for (c, _) in &rows {
+            if !active.contains(c) {
+                active.push(*c);                     // a channel is read once
+            }
+        }
         self.display = rows;
+        let texels = active.iter().filter_map(|c| self.format_of(*c).map(|f| (*c, f.bytes() as u64))).collect();
+        self.planner.set_texels(texels);
+        self.update_total();
         if !self.paused {
             self.planner.set_active(active);
             self.issue();
@@ -185,54 +224,51 @@ impl ViewerCore {
         self.pool.set_jobs(Vec::new());
     }
 
+    /// How a channel's tiles are stored (None: missing, never drawn).
+    pub fn format_of(&self, c: Ch) -> Option<crate::family::Format> {
+        use crate::corrected::Source;
+        use crate::family::Format;
+        use crate::step1_tile::RawKind;
+        match self.sources.of(c)? {
+            Source::Raw { .. } => Some(match self.raw_kind {
+                RawKind::U8 => Format::U8,
+                RawKind::U16 => Format::U16,
+                _ => Format::F32,
+            }),
+            Source::Corrected { .. } => Some(Format::F32),
+            Source::Missing { .. } => None,
+        }
+    }
+
+    /// The admission total (`_total_budget`): the budget less one block
+    /// of each format the drawn channels use.
+    fn update_total(&mut self) {
+        let Some(g) = self.gpu.as_ref() else { return };
+        // `_total_budget`: one block of the slide's own format, and one of
+        // float32 when any drawn channel is not raw
+        let raw = match self.raw_kind {
+            crate::step1_tile::RawKind::U8 => crate::family::Format::U8,
+            crate::step1_tile::RawKind::U16 => crate::family::Format::U16,
+            _ => crate::family::Format::F32,
+        };
+        let mut formats = vec![raw];
+        if self.display.iter().any(|(c, _)| !matches!(self.sources.of(*c), Some(crate::corrected::Source::Raw { .. }))) {
+            formats.push(crate::family::Format::F32);
+        }
+        let total = self.cfg.max_raw_texture_bytes.saturating_sub(g.store.slack_bytes(&formats));
+        self.planner.set_total(Some(total as u64));
+    }
+
     pub fn resume(&mut self) {
         self.paused = false;
-        let active: Vec<Ch> = self.display.iter().map(|r| r.0).collect();
+        let mut active: Vec<Ch> = Vec::new();
+        for (c, _) in &self.display {
+            if !active.contains(c) {
+                active.push(*c);
+            }
+        }
         self.planner.set_active(active);
         self.issue();
-    }
-
-    /// GL resources for the current context (`initializeGL`).
-    pub fn attach_gl(&mut self, gl: glow::Context, max_layers: usize) -> Result<(), String> {
-        let render = unsafe { Render::new(&gl)? };
-        let store = Store::new(self.cfg.max_raw_texture_bytes, max_layers, render.u_blocks);
-        let vt = Vt::new(&self.pyr, render.u_blocks, store.layers_per_block as usize);
-        let total = self.cfg.max_raw_texture_bytes.saturating_sub(store.slack_bytes());
-        self.planner.set_total(Some(total as u64));
-        self.gpu = Some(Gpu { gl, store, vt, render });
-        Ok(())
-    }
-
-    /// Delete every GL name (context current: `aboutToBeDestroyed`).
-    pub fn release_gl(&mut self) {
-        if let Some(mut g) = self.gpu.take() {
-            g.store.clear(&g.gl);
-            unsafe { g.render.destroy(&g.gl) };
-        }
-    }
-
-    /// The context is already gone: forget the names without GL calls.
-    pub fn forget_gl(&mut self) {
-        self.gpu = None;
-    }
-
-    pub fn gpu_bytes(&self) -> usize {
-        self.gpu.as_ref().map_or(0, |g| g.store.allocated_bytes() + g.render.target_bytes())
-    }
-
-    /// Keep only the complete coarse on the GPU (`release_to_coarse`).
-    pub fn release_to_coarse(&mut self) -> usize {
-        let before = self.gpu_bytes();
-        let coarsest = self.pyr.coarsest();
-        if let Some(g) = self.gpu.as_mut() {
-            let keep: std::collections::HashSet<Key> =
-                g.store.slots.keys().filter(|k| k.1.level == coarsest).copied().collect();
-            g.store.release_except(&g.gl, &keep);
-            g.vt.forget();
-            unsafe { g.render.drop_targets(&g.gl) };
-            g.render.last_rows = 0;            // nothing old is redrawn from released slots
-        }
-        before.saturating_sub(self.gpu_bytes())
     }
 
     /// Stop: no notice, no read after this (the Python side then closes

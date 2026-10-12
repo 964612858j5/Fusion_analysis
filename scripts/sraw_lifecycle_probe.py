@@ -5,11 +5,23 @@
 One scenario per process (one GL widget per process):
   pause_resume    paused: no read, the camera may move; resumed: the
                   picture catches up and is complete again
-  fusion_fallback switching to Fusion hands the picture to the Python GPU
-                  path; its scheduler starts only then; the Rust readers end
+  fusion_stays_rust  switching to Fusion and back keeps the Rust picture
+                  (R2), stable both ways; the Python scheduler never starts
   source_change   a rebuilt viewer (whole-slide region) is Rust again
-  partial_roi     a region inside the slide hands over to the Python path
+  partial_roi_stays_rust  a region inside the slide is drawn by a rebuilt
+                  Rust viewer (R2)
+  capacity_fallback  (with --project: corrected channels) a picture that
+                  needs more blocks of one format than one pass binds hands
+                  over to the Python GPU path, which then starts its
+                  scheduler; the Rust readers end (R2 plan §2.3)
+  format_switch   (with --project; the caller sets a small GPU budget and
+                  three samplers) raw channels first, then corrected ones
+                  only: the raw blocks are given back and the samplers move
+                  to the float family; the picture stays Rust, no core
+                  error (codex R2 review: reclaim, split change)
   close           closing ends the Rust reader threads and leaves no layer
+(R2 migration, user-authorised 2026-10-12: fusion_fallback and partial_roi
+asserted the hand-over the thin slice needed.)
 """
 
 import argparse
@@ -67,24 +79,88 @@ def s_pause_resume(rig, out):
                  and out["stable_after"] and out["complete_after"])
 
 
-def s_fusion_fallback(rig, out):
+def s_fusion_stays_rust(rig, out):
     from sraw_rig import stable
-    from block01.ui.step1_viewer_mount import LEGACY_FUSION
-    _shot, out["stable_rust"] = stable(rig)
+    from block01.ui.step1_viewer_mount import LEGACY_FUSION, LEGACY_OVERLAY
+    _shot, out["stable_overlay"] = stable(rig)
+    scheduler = rig.mount.host.stack.scheduler
+    first_core = rig.mount.gpu_layer.core
+    rig.mount.set_mode(LEGACY_FUSION)
+    rig.pump(0.5)
+    out["binding_fusion"] = type(rig.mount.gpu_binding).__name__
+    _shot, out["stable_fusion"] = stable(rig)
+    rig.mount.set_mode(LEGACY_OVERLAY)
+    rig.pump(0.5)
+    out["binding_back"] = type(rig.mount.gpu_binding).__name__
+    _shot, out["stable_back"] = stable(rig)
+    out["same_core"] = rig.mount.gpu_layer is not None and rig.mount.gpu_layer.core is first_core
+    out["scheduler_started"] = scheduler.started
+    out["ok"] = (out["stable_overlay"] and out["binding_fusion"] == "Step1CoreBinding"
+                 and out["stable_fusion"] and out["binding_back"] == "Step1CoreBinding"
+                 and out["stable_back"] and not out["scheduler_started"])
+
+
+def s_capacity_fallback(rig, out):
+    """BLOCK01_RUST_TEST_BLOCK_UNITS=2 (set by the caller): one integer and
+    one float block; the corrected channels' tiles at level 0 need more."""
+    from sraw_rig import stable
+    box = rig.mount.host.stack.view.view_box
+    h0, w0 = rig.shape
     scheduler = rig.mount.host.stack.scheduler
     out["scheduler_started_before"] = scheduler.started
-    out["readers_before"] = os_readers()
-    rig.mount.set_mode(LEGACY_FUSION)
-    ok = wait_for(rig, lambda: type(rig.mount.gpu_binding).__name__ == "Step1GpuBinding")
+    box.setRange(xRange=(w0 * 0.2, w0 * 0.2 + 1400), yRange=(h0 * 0.2, h0 * 0.2 + 1400), padding=0)
+    ok = wait_for(rig, lambda: type(rig.mount.gpu_binding).__name__ == "Step1GpuBinding", 30.0)
     out["handed_over"] = ok
-    out["layer"] = type(rig.mount.gpu_layer).__name__
+    out["rust_refused"] = rig.mount._rust_refused
     _shot, out["stable_python"] = stable(rig)
     out["scheduler_started_after"] = scheduler.started
     out["readers_after"] = (wait_for(rig, lambda: os_readers() == 0, 5.0), os_readers())
-    out["rust_refused"] = rig.mount._rust_refused
-    out["ok"] = (out["stable_rust"] and not out["scheduler_started_before"] and out["readers_before"] > 0
-                 and ok and out["layer"] == "Step1GpuLayer" and out["stable_python"]
-                 and out["scheduler_started_after"] and out["readers_after"][0])
+    out["ok"] = (ok and not out["scheduler_started_before"] and "one pass" in str(out["rust_refused"])
+                 and out["stable_python"] and out["scheduler_started_after"] and out["readers_after"][0])
+
+
+def s_format_switch(rig, out):
+    from sraw_rig import stable
+    from block01.ui.step1_draft_spec import STEP1_SCOPE
+    box = rig.mount.host.stack.view.view_box
+    h0, w0 = rig.shape
+    errors = []
+    layer = rig.mount.gpu_layer
+    paint = layer.paintGL
+
+    def watched():
+        paint()
+        if (layer.last_report or {}).get("error"):
+            errors.append(str(layer.last_report["error"]))
+    layer.paintGL = watched
+
+    def core():
+        return dict(rig.mount.gpu_binding.stats().get("core") or {})
+
+    def show(channels):
+        with rig.state.using_scope(STEP1_SCOPE):
+            for c in rig.names:
+                rig.state.set_display_visible(c, c in channels)
+    raw = [c for c in rig.names if rig.decisions.get(c) == "original"]
+    corrected = [c for c in rig.names if rig.decisions.get(c) not in ("original", None) and c != "d"]
+    show(raw)
+    for k in range(3):                              # level 0 in a few places: the raw blocks fill
+        box.setRange(xRange=(w0 * (0.1 + 0.25 * k), w0 * (0.1 + 0.25 * k) + 900),
+                     yRange=(h0 * 0.3, h0 * 0.3 + 900), padding=0)
+        _shot, out[f"stable_raw_{k}"] = stable(rig)
+    before = core()
+    out["before"] = {k: before.get(k) for k in ("sampler_split", "gpu_live_blocks")}
+    show(corrected)
+    _shot, out["stable_corrected"] = stable(rig, timeout=60.0)
+    after = core()
+    out["after"] = {k: after.get(k) for k in ("sampler_split", "gpu_live_blocks")}
+    out["binding"] = type(rig.mount.gpu_binding).__name__
+    out["errors"] = errors[:3]
+    split_b, split_a = tuple(before.get("sampler_split") or ()), tuple(after.get("sampler_split") or ())
+    out["ok"] = (all(out[f"stable_raw_{k}"] for k in range(3)) and out["stable_corrected"]
+                 and out["binding"] == "Step1CoreBinding" and not errors
+                 and split_b and split_a and split_b[0] >= 2 and split_a[1] > split_b[1]
+                 and (after.get("gpu_live_blocks") or {}).get("u8", 0) < (before.get("gpu_live_blocks") or {}).get("u8", 0))
 
 
 def s_source_change(rig, out):
@@ -103,18 +179,19 @@ def s_source_change(rig, out):
                  and out["stable_after"] and out["readers"] <= 6)
 
 
-def s_partial_roi(rig, out):
-    """A region that is not the whole slide is outside the thin slice: the
-    rebuilt viewer takes the Python GPU path and says why."""
+def s_partial_roi_stays_rust(rig, out):
+    """A region that is not the whole slide is drawn by a rebuilt Rust
+    viewer (R2)."""
     from sraw_rig import stable
     h0, w0 = rig.shape
+    first_core = rig.mount.gpu_layer.core
     rig.window._active_roi = {"name": "ROI_3", "bbox_fullres": [100, h0 - 100, 80, w0 - 80]}
     rig.mount.source_changed("roi")
-    ok = wait_for(rig, lambda: type(rig.mount.gpu_binding).__name__ == "Step1GpuBinding")
+    rig.pump(0.5)
     out["binding"] = type(rig.mount.gpu_binding).__name__
-    out["rust_refused"] = rig.mount._rust_refused
+    out["new_core"] = rig.mount.gpu_layer is not None and rig.mount.gpu_layer.core is not first_core
     _shot, out["stable"] = stable(rig)
-    out["ok"] = ok and "whole slide" in out["rust_refused"] and out["stable"]
+    out["ok"] = out["binding"] == "Step1CoreBinding" and out["new_core"] and out["stable"]
 
 
 def s_close(rig, out):
@@ -134,12 +211,22 @@ SCENARIOS = {n[2:]: f for n, f in globals().items() if n.startswith("s_")}
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("scenario", choices=sorted(SCENARIOS))
-    ap.add_argument("--slide", required=True)
+    ap.add_argument("--slide", default="")
+    ap.add_argument("--project", default="")
+    ap.add_argument("--gpu-bytes", type=int, default=0)
     args = ap.parse_args()
     from sraw_rig import open_rig
     out = {"scenario": args.scenario}
     try:
-        rig = open_rig("rust", args.slide)
+        if args.project:
+            project = json.load(open(args.project))
+            rig = open_rig("rust", project["slide"], channels=[c for c in project["names"] if c != "d"],
+                           roi=project["roi"],
+                           decisions=project["decisions"], zarr=project["zarr"], size=1500,
+                           gpu_bytes=args.gpu_bytes or None)
+            rig.decisions = project["decisions"]
+        else:
+            rig = open_rig("rust", args.slide)
         out["binding_at_start"] = type(rig.mount.gpu_binding).__name__
         SCENARIOS[args.scenario](rig, out)
         if args.scenario != "close":

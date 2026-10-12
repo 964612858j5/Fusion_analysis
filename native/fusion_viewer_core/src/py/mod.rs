@@ -1,6 +1,6 @@
 //! Python bindings. Each file wraps one core module; no logic lives here.
 
-mod corrected;
+pub(crate) mod corrected;
 mod gil;
 mod gl;
 mod notify;

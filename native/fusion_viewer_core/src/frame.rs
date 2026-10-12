@@ -28,6 +28,9 @@ pub struct FrameReport {
     pub base_overflow: bool,
     /// blocks are still being reserved ahead (one per frame): paint again
     pub reserving: bool,
+    /// a tile's sampler family was full with nothing to evict: the picture
+    /// cannot be drawn in one pass (the binding hands it to Python)
+    pub capacity_exceeded: bool,
     pub drain_ms: f64,
     pub upload_ms: f64,
     pub draw_ms: f64,
@@ -51,32 +54,59 @@ fn drawn_rows(core: &mut ViewerCore) -> Vec<(crate::plan::Ch, Vec<crate::geom::T
     rows
 }
 
-/// Hold GPU blocks ahead of need (`reserve::target_blocks`; docs §48, the
-/// approved exception to "reserve once": the first frames, and again when
-/// more channels are drawn, the canvas grows or a release dropped blocks).
-/// One block per frame and never while input is hot, so no frame pays more
-/// than one first use (55-64 ms per 64 MiB on the server, `gpu_touch`). Tiles the frame
-/// must have (complete coarse) still grow the store at once in `prepare`.
+/// Hold GPU blocks ahead of need (`store_plan`; docs §48, the approved
+/// exception to "reserve once": the first frames, and again when other
+/// channels are drawn, the canvas grows or a release dropped blocks), and
+/// split the samplers between the families by need. One block per frame
+/// and never while input is hot, so no frame pays more than one first use
+/// (55-64 ms per 64 MiB on the server, `gpu_touch`). Tiles the frame must
+/// have (complete coarse) still grow the store at once in `prepare`.
 /// Returns whether more blocks are still to come.
 fn top_up(core: &mut ViewerCore, w: i32, h: i32, hot: bool, base_overflow: bool) -> bool {
-    let channels = core.planner.active().len();
     let (across, down) = core.pyr.grid(core.pyr.coarsest());
+    let mut channels = std::collections::HashMap::new();
+    for c in core.planner.active() {
+        if let Some(f) = core.format_of(*c) {
+            *channels.entry(f).or_insert(0) += 1;
+        }
+    }
+    let formats: Vec<_> = channels.keys().copied().collect();
+    let drawn: std::collections::HashSet<u16> = core.planner.active().iter().copied().collect();
     let Some(gpu) = core.gpu.as_mut() else { return false };
     let store = &mut gpu.store;
     if base_overflow {
-        store.target_blocks = store.live_blocks();   // no speculative block then
+        let now: Vec<_> = crate::family::ALL.iter().map(|f| (*f, store.live_blocks(*f))).collect();
+        store.targets = now.into_iter().collect();     // no speculative block then
         return false;
     }
-    store.target_blocks = crate::reserve::target_blocks(channels, (across * down) as usize, w, h,
-                                                        store.layers_per_block as usize,
-                                                        store.budget_blocks());
-    if store.live_blocks() >= store.target_blocks {
-        return false;
+    let need = crate::store_plan::Need { channels, coarse_slots: (across * down) as usize, w, h };
+    let room = store.max_bytes().saturating_sub(store.slack_bytes(&formats));
+    let plan = crate::store_plan::plan(&need, &|f| store.layers(f) as usize, &|f| store.block_bytes(f),
+                                       room, gpu.render.units);
+    let old = store.caps;
+    if plan.caps != old && store.fit_caps(&gpu.gl, plan.caps, &drawn) {
+        unsafe {
+            if gpu.render.set_split(&gpu.gl, (plan.caps[0], plan.caps[1])).is_ok() {
+                gpu.vt.set_caps(plan.caps);
+                let all: Vec<_> = store.slots.values().copied().collect();
+                store.dirty.extend(all);                // refill the meta table
+            } else {
+                store.caps = old;                       // renumbered blocks fit the old split too
+            }
+        }
     }
+    store.targets = plan.targets;
+    let short = crate::family::ALL.into_iter()
+        .find(|f| store.live_blocks(*f) < store.targets.get(f).copied().unwrap_or(0));
+    let Some(format) = short else { return false };
     if !hot {
-        store.reserve(&gpu.gl, 1);
+        // a target that cannot be reached now (budget or samplers held by
+        // blocks still drawn) stops here: no repaint is asked for it
+        if !store.reclaim_idle(&gpu.gl, format, &drawn) || store.reserve(&gpu.gl, format, 1) == 0 {
+            return false;
+        }
     }
-    store.live_blocks() < store.target_blocks
+    crate::family::ALL.iter().any(|f| store.live_blocks(*f) < store.targets.get(f).copied().unwrap_or(0))
 }
 
 /// `view`: the world rect on screen now (x0, x1, y0, y1); `fbo`, `w`, `h`:
@@ -142,6 +172,7 @@ pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) ->
         core.trace.stamp("gpu", Some(*key), vec![]);
     }
     rep.uploads = prep.uploaded.len();
+    rep.capacity_exceeded = prep.capacity;
     rep.deferred = prep.deferred;
     rep.deferred_growth = prep.deferred_growth;
     if let Some(e) = prep.error {
@@ -160,9 +191,10 @@ pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) ->
         gpu.vt.sync_pages(&rows, &gpu.store);
     }
     gpu.vt.sync_meta(&mut gpu.store);
-    let params_rows: Vec<_> = rows.iter().filter_map(|(c, _)| {
-        core.display.iter().find(|(d, _)| d == c).map(|(_, p)| (*c, *p))
-    }).collect();
+    // the display's rows in order (a channel may have several, Fusion
+    // groups), those of channels drawn now
+    let drawn: std::collections::HashSet<_> = rows.iter().map(|(c, _)| *c).collect();
+    let params_rows: Vec<_> = core.display.iter().filter(|(c, _)| drawn.contains(c)).copied().collect();
     let params = if base_overflow { Vec::new() } else { gpu.vt.params(&params_rows) };
     let (gl, render) = (&gpu.gl, &mut gpu.render);
     unsafe {
@@ -177,9 +209,13 @@ pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) ->
             }
         }
         let v32 = [view[0] as f32, view[1] as f32, view[2] as f32, view[3] as f32];
-        let scissor = roi_scissor_box(view, core.roi_world, render.size);
+        let clip = crate::render::Clip { scissor: roi_scissor_box(view, core.roi_world, render.size),
+                                         polygon: core.polygon.clone() };
         let rows_drawn = if base_overflow { render.last_rows } else { params_rows.len() };
-        render.compose(gl, &gpu.vt, &gpu.store, rows_drawn, v32, core.smooth, scissor);
+        if let Err(e) = render.compose(gl, &gpu.vt, &gpu.store, rows_drawn, v32, core.smooth, core.fusion, &clip) {
+            rep.error = e;
+            return rep;
+        }
         render.last_rows = rows_drawn;
         render.blit(gl, fbo, w, h);
     }

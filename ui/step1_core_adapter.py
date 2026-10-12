@@ -251,8 +251,9 @@ def build_corrected_manifest(table, raw_provider, strides) -> Dict[str, Any]:
     channels = {}
     for name in raw_provider.channel_names:
         source = table.source_of(name)
+        index = int(raw_provider.channel_index(name))
         if source == SOURCE_MISSING:
-            channels[name] = {"source": "missing", "reason": reasons.get(name, "")}
+            channels[name] = {"source": "missing", "reason": reasons.get(name, ""), "index": index}
         elif source == SOURCE_CORRECTED:
             region = table.region(name)
             planes = []
@@ -262,9 +263,10 @@ def build_corrected_manifest(table, raw_provider, strides) -> Dict[str, Any]:
                     planes.append({"stride": stride, "array": _array_spec(plane.array),
                                    "origin": [int(plane.origin[0]), int(plane.origin[1])]})
             channels[name] = {"source": "corrected", "product": _array_spec(region.array),
-                              "bbox": [int(v) for v in region.bbox], "planes": planes}
+                              "bbox": [int(v) for v in region.bbox], "planes": planes,
+                              "index": index}
         else:
-            channels[name] = {"source": "raw", "index": int(raw_provider.channel_index(name))}
+            channels[name] = {"source": "raw", "index": index}
     roi = table.roi_bbox()
     return {
         "roi": None if roi is None else [int(v) for v in roi],

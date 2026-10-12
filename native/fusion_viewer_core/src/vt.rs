@@ -14,12 +14,15 @@ pub const BLOCK_ROWS: usize = 3;
 pub const PARAM_TEXELS: usize = 5;
 pub const MAX_LEVELS: usize = 16;
 
-/// One drawn channel's display: mapping (lo, hi, gamma), colour, weight.
+/// One drawn row's display: mapping (lo, hi, gamma), colour, weight, and
+/// for Fusion its group (-1: the nucleus) and the group's weight.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RowParams {
     pub mapping: [f32; 3],
     pub color: [f32; 3],
     pub weight: f32,
+    pub group: f32,
+    pub group_weight: f32,
 }
 
 pub struct Vt {
@@ -35,6 +38,9 @@ pub struct Vt {
     /// (layer, first row, end row) changed since the last upload
     pub dirty_pages: Vec<(usize, usize, usize)>,
     pub pages_resized: bool,
+    /// blocks per family the shader binds ([integer, float]): meta rows
+    /// are `(family * caps[0] + index) * BLOCK_ROWS` (`U_BLOCKS`)
+    pub caps: [usize; 2],
     pub meta_rows: usize,
     pub meta_width: usize,
     pub meta: Vec<[f32; 4]>,
@@ -44,8 +50,9 @@ pub struct Vt {
 
 impl Vt {
     /// The page atlas laid out for the whole pyramid: every level side by
-    /// side, level 0 extent, `u_blocks` blocks of `layers` meta columns.
-    pub fn new(pyr: &Pyramid, u_blocks: usize, layers: usize) -> Self {
+    /// side, level 0 extent; meta rows for `caps` blocks, `layers` columns.
+    pub fn new(pyr: &Pyramid, caps: [usize; 2], layers: usize) -> Self {
+        let blocks = caps[0] + caps[1];
         let (h0, w0) = pyr.shapes[0];
         let (mut grid, mut offset, mut ds, mut x) = (Vec::new(), Vec::new(), Vec::new(), 0u32);
         for level in 0..pyr.levels() as u8 {
@@ -60,9 +67,21 @@ impl Vt {
         let height = grid.iter().map(|g| g.1).max().unwrap_or(1) as usize;
         Vt { grid, offset, ds, width: x as usize, height, channel_slots: HashMap::new(),
              pages: Vec::new(), written: HashMap::new(), dirty_pages: Vec::new(), pages_resized: true,
-             meta_rows: u_blocks * BLOCK_ROWS, meta_width: layers.max(1),
-             meta: vec![[0.0; 4]; u_blocks * BLOCK_ROWS * layers.max(1)],
+             caps, meta_rows: blocks * BLOCK_ROWS, meta_width: layers.max(1),
+             meta: vec![[0.0; 4]; blocks * BLOCK_ROWS * layers.max(1)],
              meta_dirty_rows: Vec::new(), meta_resized: true }
+    }
+
+    /// A new sampler split: the meta table is laid out again (the caller
+    /// marks every resident slot dirty so it is refilled).
+    pub fn set_caps(&mut self, caps: [usize; 2]) {
+        if caps == self.caps {
+            return;
+        }
+        self.caps = caps;
+        self.meta_rows = (caps[0] + caps[1]) * BLOCK_ROWS;
+        self.meta = vec![[0.0; 4]; self.meta_rows * self.meta_width];
+        self.meta_resized = true;
     }
 
     pub fn layers(&self) -> usize {
@@ -98,8 +117,8 @@ impl Vt {
             let slot = self.slot_of(*c);
             let mut cells: HashMap<TileAt, i32> = HashMap::new();
             for t in tiles {
-                if let Some(&(block, layer)) = store.slots.get(&(*c, *t)) {
-                    cells.insert(*t, ((block as i32) << 16) | layer as i32);
+                if let Some((family, index, layer)) = store.code(&(*c, *t)) {
+                    cells.insert(*t, ((family as i32) << 24) | ((index as i32) << 16) | layer as i32);
                 }
             }
             let before = self.written.remove(c).unwrap_or_default();
@@ -140,7 +159,8 @@ impl Vt {
     /// block three rows (rect, valid rect, size), one column per layer.
     pub fn sync_meta(&mut self, store: &mut Store) {
         for (block, layer) in std::mem::take(&mut store.dirty) {
-            let row = block * BLOCK_ROWS;
+            let Some((family, index)) = store.row_of(block) else { continue };
+            let row = (family * self.caps[0] + index) * BLOCK_ROWS;
             if row + 2 >= self.meta_rows || layer as usize >= self.meta_width {
                 continue;
             }
@@ -163,6 +183,7 @@ impl Vt {
     /// The parameter rows in draw order (`upload_params`): mapping and the
     /// channel's page layer; colour and weight; group, group weight and
     /// the number of levels used; the levels used, finest first.
+    /// A channel may appear in several rows (Fusion groups); its pages are one.
     pub fn params(&self, rows: &[(Ch, RowParams)]) -> Vec<[f32; 4]> {
         let mut out = vec![[0.0f32; 4]; rows.len().max(1) * PARAM_TEXELS];
         for (i, (c, p)) in rows.iter().enumerate() {
@@ -178,7 +199,7 @@ impl Vt {
             let r = i * PARAM_TEXELS;
             out[r] = [p.mapping[0], p.mapping[1], p.mapping[2], slot];
             out[r + 1] = [p.color[0], p.color[1], p.color[2], p.weight];
-            out[r + 2] = [0.0, 0.0, used.len() as f32, 0.0];
+            out[r + 2] = [p.group, p.group_weight, used.len() as f32, 0.0];
             out[r + 3] = [padded[0], padded[1], padded[2], padded[3]];
             out[r + 4] = [padded[4], padded[5], padded[6], padded[7]];
         }

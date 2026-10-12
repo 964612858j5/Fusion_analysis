@@ -5,7 +5,7 @@ use super::*;
 fn planner() -> Planner {
     let pyr = Pyramid { shapes: vec![(4096, 4096), (2048, 2048), (1024, 1024)] };
     let b = Budgets { max_fine_tiles: 256, max_fine_bytes_per_channel: 48 << 20,
-                      total: Some(1 << 30), texel_bytes: 1 };
+                      total: Some(1 << 30), max_coarse_bytes: None };
     Planner::new(pyr, b, 1024)
 }
 
@@ -72,7 +72,7 @@ fn stand_ins_share_the_carry_nearest_level_first() {
     let pyr = Pyramid { shapes: vec![(4096, 4096), (2048, 2048), (1024, 1024)] };
     // carry room for exactly one 512x512 tile beyond the target
     let b = Budgets { max_fine_tiles: 256, max_fine_bytes_per_channel: (2 * 512 * 512) as u64,
-                      total: None, texel_bytes: 1 };
+                      total: None, max_coarse_bytes: None };
     let mut p = Planner::new(pyr, b, 1024);
     p.set_active(vec![0]);
     p.set_view(View { level: 0, bbox_l0: [0, 0, 1024, 512], epoch: 1 });   // two level-0 tiles

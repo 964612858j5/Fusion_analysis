@@ -39,6 +39,12 @@ pub(super) fn parse(config: &Bound<'_, PyDict>) -> PyResult<crate::viewer::Confi
         },
         threads: cfg_u(config, "threads")?,
         input_hot_s: cfg_f(config, "input_hot_s")?,
+        upload_hot_s: crate::frame::Pacing::upload_window(
+            match config.get_item("upload_hot_s")? {
+                Some(v) if !v.is_none() => Some(v.extract()?),
+                _ => None,
+            },
+            cfg_f(config, "input_hot_s")?),
         hot_upload_ms: cfg_f(config, "hot_upload_ms")?,
         frame_budget_ms: cfg_f(config, "frame_budget_ms")?,
         growth_quiet_s: cfg_f(config, "growth_quiet_s")?,

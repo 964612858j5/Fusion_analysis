@@ -230,3 +230,17 @@ Python 每次只交一个轻量的不可变快照，不参与逐块的读取和�
 - 内存上限另计标签读线程的临时内存：取这个查看器用过的数据源中最大的一份，不会缩小。
 - 测试开关：`BLOCK01_RUST_TEST_FAULT=label:N`（前 N 次读标签都出错）、`BLOCK01_RUST_TEST_LABEL_DELAY_MS`（每次读标签前等待），只在测试里用。
 - 测试函数：`fusion_viewer_core.plan_labels_for_test(...)`、`read_label_tile_for_test(...)`。
+
+## 12. R5 起：上传节奏的配置（`docs/v16_5_r5_zoom_plan.md`）
+
+| 配置项（`core_config`） | 单位 | 含义 |
+|---|---|---|
+| `input_hot_s` | 秒 | 程序处理输入后这么久之内，不预留新的显存块（`top_up`）。0.060 |
+| `upload_hot_s` | 秒 | 程序处理输入后这么久之内，普通块的上传截止是"开始上传后 `hot_upload_ms`"。不传时取 `input_hot_s`。默认 0.060 |
+| `hot_upload_ms` | 毫秒 | 上面这段时间内每帧的上传截止。R5 起默认 4.0（原来 1.5），确认和冷读向右拖动重测见 A9 §55 |
+| `frame_budget_ms` | 毫秒 | 不在上传热窗口内时，普通块的上传截止是"这一帧开始后这么久"。12.0 |
+
+- 规则在 `frame/pace.rs`（`Pacing`），每帧开始时取一次"离上次输入多久"。
+- 测量开关（只在测量时用，都写毫秒）：`BLOCK01_A9_RUST_UPLOAD_HOT_MS`（换成秒写入 `upload_hot_s`）、`BLOCK01_A9_RUST_HOT_UPLOAD_MS`（保持毫秒写入 `hot_upload_ms`）。
+- 测量日志：建核心时记 `rust.config`（上面四项的实际值）；`gpu.frame` 新增 `deferred_growth`、`capacity_exceeded`。
+- Python 后备路径（`step1_gpu_binding.py`）的 `HOT_UPLOAD_BUDGET_MS` 仍是 1.5，不受影响。

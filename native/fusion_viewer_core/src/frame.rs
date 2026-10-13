@@ -5,10 +5,12 @@
 use crate::clock::monotonic;
 use crate::viewer::ViewerCore;
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 mod compose;
+mod pace;
 pub use compose::{draw_labels, ComposeKey};
+pub use pace::Pacing;
 
 /// What one frame did, for the Python side's measurement and pacing.
 #[derive(Debug, Default)]
@@ -129,8 +131,8 @@ pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) ->
     let started = Instant::now();
     let mut rep = FrameReport { frame: core.frames + 1, ..Default::default() };
     core.frames += 1;
-    let hot = core.input_hot();
-    let budget = Duration::from_secs_f64(core.cfg.frame_budget_ms / 1000.0);
+    let pacing = core.pacing();
+    let hot = pacing.input_hot();
     let reads = core.check_reads();
     rep.retry_ms = reads.retry_ms.unwrap_or(0.0);
     if let Some(why) = reads.give_up {
@@ -185,11 +187,7 @@ pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) ->
         }
     }
     let t_up = Instant::now();
-    let deadline = if hot {
-        Some(t_up + Duration::from_secs_f64(core.cfg.hot_upload_ms / 1000.0))
-    } else {
-        Some(started + budget)
-    };
+    let deadline = Some(pacing.deadline(started, t_up));
     let may_grow = monotonic() - core.last_input >= core.cfg.growth_quiet_s;
     let gpu = core.gpu.as_mut().unwrap();
     let prep = gpu.store.prepare(&gpu.gl, &items, &mandatory, &required, deadline, may_grow);

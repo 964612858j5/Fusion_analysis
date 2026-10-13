@@ -350,6 +350,8 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
                             ideal=int(report.get("ideal", -1)), channels=int(report.get("channels", 0)),
                             planes=int(report.get("planes", 0)), uploads=int(report.get("uploads", 0)),
                             deferred=int(report.get("deferred", 0)),
+                            deferred_growth=int(report.get("deferred_growth", 0)),
+                            capacity_exceeded=int(bool(report.get("capacity_exceeded"))),
                             paint_ms=round(float(report.get("total_ms", 0.0)), 3),
                             upload_ms=round(float(report.get("upload_ms", 0.0)), 3),
                             draw_ms=round(float(report.get("draw_ms", 0.0)), 3), backend="rust")

@@ -25,7 +25,12 @@ from .step1_gpu_layer import MODE_FUSION, MODE_OVERLAY, sanitize_roi_polygon
 #: the Python binding's timings (step1_gpu_binding: INPUT_HOT_MS,
 #: HOT_UPLOAD_BUDGET_MS, GROWTH_QUIET_MS) and the whole-frame budget
 INPUT_HOT_S = 0.060
-HOT_UPLOAD_MS = 1.5
+#: R5 (docs/v16_5_r5_zoom_plan.md): the upload hot window, apart from
+#: INPUT_HOT_S (which still keeps GPU blocks from being reserved ahead)
+UPLOAD_HOT_S = 0.060
+#: R5 (A9 §55): 4 ms, candidate D, after the confirmation and the cold
+#: drag-right rerun; was 1.5 (the Python path's)
+HOT_UPLOAD_MS = 4.0
 FRAME_BUDGET_MS = 12.0
 GROWTH_QUIET_S = 0.300
 READER_THREADS = 6
@@ -43,8 +48,20 @@ def raw_provider_of(provider):
     return None
 
 
+def _pacing():
+    """(upload_hot_s, hot_upload_ms): the defaults, or the two measurement
+    switches (R5 plan §2; milliseconds, as the §43 switches)."""
+    upload_hot_s, hot_upload_ms = UPLOAD_HOT_S, HOT_UPLOAD_MS
+    if os.environ.get("BLOCK01_A9_RUST_UPLOAD_HOT_MS"):
+        upload_hot_s = float(os.environ["BLOCK01_A9_RUST_UPLOAD_HOT_MS"]) / 1000.0
+    if os.environ.get("BLOCK01_A9_RUST_HOT_UPLOAD_MS"):
+        hot_upload_ms = float(os.environ["BLOCK01_A9_RUST_HOT_UPLOAD_MS"])
+    return upload_hot_s, hot_upload_ms
+
+
 def core_config(budgets, *, legacy_order=False) -> Dict[str, Any]:
     """`ViewerCore`'s config from the mount's `demo_budgets()`."""
+    upload_hot_s, hot_upload_ms = _pacing()
     return {
         "max_raw_texture_bytes": int(budgets.max_raw_texture_bytes),
         "max_fine_tiles": int(budgets.max_fine_tiles_per_viewport),
@@ -56,7 +73,8 @@ def core_config(budgets, *, legacy_order=False) -> Dict[str, Any]:
         "corrected_cache_bytes": int(_tiers.STEP1_VIEWER_CORRECTED_CACHE_BYTES),
         "threads": READER_THREADS,
         "input_hot_s": INPUT_HOT_S,
-        "hot_upload_ms": HOT_UPLOAD_MS,
+        "upload_hot_s": upload_hot_s,
+        "hot_upload_ms": hot_upload_ms,
         "frame_budget_ms": FRAME_BUDGET_MS,
         "growth_quiet_s": GROWTH_QUIET_S,
         "legacy_order": bool(legacy_order),
@@ -359,8 +377,12 @@ def build(mount, stack, budgets, *, legacy_order=None):
         sources = adapter.build_corrected_manifest(table, raw, strides)
     sockets = notice_pair()
     try:
-        from ..utils import tile_trace
-        core = fvc.ViewerCore(manifest, core_config(budgets, legacy_order=legacy_order),
+        from ..utils import perf_trace, tile_trace
+        config = core_config(budgets, legacy_order=legacy_order)
+        if perf_trace.enabled():      # which pacing was measured (R5 plan §2)
+            perf_trace.mark("rust.config", **{k: config[k] for k in (
+                "input_hot_s", "upload_hot_s", "hot_upload_ms", "frame_budget_ms")})
+        core = fvc.ViewerCore(manifest, config,
                               tuple(int(v) for v in roi) if roi else None,
                               sockets[1].fileno(), bool(tile_trace.ON), sources)
     except Exception:

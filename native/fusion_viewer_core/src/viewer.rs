@@ -36,7 +36,11 @@ pub struct Config {
     pub cpu_cache_bytes: usize,
     pub corrected_cache_bytes: usize,
     pub threads: usize,
+    /// input this recent: no GPU block is reserved ahead (`top_up`)
     pub input_hot_s: f64,
+    /// input this recent: ordinary uploads stop `hot_upload_ms` after the
+    /// upload starts (R5; the binding's `input_hot_s` when not given)
+    pub upload_hot_s: f64,
     pub hot_upload_ms: f64,
     pub frame_budget_ms: f64,
     pub growth_quiet_s: f64,
@@ -174,8 +178,11 @@ impl ViewerCore {
         self.plan_labels();
     }
 
-    pub fn input_hot(&self) -> bool {
-        monotonic() - self.last_input < self.cfg.input_hot_s
+    /// R5: the two hot windows, read once per frame.
+    pub fn pacing(&self) -> crate::frame::Pacing {
+        crate::frame::Pacing { since: monotonic() - self.last_input, input_hot_s: self.cfg.input_hot_s,
+                               upload_hot_s: self.cfg.upload_hot_s, hot_upload_ms: self.cfg.hot_upload_ms,
+                               frame_budget_ms: self.cfg.frame_budget_ms }
     }
 
     /// Hand the planner's wants to the pool: cache hits are delivered at

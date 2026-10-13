@@ -110,7 +110,7 @@ def main(data, outdir, channels, gestures_path):
             part = os.path.join(outdir, "part.jsonl")
             done_before = len(open(part).read().splitlines())
             subprocess.run([PY, os.path.join(HERE, "a9_xwheel.py"), str(px), str(py),
-                            g["pattern"], part])
+                            g["pattern"], part, win])     # R4: delivery evidence
             # §44 step 0 (codex): only THIS gesture's injections -- part.jsonl
             # accumulates (the shot watcher reads it), and copying it whole
             # every gesture repeated the earlier ones in xwheel.jsonl
@@ -122,13 +122,19 @@ def main(data, outdir, channels, gestures_path):
             # loading state, asked right after that shot
             plan_end = json.loads(open(part + ".plan").read().splitlines()[-1])["end"]
             time.sleep(max(0.0, plan_end + REFERENCE_S + 0.03 - time.monotonic()))
+            # R4 plan §2: the query's start and end, to set against the
+            # reference shot's real capture time
+            q0 = time.monotonic()
+            state = ctl.call("get_loading_state").get("result")
+            q1 = time.monotonic()
             with open(os.path.join(outdir, "loading.jsonl"), "a") as f:
-                f.write(json.dumps({"t": time.monotonic(), "since_stop_ms": round(
-                    (time.monotonic() - plan_end) * 1000.0, 1), "label": g["label"],
-                    "state": ctl.call("get_loading_state").get("result")}) + "\n")
+                f.write(json.dumps({"t": q0, "query_start": q0, "query_end": q1,
+                                    "since_stop_ms": round((q0 - plan_end) * 1000.0, 1),
+                                    "label": g["label"], "state": state}) + "\n")
             time.sleep(max(0.0, tail_end - time.monotonic()))
         marks.write(f"{time.monotonic():.6f}\tdone\n")
         marks.close()
+        time.sleep(1.2)          # R4 plan §2: a heartbeat after `done` covers the last gesture
         watch.terminate()
         watch.wait()
         if shots is not None:

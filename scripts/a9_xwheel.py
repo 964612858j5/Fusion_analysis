@@ -6,11 +6,17 @@ the program under test -- like a human hand: a busy program makes the
 notches queue up, it cannot delay them. Each injection is logged with
 `time.monotonic()` (the same clock as the perf log) as a JSON line.
 
-Usage: a9_xwheel.py X Y PATTERN LOG
+Usage: a9_xwheel.py X Y PATTERN LOG [TARGET_WINDOW]
 PATTERN: comma-separated tokens, each `+N@MS` (N notches in, MS ms apart),
 `-N@MS` (out), `wMS` (wait MS ms), or `>DX:DY:N@MS` (a left-button drag by
 DX, DY pixels in N motion steps MS ms apart; each step is one injection).
 Example: "+4@30,w300,+4@30,w300,>300:0:30@8".
+
+R4 plan §2 (delivery evidence, the same for every program): each logged
+injection also records the top-level window under the pointer when it was
+sent (`under`), whether that is TARGET_WINDOW's top-level (`on_target`,
+None without a target) and the X errors so far (`x_errors`); a target that
+cannot be found is logged as {"error": ...} in LOG.err.
 """
 
 import ctypes
@@ -26,6 +32,45 @@ x11.XFlush.argtypes = [ctypes.c_void_p]
 x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
 xtst.XTestFakeButtonEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
 xtst.XTestFakeMotionEvent.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_ulong]
+x11.XDefaultRootWindow.restype = ctypes.c_ulong
+x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+_W = ctypes.c_ulong
+x11.XQueryPointer.argtypes = [ctypes.c_void_p, _W, ctypes.POINTER(_W), ctypes.POINTER(_W),
+                              ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+                              ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+                              ctypes.POINTER(ctypes.c_uint)]
+x11.XQueryTree.argtypes = [ctypes.c_void_p, _W, ctypes.POINTER(_W), ctypes.POINTER(_W),
+                           ctypes.POINTER(ctypes.POINTER(_W)), ctypes.POINTER(ctypes.c_uint)]
+x11.XFree.argtypes = [ctypes.c_void_p]
+_ERRORS = [0]
+_HANDLER = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(
+    lambda _d, _e: _ERRORS.__setitem__(0, _ERRORS[0] + 1) or 0)
+x11.XSetErrorHandler.argtypes = [ctypes.c_void_p]
+
+
+def top_level(dpy, root, win):
+    """The root's child that contains `win` (its window-manager frame), or
+    None when `win` does not exist."""
+    errors = _ERRORS[0]
+    while True:
+        r, parent, kids, n = _W(), _W(), ctypes.POINTER(_W)(), ctypes.c_uint()
+        if not x11.XQueryTree(dpy, win, ctypes.byref(r), ctypes.byref(parent), ctypes.byref(kids),
+                              ctypes.byref(n)) or _ERRORS[0] != errors:
+            return None
+        if kids:
+            x11.XFree(kids)
+        if parent.value in (0, root):
+            return win
+        win = parent.value
+
+
+def under_pointer(dpy, root):
+    r, child = _W(), _W()
+    i = ctypes.c_int()
+    m = ctypes.c_uint()
+    x11.XQueryPointer(dpy, root, ctypes.byref(r), ctypes.byref(child), ctypes.byref(i), ctypes.byref(i),
+                      ctypes.byref(i), ctypes.byref(i), ctypes.byref(m))
+    return child.value
 
 
 def parse(pattern):
@@ -58,9 +103,16 @@ def parse(pattern):
 
 def main():
     x, y, pattern, log = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4]
+    target = int(sys.argv[5], 0) if len(sys.argv) > 5 else None
     dpy = x11.XOpenDisplay(None)
     if not dpy:
         raise SystemExit("cannot open display")
+    x11.XSetErrorHandler(_HANDLER)
+    root = x11.XDefaultRootWindow(dpy)
+    frame = top_level(dpy, root, target) if target is not None else None
+    if target is not None and frame is None:
+        with open(log + ".err", "a") as err:            # not in LOG: its readers want "t"
+            err.write(json.dumps({"error": f"target window {target:#x} not found"}) + "\n")
     xtst.XTestFakeMotionEvent(dpy, -1, x, y, 0)
     x11.XSync(dpy, 0)
     time.sleep(0.3)
@@ -105,7 +157,10 @@ def main():
                 xtst.XTestFakeButtonEvent(dpy, value, 1, 0)
                 xtst.XTestFakeButtonEvent(dpy, value, 0, 0)
             x11.XFlush(dpy)
+            under = under_pointer(dpy, root)
             out.write(json.dumps({"seq": seq, "t": t, "kind": kind,
+                                  "under": hex(under), "x_errors": _ERRORS[0],
+                                  "on_target": None if target is None else (frame is not None and under == frame),
                                   "button": value if kind == "notch" else None,
                                   # §44 step 0: where a move went (pairs it with its receipt)
                                   "xy": [int(round(x + value[0])), int(round(y + value[1]))]

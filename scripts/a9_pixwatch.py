@@ -9,6 +9,11 @@ Usage: a9_pixwatch.py WINDOW_ID X Y W ROWS SECONDS OUT
   change: {"t": monotonic, "n": capture index, "d": share of the sampled
   pixels that changed (blue byte)}; the last line holds the
   capture count and mean capture interval.
+
+R4 plan §2 (sampling must be auditable even when the watcher is stopped
+early): about once a second a line {"hb": monotonic, "n": captures so far,
+"miss": sampled rows since the last such line that could not be
+read}. It has no "t" key: readers that take changes by "t" skip it.
 """
 import ctypes
 import json
@@ -44,12 +49,14 @@ def main():
     dpy = x11.XOpenDisplay(None)
     ys = [y + (400 * k) // max(1, rows - 1) for k in range(rows)]
     last, n, t_start = None, 0, time.monotonic()
+    hb, miss = t_start, 0
     with open(out, "w", buffering=1) as f:
         while time.monotonic() - t_start < seconds:
             parts = []
             for yy in ys:
                 img = x11.XGetImage(dpy, win, x, yy, w, 1, ALLPLANES, ZPIXMAP)
                 if not img:
+                    miss += 1
                     continue
                 im = XImage.from_address(img)
                 parts.append(ctypes.string_at(im.data, im.bytes_per_line))
@@ -67,6 +74,9 @@ def main():
                     share = 1.0
                 f.write(json.dumps({"t": t, "n": n, "d": round(share, 4)}) + "\n")
             last = frame
+            if t - hb >= 1.0:
+                f.write(json.dumps({"hb": t, "n": n, "miss": miss}) + "\n")
+                hb, miss = t, 0
         f.write(json.dumps({"captures": n, "interval_ms": (time.monotonic() - t_start) * 1000.0 / max(1, n)}) + "\n")
 
 

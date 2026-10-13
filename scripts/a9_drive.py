@@ -432,7 +432,8 @@ class Driver(QtCore.QObject):
         log = os.environ.get("BLOCK01_PERF_LOG", "a9") + ".xwheel.jsonl"
         perf_trace.mark("a9.xwheel", n=self.i, x=g.x(), y=g.y(), layers=len(layers), log=log)
         proc = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "a9_xwheel.py"), str(g.x()), str(g.y()), a["pattern"], log])
+                                 "a9_xwheel.py"), str(g.x()), str(g.y()), a["pattern"], log,
+                                 str(int(self.w.winId()))])     # R4: delivery evidence
 
         def poll():
             if proc.poll() is None:

@@ -25,7 +25,8 @@ impl ViewerCore {
         let store = Store::new(self.cfg.max_raw_texture_bytes, max_layers, caps);
         let width = crate::family::ALL.iter().map(|f| store.layers(*f) as usize).max().unwrap_or(1);
         let vt = Vt::new(&self.pyr, caps, width);
-        self.gpu = Some(Gpu { gl, store, vt, render, composed: None, composed_for: None });
+        self.gpu = Some(Gpu { gl, store, vt, render, composed: None, composed_for: None,
+                              timers: Default::default() });
         self.update_total();
         Ok(())
     }
@@ -33,6 +34,7 @@ impl ViewerCore {
     /// Delete every GL name (context current: `aboutToBeDestroyed`).
     pub fn release_gl(&mut self) {
         if let Some(mut g) = self.gpu.take() {
+            unsafe { g.timers.destroy(&g.gl, &self.trace) };
             g.store.clear(&g.gl);
             unsafe { g.render.destroy(&g.gl) };
         }
@@ -40,6 +42,9 @@ impl ViewerCore {
 
     /// The context is already gone: forget the names without GL calls.
     pub fn forget_gl(&mut self) {
+        if let Some(g) = self.gpu.as_mut() {
+            g.timers.forget(&self.trace);
+        }
         self.gpu = None;
     }
 

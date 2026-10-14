@@ -67,9 +67,13 @@ def release_hidden(reason: str) -> int:
         if not getattr(layer, "hidden", False):
             continue
         try:
-            released += int(layer.release_to_coarse())
+            got = int(layer.release_to_coarse())
         except Exception:                                    # noqa: BLE001 -- never blocks the caller
             continue
+        released += got
+        if got:          # R6 §12.4, measurement: which viewer gave back what
+            perf_trace.mark("gpu.memory_released_by", reason=reason, bytes=got,
+                            viewer=f"{id(layer):x}", kind=type(layer).__name__)
     if released:
         perf_trace.mark("gpu.memory_released", reason=reason, bytes=released)
     return released

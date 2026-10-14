@@ -36,6 +36,7 @@ pub mod plan;
 pub mod pool;
 pub mod posread;
 pub mod reader;
+pub mod read_split;
 pub mod reduce;
 pub mod render;
 pub mod reserve;

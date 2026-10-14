@@ -49,6 +49,10 @@ pub(super) fn parse(config: &Bound<'_, PyDict>) -> PyResult<crate::viewer::Confi
         frame_budget_ms: cfg_f(config, "frame_budget_ms")?,
         growth_quiet_s: cfg_f(config, "growth_quiet_s")?,
         legacy_order: cfg_b(config, "legacy_order")?,
+        draw_log: match config.get_item("draw_log")? {
+            Some(v) if !v.is_none() => v.extract()?,
+            _ => false,
+        },
         result_bytes: match config.get_item("result_bytes")? {
             Some(v) => v.extract()?,
             None => crate::pool::RESULT_BYTES,

@@ -106,9 +106,13 @@ pub fn decode_into(frame: &[u8], out: &mut [u8]) -> Result<()> {
             let bsize = if last_short { leftover } else { blocksize };
             let dest = &mut out[b * blocksize..b * blocksize + bsize];
             if flags & DOSHUFFLE != 0 && typesize > 1 {
+                let lz = crate::read_split::span("lz4");
                 decode_block(&frame[..cbytes], start, flags, typesize, bsize, last_short, &mut tmp[..bsize])?;
+                drop(lz);
+                let _un = crate::read_split::span("unshuffle");
                 unshuffle(&tmp[..bsize], typesize, dest);
             } else {
+                let _lz = crate::read_split::span("lz4");
                 decode_block(&frame[..cbytes], start, flags, typesize, bsize, last_short, dest)?;
             }
         }

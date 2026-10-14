@@ -64,6 +64,9 @@ def main():
     mount.close()
     rig.app.processEvents()
     print(json.dumps(result, default=str), flush=True)
+    from block01.utils import tile_trace
+    if tile_trace.ON:          # R6: os._exit skips the atexit dump
+        tile_trace.dump()
     os._exit(0)
 
 

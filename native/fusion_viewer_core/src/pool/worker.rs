@@ -32,6 +32,7 @@ pub(super) fn worker(s: Arc<Shared>) {
                 if !s.read_delay.is_zero() {
                     std::thread::sleep(s.read_delay);
                 }
+                crate::read_split::reset();
                 let (w0, c0) = (crate::clock::monotonic(), crate::clock::thread_cpu());
                 let still = || s.queue.lock().unwrap().wanted.contains(&key);
                 let got = if s.faults.read_fails(key) {
@@ -39,10 +40,18 @@ pub(super) fn worker(s: Arc<Shared>) {
                 } else {
                     read_tile(&s, key, &still)
                 };
-                let timing = |err: bool, stale: bool| vec![
-                    ("wall_ms", (crate::clock::monotonic() - w0) * 1000.0),
-                    ("cpu_ms", (crate::clock::thread_cpu() - c0) * 1000.0),
-                    ("err", err as i32 as f64), ("stale", stale as i32 as f64)];
+                // R7a: the read's own stages, taken as the read returns
+                // (`read_split`; empty when off); `rest_ms` is against the
+                // read alone, the record's `wall_ms` stays as it was
+                let split = crate::read_split::take((crate::clock::monotonic() - w0) * 1000.0);
+                let timing = |err: bool, stale: bool| {
+                    let mut v = vec![
+                        ("wall_ms", (crate::clock::monotonic() - w0) * 1000.0),
+                        ("cpu_ms", (crate::clock::thread_cpu() - c0) * 1000.0),
+                        ("err", err as i32 as f64), ("stale", stale as i32 as f64)];
+                    v.extend(split.iter().copied());
+                    v
+                };
                 match got {
                     Ok(None) => {                    // cancelled: the plan left it
                         s.queue.lock().unwrap().reading.remove(&key);

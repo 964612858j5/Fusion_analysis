@@ -8,7 +8,9 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 mod compose;
+mod drawlog;
 mod pace;
+pub mod phase_time;
 pub use compose::{draw_labels, ComposeKey};
 pub use pace::Pacing;
 
@@ -209,9 +211,12 @@ pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) ->
     // base layers over budget nothing new is drawn: the last frame stays
     let t_draw = Instant::now();
     rep.base_overflow = base_overflow;
-    let Some(rows) = compose::draw(core, &mut rep, fbo, w, h, view, base_overflow) else { return rep };
+    let mut pc = phase_time::PhaseClock::new(core.cfg.draw_log && core.trace.on(), rep.frame);
+    let Some((rows, made)) = compose::draw(core, &mut rep, fbo, w, h, view, base_overflow, &mut pc) else { return rep };
     let gpu = core.gpu.as_ref().unwrap();
     rep.draw_ms = t_draw.elapsed().as_secs_f64() * 1000.0;
+    phase_time::record(&core.trace, &pc, rep.draw_ms, rep.composed, made, rows.len(), core.attaches,
+                       gpu.timers.missing);
     // 5. what this frame owes and shows (the A9 coverage record)
     rep.channels = rows.len();
     rep.planes = rows.iter().map(|r| r.1.len()).sum();
@@ -235,6 +240,7 @@ pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) ->
         }
     }
     rep.view_id = view_plan.map_or(0, |v| v.epoch);
+    drawlog::record(core, rep.frame, view, rep.level, rep.composed, &rows);
     rep.total_ms = started.elapsed().as_secs_f64() * 1000.0;
     rep.label_ms = std::mem::take(&mut core.lab.gui_ms);
     rep

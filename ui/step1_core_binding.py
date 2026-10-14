@@ -78,6 +78,9 @@ def core_config(budgets, *, legacy_order=False) -> Dict[str, Any]:
         "frame_budget_ms": FRAME_BUDGET_MS,
         "growth_quiet_s": GROWTH_QUIET_S,
         "legacy_order": bool(legacy_order),
+        # R6 measurement only (A9 §56): with the tile trace on, the core
+        # records per paint what it drew and what it held (`frame::drawlog`)
+        "draw_log": os.environ.get("BLOCK01_A9_DRAW_LOG") == "1",
         # test only (R2 lifecycle: the sampler-capacity fallback)
         "test_block_units": (int(os.environ["BLOCK01_RUST_TEST_BLOCK_UNITS"])
                              if os.environ.get("BLOCK01_RUST_TEST_BLOCK_UNITS") else None),

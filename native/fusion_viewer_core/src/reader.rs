@@ -63,8 +63,12 @@ impl RawSource {
             return Ok(vec![0u8; rows * t.block_cols * t.format.sample_bytes]);
         }
         let mut raw = vec![0u8; count as usize];
+        let span = crate::read_split::span("file");
         read_exact_at(&self.file, &mut raw, offset)
             .map_err(|e| CoreError::Io(format!("read {count} B at {offset}: {e}")))?;
+        drop(span);
+        crate::read_split::count(count as usize, 1, crate::read_split::SRC_TIFF);
+        let _dec = crate::read_split::span("tiffdec");
         decode_block(&raw, &t.format, rows, t.block_cols)
     }
 
@@ -84,6 +88,7 @@ impl RawSource {
         for by in r.y0 / br..r.y1.div_ceil(br) {
             for bx in r.x0 / bc..r.x1.div_ceil(bc) {
                 let block = self.read_block(r.level, r.channel, by, bx)?;
+                let _copy = crate::read_split::span("copy");
                 copy_overlap(&block, t, by, bx, r, &mut out, w);
             }
         }

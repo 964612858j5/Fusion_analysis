@@ -5,6 +5,7 @@
 //! composes no channel (`Step1GpuLayer.set_labels`: `image_submissions`
 //! stays, `label_compositions` grows; R3 plan §2.1).
 
+use super::phase_time::{self as pt, PhaseClock};
 use super::{drawn_rows, FrameReport};
 use crate::geom::{roi_scissor_box, TileAt};
 use crate::plan::Ch;
@@ -33,22 +34,34 @@ pub struct ComposeKey {
     base_overflow: bool,
 }
 
-/// Steps 4 of `paint`; the rows drawn, or None when GL failed (`rep.error`
-/// says why; nothing was blitted).
+/// Steps 4 of `paint`; the rows drawn and whether the targets were made
+/// anew, or None when GL failed (`rep.error` says why; nothing was
+/// blitted). `pc` times the segments (R7a, `phase_time`; inert when off).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw(core: &mut ViewerCore, rep: &mut FrameReport, fbo: u32, w: i32, h: i32,
-                   view: [f64; 4], base_overflow: bool) -> Option<Vec<(Ch, Vec<TileAt>)>> {
+                   view: [f64; 4], base_overflow: bool, pc: &mut PhaseClock)
+                   -> Option<(Vec<(Ch, Vec<TileAt>)>, bool)> {
     let rows = if base_overflow { Vec::new() } else { drawn_rows(core) };
+    let viewer_frames = core.frames;
     let gpu = core.gpu.as_mut().unwrap();
+    if pc.on {
+        unsafe { gpu.timers.collect(&gpu.gl, &core.trace, viewer_frames) };
+    }
+    unsafe { pc.begin(&gpu.gl, &mut gpu.timers, pt::TABLES) };
     if !base_overflow {
         gpu.vt.sync_pages(&rows, &gpu.store);
     }
     gpu.vt.sync_meta(&mut gpu.store);
+    unsafe { pc.end(&gpu.gl, &mut gpu.timers, pt::TABLES) };
     // the display's rows in order (a channel may have several, Fusion
     // groups), those of channels drawn now
     let drawn: std::collections::HashSet<_> = rows.iter().map(|(c, _)| *c).collect();
     let params_rows: Vec<_> = core.display.iter().filter(|(c, _)| drawn.contains(c)).copied().collect();
-    let (gl, render) = (&gpu.gl, &mut gpu.render);
-    let made = match unsafe { render.ensure_targets(gl, w.max(1), h.max(1)) } {
+    let (gl, render, timers) = (&gpu.gl, &mut gpu.render, &mut gpu.timers);
+    unsafe { pc.begin(gl, timers, pt::TARGETS) };
+    let made = unsafe { render.ensure_targets(gl, w.max(1), h.max(1)) };
+    unsafe { pc.end(gl, timers, pt::TARGETS) };
+    let made = match made {
         Ok(m) => m,
         Err(e) => {
             rep.error = e;
@@ -69,12 +82,18 @@ pub(super) fn draw(core: &mut ViewerCore, rep: &mut FrameReport, fbo: u32, w: i3
         if composed {
             if !base_overflow {
                 let params = gpu.vt.params(&params_rows);
-                if let Err(e) = render.upload(gl, &mut gpu.vt, &params) {
+                pc.begin(gl, timers, pt::UPLOAD);
+                let up = render.upload(gl, &mut gpu.vt, &params);
+                pc.end(gl, timers, pt::UPLOAD);
+                if let Err(e) = up {
                     rep.error = e;
                     return None;
                 }
             }
-            if let Err(e) = render.compose(gl, &gpu.vt, &gpu.store, rows_drawn, v32, core.smooth, core.fusion, &clip) {
+            pc.begin(gl, timers, pt::COMPOSE);
+            let done = render.compose(gl, &gpu.vt, &gpu.store, rows_drawn, v32, core.smooth, core.fusion, &clip);
+            pc.end(gl, timers, pt::COMPOSE);
+            if let Err(e) = done {
                 rep.error = e;
                 gpu.composed = None;
                 return None;
@@ -88,7 +107,10 @@ pub(super) fn draw(core: &mut ViewerCore, rep: &mut FrameReport, fbo: u32, w: i3
             let t = std::time::Instant::now();
             // label uploads within ~3 ms a paint: the rest come next paint
             let budget = Some(std::time::Duration::from_secs_f64(LABEL_UPLOAD_MS / 1000.0));
-            match render.compose_labels(gl, &mut core.labels, v32, &clip, budget) {
+            pc.begin(gl, timers, pt::LABELS);
+            let labelled = render.compose_labels(gl, &mut core.labels, v32, &clip, budget);
+            pc.end(gl, timers, pt::LABELS);
+            match labelled {
                 Err(e) => {
                     rep.error = e;
                     return None;
@@ -103,10 +125,12 @@ pub(super) fn draw(core: &mut ViewerCore, rep: &mut FrameReport, fbo: u32, w: i3
             core.lab.gui_ms += ms;
             core.lab.split_ms[2] += ms;
         }
+        pc.begin(gl, timers, pt::BLIT);
         render.blit(gl, fbo, w, h, core.labels.shown);
+        pc.end(gl, timers, pt::BLIT);
     }
     rep.composed = composed;
-    Some(rows)
+    Some((rows, made))
 }
 
 /// A new mask snapshot drawn over the picture as it stands, at once and

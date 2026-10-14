@@ -60,11 +60,14 @@ impl ArrayMeta {
     /// One chunk at its full stored shape, row-major f32 (`fill` if absent).
     pub fn read_chunk(&self, cy: usize, cx: usize) -> Result<Vec<f32>> {
         let n = self.chunks[0] * self.chunks[1];
+        let span = crate::read_split::span("file");
         let frame = match std::fs::read(self.chunk_path(cy, cx)) {
             Ok(b) => b,
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(vec![self.fill; n]),
             Err(e) => return Err(CoreError::Io(format!("{}: {e}", self.chunk_path(cy, cx).display()))),
         };
+        drop(span);
+        crate::read_split::count(frame.len(), 1, crate::read_split::SRC_ZARR);
         CHUNKS_DECODED.fetch_add(1, Ordering::Relaxed);
         let mut values = vec![0f32; n];
         // the chunk's bytes go straight into the f32 buffer (little-endian
@@ -108,6 +111,7 @@ impl ArrayMeta {
                     return Ok(None);
                 }
                 let chunk = self.read_chunk(cy, cx)?;
+                let _copy = crate::read_split::span("copy");
                 let (ry0, ry1) = (y0.max(cy * ch), y1.min((cy + 1) * ch));
                 let (rx0, rx1) = (x0.max(cx * cw), x1.min((cx + 1) * cw));
                 for y in ry0..ry1 {

@@ -103,6 +103,7 @@ fn raw_tile(raw: &RawSource, kind: RawKind, index: usize, level: usize, rect: [i
                                            x0: cx0 as usize, x1: cx1 as usize })?;
     let (ly0, lx0, h, w) = ((cy0 - y0) as usize, (cx0 - x0) as usize, (cy1 - cy0) as usize, (cx1 - cx0) as usize);
     let local = [ly0, ly0 + h, lx0, lx0 + w];
+    let _pack = crate::read_split::span("pack");
     Ok(match kind {
         RawKind::U8 => {
             let mut v = vec![0u8; rows * cols];
@@ -184,6 +185,7 @@ fn corrected_tile(region: &CorrectedRegion, planes: &std::collections::HashMap<u
             r
         }
     };
+    let _pack = crate::read_split::span("pack");
     let values = red.values.iter().zip(&red.valid).map(|(&v, &ok)| if ok { v } else { f32::NAN }).collect();
     Ok(Some(Tile { rows: red.rows, cols: red.cols, values: Values::F32(values), valid: Valid::Finite }))
 }

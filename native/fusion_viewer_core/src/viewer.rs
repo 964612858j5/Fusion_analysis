@@ -53,6 +53,9 @@ pub struct Config {
     pub test_block_units: Option<usize>,
     /// test only: request fine tiles channel by channel (the old order)
     pub legacy_order: bool,
+    /// R6 measurement only: with the trace on, record per paint what was
+    /// drawn and what was in hand (`frame::drawlog`); default off
+    pub draw_log: bool,
 }
 
 mod failures;
@@ -70,6 +73,8 @@ pub struct Gpu {
     pub composed: Option<crate::frame::ComposeKey>,
     /// the view and clip `final` was composed for (masks drawn alone use them)
     pub composed_for: Option<([f32; 4], crate::render::Clip)>,
+    /// R7a measurement only: this context's GPU timer queries
+    pub timers: crate::frame::phase_time::GpuTimers,
 }
 
 pub struct ViewerCore {
@@ -120,6 +125,7 @@ impl ViewerCore {
                raw_kind: crate::step1_tile::RawKind, budget: usize,
                notifier: Option<Arc<Notifier>>, trace: Arc<Trace>) -> ViewerCore {
         let roi = sources.roi;
+        crate::read_split::set_on(cfg.draw_log && trace.on());     // R7a, measurement only
         let missing: Vec<Ch> = sources.names.keys().copied().filter(|c| sources.missing(*c).is_some()).collect();
         let shapes = source.manifest().levels.iter().map(|l| (l.height, l.width)).collect();
         let pyr = Pyramid { shapes };

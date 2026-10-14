@@ -773,6 +773,8 @@ def attach(window):
         path = DEFAULT_SCENARIO
     with open(path, encoding="utf-8") as f:
         actions = json.load(f)
+    from . import a9_drive_r6                  # R6 actions (measurement only)
+    a9_drive_r6.install(Driver)
     driver = Driver(window, actions)
     QtCore.QTimer.singleShot(0, driver.start)
     print(f"[A9] driver attached: {path} ({len(driver.actions)} actions)")

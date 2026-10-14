@@ -333,7 +333,7 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
         if tile_trace.ON and state != getattr(self, "_traced_coverage", None):
             self._traced_coverage = state
             tile_trace.stamp("cov", level=None if state[0] < 0 else state[0], wanted=state[1],
-                             shown=state[2], vp=state[3])
+                             shown=state[2], vp=state[3], viewer=self.a9_tag())
         growths = self.core.drain_growths()
         if growths and not self._pressure_pending:
             # A9 §36 / R3 plan §2.2: the viewers grew -- hidden ones give
@@ -343,10 +343,13 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
             QtCore.QTimer.singleShot(0, self._pressure_check)
         if perf_trace.enabled():
             for at, layers, alloc_ms, warm_ms, status, error in growths:   # §48: block creation
-                perf_trace.mark("gpu.grow", frame=self._a9_frame, at=round(at, 6), layers=layers,
+                perf_trace.mark("gpu.grow", frame=self._a9_frame, viewer=self.a9_tag(),
+                                at=round(at, 6), layers=layers,
                                 alloc_ms=round(alloc_ms, 3), warm_ms=round(warm_ms, 3),
                                 fb_status=hex(status), gl_error=hex(error))
-            perf_trace.mark("gpu.frame", frame=self._a9_frame, level=int(report.get("level", -1)),
+            perf_trace.mark("gpu.frame", frame=self._a9_frame, rust_frame=int(report.get("frame", 0)),
+                            viewer=self.a9_tag(),
+                            level=int(report.get("level", -1)),
                             ideal=int(report.get("ideal", -1)), channels=int(report.get("channels", 0)),
                             planes=int(report.get("planes", 0)), uploads=int(report.get("uploads", 0)),
                             deferred=int(report.get("deferred", 0)),
@@ -365,13 +368,13 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
 
     def _presented(self) -> None:
         if tile_trace.ON:
-            tile_trace.stamp("present", frame=self._a9_frame)
+            tile_trace.stamp("present", frame=self._a9_frame, viewer=self.a9_tag())
             self._merge_trace()
         pending, self._a9_pending = self._a9_pending, None
         if pending is None:
             return
         frame, result, seq, _report = pending
-        perf_trace.mark("gpu.present", frame=frame, seq=seq)
+        perf_trace.mark("gpu.present", frame=frame, seq=seq, viewer=self.a9_tag())
         coverage_probe.publish(result, "gpu", frame)
 
     def _merge_trace(self) -> None:
@@ -383,7 +386,8 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
                 break
             name = key and self._channel_name(key[0])
             k = None if key is None else (name, int(key[1]), int(key[2]), int(key[3]))
-            fields = {}
+            # R6 §12.4: which viewer (Step1 / Step3 are two layers)
+            fields = {"viewer": self.a9_tag()}
             for n, v in extra.items():                 # the fields a9_tiletl reads
                 if n == "fine":
                     fields["tier"] = "fine" if v else "coarse"
@@ -392,6 +396,10 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
                 else:
                     fields[n] = int(v) if float(v).is_integer() and n == "ok" else round(float(v), 3)
             tile_trace._records.append((t, stage, k, fields))
+
+    def a9_tag(self) -> str:
+        """Measurement only: this layer's name in exported records."""
+        return f"{id(self):x}"
 
     def _channel_name(self, index):
         names = getattr(self, "channel_names", None)
@@ -438,6 +446,8 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
         else:
             self.core.forget_gl()
         self._initialized = False
+        if tile_trace.ON:
+            self._merge_trace()       # R7a: what the GL release itself recorded (lost GPU timers)
         # what is left after the release (Step1GpuLayer's keys: 0 when clean)
         left = dict(self.core.stats())
         remaining = {"raw_textures_remaining": int(left.get("gpu_tiles", 0)),

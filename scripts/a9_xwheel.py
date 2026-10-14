@@ -9,8 +9,16 @@ notches queue up, it cannot delay them. Each injection is logged with
 Usage: a9_xwheel.py X Y PATTERN LOG [TARGET_WINDOW]
 PATTERN: comma-separated tokens, each `+N@MS` (N notches in, MS ms apart),
 `-N@MS` (out), `wMS` (wait MS ms), or `>DX:DY:N@MS` (a left-button drag by
-DX, DY pixels in N motion steps MS ms apart; each step is one injection).
-Example: "+4@30,w300,+4@30,w300,>300:0:30@8".
+DX, DY pixels in N motion steps MS ms apart; each step is one injection),
+or `/DX:DY:N@MS:BACK` (R6 plan §3, a "stroke": the same drag, but the button
+is released AT THE END POINT, then the pointer moves back to the start with
+no button held and the injector waits BACK ms; logged as kinds "move",
+"release_end" (xy = where it was released) and "hover").
+`cX:Y` clicks the left button at the absolute screen point (X, Y) (R6 S2:
+the Tissue Preview), logged as kind "click"; a stroke first moves the
+pointer to its start (kind "hover"), so it can follow a click elsewhere.
+Example: "+4@30,w300,+4@30,w300,>300:0:30@8", "/900:0:90@8:50",
+"c120:300,w100,/900:0:45@8:50".
 
 R4 plan §2 (delivery evidence, the same for every program): each logged
 injection also records the top-level window under the pointer when it was
@@ -21,6 +29,7 @@ cannot be found is logged as {"error": ...} in LOG.err.
 
 import ctypes
 import json
+import os
 import sys
 import time
 
@@ -82,6 +91,24 @@ def parse(pattern):
         if tok[0] == "w":
             steps.append(("wait", float(tok[1:]) / 1000.0))
             continue
+        if tok[0] == "c":
+            cx, cy = tok[1:].split(":")
+            steps.append(("click", (int(cx), int(cy))))
+            continue
+        if tok[0] == "/":
+            spec, rest = tok[1:].split("@")
+            ms, back = rest.split(":")
+            dx, dy, n = spec.split(":")
+            steps.append(("hover", (0.0, 0.0)))
+            steps.append(("press", None))
+            for k in range(1, int(n) + 1):
+                steps.append(("wait", float(ms) / 1000.0))
+                steps.append(("move", (float(dx) * k / int(n), float(dy) * k / int(n))))
+            steps.append(("wait", float(ms) / 1000.0))
+            steps.append(("release_end", (float(dx), float(dy))))
+            steps.append(("hover", (0.0, 0.0)))
+            steps.append(("wait", float(back) / 1000.0))
+            continue
         if tok[0] == ">":
             spec, ms = tok[1:].split("@")
             dx, dy, n = spec.split(":")
@@ -117,6 +144,10 @@ def main():
     x11.XSync(dpy, 0)
     time.sleep(0.3)
     due = time.monotonic()
+    # R6 S2: an absolute first deadline (time.monotonic()), so a stroke can
+    # start a fixed time after a jump issued by another process
+    if os.environ.get("A9_XWHEEL_T0"):
+        due = max(due, float(os.environ["A9_XWHEEL_T0"]))
     seq = 0
     steps = parse(pattern)
     # §44 step 0: the planned moment of the last logged injection, written
@@ -126,7 +157,7 @@ def main():
     for kind, value in steps:
         if kind == "wait":
             end += value
-        elif kind in ("move", "notch"):
+        elif kind in ("move", "notch", "release_end", "hover", "click"):
             last_due = end
     with open(log + ".plan", "a") as plan:
         plan.write(json.dumps({"start": due, "end": last_due, "pattern": pattern}) + "\n")
@@ -151,7 +182,15 @@ def main():
                 x11.XFlush(dpy)
                 continue
             seq += 1
-            if kind == "move":
+            if kind == "click":           # R6: absolute point, press + release
+                xtst.XTestFakeMotionEvent(dpy, -1, value[0], value[1], 0)
+                xtst.XTestFakeButtonEvent(dpy, 1, 1, 0)
+                xtst.XTestFakeButtonEvent(dpy, 1, 0, 0)
+            elif kind == "release_end":   # R6: release where the stroke ended
+                xtst.XTestFakeButtonEvent(dpy, 1, 0, 0)
+            elif kind == "hover":         # R6: back to the start, no button held
+                xtst.XTestFakeMotionEvent(dpy, -1, x, y, 0)
+            elif kind == "move":
                 xtst.XTestFakeMotionEvent(dpy, -1, int(round(x + value[0])), int(round(y + value[1])), 0)
             else:
                 xtst.XTestFakeButtonEvent(dpy, value, 1, 0)
@@ -163,8 +202,9 @@ def main():
                                   "on_target": None if target is None else (frame is not None and under == frame),
                                   "button": value if kind == "notch" else None,
                                   # §44 step 0: where a move went (pairs it with its receipt)
-                                  "xy": [int(round(x + value[0])), int(round(y + value[1]))]
-                                  if kind == "move" else None,
+                                  "xy": list(value) if kind == "click" else
+                                  [int(round(x + value[0])), int(round(y + value[1]))]
+                                  if kind in ("move", "release_end", "hover") else None,
                                   "late_ms": round((t - due) * 1000.0, 3)}) + "\n")
     x11.XSync(dpy, 0)
 

@@ -34,6 +34,21 @@ HOT_UPLOAD_MS = 4.0
 FRAME_BUDGET_MS = 12.0
 GROWTH_QUIET_S = 0.300
 READER_THREADS = 6
+#: R7b B1.1: decoded corrected chunks kept per viewer, carved out of the
+#: corrected tile cache's allowance (`STEP1_VIEWER_CORRECTED_CACHE_BYTES`).
+#: Off by default (R7b B1 results: no consistent gain yet); on with
+#: `BLOCK01_STEP1_CHUNK_CACHE=1`. Off, the tile cache keeps it all.
+CHUNK_CACHE_BYTES = 256 * 1024 * 1024
+
+
+def _reader_threads():
+    """READER_THREADS, or the R7b B1.3 measurement switch."""
+    v = os.environ.get("BLOCK01_A9_READER_THREADS")
+    return int(v) if v else READER_THREADS
+
+
+def _chunk_cache_bytes():
+    return CHUNK_CACHE_BYTES if os.environ.get("BLOCK01_STEP1_CHUNK_CACHE") == "1" else 0
 
 
 def raw_provider_of(provider):
@@ -71,7 +86,8 @@ def core_config(budgets, *, legacy_order=False) -> Dict[str, Any]:
                                          else int(budgets.max_coarse_plane_bytes_per_channel)),
         "cpu_cache_bytes": int(_tiers.STEP1_VIEWER_RAW_CACHE_BYTES),
         "corrected_cache_bytes": int(_tiers.STEP1_VIEWER_CORRECTED_CACHE_BYTES),
-        "threads": READER_THREADS,
+        "threads": _reader_threads(),
+        "chunk_cache_bytes": _chunk_cache_bytes(),
         "input_hot_s": INPUT_HOT_S,
         "upload_hot_s": upload_hot_s,
         "hot_upload_ms": hot_upload_ms,
@@ -384,7 +400,8 @@ def build(mount, stack, budgets, *, legacy_order=None):
         config = core_config(budgets, legacy_order=legacy_order)
         if perf_trace.enabled():      # which pacing was measured (R5 plan §2)
             perf_trace.mark("rust.config", **{k: config[k] for k in (
-                "input_hot_s", "upload_hot_s", "hot_upload_ms", "frame_budget_ms")})
+                "input_hot_s", "upload_hot_s", "hot_upload_ms", "frame_budget_ms", "threads",
+                "chunk_cache_bytes")})
         core = fvc.ViewerCore(manifest, config,
                               tuple(int(v) for v in roi) if roi else None,
                               sockets[1].fileno(), bool(tile_trace.ON), sources)

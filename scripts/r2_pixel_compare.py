@@ -185,7 +185,11 @@ def probe(args):
               "unsupported": stats.get("unsupported", ""), "missing_windows": stats.get("missing_windows"),
               "roi_polygon_error": stats.get("roi_polygon_error"),
               "unavailable": stats.get("unavailable"),
-              "sampler_split": (stats.get("core") or {}).get("sampler_split")}
+              "sampler_split": (stats.get("core") or {}).get("sampler_split"),
+              # R7b B1.1: the decoded-chunk cache's counters (Rust only)
+              "chunk": {k: v for k, v in (stats.get("core") or {}).items() if k.startswith("chunk_")},
+              "cpu_bytes": (stats.get("core") or {}).get("cpu_bytes"),
+              "cpu_bound_bytes": (stats.get("core") or {}).get("cpu_bound_bytes")}
     mount.close()
     rig.app.processEvents()
     print(json.dumps(result, default=str), flush=True)

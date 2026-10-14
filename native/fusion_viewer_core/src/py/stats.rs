@@ -19,6 +19,17 @@ pub(super) fn stats<'py>(py: Python<'py>, core: &mut crate::viewer::ViewerCore) 
                    ("cpu_bytes", m.total), ("cpu_bound_bytes", m.bound)] {
         d.set_item(k, v)?;
     }
+    // R7b B1.1: the decoded-chunk cache
+    let cs = core.chunk_cache.as_ref().map(|c| c.stats()).unwrap_or_default();
+    for (k, v) in [("chunk_held_bytes", cs.held_bytes), ("chunk_decoding_bytes", cs.decoding_bytes),
+                   ("chunk_referenced_bytes", cs.referenced_bytes),
+                   ("chunk_budget_bytes", core.chunk_cache.as_ref().map_or(0, |c| c.budget()))] {
+        d.set_item(k, v)?;
+    }
+    for (k, v) in [("chunk_hits", cs.hits), ("chunk_misses", cs.misses), ("chunk_bypass", cs.bypass),
+                   ("chunk_waits", cs.waits)] {
+        d.set_item(k, v)?;
+    }
     d.set_item("held_tiles", core.held.len())?;
     d.set_item("frames", core.frames)?;
     d.set_item("unavailable", core.planner.unavailable.iter().copied().collect::<Vec<_>>())?;

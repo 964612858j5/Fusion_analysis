@@ -53,6 +53,9 @@ pub struct Config {
     pub test_block_units: Option<usize>,
     /// test only: request fine tiles channel by channel (the old order)
     pub legacy_order: bool,
+    /// R7b B1.1: decoded corrected chunks kept per viewer, carved out of
+    /// `corrected_cache_bytes` (0: off)
+    pub chunk_cache_bytes: usize,
     /// R6 measurement only: with the trace on, record per paint what was
     /// drawn and what was in hand (`frame::drawlog`); default off
     pub draw_log: bool,
@@ -88,6 +91,8 @@ pub struct ViewerCore {
     pub pool: Pool,
     pub notifier: Option<Arc<Notifier>>,
     pub trace: Arc<Trace>,
+    /// R7b B1.1 (None when off)
+    pub chunk_cache: Option<Arc<crate::chunk_cache::ChunkCache>>,
     pub gpu: Option<Gpu>,
     /// the rows drawn, in order (Fusion: a channel may have several)
     pub display: Vec<(Ch, RowParams)>,
@@ -126,6 +131,19 @@ impl ViewerCore {
                notifier: Option<Arc<Notifier>>, trace: Arc<Trace>) -> ViewerCore {
         let roi = sources.roi;
         crate::read_split::set_on(cfg.draw_log && trace.on());     // R7a, measurement only
+        let mut sources = sources;
+        let chunk_bytes = cfg.chunk_cache_bytes.min(cfg.corrected_cache_bytes);
+        let chunk_cache = (chunk_bytes > 0).then(|| Arc::new(crate::chunk_cache::ChunkCache::new(chunk_bytes)));
+        if let Some(cc) = &chunk_cache {
+            for src in sources.channels.values_mut() {
+                if let crate::corrected::Source::Corrected { region, planes } = src {
+                    region.array.cache = Some(Arc::clone(cc));
+                    for p in planes.values_mut() {
+                        p.array.cache = Some(Arc::clone(cc));
+                    }
+                }
+            }
+        }
         let missing: Vec<Ch> = sources.names.keys().copied().filter(|c| sources.missing(*c).is_some()).collect();
         let shapes = source.manifest().levels.iter().map(|l| (l.height, l.width)).collect();
         let pyr = Pyramid { shapes };
@@ -139,10 +157,10 @@ impl ViewerCore {
         let sources = Arc::new(sources);
         let faults = Arc::new(crate::fault::Faults::from_env());
         let pool = Pool::start(Arc::new(source), pyr.clone(), Arc::clone(&sources), raw_kind, budget,
-                               [cfg.cpu_cache_bytes, cfg.corrected_cache_bytes], cfg.threads, cfg.result_bytes, cfg.test_read_delay_ms,
+                               [cfg.cpu_cache_bytes, cfg.corrected_cache_bytes - chunk_bytes], cfg.threads, cfg.result_bytes, cfg.test_read_delay_ms,
                                notifier.clone(), Arc::clone(&trace), Arc::clone(&faults));
         let roi_world = roi.map(|[y0, y1, x0, x1]| [x0 as f64, x1 as f64, y0 as f64, y1 as f64]);
-        ViewerCore { cfg, pyr, roi_world, planner, pool, sources, notifier, trace, gpu: None,
+        ViewerCore { cfg, pyr, roi_world, planner, pool, sources, notifier, trace, chunk_cache, gpu: None,
                      display: Vec::new(), smooth: true, fusion: false, polygon: None, raw_kind,
                      last_input: -1e9, paused: false,
                      held: HashMap::new(), frames: 0, last_error: String::new(),
@@ -279,6 +297,9 @@ impl ViewerCore {
     /// the socket pair). Never waits for a read under way.
     pub fn close(&mut self) {
         self.pool.close();
+        if let Some(c) = &self.chunk_cache {
+            c.close();                                   // waiting readers return now
+        }
         self.close_labels();
         if let Some(n) = &self.notifier {
             n.close();

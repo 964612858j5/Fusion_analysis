@@ -24,6 +24,8 @@ pub struct ArrayMeta {
     pub chunks: [usize; 2],
     pub fill: f32,
     pub separator: char,
+    /// R7b B1.1: the viewer's decoded-chunk cache (None: read every time)
+    pub cache: Option<std::sync::Arc<crate::chunk_cache::ChunkCache>>,
 }
 
 impl ArrayMeta {
@@ -50,7 +52,7 @@ impl ArrayMeta {
         if chunks[0] == 0 || chunks[1] == 0 {
             return refuse("empty chunk shape".into());
         }
-        Ok(ArrayMeta { dir, shape, chunks, fill, separator })
+        Ok(ArrayMeta { dir, shape, chunks, fill, separator, cache: None })
     }
 
     fn chunk_path(&self, cy: usize, cx: usize) -> PathBuf {
@@ -110,7 +112,16 @@ impl ArrayMeta {
                 if !still_wanted() {
                     return Ok(None);
                 }
-                let chunk = self.read_chunk(cy, cx)?;
+                let chunk = match &self.cache {
+                    Some(c) => {
+                        let bytes = self.chunks[0] * self.chunks[1] * 4;
+                        match c.get((self.dir.clone(), cy, cx), bytes, still_wanted, &|| self.read_chunk(cy, cx))? {
+                            Some(d) => d,
+                            None => return Ok(None),        // cancelled while waiting
+                        }
+                    }
+                    None => std::sync::Arc::new(self.read_chunk(cy, cx)?),
+                };
                 let _copy = crate::read_split::span("copy");
                 let (ry0, ry1) = (y0.max(cy * ch), y1.min((cy + 1) * ch));
                 let (rx0, rx1) = (x0.max(cx * cw), x1.min((cx + 1) * cw));

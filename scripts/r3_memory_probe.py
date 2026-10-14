@@ -169,9 +169,13 @@ def s_memory(rig, out, rss0):
     keys = ("cache_raw_bytes", "cache_corrected_bytes", "queue_extra_bytes", "held_extra_bytes",
             "label_copy_bytes", "cpu_bytes", "cpu_bound_bytes", "worker_allowance_bytes")
     out.update({k: int(stats[k]) for k in keys})
+    # R7b B1.1: the decoded-chunk cache is part of the total (held + being
+    # decoded), inside the corrected allowance, so the bound is unchanged
+    parts = keys[:5] + ("chunk_held_bytes", "chunk_decoding_bytes")
+    out.update({k: int(stats.get(k, 0)) for k in parts[5:]})
     out["rss_growth"] = _rss() - rss0
     out["ok"] = (out["stable"] and out["cpu_bytes"] <= out["cpu_bound_bytes"]
-                 and out["cpu_bytes"] == sum(out[k] for k in keys[:5])
+                 and out["cpu_bytes"] == sum(out[k] for k in parts)
                  and out["rss_growth"] <= out["cpu_bound_bytes"])
 
 

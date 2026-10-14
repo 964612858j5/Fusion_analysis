@@ -25,6 +25,9 @@ mod worker;
 pub use worker::read_tile;
 
 pub const RESULT_CAPACITY: usize = 1024;
+/// R7b B1.3: the most reader threads a viewer starts (was a fixed 6;
+/// the default stays `READER_THREADS` = 6 on the Python side)
+pub const MAX_READERS: usize = 16;
 /// default byte bound of the result queue (tiles waiting for the GUI)
 pub const RESULT_BYTES: usize = 256 * 1024 * 1024;
 /// what one reader may hold while it works (R3 plan §2.3): a corrected
@@ -154,7 +157,7 @@ impl Pool {
         });
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
         let mut handles = Vec::new();
-        for i in 0..threads.clamp(1, 6).min(cores) {
+        for i in 0..threads.clamp(1, MAX_READERS).min(cores) {
             let s = Arc::clone(&shared);
             handles.push(std::thread::Builder::new().name(format!("fvc-read-{i}"))
                 .spawn(move || worker::worker(s)).expect("spawn reader"));

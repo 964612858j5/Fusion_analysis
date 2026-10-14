@@ -57,6 +57,7 @@
 - Rust：`zarr_v2.rs`、`blosc.rs`、`lz4.rs`（或替换）、新 `chunk_cache.rs`（≤ 约 300 行）、`pool.rs`、`pool/worker.rs`、`viewer/memory.rs`、`py/config.rs`、`py/stats.rs`（只加统计字段）、`viewer.rs`（配置字段）；`Cargo.toml` 和 `Cargo.lock`（只在选新解压库时，只做这一个依赖的机械更新）。
 - Python：`ui/step1_core_binding.py`（配置）。
 - 测试：新 `tests/test_v16_5_r7b1_*.py` 和 Rust 单元测试。
+- 实施中追加（2026-10-15）：`lib.rs`（只加 `chunk_cache` 模块声明）；用户同意的 `scripts/r2_pixel_compare.py`（输出块缓存和内存统计）、`scripts/r3_memory_probe.py`（内存合计算上块缓存）。
 - 不改请求顺序、上传预算、显存规则；不改原图读取的结果。
 
 ### B2 校正通道的中间层（16 位），加"先要一个便宜的过渡层"

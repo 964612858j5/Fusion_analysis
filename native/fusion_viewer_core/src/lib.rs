@@ -9,6 +9,7 @@ pub mod batch;
 pub mod blosc;
 pub mod cache;
 pub mod cancel;
+pub mod chunk_cache;
 pub mod clock;
 pub mod corrected;
 pub mod decode;

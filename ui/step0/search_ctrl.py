@@ -56,6 +56,7 @@ from ...core.bg_parallel import (MEM_PER_TILE_BYTES, MEM_PER_TILE_FAST_BYTES, ch
                                  mem_available_bytes, ordered_results)
 from ...core.io_loader import OMETIFFLoader
 from ...viewer import step1_source as sources
+from ...viewer import display_pyramid
 from ...utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
@@ -2082,6 +2083,20 @@ class _CoarsePlaneAccumulator:
         return int(self._sums.nbytes + self._counts.nbytes)
 
 
+class _PlaneFeeds:
+    """R7b B2.3: what each written tile also feeds -- the coarse plane and
+    the display layers (`viewer/display_pyramid.py`), ROI-local coords."""
+
+    def __init__(self, coarse, display):
+        self.coarse, self.display = coarse, display
+
+    def add(self, values, roi_y0, roi_x0):
+        if self.coarse is not None:
+            self.coarse.add(values, roi_y0, roi_x0)
+        if self.display is not None:
+            self.display.add_local(values, roi_y0, roi_x0)
+
+
 def coarsest_level_stride(slide_path):
     """`(level, stride)` Step1 will ask a corrected channel for, or None.
 
@@ -2279,6 +2294,7 @@ class WsiCorrectionWorker(QThread):
                 os.path.join(os.path.dirname(zarr_path),
                              sources.COARSE_SIDECAR_DIRNAME),
                 ignore_errors=True)
+            shutil.rmtree(display_pyramid.display_root(zarr_path), ignore_errors=True)
             return
         if group is not None and ch_name is not None and ch_name in group:
             try:
@@ -2394,10 +2410,14 @@ class WsiCorrectionWorker(QThread):
                 shutil.rmtree(zarr_path, ignore_errors=True)
                 # Every plane belonged to the product just removed.
                 shutil.rmtree(sidecar_path, ignore_errors=True)
+                shutil.rmtree(display_pyramid.display_root(zarr_path), ignore_errors=True)
             # Which level Step1 will ask a corrected channel for, read from
             # the slide's own pyramid. `None` means "do not write a plane" --
             # never a guessed stride.
             level_stride = coarsest_level_stride(
+                getattr(self.loader, "filepath", "") or "")
+            # R7b B2.3: every level's stride, for the display layers
+            display_strides = display_pyramid.level_strides(
                 getattr(self.loader, "filepath", "") or "")
 
             if not channels:
@@ -2469,6 +2489,7 @@ class WsiCorrectionWorker(QThread):
             started = time.time()
             completed_units = 0
             progress_idx = 0
+            display = None                 # the display builder under way, if any
 
             for info in roi_infos:
                 # Incremental: reuse the existing group (keep its already-corrected
@@ -2512,6 +2533,16 @@ class WsiCorrectionWorker(QThread):
                         if level_stride is not None:
                             accumulator = _CoarsePlaneAccumulator(
                                 info["bbox"], level_stride[1])
+                        # its display layers go too (a builder that cannot
+                        # run -- no level, no disk, a sample it cannot keep
+                        # -- leaves none, and Step1 reads as before)
+                        display_pyramid.drop(display_pyramid.display_root(zarr_path),
+                                             info["group_name"], ch_name)
+                        display = None
+                        if display_strides:
+                            display = display_pyramid.DisplayBuilder(
+                                display_pyramid.display_root(zarr_path), info["group_name"],
+                                ch_name, info["bbox"], display_strides, threaded=True)
                         ds = group.create_dataset(
                             ch_name,
                             shape=(roi_h, roi_w),
@@ -2536,7 +2567,8 @@ class WsiCorrectionWorker(QThread):
                         )
                         try:
                             outcome = self._correct_channel(
-                                ds, accumulator, tiles, ch_name, method, param, path,
+                                ds, _PlaneFeeds(accumulator, display), tiles, ch_name,
+                                method, param, path,
                                 info, roi_y0, roi_x0, poly_mask,
                                 (progress_idx, channel_total, completed_units,
                                  total_units, started), impl)
@@ -2545,6 +2577,8 @@ class WsiCorrectionWorker(QThread):
                                   f"is discarded and computed again on the CPU from tile 0")
                             if ch_name in group:
                                 del group[ch_name]
+                            if display is not None:
+                                display.abort()        # its thread ends before the redo
                             path = "cpu"
                             impl = compute_impl(method, path)
                             continue
@@ -2554,10 +2588,14 @@ class WsiCorrectionWorker(QThread):
                                   f"is discarded and computed again with scipy from tile 0")
                             if ch_name in group:
                                 del group[ch_name]
+                            if display is not None:
+                                display.abort()        # its thread ends before the redo
                             impl = GAUSSIAN_IMPL_SCIPY
                             continue
                         break
                     if outcome == "canceled":
+                        if display is not None:
+                            display.abort()
                         # Checked per TILE, not per channel: in Full-WSI
                         # mode one channel is the whole slide, and a
                         # cancel that waited for it was a cancel that did
@@ -2591,6 +2629,8 @@ class WsiCorrectionWorker(QThread):
                         self._publish_plane(
                             sidecar_path, info["group_name"], ch_name,
                             accumulator, ds, level_stride, write_token)
+                    if display is not None:
+                        display.finish(dict(ds.attrs))      # carries the new token
                     corrected_decisions[ch_name] = method
                     completed_units += len(tiles)
                     if self._cancel_requested:
@@ -2602,6 +2642,10 @@ class WsiCorrectionWorker(QThread):
 
             self.finished.emit(zarr_path, corrected_decisions)
         except Exception:
+            # a display builder still running ends with the save (R7b B2)
+            builder = locals().get("display")
+            if builder is not None:
+                builder.abort()
             self.error.emit(traceback.format_exc())
 
 

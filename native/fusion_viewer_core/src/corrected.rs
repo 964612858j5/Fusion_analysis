@@ -29,6 +29,9 @@ pub struct ArraySpec {
 pub struct Plane {
     pub array: ArrayMeta,
     pub origin: [i64; 2],
+    /// R7b B2: a uint16 display layer Python accepted, not the float32
+    /// coarse plane
+    pub display: bool,
 }
 
 pub enum Source {
@@ -89,13 +92,13 @@ pub fn verify(spec: &ArraySpec) -> Result<()> {
 }
 
 /// A corrected channel's sources, verified.
-pub fn corrected(product: ArraySpec, bbox: [i64; 4], planes: Vec<(usize, ArraySpec, [i64; 2])>)
+pub fn corrected(product: ArraySpec, bbox: [i64; 4], planes: Vec<(usize, ArraySpec, [i64; 2], bool)>)
                  -> Result<Source> {
     verify(&product)?;
     let mut by_stride = HashMap::new();
-    for (stride, spec, origin) in planes {
+    for (stride, spec, origin, display) in planes {
         verify(&spec)?;
-        by_stride.insert(stride, Plane { array: spec.meta, origin });
+        by_stride.insert(stride, Plane { array: spec.meta, origin, display });
     }
     Ok(Source::Corrected { region: CorrectedRegion { array: product.meta, bbox }, planes: by_stride })
 }

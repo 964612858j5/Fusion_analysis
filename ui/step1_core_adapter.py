@@ -261,7 +261,8 @@ def build_corrected_manifest(table, raw_provider, strides) -> Dict[str, Any]:
                 plane = table.coarse_plane(name, stride)
                 if plane is not None:
                     planes.append({"stride": stride, "array": _array_spec(plane.array),
-                                   "origin": [int(plane.origin[0]), int(plane.origin[1])]})
+                                   "origin": [int(plane.origin[0]), int(plane.origin[1])],
+                                   "display": bool(getattr(plane, "display", False))})
             channels[name] = {"source": "corrected", "product": _array_spec(region.array),
                               "bbox": [int(v) for v in region.bbox], "planes": planes,
                               "index": index}

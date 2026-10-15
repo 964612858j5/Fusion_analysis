@@ -1,5 +1,6 @@
 //! One zarr v2 array as the corrected products store it (plan R1 §3):
-//! 2-D, C order, no filters, little-endian float32, Blosc-LZ4 chunks in
+//! 2-D, C order, no filters, little-endian float32 (or, R7b B2, the
+//! display layers' little-endian uint16, read as f32), Blosc-LZ4 chunks in
 //! files named "<row>.<col>" (the '.' separator only, plan R1 §2.2). A chunk file that does not
 //! exist reads as `fill_value`; an edge chunk is stored at the full chunk
 //! shape and cut. Anything else is refused when the array is described
@@ -24,6 +25,8 @@ pub struct ArrayMeta {
     pub chunks: [usize; 2],
     pub fill: f32,
     pub separator: char,
+    /// R7b B2: `<u2` samples (display layers), widened to f32 when read
+    pub u16: bool,
     /// R7b B1.1: the viewer's decoded-chunk cache (None: read every time)
     pub cache: Option<std::sync::Arc<crate::chunk_cache::ChunkCache>>,
 }
@@ -34,8 +37,8 @@ impl ArrayMeta {
                compressor: &str, cname: &str, filters_none: bool, fill: f32, separator: char)
                -> Result<Self> {
         let refuse = |why: String| Err(CoreError::Manifest(format!("zarr array {}: {why}", dir.display())));
-        if dtype != "<f4" {
-            return refuse(format!("dtype {dtype} not taken (<f4 only)"));
+        if dtype != "<f4" && dtype != "<u2" {
+            return refuse(format!("dtype {dtype} not taken (<f4 or <u2 only)"));
         }
         if order != "C" {
             return refuse(format!("order {order} not taken"));
@@ -52,7 +55,7 @@ impl ArrayMeta {
         if chunks[0] == 0 || chunks[1] == 0 {
             return refuse("empty chunk shape".into());
         }
-        Ok(ArrayMeta { dir, shape, chunks, fill, separator, cache: None })
+        Ok(ArrayMeta { dir, shape, chunks, fill, separator, u16: dtype == "<u2", cache: None })
     }
 
     fn chunk_path(&self, cy: usize, cx: usize) -> PathBuf {
@@ -71,6 +74,12 @@ impl ArrayMeta {
         drop(span);
         crate::read_split::count(frame.len(), 1, crate::read_split::SRC_ZARR);
         CHUNKS_DECODED.fetch_add(1, Ordering::Relaxed);
+        if self.u16 {
+            let mut bytes = vec![0u8; n * 2];
+            crate::blosc::decode_into(&frame, &mut bytes).map_err(|e| CoreError::Decode(format!(
+                "chunk {cy}.{cx} of {}: {e}", self.dir.display())))?;
+            return Ok(bytes.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]]) as f32).collect());
+        }
         let mut values = vec![0f32; n];
         // the chunk's bytes go straight into the f32 buffer (little-endian
         // f32 is the host's own layout on the platforms built for)

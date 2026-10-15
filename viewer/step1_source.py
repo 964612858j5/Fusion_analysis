@@ -136,10 +136,13 @@ class CoarsePlane:
     tile's blocks are `rect` itself, offset by where the plane starts.
     """
 
-    def __init__(self, array, stride, origin):
+    def __init__(self, array, stride, origin, display=False):
         self.array = array
         self.stride = int(stride)
         self.origin = (int(origin[0]), int(origin[1]))
+        #: R7b B2: a uint16 display layer (`display_pyramid`), not the
+        #: float32 `corrected_coarse.zarr` plane
+        self.display = bool(display)
         # block A9-P: its pixels through a PixelSource, the same array
         self.source = ArrayRegionSource(array, self.origin, stage="coarse_plane")
 
@@ -383,6 +386,19 @@ class Step1SourceTable:
         if not self._path:
             return None
         import os
+        # R7b B2: a display layer of this product at this stride comes
+        # first (`display_pyramid.accept` checks it as strictly), then the
+        # float32 coarse plane, then the runtime reduction
+        region = self._regions[channel]
+        product = dict(getattr(region.array, "attrs", {}) or {})
+        if os.environ.get("BLOCK01_STEP1_DISPLAY_LAYERS") != "0":
+            from . import display_pyramid
+            array = display_pyramid.accept(
+                display_pyramid.display_root(self._path),
+                str(getattr(region.array, "path", "") or ""), product, region.bbox, stride)
+            if array is not None:
+                origin, _shape = coarse_block_range(region.bbox, stride)
+                return CoarsePlane(array, stride, origin, display=True)
         sidecar = os.path.join(os.path.dirname(self._path),
                                COARSE_SIDECAR_DIRNAME)
         if not os.path.isdir(sidecar):

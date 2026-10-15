@@ -125,12 +125,32 @@ fn span_per_block(front: usize, length: usize, stride: usize, blocks: usize) -> 
 /// `reduce_corrected(region, rect, stride, budget)`; `rect` is level 0.
 pub fn reduce(region: Option<&CorrectedRegion>, rect: [i64; 4], stride: usize, budget: usize,
               wanted: &dyn Fn() -> bool) -> Result<Option<Reduced>> {
+    Ok(reduce_as(region, rect, stride, budget, wanted, &|m| m as f32, &|v| v)?
+        .map(|(values, valid, rows, cols)| Reduced { values, valid, rows, cols }))
+}
+
+/// R7c 1E: the same reduction quantised the way the display layers are
+/// (`display_pyramid`: the float64 mean, `floor(mean + 0.5)`, once) -- before
+/// any float32 rounding could move a mean across a half. For a channel
+/// whose samples are all integers in 0..65535 (the display layers' rule).
+pub fn reduce_u16(region: Option<&CorrectedRegion>, rect: [i64; 4], stride: usize, budget: usize,
+                  wanted: &dyn Fn() -> bool) -> Result<Option<(Vec<u16>, Vec<bool>, usize, usize)>> {
+    reduce_as(region, rect, stride, budget, wanted, &|m| (m + 0.5).floor().clamp(0.0, 65535.0) as u16,
+              &|v| (v as f64 + 0.5).floor().clamp(0.0, 65535.0) as u16)
+}
+
+/// The reduction, each output value made by `mean` (block means, float64)
+/// or `sample` (stride 1 within the budget: the samples themselves).
+#[allow(clippy::type_complexity)]
+fn reduce_as<T: Copy + Default>(region: Option<&CorrectedRegion>, rect: [i64; 4], stride: usize, budget: usize,
+                                wanted: &dyn Fn() -> bool, mean: &dyn Fn(f64) -> T, sample: &dyn Fn(f32) -> T)
+                                -> Result<Option<(Vec<T>, Vec<bool>, usize, usize)>> {
     let [y0, y1, x0, x1] = rect;
     let s = stride.max(1);
     let (height, width) = ((y1 - y0).max(0) as usize, (x1 - x0).max(0) as usize);
     let budget = budget.max(1);
     if s == 1 && height * width <= budget {
-        let mut values = vec![0f32; height * width];
+        let mut values = vec![T::default(); height * width];
         let mut valid = vec![false; height * width];
         if let Some(r) = region.filter(|r| height > 0 && width > 0 && r.overlaps(y0, y1, x0, x1)) {
             match r.read(y0, y1, x0, x1, wanted)? {
@@ -140,7 +160,9 @@ pub fn reduce(region: Option<&CorrectedRegion>, rect: [i64; 4], stride: usize, b
                     let (ry, rx) = ((p.y0 - y0) as usize, (p.x0 - x0) as usize);
                     for i in 0..p.rows {
                         let at = (ry + i) * width + rx;
-                        values[at..at + p.cols].copy_from_slice(&p.data[i * p.cols..(i + 1) * p.cols]);
+                        for (o, &v) in values[at..at + p.cols].iter_mut().zip(&p.data[i * p.cols..(i + 1) * p.cols]) {
+                            *o = sample(v);
+                        }
                         valid[at..at + p.cols].iter_mut().for_each(|v| *v = true);
                     }
                 }
@@ -149,7 +171,7 @@ pub fn reduce(region: Option<&CorrectedRegion>, rect: [i64; 4], stride: usize, b
         if !wanted() {
             return Ok(None);
         }
-        return Ok(Some(Reduced { values, valid, rows: height, cols: width }));
+        return Ok(Some((values, valid, height, width)));
     }
     let si = s as i64;
     let (py, px) = (y0.rem_euclid(si) as usize, x0.rem_euclid(si) as usize);
@@ -192,8 +214,8 @@ pub fn reduce(region: Option<&CorrectedRegion>, rect: [i64; 4], stride: usize, b
     }
     let valid: Vec<bool> = counts.iter().map(|&c| c > 0).collect();
     let values = sums.iter().zip(&counts)
-        .map(|(&sum, &c)| if c > 0 { (sum / c as f64) as f32 } else { 0.0 }).collect();
-    Ok(Some(Reduced { values, valid, rows: out_h, cols: out_w }))
+        .map(|(&sum, &c)| if c > 0 { mean(sum / c as f64) } else { T::default() }).collect();
+    Ok(Some((values, valid, out_h, out_w)))
 }
 
 /// `_accumulate_blocks`: one slab into the global block sums and counts.

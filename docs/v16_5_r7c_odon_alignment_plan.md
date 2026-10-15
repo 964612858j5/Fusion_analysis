@@ -60,6 +60,45 @@
 - 用户据此选数据方案（可两者都保留）。
 - 测量文件（仓库外，`/sda1/Fusion/a9_bench/r7c/`）：`run_one_r7c.sh`（由 `r7b1/run_one_alt.sh` 复制，加介质路径与挂载记录）、`verify_ometiff.py`（1B 全分辨率抽样核验）、`copy_nvme.sh`（1C 复制与校验）、`run_r7c1.sh`、`an_r7c1.py`、报告 `R7c1_results.md`；生成数据放项目副本与 `/nvme0n1p1/fusion_bench/`。
 
+## 2b. 第 1 步补充（第二版，按 codex `codex_r7c1e_plan_1.out` 修订；待用户批准）：16 位直接上传，固态盘重测 NGFF 副本，两种介质上和 Odon 比
+
+部署场景见 `docs/deployment_targets.md`（边缘计算雷电外接固态盘，服务器机械盘）。第 1 步测量：选项 1（`corrected_display.zarr`，即 NGFF 结构的 u16 512 副本）在固态盘 z1 S2 偏差，候选原因是读入后转 F32 上传（4 字节/像素）。
+
+### 1E 校正通道的显示层以 u16 直接上传
+| | Odon | 现在的我们 | 本步 |
+|---|---|---|---|
+| 纹理格式 | 每块 R16（u8 也扩成 u16），`render/tiles_gl.rs:1183-1225` | 校正通道一律 R32F | 显示层齐全的校正通道用现有 R16UI 族（`family.rs` 已有 U16），2 字节/像素 |
+- **资格**（Python 在清单里标 `display_u16: true`）：通道在看图用到的**每一个**倍数（1 与原图金字塔各层）上，`coarse_plane()` 选中的都是 `display` 层（不是 F32 粗层），且 `BLOCK01_STEP1_DISPLAY_LAYERS`、`BLOCK01_STEP1_DISPLAY_S1` 都没关。否则照旧 F32。
+- **Rust**：
+  - `viewer/formats.rs`：该通道 `format_of` 给 `Format::U16`；`update_total()` 按实际绘制格式预留（U16、F32 混合时两种都计）。
+  - `step1_tile.rs`：从显示层读出的值直接组成 `Values::U16`，有效区为层覆盖与图块的交（`Valid::Rect`，完全在外为 `Valid::Nothing`）。
+  - 读层失败退回现场缩小时：**在丢失精度前**量化——`reduce.rs` 增加最小的"按 f64 均值 `floor(mean + 0.5)` 输出 u16"出口（与 `display_pyramid` 同一规则），不先转 F32；读取记录照旧标来源 1。
+  - `corrected.rs` 加标记字段，`viewer.rs:139` 的字段解构随之调整（只限字段接线，缓存行为不变），`py/corrected.rs` 解析。
+- 显示参数单位不变（原值）；着色器整数族已处理矩形有效区、跨块平滑、无效采样剔除；多边形仍由最终裁切。
+- 开关 `BLOCK01_STEP1_DISPLAY_U16=0` 退回 F32。
+- 白名单：`ui/step1_core_adapter.py`、`viewer/step1_source.py`（只读判定，若需要）、Rust `corrected.rs`、`viewer.rs`（字段接线）、`py/corrected.rs`、`step1_tile.rs`、`reduce.rs`（量化出口）、`viewer/formats.rs`；测试 `tests/test_v16_5_r7c1e_u16.py`。
+- 验收（合成项目）：
+  - U16 与 F32 两条上传路径读**同一份显示层**时，停稳画面逐像素相同；
+  - 回退块按显示层取整规则：含 stride 32 临界值用例（511 个 32769 + 513 个 32768 → 32768）；
+  - Python / Rust 数值一致；资格不全（缺一层、F32 粗层被选中、开关关闭）时退回 F32；
+  - ROI 边缘、合法 0、跨块平滑、窄窗 / Gamma、U16 与 F32 校正通道混合时的预算。
+
+### 1F 测量（第 1 步尺子；用户项目副本；冷读；两档倍数 × S1/S2 × 3 轮；配置轮换；每次核验各通道实际来源与物理盘）
+- **物理盘安排**：
+  - 固态盘：`/nvme0n1p1/fusion_bench/`（已有；补 DAPI 所需文件见下）。
+  - 机械盘：新建 `/sda1/Fusion/a9_bench/hdd_bench/`（物理盘 /dev/sdb1，ST8000NM017B），结构与固态盘目录完全相同：qptiff、合并 OME-TIFF、9 个测量通道的浮点结果、粗层、显示层，约 100 GB。机械盘配置的**所有**数据都从这里读（不再混用原项目所在的另一块盘）；不向原项目所在盘写任何东西。
+- **十通道同文件**：读合并 OME-TIFF 的配置（opt2）在测量开关下，**原图通道（DAPI）也从合并 OME-TIFF 读**（`_display_tiff` 对文件中名称唯一的原图通道同样替换；先只读核验 DAPI 全分辨率与 qptiff 全分辨率逐像素相等，不等则停）。这样 opt2 与 Odon 的十个通道都来自同一个文件。白名单加：`ui/step1_core_adapter.py`（原图通道替换）、`a9_bench/r7c/verify_ometiff.py`（加 DAPI 对 qptiff 的核验）。
+- **配置（9 种 × 12 = 108 次）**：
+  - 固态盘：base_n、opt1u16_n、opt1_n（`DISPLAY_U16=0`）、opt2_n、**odon_n**；
+  - 机械盘：base_h、opt1u16_h、opt2_h、**odon_h**。
+- **Odon**：
+  - 驱动 `scripts/a9_odon_r6.py` 加入白名单，只限：通道列表改为测量的 10 个（DAPI + 9），核验实际可见集合；加开关不再强制 0–255 对比度，用 Odon 自己打开后的默认（含其自动对比度），并把最终参数写进 `setup.json`；参考图与正式轮次用同一设置。
+  - `a9_bench/r7c/run_one_r7c.sh` 的 Odon 分支接 MEDIA：Odon 打开的文件、清缓存的文件、`paths.txt` 记录的设备号必须是同一块盘上的同一个文件；不一致或清缓存失败判测量失败、重跑。
+  - 参考图：先核查已知的 z2 S2 第 2 轮无法定位问题；再在合并 OME-TIFF 上为 Odon 拍 12 条路线的参考视野（共约 108 个视野，R6 方法），用现有 `scripts/a9_r6_ref.py` 拼图并检查超时、接缝、覆盖，不合格重拍；分析器使用 `r6/refs/odon10_*`。我们的配置继续用现有 `real_*` 参考图。
+- 环境门同第 1 步；报告逐项列出（面积、最差帧、跳变、新边缘、跟手、卡顿、读取、排队），不做单因素归因；我们配置之间补做停稳逐像素比较。内置 NVMe 结果不代替雷电外接盘的正式验收（有设备时补测）。
+- 时间：约 4 小时测量 + 参考图约 1 小时 + 复制约 1 小时；另留重跑余量。
+- 测量文件：`/sda1/Fusion/a9_bench/r7c/` 下 `copy_hdd_bench.sh`、`run_r7c1f.sh`、`an_r7c1f.py`、`R7c1f_results.md`。
+
 ## 3. 第 2 步：视野外预读（off / odon / limited）
 
 在第 1 步选定的数据上做；**本步保持我们现行的层选择、最粗层整层请求与发布门不变**（这些属第 3 步），只改"目标层的请求范围"。"odon"一列**照用 Odon 的预读规则，但有意适配**：Odon 对当前请求的各层都做 pad1，本步只对目标层做（其余层在第 3 步 odon 策略里照用）；Odon 的 adaptive 辅助层限制、pinned 暂停不适用（我们无此两种机制），不新增：

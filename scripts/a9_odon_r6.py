@@ -58,13 +58,26 @@ def setup(data, outdir, channels, scale):
     time.sleep(1.0)
     shown = channels.split(",")
     log = {"window": win, "visible": ctl.call("set_visible_channels", {"channels": shown, "mode": "only"})}
-    log["contrast"] = {c: ctl.call("set_channel_contrast", {"channel": c, "min": 0, "max": 255}) for c in shown}
+    if os.environ.get("A9_ODON_KEEP_CONTRAST") == "1":
+        # R7c 1F: Odon's own default (its auto contrast on open), recorded below;
+        # the reference walk and every run take the same procedure
+        time.sleep(2.0)
+        log["contrast"] = "odon default"
+    else:
+        log["contrast"] = {c: ctl.call("set_channel_contrast", {"channel": c, "min": 0, "max": 255}) for c in shown}
     log["smooth"] = ctl.call("set_smooth_pixels", {"smooth": False})
     log["channels"] = ctl.call("list_channels")
     log["smooth_now"] = ctl.call("get_smooth_pixels")
     log["contrast_now"] = {c: ctl.call("get_channel_contrast", {"channel": c}) for c in shown}
     log["canvas"] = canvas_rect(win)
+    # R7c 1F: the channels really shown are the ones asked for
+    seen = sorted(c.get("name") for c in log["visible"].get("result", {}).get("result", {}).get(
+        "visible_channels", []))
+    log["visible_check"] = {"asked": sorted(shown), "shown": seen, "ok": seen == sorted(shown)}
     json.dump(log, open(os.path.join(outdir, "setup.json"), "w"), indent=1)
+    if os.environ.get("A9_ODON_KEEP_CONTRAST") == "1" and not log["visible_check"]["ok"]:
+        proc.terminate()
+        raise SystemExit(f"Odon shows {seen}, not {sorted(shown)}")
     return proc, win, log["canvas"]
 
 

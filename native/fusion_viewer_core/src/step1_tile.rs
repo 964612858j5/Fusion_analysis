@@ -196,6 +196,40 @@ fn corrected_tile(region: &CorrectedRegion, planes: &std::collections::HashMap<u
     Ok(Some(Tile { rows: red.rows, cols: red.cols, values: Values::F32(values), valid: Valid::Finite }))
 }
 
+/// R7c 1E: a channel whose every stride has an accepted display layer, as
+/// uint16 (R16UI): the layer's values as they are, valid on the rectangle
+/// the layer covers; a layer read that fails falls back to the reduction
+/// quantised the layers' way (`reduce_u16`).
+fn corrected_u16_tile(region: &CorrectedRegion, planes: &std::collections::HashMap<usize, Plane>,
+                      rect: [i64; 4], stride: usize, budget: usize, wanted: &dyn Fn() -> bool)
+                      -> Result<Option<Tile>> {
+    let (values, valid, rows, cols) = match planes.get(&stride).filter(|p| p.display)
+        .map(|plane| plane_tile(plane, rect, wanted)) {
+        Some(Ok(None)) => return Ok(None),
+        Some(Ok(Some(t))) => {
+            crate::read_split::count(0, 0, 3);        // from a saved plane (see `corrected_tile`)
+            (t.values.iter().map(|&v| v as u16).collect(), t.valid, t.rows, t.cols)
+        }
+        _ => {
+            let s = stride as i64;
+            let level0 = [rect[0] * s, rect[1] * s, rect[2] * s, rect[3] * s];
+            let Some(r) = crate::reduce::reduce_u16(Some(region), level0, stride, budget, wanted)? else {
+                return Ok(None);
+            };
+            r
+        }
+    };
+    let _pack = crate::read_split::span("pack");
+    // the valid samples are one rectangle (a layer's or the region's cover)
+    let (mut y0, mut y1, mut x0, mut x1) = (rows, 0, cols, 0);
+    for i in (0..valid.len()).filter(|&i| valid[i]) {
+        let (y, x) = (i / cols.max(1), i % cols.max(1));
+        (y0, y1, x0, x1) = (y0.min(y), y1.max(y + 1), x0.min(x), x1.max(x + 1));
+    }
+    let valid = if y1 > y0 { Valid::Rect([y0, y1, x0, x1]) } else { Valid::Nothing };
+    Ok(Some(Tile { rows, cols, values: Values::U16(values), valid }))
+}
+
 /// One tile; None when `wanted` turned false on the way (cancelled).
 #[allow(clippy::too_many_arguments)]
 pub fn read(source: &Source, raw: &RawSource, raw_kind: RawKind, roi: Option<[i64; 4]>, level: usize,
@@ -203,7 +237,8 @@ pub fn read(source: &Source, raw: &RawSource, raw_kind: RawKind, roi: Option<[i6
             wanted: &dyn Fn() -> bool) -> Result<Option<Tile>> {
     match source {
         Source::Raw { index } => raw_tile(raw, raw_kind, *index, level, rect, stride, roi).map(Some),
-        Source::Corrected { region, planes } => corrected_tile(region, planes, rect, stride, budget, wanted),
+        Source::Corrected { region, planes, u16: false } => corrected_tile(region, planes, rect, stride, budget, wanted),
+        Source::Corrected { region, planes, u16: true } => corrected_u16_tile(region, planes, rect, stride, budget, wanted),
         Source::DisplayTiff { src, kind, index } => raw_tile(src, *kind, *index, level, rect, stride, roi).map(Some),
         Source::Missing { .. } => Ok(Some(Tile { rows: tile_size, cols: tile_size,
                                                   values: Values::F32(vec![f32::NAN; tile_size * tile_size]),

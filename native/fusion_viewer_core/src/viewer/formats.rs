@@ -16,6 +16,7 @@ impl ViewerCore {
                 RawKind::U16 => Format::U16,
                 _ => Format::F32,
             }),
+            Source::Corrected { u16: true, .. } => Some(Format::U16),          // R7c 1E
             Source::Corrected { .. } => Some(Format::F32),
             Source::DisplayTiff { kind, .. } => Some(match kind {         // R7c 1B
                 RawKind::U8 => Format::U8,
@@ -38,11 +39,11 @@ impl ViewerCore {
             _ => crate::family::Format::F32,
         };
         let mut formats = vec![raw];
-        if self.display.iter().any(|(c, _)| matches!(self.sources.of(*c), Some(crate::corrected::Source::Corrected { .. }))) {
-            formats.push(crate::family::Format::F32);
-        }
-        for (c, _) in &self.display {                 // R7c 1B: a display TIFF's own format
-            if let (Some(crate::corrected::Source::DisplayTiff { .. }), Some(f)) = (self.sources.of(*c), self.format_of(*c)) {
+        // one block of every format a drawn non-raw channel uses (R7c 1B, 1E)
+        for (c, _) in &self.display {
+            let non_raw = matches!(self.sources.of(*c), Some(crate::corrected::Source::Corrected { .. })
+                                                     | Some(crate::corrected::Source::DisplayTiff { .. }));
+            if let (true, Some(f)) = (non_raw, self.format_of(*c)) {
                 if !formats.contains(&f) {
                     formats.push(f);
                 }

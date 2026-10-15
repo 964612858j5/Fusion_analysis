@@ -264,9 +264,13 @@ def build_corrected_manifest(table, raw_provider, strides) -> Dict[str, Any]:
                     planes.append({"stride": stride, "array": _array_spec(plane.array),
                                    "origin": [int(plane.origin[0]), int(plane.origin[1])],
                                    "display": bool(getattr(plane, "display", False))})
+            # R7c 1E: every stride drawn served by a display layer -> uint16 tiles
+            wanted = sorted({max(1, int(s)) for s in strides})
+            u16 = (os.environ.get("BLOCK01_STEP1_DISPLAY_U16") != "0"
+                   and sorted(p["stride"] for p in planes if p["display"]) == wanted)
             channels[name] = {"source": "corrected", "product": _array_spec(region.array),
                               "bbox": [int(v) for v in region.bbox], "planes": planes,
-                              "index": index}
+                              "index": index, "display_u16": bool(u16)}
         else:
             channels[name] = {"source": "raw", "index": index}
     roi = table.roi_bbox()
@@ -279,9 +283,9 @@ def build_corrected_manifest(table, raw_provider, strides) -> Dict[str, Any]:
     _display_tiff(table, raw_provider, out)
     if os.environ.get("BLOCK01_A9_DRAW_LOG") == "1":       # measurement evidence (R7c 1D)
         for name, entry in sorted(channels.items()):
-            if entry["source"] in ("corrected", "display_tiff"):
-                planes = [f"{p['stride']}{'*' if p.get('display') else ''}" for p in entry.get("planes", [])]
-                print(f"[sources] {name}: {entry['source']} planes={','.join(planes)}", flush=True)
+            planes = [f"{p['stride']}{'*' if p.get('display') else ''}" for p in entry.get("planes", [])]
+            print(f"[sources] {name}: {entry['source']} planes={','.join(planes)}"
+                  f"{' u16' if entry.get('display_u16') else ''}", flush=True)
     return out
 
 
@@ -314,6 +318,16 @@ def _display_tiff(table, raw_provider, manifest) -> None:
         names = {n for n in all_names if all_names.count(n) == 1}      # a repeated name is ambiguous
         used = []
         for name, entry in manifest["channels"].items():
+            if entry.get("source") == "raw":
+                # R7c 1F: a raw channel too, so every drawn channel comes from
+                # the one file (its level 0 checked equal to the slide's,
+                # `a9_bench/r7c/verify_dapi.py`)
+                roi = table.roi_bbox()
+                if name in names and (roi is None or [int(v) for v in roi] == full):
+                    manifest["channels"][name] = {"source": "display_tiff", "index": entry["index"],
+                                                  "tiff_index": int(tiff.channel_index(name))}
+                    used.append(name)
+                continue
             if entry.get("source") != "corrected":
                 continue
             if name not in names or [int(v) for v in table.region(name).bbox] != full:

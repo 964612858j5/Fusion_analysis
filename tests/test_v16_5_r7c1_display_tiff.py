@@ -7,7 +7,8 @@ float product for b over the whole slide (integers), and a merged uint8
 OME-TIFF holding a (raw) and b (its product), levels reduced 2x2.
 
 * With the switch, b is read from the merged file: level 0 equals the
-  product, coarser levels equal the file's own levels; a stays raw.
+  product, coarser levels equal the file's own levels; the raw channel a
+  is read from the same file (R7c 1F).
 * Without it, or when the region is not the whole slide, the file lacks the
   channel, or its levels are not the slide's, b stays on its product.
 * A core with this manifest reads b's tiles without errors.
@@ -77,7 +78,8 @@ def test_the_switch_draws_b_from_the_merged_file(tmp_path, monkeypatch):
         monkeypatch.setenv("BLOCK01_STEP1_DISPLAY_OMETIFF", merged_path)
         manifest = build_corrected_manifest(table, raw, [1, 2, 4])
         assert manifest["channels"]["b"] == {"source": "display_tiff", "index": 1, "tiff_index": 1}
-        assert manifest["channels"]["a"]["source"] == "raw"
+        # R7c 1F: the raw channel too, so every channel comes from the one file
+        assert manifest["channels"]["a"] == {"source": "display_tiff", "index": 0, "tiff_index": 0}
         reader = core.Step1Reader(build_raw_manifest(raw), manifest)
         mtiff = tifffile.TiffFile(merged_path)
         for level, stride in ((0, 1), (1, 2), (2, 4)):
@@ -111,7 +113,11 @@ def test_b_stays_on_its_product_otherwise(tmp_path, monkeypatch, case):
     try:
         manifest = build_corrected_manifest(table, raw, [1, 2, 4])
         assert manifest["channels"]["b"]["source"] == "corrected"
-        assert "display_tiff" not in manifest
+        if case != "partial-region":
+            # the raw channel a still comes from the file when it names it and the region is whole
+            assert manifest["channels"]["a"]["source"] == ("display_tiff" if case == "no-channel" else "raw")
+        else:
+            assert manifest["channels"]["a"]["source"] == "raw"
     finally:
         raw.close()
 

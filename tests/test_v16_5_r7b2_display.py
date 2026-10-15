@@ -226,8 +226,14 @@ def test_python_and_rust_tiles_are_equal_on_layers(tmp_path, monkeypatch):
                     rect = (y0, min(h, y0 + 128), x0, min(w, x0 + 128))
                     want, valid = sources.read_tile(table, "CH_A", rect, stride=stride)
                     t = reader.read_tile("CH_A", 1, *rect, stride, 128)
-                    got = np.frombuffer(t["data"], "<f4").reshape(t["rows"], t["cols"])
-                    assert np.array_equal(np.isfinite(got), valid)
+                    # every stride has a display layer: uint16 tiles (R7c 1E)
+                    assert t["dtype"] == "uint16"
+                    got = np.frombuffer(t["data"], "<u2").reshape(t["rows"], t["cols"]).astype(np.float32)
+                    mask = np.zeros(got.shape, bool)
+                    if t["valid"] == "rect":
+                        ry0, ry1, rx0, rx1 = t["rect"]
+                        mask[ry0:ry1, rx0:rx1] = True
+                    assert np.array_equal(mask, valid)
                     assert np.array_equal(got[valid], want[valid]), (stride, rect)
     finally:
         raw.close()

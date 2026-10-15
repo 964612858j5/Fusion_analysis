@@ -25,6 +25,8 @@ def open_rig(backend, slide, *, channels=(), roi=None, size=530, smooth=1,
     GPU texture budget for this process (tests: small blocks); `labels`:
     Step3's kind of viewer, which draws masks (R3)."""
     os.environ["BLOCK01_STEP1_BACKEND"] = backend
+    if gpu_bytes is None and os.environ.get("BLOCK01_A9_RIG_GPU_BYTES"):   # R7c 1E tests: budget pressure
+        gpu_bytes = int(os.environ["BLOCK01_A9_RIG_GPU_BYTES"])
     os.environ["BLOCK01_SMOOTH"] = str(int(smooth))
     sys.path[:0] = [os.path.dirname(_REPO), _REPO]
     import conftest  # noqa: F401 -- maps `block01` to this checkout
@@ -67,7 +69,10 @@ def open_rig(backend, slide, *, channels=(), roi=None, size=530, smooth=1,
         for i, c in enumerate(names):
             state.set_display_visible(c, c in chosen)
             state.set_color(c, PALETTE[i % len(PALETTE)])
-            state.set_mapping(c, 10.0 + 3 * i, 240.0 - 5 * i, 1.0 if i % 2 == 0 else 0.7)
+            lo, hi = 10.0 + 3 * i, 240.0 - 5 * i
+            if os.environ.get("BLOCK01_A9_RIG_WINDOW"):          # R7c 1E tests: a narrow window
+                lo, hi = (float(v) for v in os.environ["BLOCK01_A9_RIG_WINDOW"].split(","))
+            state.set_mapping(c, lo, hi, 1.0 if i % 2 == 0 else 0.7)
         state.set_selected_channel(chosen[0])
     state.set_scope(STEP1_SCOPE)
     window = SimpleNamespace(

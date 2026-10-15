@@ -64,7 +64,8 @@ fn source(d: &Bound<'_, PyDict>, tiff: &DisplayTiff) -> PyResult<Source> {
                 planes.push((item(p, "stride")?.extract()?, spec(item(p, "array")?.cast::<PyDict>()?)?,
                              item(p, "origin")?.extract()?, display));
             }
-            crate::corrected::corrected(product, item(d, "bbox")?.extract()?, planes).map_err(to_py_err)
+            let u16 = match d.get_item("display_u16")? { Some(v) => v.extract()?, None => false };
+            crate::corrected::corrected(product, item(d, "bbox")?.extract()?, planes, u16).map_err(to_py_err)
         }
         other => Err(PyValueError::new_err(format!("source {other:?}"))),
     }

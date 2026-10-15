@@ -36,7 +36,9 @@ pub struct Plane {
 
 pub enum Source {
     Raw { index: usize },
-    Corrected { region: CorrectedRegion, planes: HashMap<usize, Plane> },
+    /// `u16`: every stride the viewer draws has an accepted display layer
+    /// (R7c 1E): its tiles are uint16 (R16UI), not float32
+    Corrected { region: CorrectedRegion, planes: HashMap<usize, Plane>, u16: bool },
     /// R7c 1B: a corrected channel drawn from a second, already-built tiled
     /// pyramid (the merged OME-TIFF), read like a raw channel of that file
     DisplayTiff { src: std::sync::Arc<crate::reader::RawSource>, kind: crate::step1_tile::RawKind, index: usize },
@@ -95,15 +97,15 @@ pub fn verify(spec: &ArraySpec) -> Result<()> {
 }
 
 /// A corrected channel's sources, verified.
-pub fn corrected(product: ArraySpec, bbox: [i64; 4], planes: Vec<(usize, ArraySpec, [i64; 2], bool)>)
-                 -> Result<Source> {
+pub fn corrected(product: ArraySpec, bbox: [i64; 4], planes: Vec<(usize, ArraySpec, [i64; 2], bool)>,
+                 u16: bool) -> Result<Source> {
     verify(&product)?;
     let mut by_stride = HashMap::new();
     for (stride, spec, origin, display) in planes {
         verify(&spec)?;
         by_stride.insert(stride, Plane { array: spec.meta, origin, display });
     }
-    Ok(Source::Corrected { region: CorrectedRegion { array: product.meta, bbox }, planes: by_stride })
+    Ok(Source::Corrected { region: CorrectedRegion { array: product.meta, bbox }, planes: by_stride, u16 })
 }
 
 pub fn exists(dir: &Path) -> bool {

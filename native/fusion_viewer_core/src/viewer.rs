@@ -136,7 +136,7 @@ impl ViewerCore {
         let chunk_cache = (chunk_bytes > 0).then(|| Arc::new(crate::chunk_cache::ChunkCache::new(chunk_bytes)));
         if let Some(cc) = &chunk_cache {
             for src in sources.channels.values_mut() {
-                if let crate::corrected::Source::Corrected { region, planes } = src {
+                if let crate::corrected::Source::Corrected { region, planes, .. } = src {
                     region.array.cache = Some(Arc::clone(cc));
                     for p in planes.values_mut() {
                         p.array.cache = Some(Arc::clone(cc));

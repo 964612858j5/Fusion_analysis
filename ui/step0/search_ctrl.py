@@ -2538,11 +2538,6 @@ class WsiCorrectionWorker(QThread):
                         # -- leaves none, and Step1 reads as before)
                         display_pyramid.drop(display_pyramid.display_root(zarr_path),
                                              info["group_name"], ch_name)
-                        display = None
-                        if display_strides:
-                            display = display_pyramid.DisplayBuilder(
-                                display_pyramid.display_root(zarr_path), info["group_name"],
-                                ch_name, info["bbox"], display_strides, threaded=True)
                         ds = group.create_dataset(
                             ch_name,
                             shape=(roi_h, roi_w),
@@ -2550,6 +2545,12 @@ class WsiCorrectionWorker(QThread):
                             dtype=np.float32,
                             overwrite=True,
                         )
+                        display = None
+                        if display_strides:
+                            display = display_pyramid.DisplayBuilder(
+                                display_pyramid.display_root(zarr_path), info["group_name"],
+                                ch_name, info["bbox"], display_strides, threaded=True,
+                                fill=float(ds.fill_value or 0.0))
                         # v14.5a: per-channel source identity (metadata only — never
                         # touches array data/shape). channel_index from the loader's
                         # channel map; None if unavailable (name/key/shape/dtype still
@@ -2630,7 +2631,7 @@ class WsiCorrectionWorker(QThread):
                             sidecar_path, info["group_name"], ch_name,
                             accumulator, ds, level_stride, write_token)
                     if display is not None:
-                        display.finish(dict(ds.attrs))      # carries the new token
+                        display.finish(dict(ds.attrs), ds)  # the new token; s1 checked against ds
                     corrected_decisions[ch_name] = method
                     completed_units += len(tiles)
                     if self._cancel_requested:

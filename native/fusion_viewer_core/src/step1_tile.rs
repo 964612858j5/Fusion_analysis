@@ -7,9 +7,10 @@
 //!   pyramid's own level. u8/u16 stay integers, zero outside, valid on the
 //!   clipped rectangle; other types become f32, NaN outside, valid where
 //!   finite. A tile outside the ROI is zeros (u8), nothing valid.
-//! * CORRECTED: the accepted coarse plane's slice at this stride, or the
-//!   reduction of the level-0 rectangle (`reduce`); f32, NaN where not
-//!   valid, valid where finite.
+//! * CORRECTED: the accepted coarse plane's slice at this stride (at
+//!   stride 1 only a uint16 display layer, R7c 1A), or the reduction of the
+//!   level-0 rectangle (`reduce`); f32, NaN where not valid, valid where
+//!   finite.
 //! * MISSING: nothing valid; Python's tile is `tile_size` square of NaN.
 
 use crate::corrected::{Plane, Source};
@@ -167,13 +168,18 @@ fn corrected_tile(region: &CorrectedRegion, planes: &std::collections::HashMap<u
                   rect: [i64; 4], stride: usize, budget: usize, wanted: &dyn Fn() -> bool)
                   -> Result<Option<Tile>> {
     let mut got = None;
-    if stride > 1 {
-        if let Some(plane) = planes.get(&stride) {
-            match plane_tile(plane, rect, wanted) {
-                Ok(None) => return Ok(None),
-                Ok(Some(t)) => got = Some(t),
-                Err(_) => {}            // a plane read that failed: reduce instead
+    // stride 1: only a full-resolution display layer (R7c 1A) stands for level 0
+    if let Some(plane) = planes.get(&stride).filter(|p| stride > 1 || p.display) {
+        match plane_tile(plane, rect, wanted) {
+            Ok(None) => return Ok(None),
+            Ok(Some(t)) => {
+                // measurement evidence (R7c 1D): this tile came from a saved
+                // plane (src 3), not the product (1); a failed plane read
+                // falls back below and the product's chunk reads mark it 1
+                crate::read_split::count(0, 0, 3);
+                got = Some(t)
             }
+            Err(_) => {}                // a plane read that failed: reduce instead
         }
     }
     let red = match got {
@@ -198,6 +204,7 @@ pub fn read(source: &Source, raw: &RawSource, raw_kind: RawKind, roi: Option<[i6
     match source {
         Source::Raw { index } => raw_tile(raw, raw_kind, *index, level, rect, stride, roi).map(Some),
         Source::Corrected { region, planes } => corrected_tile(region, planes, rect, stride, budget, wanted),
+        Source::DisplayTiff { src, kind, index } => raw_tile(src, *kind, *index, level, rect, stride, roi).map(Some),
         Source::Missing { .. } => Ok(Some(Tile { rows: tile_size, cols: tile_size,
                                                   values: Values::F32(vec![f32::NAN; tile_size * tile_size]),
                                                   valid: Valid::Nothing })),

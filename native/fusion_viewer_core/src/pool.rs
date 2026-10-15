@@ -143,7 +143,8 @@ impl Pool {
         // holds at most `result_bytes` plus one tile.
         let result_bytes = result_bytes.max(1);
         let corrected = sources.names.keys().copied()
-            .filter(|c| matches!(sources.of(*c), Some(crate::corrected::Source::Corrected { .. }))).collect();
+            .filter(|c| matches!(sources.of(*c), Some(crate::corrected::Source::Corrected { .. })
+                                                   | Some(crate::corrected::Source::DisplayTiff { .. }))).collect();
         let shared = Arc::new(Shared {
             queue: Mutex::new(Queue { jobs: VecDeque::new(), wanted: Default::default(), result_bytes: 0,
                                      reading: Default::default(), results: VecDeque::new(), closed: false }),

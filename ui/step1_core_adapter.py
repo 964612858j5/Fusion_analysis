@@ -257,9 +257,10 @@ def build_corrected_manifest(table, raw_provider, strides) -> Dict[str, Any]:
         elif source == SOURCE_CORRECTED:
             region = table.region(name)
             planes = []
-            for stride in sorted({int(s) for s in strides if int(s) > 1}):
+            for stride in sorted({max(1, int(s)) for s in strides}):
                 plane = table.coarse_plane(name, stride)
-                if plane is not None:
+                # stride 1: only a full-resolution display layer (R7c 1A)
+                if plane is not None and (stride > 1 or getattr(plane, "display", False)):
                     planes.append({"stride": stride, "array": _array_spec(plane.array),
                                    "origin": [int(plane.origin[0]), int(plane.origin[1])],
                                    "display": bool(getattr(plane, "display", False))})
@@ -269,9 +270,61 @@ def build_corrected_manifest(table, raw_provider, strides) -> Dict[str, Any]:
         else:
             channels[name] = {"source": "raw", "index": index}
     roi = table.roi_bbox()
-    return {
+    out = {
         "roi": None if roi is None else [int(v) for v in roi],
         "revision": table.identity_token(),
         "budget": int(MAX_REDUCTION_ELEMENTS),
         "channels": channels,
     }
+    _display_tiff(table, raw_provider, out)
+    if os.environ.get("BLOCK01_A9_DRAW_LOG") == "1":       # measurement evidence (R7c 1D)
+        for name, entry in sorted(channels.items()):
+            if entry["source"] in ("corrected", "display_tiff"):
+                planes = [f"{p['stride']}{'*' if p.get('display') else ''}" for p in entry.get("planes", [])]
+                print(f"[sources] {name}: {entry['source']} planes={','.join(planes)}", flush=True)
+    return out
+
+
+#: R7c 1B (measurement switch, not a product entry): a corrected channel is
+#: drawn from this already-built tiled pyramid (the merged OME-TIFF) instead
+#: of its float product. Only a full-slide region, only a channel the file
+#: names, only a file whose every level has the slide's own shape; anything
+#: else stays on its own path. The file is assumed to be the snapshot of the
+#: current product (checked before measuring, `a9_bench/r7c/verify_ometiff.py`).
+DISPLAY_OMETIFF_ENV = "BLOCK01_STEP1_DISPLAY_OMETIFF"
+
+
+def _display_tiff(table, raw_provider, manifest) -> None:
+    path = os.environ.get(DISPLAY_OMETIFF_ENV, "").strip()
+    if not path:
+        return
+    from ..viewer.raw_tile_provider import RawTileProvider
+    try:
+        tiff = RawTileProvider(path)
+    except Exception as exc:                                # noqa: BLE001
+        print(f"[display_tiff] {path}: not opened ({exc}); every channel stays on its own path")
+        return
+    try:
+        shapes = [tuple(raw_provider.level_shape(k)) for k in range(raw_provider.num_levels)]
+        if [tuple(tiff.level_shape(k)) for k in range(tiff.num_levels)] != shapes:
+            print(f"[display_tiff] {path}: its levels are not the slide's; not used")
+            return
+        full = [0, shapes[0][0], 0, shapes[0][1]]
+        all_names = list(tiff.channel_names)
+        names = {n for n in all_names if all_names.count(n) == 1}      # a repeated name is ambiguous
+        used = []
+        for name, entry in manifest["channels"].items():
+            if entry.get("source") != "corrected":
+                continue
+            if name not in names or [int(v) for v in table.region(name).bbox] != full:
+                print(f"[display_tiff] {name}: stays on its corrected product "
+                      f"({'not in the file' if name not in names else 'not a full-slide region'})")
+                continue
+            manifest["channels"][name] = {"source": "display_tiff", "index": entry["index"],
+                                          "tiff_index": int(tiff.channel_index(name))}
+            used.append(name)
+        if used:
+            manifest["display_tiff"] = build_raw_manifest(tiff)
+        print(f"[display_tiff] {path}: drawn from it: {sorted(used)}", flush=True)
+    finally:
+        tiff.close()

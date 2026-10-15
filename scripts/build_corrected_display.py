@@ -53,7 +53,8 @@ def build_channel(array, group_name, channel, out_root, strides, max_bytes):
         return {"skipped": "no source_identity on the product"}
     if len(bbox) != 4 or tuple(array.shape) != (bbox[1] - bbox[0], bbox[3] - bbox[2]):
         return {"skipped": "the product's shape is not its region's"}
-    builder = dp.DisplayBuilder(out_root, group_name, channel, bbox, strides, max_bytes=max_bytes)
+    builder = dp.DisplayBuilder(out_root, group_name, channel, bbox, strides, max_bytes=max_bytes,
+                                fill=float(array.fill_value if array.fill_value is not None else 0.0))
     height, width = (int(v) for v in array.shape)
     chunk = int(array.chunks[0])
     rows = max(chunk, (max_bytes // (width * 4 * 4)) // chunk * chunk)
@@ -63,7 +64,7 @@ def build_channel(array, group_name, channel, out_root, strides, max_bytes):
             break
         values = np.asarray(array[r0:min(height, r0 + rows), :], dtype=np.float32)
         builder.add(values, bbox[0] + r0, bbox[2])
-    ok = builder.finish(attrs)
+    ok = builder.finish(attrs, array)
     out = {"published": ok, "seconds": round(time.perf_counter() - started, 1),
            "band_rows": rows, "strides": strides}
     if not ok:

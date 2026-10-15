@@ -118,7 +118,11 @@ def test_a_save_writes_every_level_as_the_rounded_reduction(tmp_path, monkeypatc
                                             stride)
         assert np.abs(got - mean).max() <= 0.5
     group = zarr.open_group(os.path.join(root, "R", "CH_A"), mode="r")
-    assert [d["path"] for d in group.attrs["multiscales"][0]["datasets"]] == ["s2", "s4"]
+    assert [d["path"] for d in group.attrs["multiscales"][0]["datasets"]] == ["s1", "s2", "s4"]
+    # R7c 1A: level 0 itself, lossless as uint16
+    s1 = dp.accept(root, "R/CH_A", attrs, ROI, 1)
+    assert s1 is not None and s1.dtype == np.uint16
+    assert np.array_equal(s1[...].astype(np.float32), product[...])
 
 
 def test_the_product_and_the_coarse_plane_do_not_change(tmp_path, monkeypatch):
@@ -213,9 +217,9 @@ def test_python_and_rust_tiles_are_equal_on_layers(tmp_path, monkeypatch):
     try:
         manifest = build_corrected_manifest(table, raw, [1, 2, 4])
         planes = manifest["channels"]["CH_A"]["planes"]
-        assert {p["stride"]: p["display"] for p in planes} == {2: True, 4: True}
+        assert {p["stride"]: p["display"] for p in planes} == {1: True, 2: True, 4: True}
         reader = core.Step1Reader(build_raw_manifest(raw), manifest)
-        for stride in (2, 4):
+        for stride in (1, 2, 4):
             h, w = 1024 // stride, 768 // stride
             for y0 in range(0, h, 128):
                 for x0 in range(0, w, 128):
@@ -321,3 +325,78 @@ def test_the_backfill_never_writes_the_product(tmp_path):
     layer = dp.accept(dp.display_root(product), "R/c", dict(arr.attrs), [0, SIDE, 0, SIDE], 4)
     want = arr[...].reshape(SIDE // 4, 4, SIDE // 4, 4).mean(axis=(1, 3))
     assert np.array_equal(layer[...], np.floor(want + 0.5).astype(np.uint16))
+
+
+def test_the_full_resolution_layer_can_be_switched_off(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    assert _save(tmp_path, out, monkeypatch=monkeypatch)["finished"]
+    assert _table(out).coarse_plane("CH_A", 1).display
+    monkeypatch.setenv("BLOCK01_STEP1_DISPLAY_S1", "0")
+    assert _table(out).coarse_plane("CH_A", 1) is None        # level 0 is read as before
+    assert _table(out).coarse_plane("CH_A", 2).display        # the coarser layers stay
+
+
+def test_s1_that_differs_from_the_product_is_not_published(tmp_path):
+    _square_project(tmp_path)
+    product = zarr.open_group(str(tmp_path / "corrected_channels.zarr"), mode="r")["R"]["c"]
+    values = product[...]
+    root = tmp_path / "display"
+    b = dp.DisplayBuilder(str(root), "R", "c", [0, SIDE, 0, SIDE], [2])
+    changed = values.copy()
+    changed[0, 0] += 1                                       # what s1 holds is not the product
+    b.add(changed, 0, 0)
+    assert not b.finish(dict(product.attrs), product)
+    assert "differs" in b.refused
+    assert not (root / "R" / "c").exists()
+    b = dp.DisplayBuilder(str(root), "R", "c", [0, SIDE, 0, SIDE], [2])
+    b.add(values, 0, 0)
+    assert b.finish(dict(product.attrs), product)
+    assert dp.accept(str(root), "R/c", dict(product.attrs), [0, SIDE, 0, SIDE], 1) is not None
+
+
+def _thin_product(tmp_path, fill=0.0, width=5120):
+    """One row of 512 chunks across (1 x 10 s1 chunks): only the long axis
+    has 1024 source-chunk boundaries."""
+    product = zarr.open_group(str(tmp_path / "corrected_channels.zarr"), mode="w").require_group(
+        "R").create_dataset("t", shape=(512, width), chunks=(1024, 1024), dtype=np.float32,
+                            fill_value=fill)
+    values = np.random.default_rng(9).integers(0, 255, (512, width)).astype(np.float32)
+    product[:, :1024] = values[:, :1024]             # the rest is never written: fill
+    product.attrs.update({"source_identity": "tok", "roi_bbox_fullres": [0, 512, 0, width]})
+    values[:, 1024:] = fill
+    return product, values
+
+
+def test_s1_keeps_the_product_fill(tmp_path):
+    product, values = _thin_product(tmp_path, fill=7.0)
+    root = tmp_path / "display"
+    b = dp.DisplayBuilder(str(root), "R", "t", [0, 512, 0, 5120], [2], fill=float(product.fill_value))
+    b.add(np.asarray(product[...]), 0, 0)
+    assert b.finish(dict(product.attrs), product), b.refused
+    s1 = dp.accept(str(root), "R/t", dict(product.attrs), [0, 512, 0, 5120], 1)
+    assert s1.fill_value == 7 and np.array_equal(s1[...].astype(np.float32), values)
+    bad = dp.DisplayBuilder(str(tmp_path / "d2"), "R", "t", [0, 512, 0, 5120], [2], fill=float("nan"))
+    assert "fill" in bad.refused
+
+
+def test_the_spot_check_covers_a_single_axis_boundary(tmp_path):
+    product, values = _thin_product(tmp_path)
+    changed = values.copy()
+    changed[10, 1024 + 3] += 1                      # s1 chunk (0, 2): right of the 1024 boundary
+    b = dp.DisplayBuilder(str(tmp_path / "display"), "R", "t", [0, 512, 0, 5120], [2])
+    b.add(changed, 0, 0)
+    assert not b.finish(dict(product.attrs), product)
+    assert "0.2 differs" in b.refused
+
+
+def test_a_spot_check_that_cannot_read_drops_only_the_layers(tmp_path, monkeypatch):
+    product, values = _thin_product(tmp_path)
+    root = tmp_path / "display"
+    b = dp.DisplayBuilder(str(root), "R", "t", [0, 512, 0, 5120], [2])
+    b.add(values, 0, 0)
+
+    def broken(self, product):
+        raise OSError("disk")
+    monkeypatch.setattr(dp.DisplayBuilder, "_spot_check", broken)
+    assert not b.finish(dict(product.attrs), product)
+    assert "could not read" in b.refused and not (root / "R" / "t").exists()

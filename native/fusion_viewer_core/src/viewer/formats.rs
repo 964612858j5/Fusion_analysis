@@ -17,6 +17,11 @@ impl ViewerCore {
                 _ => Format::F32,
             }),
             Source::Corrected { .. } => Some(Format::F32),
+            Source::DisplayTiff { kind, .. } => Some(match kind {         // R7c 1B
+                RawKind::U8 => Format::U8,
+                RawKind::U16 => Format::U16,
+                _ => Format::F32,
+            }),
             Source::Missing { .. } => None,
         }
     }
@@ -33,8 +38,15 @@ impl ViewerCore {
             _ => crate::family::Format::F32,
         };
         let mut formats = vec![raw];
-        if self.display.iter().any(|(c, _)| !matches!(self.sources.of(*c), Some(crate::corrected::Source::Raw { .. }))) {
+        if self.display.iter().any(|(c, _)| matches!(self.sources.of(*c), Some(crate::corrected::Source::Corrected { .. }))) {
             formats.push(crate::family::Format::F32);
+        }
+        for (c, _) in &self.display {                 // R7c 1B: a display TIFF's own format
+            if let (Some(crate::corrected::Source::DisplayTiff { .. }), Some(f)) = (self.sources.of(*c), self.format_of(*c)) {
+                if !formats.contains(&f) {
+                    formats.push(f);
+                }
+            }
         }
         let total = self.cfg.max_raw_texture_bytes.saturating_sub(g.store.slack_bytes(&formats));
         self.planner.set_total(Some(total as u64));

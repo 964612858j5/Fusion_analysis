@@ -41,10 +41,19 @@ fn spec(d: &Bound<'_, PyDict>) -> PyResult<ArraySpec> {
                    zattrs: if zattrs.is_none() { None } else { Some(file_id(&zattrs)?) } })
 }
 
-fn source(d: &Bound<'_, PyDict>) -> PyResult<Source> {
+/// R7c 1B: the second pyramid corrected channels may be drawn from.
+type DisplayTiff = Option<(std::sync::Arc<crate::reader::RawSource>, RawKind)>;
+
+fn source(d: &Bound<'_, PyDict>, tiff: &DisplayTiff) -> PyResult<Source> {
     let kind: String = item(d, "source")?.extract()?;
     match kind.as_str() {
         "raw" => Ok(Source::Raw { index: item(d, "index")?.extract()? }),
+        "display_tiff" => {
+            let (src, kind) = tiff.as_ref()
+                .ok_or_else(|| PyValueError::new_err("display_tiff channel without a display_tiff manifest"))?;
+            Ok(Source::DisplayTiff { src: std::sync::Arc::clone(src), kind: *kind,
+                                     index: item(d, "tiff_index")?.extract()? })
+        }
         "missing" => Ok(Source::Missing { reason: item(d, "reason")?.extract()? }),
         "corrected" => {
             let product = spec(item(d, "product")?.cast::<PyDict>()?)?;
@@ -69,11 +78,21 @@ pub(crate) fn parse(raw: &Bound<'_, PyDict>, sources: &Bound<'_, PyDict>)
     let dtype: String = item(raw, "dtype")?.extract()?;
     let raw_kind = RawKind::parse(&dtype)
         .ok_or_else(|| PyValueError::new_err(format!("raw dtype {dtype} not taken")))?;
+    let tiff: DisplayTiff = match sources.get_item("display_tiff")? {
+        Some(m) if !m.is_none() => {
+            let m = m.cast::<PyDict>()?.clone();
+            let dtype: String = item(&m, "dtype")?.extract()?;
+            let kind = RawKind::parse(&dtype)
+                .ok_or_else(|| PyValueError::new_err(format!("display tiff dtype {dtype} not taken")))?;
+            Some((std::sync::Arc::new(crate::py::reader::open_source(&m)?), kind))
+        }
+        _ => None,
+    };
     let (mut channels, mut names) = (HashMap::new(), HashMap::new());
     for (name, d) in item(sources, "channels")?.cast_into::<PyDict>()?.iter() {
         let (name, d) = (name.extract::<String>()?, d.cast::<PyDict>()?.clone());
         names.insert(item(&d, "index")?.extract::<u16>()?, name.clone());
-        channels.insert(name, source(&d)?);
+        channels.insert(name, source(&d, &tiff)?);
     }
     let roi = item(sources, "roi")?;
     Ok((raw_kind,

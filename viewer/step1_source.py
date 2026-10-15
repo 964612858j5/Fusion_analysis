@@ -381,8 +381,11 @@ class Step1SourceTable:
         return plane
 
     def _resolve_coarse_plane(self, channel, stride):
-        if stride <= 1 or self.source_of(channel) != SOURCE_CORRECTED:
+        if self.source_of(channel) != SOURCE_CORRECTED:
             return None
+        import os
+        if stride <= 1 and os.environ.get("BLOCK01_STEP1_DISPLAY_S1") == "0":
+            return None                  # R7c 1A: the full-resolution layer is off
         if not self._path:
             return None
         import os
@@ -399,6 +402,8 @@ class Step1SourceTable:
             if array is not None:
                 origin, _shape = coarse_block_range(region.bbox, stride)
                 return CoarsePlane(array, stride, origin, display=True)
+        if stride <= 1:
+            return None                  # level 0 itself: only a display layer stands for it
         sidecar = os.path.join(os.path.dirname(self._path),
                                COARSE_SIDECAR_DIRNAME)
         if not os.path.isdir(sidecar):
@@ -706,7 +711,9 @@ def read_tile(table, channel, rect, stride=1, read_raw=None,
     # a slice of it. The two are the same numbers: `rect` in level-k
     # coordinates IS the block range, because the blocks are anchored at the
     # level-0 origin and `y0 * stride % stride == 0`.
-    plane = table.coarse_plane(channel, stride) if stride > 1 else None
+    # (R7c 1A: at stride 1 an accepted full-resolution display layer `s1`
+    # holds the same values as uint16; without one, level 0 is read)
+    plane = table.coarse_plane(channel, stride)
     if plane is not None:
         try:
             return plane.tile((y0, y1, x0, x1))

@@ -20,6 +20,9 @@ uint16, in 512 chunks, beside the product in `corrected_display.zarr`:
   fields, `source_identity` included) plus the stride, dtype and block
   origin; `complete` is written last, on every stride at once. Step1 checks
   all of it (`accept`) and otherwise reads as before.
+* FULL RESOLUTION (R7c 1A, B3 plan v3): `s1` holds level 0 itself as
+  uint16 (lossless for an eligible channel), written straight through; it
+  is published only after an on-disk spot check against the product.
 * BOUNDED: fed band by band (a band is a full-width run of rows; Step0
   passes its tiles in row order, the backfill script reads slabs), only one
   band's sums are held per stride.
@@ -177,7 +180,7 @@ class DisplayBuilder:
     """
 
     def __init__(self, root_path, group_name, channel, bbox, strides,
-                 max_bytes=MAX_WORK_BYTES, log=print, threaded=False):
+                 max_bytes=MAX_WORK_BYTES, log=print, threaded=False, full_res=True, fill=0.0):
         self.root = str(root_path)
         self.group_name, self.channel = str(group_name), str(channel)
         self.bbox = tuple(int(v) for v in bbox)
@@ -186,16 +189,27 @@ class DisplayBuilder:
         self._band = None
         self._strides = []
         self._queue = self._thread = None
+        self._s1 = None                          # the full-resolution layer (1A)
         y0, y1, x0, x1 = self.bbox
         strides = sorted({int(s) for s in strides if int(s) > 1})
         if not strides or y1 <= y0 or x1 <= x0:
             self.refused = "no level to write"
             return
+        # the product's fill is a sample too (a missing chunk reads as it)
+        fill = float(fill)
+        if not (np.isfinite(fill) and 0 <= fill <= 65535 and fill == int(fill)):
+            self.refused = f"the product's fill {fill} is not an integer in 0..65535"
+            return
+        self._fill = int(fill)
         width = x1 - x0 + 2 * strides[-1]
         if 4096 * width * 4 + (4096 // strides[0] + 2) * (width // strides[0] + 2) * 8 > max_bytes:
             self.refused = "a band would exceed the working-memory bound"
             return
-        need = sum(int(np.prod(sources.coarse_block_range(self.bbox, s)[1])) * 2 for s in strides)
+        def whole_chunks(shape):            # edge chunks are stored whole, uncompressed bound
+            return -(-shape[0] // CHUNK) * -(-shape[1] // CHUNK) * CHUNK * CHUNK * 2
+        need = sum(whole_chunks(sources.coarse_block_range(self.bbox, s)[1])
+                   for s in strides + ([1] if full_res else []))
+        need += 4 * CHUNK * CHUNK * 2                  # a chunk being written per layer, temp
         probe = os.path.abspath(self.root)
         while not os.path.isdir(probe) and os.path.dirname(probe) != probe:
             probe = os.path.dirname(probe)              # the nearest folder that exists
@@ -218,6 +232,11 @@ class DisplayBuilder:
                     f"s{s}", shape=shape, chunks=(CHUNK, CHUNK), dtype="<u2", fill_value=0,
                     compressor=Blosc(cname="lz4", clevel=5, shuffle=Blosc.SHUFFLE), overwrite=True)
                 self._strides.append(_Stride(s, self.bbox, array))
+            if full_res:
+                self._s1 = group.create_dataset(
+                    "s1", shape=(y1 - y0, x1 - x0), chunks=(CHUNK, CHUNK), dtype="<u2",
+                    fill_value=self._fill, compressor=Blosc(cname="lz4", clevel=5, shuffle=Blosc.SHUFFLE),
+                    overwrite=True)
             self._group = group
         except Exception as exc:                            # noqa: BLE001
             self._fail(f"could not create the layers: {exc}")
@@ -245,6 +264,7 @@ class DisplayBuilder:
             self.refused = why
             self.log(f"[display] {self.group_name}/{self.channel}: no display layers ({why})")
         self._strides = []
+        self._s1 = None
 
     def add(self, values, gy, gx):
         if self.refused:
@@ -268,6 +288,12 @@ class DisplayBuilder:
         if not np.array_equal(values, np.floor(values)):
             return self._fail("a sample is not an integer")
         gy, gx = int(gy), int(gx)
+        if self._s1 is not None:
+            try:
+                ly, lx = gy - self.bbox[0], gx - self.bbox[2]
+                self._s1[ly:ly + values.shape[0], lx:lx + values.shape[1]] = values.astype("<u2")
+            except Exception as exc:                        # noqa: BLE001
+                return self._fail(f"writing s1 failed: {exc}")
         if self._band is not None and gy > self._band:
             self._flush_before(gy)
         self._band = gy
@@ -295,9 +321,43 @@ class DisplayBuilder:
         except Exception as exc:                            # noqa: BLE001
             self._fail(f"writing failed: {exc}")
 
-    def finish(self, product_attrs):
-        """Write what is left and publish; False (and nothing kept) if refused."""
+    def _spot_check(self, product):
+        """Re-read about 1% of `s1`'s chunks from disk (at least the corners,
+        the last row and column, and both sides of a source-chunk boundary)
+        and compare them with the product; any difference refuses."""
+        h, w = self._s1.shape
+        ny, nx = -(-h // CHUNK), -(-w // CHUNK)
+        picks = {(0, 0), (0, nx - 1), (ny - 1, 0), (ny - 1, nx - 1), (ny // 2, nx - 1), (ny - 1, nx // 2)}
+        # either side of a 1024 source-chunk boundary, on each axis that has one
+        if ny > 2:
+            picks |= {(1, 0), (2, 0)}
+        if nx > 2:
+            picks |= {(0, 1), (0, 2)}
+        rng = np.random.default_rng(int(time.time()))
+        picks |= {(int(rng.integers(ny)), int(rng.integers(nx))) for _ in range(max(1, ny * nx // 100))}
+        disk = self._s1                  # zarr keeps no chunks: every read is the store's
+        for cy, cx in sorted(picks):
+            ys, xs = slice(cy * CHUNK, min(h, cy * CHUNK + CHUNK)), slice(cx * CHUNK, min(w, cx * CHUNK + CHUNK))
+            if not np.array_equal(np.asarray(disk[ys, xs]).astype(np.float32),
+                                  np.asarray(product[ys, xs], dtype=np.float32)):
+                return f"s1 chunk {cy}.{cx} differs from the product on disk"
+        return ""
+
+    def finish(self, product_attrs, product=None):
+        """Write what is left and publish; False (and nothing kept) if
+        refused. `product`: the float level 0 `s1` is spot-checked against
+        (`s1` is not published without it)."""
         self._join()
+        if not self.refused and self._s1 is not None:
+            if product is None or tuple(product.shape) != tuple(self._s1.shape):
+                self._fail("s1 cannot be checked against the product")
+            else:
+                try:
+                    why = self._spot_check(product)
+                except Exception as exc:                    # noqa: BLE001
+                    why = f"the s1 spot check could not read: {exc}"
+                if why:
+                    self._fail(why)
         if not self.refused:
             for st in self._strides:
                 try:
@@ -309,6 +369,13 @@ class DisplayBuilder:
             return False
         try:
             datasets = []
+            if self._s1 is not None:
+                for key, value in identity(dict(product_attrs), 1).items():
+                    self._s1.attrs[key] = value
+                self._s1.attrs["block_origin"] = [self.bbox[0], self.bbox[2]]
+                datasets.append({"path": "s1", "coordinateTransformations": [
+                    {"type": "scale", "scale": [1.0, 1.0]},
+                    {"type": "translation", "translation": [float(self.bbox[0]), float(self.bbox[2])]}]})
             for st in self._strides:
                 for key, value in identity(dict(product_attrs), st.stride).items():
                     st.array.attrs[key] = value
@@ -324,6 +391,8 @@ class DisplayBuilder:
                                                  "datasets": datasets}]
             for st in self._strides:
                 st.array.attrs["complete"] = True          # LAST
+            if self._s1 is not None:
+                self._s1.attrs["complete"] = True
         except Exception as exc:                            # noqa: BLE001
             self._fail(f"publishing failed: {exc}")
             self.abort()
@@ -335,4 +404,5 @@ class DisplayBuilder:
             self.refused = self.refused or "aborted"    # the thread skips the rest
             self._join()
         self._strides = []
+        self._s1 = None
         drop(self.root, self.group_name, self.channel)

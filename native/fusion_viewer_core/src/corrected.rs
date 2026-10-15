@@ -37,6 +37,9 @@ pub struct Plane {
 pub enum Source {
     Raw { index: usize },
     Corrected { region: CorrectedRegion, planes: HashMap<usize, Plane> },
+    /// R7c 1B: a corrected channel drawn from a second, already-built tiled
+    /// pyramid (the merged OME-TIFF), read like a raw channel of that file
+    DisplayTiff { src: std::sync::Arc<crate::reader::RawSource>, kind: crate::step1_tile::RawKind, index: usize },
     Missing { reason: String },
 }
 

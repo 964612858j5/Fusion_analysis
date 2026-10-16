@@ -34,7 +34,14 @@ from block01.core import label_pyramid as lp  # noqa: E402
 from block01.ui.step1_gpu_layer import Step1GpuLayer  # noqa: E402
 from block01.ui.step1_viewer_host import Step1ViewerHost  # noqa: E402
 from block01.ui.step1_viewer_mount import (  # noqa: E402
+
     BACKEND_CPU_FALLBACK, BACKEND_GPU, DEMO_GPU_RAW_TEXTURE_BYTES, Step1WholeSlideMount)
+
+@pytest.fixture(autouse=True)
+def _python_viewer(monkeypatch):
+    """These pin the Python GPU path (the fallback since Rust became the
+    default, 2026-10-16): ask for it explicitly."""
+    monkeypatch.setenv("BLOCK01_STEP1_BACKEND", "python")
 
 _spec = importlib.util.spec_from_file_location(
     "_overview_rig", os.path.join(os.path.dirname(__file__), "test_step1_gpu_overview_skip.py"))

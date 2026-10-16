@@ -47,6 +47,13 @@ from block01.ui.step1_viewer_mount import (  # noqa: E402
 )
 from block01.viewer.tile_types import SourceIdentity, TileGridSpec  # noqa: E402
 
+@pytest.fixture(autouse=True)
+def _python_viewer(monkeypatch):
+    """These pin the Python GPU path (the fallback since Rust became the
+    default, 2026-10-16): ask for it explicitly."""
+    monkeypatch.setenv("BLOCK01_STEP1_BACKEND", "python")
+
+
 REQUIRE_GPU = os.environ.get("BLOCK01_REQUIRE_STEP1_GPU") == "1"
 
 TILE = 256

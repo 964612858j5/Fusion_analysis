@@ -4485,3 +4485,13 @@ D 的界面卡顿：超过 50 ms 的 0 次，`deferred_growth` 0。每次绘制�
 - 测量（`/sda1/Fusion/a9_bench/r7c/R7c3_results.md`）：172 次，全程显示半速，只作配置间比较。hybrid：z1 勾选新通道出齐 245–262 ms（cur 294–380、odon 331–879）；固态盘跳转后拖糊面积 0.28%（cur 1.41%、odon 8.04%）；缓存比 cur 多 18–36%（odon 2.9–4.5 倍）。
 - 测量中发现的"Vimentin 放大变黑"是测量副本只复制了 9 个通道的全分辨率块所致，原项目完整，不是产品问题。
 - 未完成：正常刷新率下复测；标定图稳定性证明；观察尾段补足。
+
+### 58.6 R7c 收尾（2026-10-16）
+- 用户裁定：第 4 步（上传、重绘、端到端整数纹理）不做；人工验收已非常满意，显示半速的原因不再追查，不做正常刷新率补测。R7c 关闭。
+
+## 59. Rust 看图设为默认 + v16_5 全量回归（2026-10-16，分支 v16_5）
+- 用户裁定：Rust 看图为默认（`ui/step1_core_adapter.py`：`BLOCK01_STEP1_BACKEND` 未设即 rust；`python` 为完整回退，Rust 启动失败自动回退）。
+- 全量回归（296 个测试文件，逐文件、每文件限时 20 min，4 路并行，真实 GL；Rust `cargo test` 59 通过）：27 个文件有失败。
+  - **3 个由默认切换引起**：`test_step1_gpu_overview_skip`、`test_step1_gpu_roi_clip_product_path`、`test_step3_label_mount`——测试专为 Python GPU 路径写（替身工厂不认 Rust 模式的 `deferred_scheduler` 参数、读 Python 报告的 `software_renderer`）；改为在测试中显式 `BLOCK01_STEP1_BACKEND=python`，20 项通过。产品代码未改。
+  - **其余 24 个与本次改动无关**：用 Python 后端重跑仍失败；19 个在 v16-final 副本上同样失败（环境缺 `anndata` / `pynvml`、界面像素尺寸、已知的 5 个老失败等）；`test_a9_perf_dispatch`、`test_v16_provenance`、`test_v16_pa_switch` 在子进程里按"仓库上一层目录"导入，本仓库目录名为 `block01_v16`，上一层的 `block01` 是另一份旧代码（环境问题）；`test_step2_layout`、`test_step3_page` 在全新 v16-final 副本上也失败且结果不稳定（屏幕环境）。
+- 未做：安装 `anndata` 等测试依赖（环境变更，另议）。

@@ -57,6 +57,13 @@ from block01.ui.step1_draft_spec import STEP1_SCOPE            # noqa: E402
 from block01.ui.step1_gpu_layer import Step1GpuLayer           # noqa: E402
 from block01.ui.step1_viewer_mount import BACKEND_GPU          # noqa: E402
 
+@pytest.fixture(autouse=True)
+def _python_viewer(monkeypatch):
+    """These pin the Python GPU path (the fallback since Rust became the
+    default, 2026-10-16): ask for it explicitly."""
+    monkeypatch.setenv("BLOCK01_STEP1_BACKEND", "python")
+
+
 SLIDE_H, SLIDE_W = 2048, 1536
 #: A strict sub-rectangle on all four sides, and on no block boundary.
 ROI_BBOX = [300, 1500, 250, 1100]          # y0, y1, x0, x1

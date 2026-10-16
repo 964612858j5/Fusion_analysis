@@ -13,9 +13,10 @@ from typing import Any, Dict, Optional, Protocol, Tuple
 
 import numpy as np
 
-#: The switch between the two viewer backends. "python" (the default) is
-#: the existing path; "rust" asks for the core and falls back to "python",
-#: with the reason logged, when the core cannot start (plan §5.3).
+#: The switch between the two viewer backends. "rust" (the default since
+#: 2026-10-16, user ruling) asks for the core and falls back to "python",
+#: with the reason logged, when the core cannot start (plan §5.3);
+#: "python" is the existing path, kept whole as the fallback.
 BACKEND_ENV = "BLOCK01_STEP1_BACKEND"
 BACKEND_PYTHON = "python"
 BACKEND_RUST = "rust"
@@ -27,8 +28,9 @@ _DECODER_CODES = {None: 1, "lzw_decode": 5, "zlib_decode": 8, "zstd_decode": 500
 
 
 def requested_backend() -> str:
-    """What the user or a test asked for; unknown values mean "python"."""
-    value = os.environ.get(BACKEND_ENV, BACKEND_PYTHON).strip().lower()
+    """What the user or a test asked for; unset means "rust" (the default),
+    unknown values mean "python"."""
+    value = os.environ.get(BACKEND_ENV, BACKEND_RUST).strip().lower()
     return value if value in (BACKEND_PYTHON, BACKEND_RUST) else BACKEND_PYTHON
 
 

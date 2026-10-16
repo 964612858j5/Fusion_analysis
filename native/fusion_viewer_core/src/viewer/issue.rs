@@ -1,5 +1,5 @@
 //! `ViewerCore::issue`: the planner's wants, and the read-ahead (R7c step 2),
-//! handed to the reader pool.
+//! handed to the reader pool -- in R7c step 3's order (`plan::levels`).
 
 use super::ViewerCore;
 use crate::geom::TileAt;
@@ -10,8 +10,28 @@ impl ViewerCore {
     /// Hand the planner's wants to the pool: cache hits are delivered at
     /// once (one picture, as the binding's `immediate` batch), the rest are
     /// queued coarse first, then fine near-to-far, all channels of one
-    /// position together.
+    /// position together. Under odon / hybrid (R7c step 3) the queue is
+    /// target first, then the helper levels finer to coarser, the coarsest
+    /// level around the view, the read-ahead, the rest of the coarsest
+    /// level -- a queueing priority, not a barrier. A cache hit that
+    /// completes a target withdraws its helpers: the wants are then taken
+    /// once more before the queue is handed over.
     pub fn issue(&mut self) {
+        let mut new_ahead = 0usize;            // odon's cap holds for the whole issue
+        for pass in 0..2 {
+            let (jobs, ahead_jobs, in_flight) = self.issue_once(&mut new_ahead);
+            // a withdrawal on the second pass leaves the flag set: the next
+            // paint issues again (the queue handed over may still hold it)
+            if pass == 1 || !self.planner.take_reissue() {
+                self.pool.set_jobs_ahead(jobs, ahead_jobs, in_flight);
+                return;
+            }
+        }
+    }
+
+    /// One pass: the cache hits delivered, the queue to hand over.
+    #[allow(clippy::type_complexity)]
+    fn issue_once(&mut self, new_ahead: &mut usize) -> (Vec<(Ch, TileAt)>, std::collections::HashSet<(Ch, TileAt)>, Option<usize>) {
         let (coarse, mut fine) = self.planner.wanted();
         // R7c step 2: read-ahead keys (cache only); Odon's pad1 is sorted
         // with the visible tiles, the rest follows them. A key the picture
@@ -24,6 +44,10 @@ impl ViewerCore {
         let pf: std::collections::HashSet<(Ch, TileAt)> = ahead.with_visible.iter().chain(&ahead.after).copied().collect();
         fine.extend(ahead.with_visible.iter().copied());
         let order: HashMap<Ch, usize> = self.planner.active().iter().enumerate().map(|(i, c)| (*c, i)).collect();
+        let tiers: Vec<((Ch, TileAt), f64)> = if self.planner.order != crate::plan::levels::Order::Cur {
+            self.ordered(coarse, fine, &ahead, &pf, &order)
+        } else {
+        // (cur only: `legacy_order`, BLOCK01_A9_RUST_LEGACY_ORDER, has no effect under odon / hybrid)
         if self.cfg.legacy_order {
             fine.sort_by_key(|(c, t)| (order.get(c).copied(), t.level, t.ty, t.tx));
         } else if let Some(v) = self.planner.view() {
@@ -37,15 +61,16 @@ impl ViewerCore {
             };
             fine.sort_by_key(|(c, t)| (dist(t), t.ty, t.tx, order.get(c).copied()));
         }
-        let mut jobs = Vec::with_capacity(coarse.len() + fine.len());
+        coarse.into_iter().map(|k| (k, 0.0)).chain(fine.into_iter().map(|k| (k, 1.0)))
+            .chain(ahead.after.iter().map(|k| (*k, 2.0))).collect()
+        };
+        let mut jobs = Vec::with_capacity(tiers.len());
         let mut hits = Vec::new();
-        let mut now_issued = std::collections::HashSet::with_capacity(coarse.len() + fine.len());
-        let (mut ahead_jobs, mut new_ahead) = (std::collections::HashSet::new(), 0usize);
+        let mut now_issued = std::collections::HashSet::with_capacity(tiers.len());
+        let mut ahead_jobs = std::collections::HashSet::new();
         let mut now_ahead = std::collections::HashSet::new();
         {
             let mut cache = self.pool.shared().cache.lock().unwrap();
-            let tiers = coarse.into_iter().map(|k| (k, 0.0)).chain(fine.into_iter().map(|k| (k, 1.0)))
-                .chain(ahead.after.iter().map(|k| (*k, 2.0)));
             for (key, fine) in tiers {
                 if pf.contains(&key) {
                     // read-ahead: nothing to do when cached; adapted from
@@ -54,11 +79,11 @@ impl ViewerCore {
                     // never cut)
                     let new = !self.issued_ahead.contains(&key);
                     if cache.contains(&key) || (self.planner.prefetch == crate::plan::prefetch::Mode::Odon
-                                                 && new && new_ahead >= 256) {
+                                                 && new && *new_ahead >= self.planner.tune.cap) {
                         continue;
                     }
                     if new {
-                        new_ahead += 1;
+                        *new_ahead += 1;
                         // `ahead` survives the layer's tier mapping (fine 2 reads as "fine")
                         self.trace.stamp("req", Some(key), vec![("fine", 2.0), ("ahead", 1.0)]);
                     }
@@ -92,7 +117,46 @@ impl ViewerCore {
         for (key, tile) in hits {
             self.deliver(key, tile);
         }
-        self.pool.set_jobs_ahead(jobs, ahead_jobs, ahead.in_flight);
+        (jobs, ahead_jobs, ahead.in_flight)
+    }
+
+    /// odon / hybrid's queue (R7c step 3 §2.1): ranked by (tier, distance
+    /// from the view centre, position, channel); the second value is the
+    /// trace's tier (0 coarse, 1 fine, 2 read-ahead after the visible).
+    fn ordered(&mut self, coarse: Vec<(Ch, TileAt)>, fine: Vec<(Ch, TileAt)>, ahead: &crate::plan::prefetch::Ahead,
+               pf: &std::collections::HashSet<(Ch, TileAt)>, order: &HashMap<Ch, usize>) -> Vec<((Ch, TileAt), f64)> {
+        let coarsest = self.pyr.coarsest();
+        let target = self.planner.admission().map_or(coarsest, |a| a.level);
+        let near = self.planner.coarse_near();
+        let after: std::collections::HashSet<(Ch, TileAt)> = ahead.after.iter().copied().collect();
+        let (cy, cx) = self.planner.view().map_or((0.0, 0.0), |v| {
+            ((v.bbox_l0[0] + v.bbox_l0[2]) as f64 / 2.0, (v.bbox_l0[1] + v.bbox_l0[3]) as f64 / 2.0)
+        });
+        let pyr = &self.pyr;
+        let dist = |t: &TileAt| {
+            let r = pyr.tile_world_rect(*t).unwrap_or([0.0; 4]);
+            let (dx, dy) = ((r[0] + r[1]) / 2.0 - cx, (r[2] + r[3]) / 2.0 - cy);
+            ((dx * dx + dy * dy).sqrt() * 1000.0) as u64
+        };
+        let tier = |k: &(Ch, TileAt)| -> u32 {
+            let t = k.1;
+            if after.contains(k) {
+                60                                         // read-ahead after the visible
+            } else if pf.contains(k) || t.level == target {
+                0                                          // the target (and Odon's pad1)
+            } else if t.level == coarsest {
+                if near.contains(&(t.tx, t.ty)) { 50 } else { 70 }
+            } else {
+                1 + t.level.saturating_sub(target) as u32  // helper levels, finer first
+            }
+        };
+        let mut all: Vec<((Ch, TileAt), f64)> = coarse.into_iter().map(|k| (k, 0.0))
+            .chain(fine.into_iter().map(|k| (k, 1.0))).chain(ahead.after.iter().map(|k| (*k, 2.0))).collect();
+        all.sort_by_key(|(k, _)| (tier(k), dist(&k.1), k.1.level, k.1.ty, k.1.tx, order.get(&k.0).copied()));
+        let aux = all.iter().filter(|(k, _)| k.1.level != target && k.1.level != coarsest).count();
+        self.trace.stamp("order", None, vec![("order", self.planner.order.code()), ("aux", aux as f64),
+                                             ("target", target as f64)]);
+        all
     }
 
 

@@ -33,6 +33,8 @@ struct Coarse {
 struct FinePlan {
     epoch: u64,
     expected: HashSet<TileAt>,
+    /// R7c step 3: helper-level tiles asked for (reserved), odon / hybrid
+    aux: HashSet<TileAt>,
 }
 
 pub struct Planner {
@@ -51,8 +53,16 @@ pub struct Planner {
     texels: HashMap<Ch, u64>,
     /// channels refused (coarse over budget); never drawn
     pub unavailable: HashSet<Ch>,
-    /// R7c step 2: read-ahead (`prefetch`)
+    /// R7c step 2: read-ahead (`prefetch`) and its numbers
     pub prefetch: prefetch::Mode,
+    pub tune: prefetch::Tune,
+    /// R7c step 3: request order and helper levels (`levels`), the sticky
+    /// ceiling, hybrid's opened channels (`gate`), a withdrawal to issue
+    pub order: levels::Order,
+    prev_target: Option<u8>,
+    ceiling: Option<u8>,
+    opened: HashSet<Ch>,
+    reissue: bool,
 }
 
 impl Planner {
@@ -60,7 +70,9 @@ impl Planner {
         Planner { pyr, budgets, max_coarse_tiles, active: Vec::new(), coarse: HashMap::new(),
                   fine: HashMap::new(), plans: HashMap::new(), view: None, consumed: None,
                   epoch: 0, admission: None, texels: HashMap::new(), unavailable: HashSet::new(),
-                  prefetch: prefetch::Mode::Off }
+                  prefetch: prefetch::Mode::Off, tune: prefetch::Tune::default(),
+                  order: levels::Order::Cur, prev_target: None, ceiling: None, opened: HashSet::new(),
+                  reissue: false }
     }
 
     /// The total budget admission uses (the raw budget less the GPU
@@ -105,12 +117,14 @@ impl Planner {
         let keep: HashSet<Ch> = active.iter().copied().collect();
         self.fine.retain(|c, _| keep.contains(c));
         self.plans.retain(|c, _| keep.contains(c));
+        self.opened.retain(|c| keep.contains(c));
         let changed = active != self.active;
         self.active = active;
         for c in self.active.clone() {
             self.start_coarse(c);
         }
         if changed && self.view.is_some() {
+            self.track_target();               // R7c step 3: admission may move with the channels
             for c in self.active.clone() {
                 self.plan_channel(c);
             }
@@ -141,6 +155,7 @@ impl Planner {
         self.consumed = Some(view.epoch);
         self.plans.clear();
         self.epoch += 1;
+        self.track_target();
         for c in self.active.clone() {
             self.plan_channel(c);
         }
@@ -171,28 +186,32 @@ impl Planner {
         };
         let carry = a.carry(self.texel(c));
         let target: HashSet<TileAt> = keys.iter().copied().collect();
-        self.retain(c, &target, viewport, level, carry);
+        let kept_bytes = self.retain(c, &target, viewport, level, carry);
         let resident = self.fine.get(&c);
         let missing: HashSet<TileAt> = keys.iter().copied()
             .filter(|k| resident.is_none_or(|r| !r.contains_key(k))).collect();
-        if missing.is_empty() {
+        // R7c step 3: helper levels from what the kept stand-ins leave
+        let aux = if a.coarse_only || a.base_overflow || keys.is_empty() { HashSet::new() } else {
+            self.helpers(c, level, !missing.is_empty(), carry.saturating_sub(kept_bytes))
+        };
+        if missing.is_empty() && aux.is_empty() {
             self.plans.remove(&c);
             return;
         }
         if let Some(p) = self.plans.get(&c) {
-            if p.epoch == self.epoch && p.expected == missing {
+            if p.epoch == self.epoch && p.expected == missing && p.aux == aux {
                 return;                    // the same request is under way
             }
         }
-        self.plans.insert(c, FinePlan { epoch: self.epoch, expected: missing });
+        self.plans.insert(c, FinePlan { epoch: self.epoch, expected: missing, aux });
     }
 
     /// Keep the target tiles and, within `carry`, the nearest-level
     /// stand-ins that still meet `viewport` (`_retain_fine`; sizes are the
     /// tiles' real bytes, not slots).
     fn retain(&mut self, c: Ch, target: &HashSet<TileAt>, viewport: Option<[f64; 4]>,
-              level: u8, carry: u64) {
-        let Some(planes) = self.fine.get(&c) else { return };
+              level: u8, carry: u64) -> u64 {
+        let Some(planes) = self.fine.get(&c) else { return 0 };
         let mut kept = BTreeMap::new();
         let mut carried = Vec::new();
         for &t in planes.keys() {
@@ -214,6 +233,7 @@ impl Planner {
             total += size;
         }
         if kept.is_empty() { self.fine.remove(&c); } else { self.fine.insert(c, kept); }
+        total                              // the kept stand-ins' bytes
     }
 
     /// A decoded tile is in hand. True when this planner wanted it (it is
@@ -236,8 +256,13 @@ impl Planner {
             }
         }
         if let Some(p) = self.plans.get_mut(&c) {
-            if p.epoch == self.epoch && p.expected.remove(&t) {
-                if p.expected.is_empty() {
+            if p.epoch == self.epoch && (p.expected.remove(&t) || p.aux.remove(&t)) {
+                // hybrid: the target complete, its helpers are withdrawn
+                if p.expected.is_empty() && !p.aux.is_empty() && self.order == levels::Order::Hybrid {
+                    p.aux.clear();
+                    self.reissue = true;
+                }
+                if p.expected.is_empty() && p.aux.is_empty() {
                     self.plans.remove(&c);
                 }
                 self.fine.entry(c).or_default().insert(t, ());
@@ -263,6 +288,8 @@ impl Planner {
 }
 
 mod draw;
+pub mod gate;
+pub mod levels;
 pub mod prefetch;
 
 #[cfg(test)]

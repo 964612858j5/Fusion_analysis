@@ -12,6 +12,7 @@
 //!   at most 48 positions; every position times every channel. The second
 //!   ring is left out with 16 or more channels, or when pad1 times the
 //!   channels exceeds the CPU cache's tile slots. No in-flight limit.
+//! (The numbers are `Tune`'s defaults; R7c step 3 §6 measures others.)
 //! * `limited`: one ring on the target level, at most 48 (tile x channel)
 //!   keys in all, at most one being read at a time; none while the target
 //!   is downgraded, the stand-in allowance is zero, or more visible tiles
@@ -38,6 +39,49 @@ impl Mode {
     }
 }
 
+/// The read-ahead's numbers. The defaults are the step-2 values (odon's
+/// adapted from Odon's Balanced rules); R7c step 3 §6 measures other values
+/// through `BLOCK01_R7C3_TUNE` (measurement only), e.g. "cap=128,gate=32".
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tune {
+    /// odon: at most this many NEW read-ahead keys per issue (`viewer/issue.rs`)
+    pub cap: usize,
+    /// odon: ring 2 only while pad1 holds at most this many positions
+    pub gate: usize,
+    /// odon: ring 2 at most this many positions
+    pub ring2: usize,
+    /// odon: no ring 2 with this many channels or more
+    pub channels: usize,
+    /// limited: at most this many (tile x channel) keys
+    pub limited: usize,
+}
+
+impl Default for Tune {
+    fn default() -> Tune {
+        Tune { cap: 256, gate: 16, ring2: 48, channels: 16, limited: 48 }
+    }
+}
+
+impl Tune {
+    pub fn from_env() -> Tune {
+        let mut t = Tune::default();
+        let Ok(spec) = std::env::var("BLOCK01_R7C3_TUNE") else { return t };
+        for item in spec.split(',') {
+            let Some((k, v)) = item.split_once('=') else { continue };
+            let Ok(v) = v.trim().parse::<usize>() else { continue };
+            match k.trim() {
+                "cap" => t.cap = v,
+                "gate" => t.gate = v,
+                "ring2" => t.ring2 = v,
+                "channels" => t.channels = v,
+                "limited" => t.limited = v,
+                _ => {}
+            }
+        }
+        t
+    }
+}
+
 /// What to read ahead: keys merged with the visible requests (sorted with
 /// them by distance; Odon's pad1) and keys after them (in order).
 #[derive(Default, Debug)]
@@ -56,7 +100,7 @@ pub struct Ahead {
 
 impl Planner {
     /// Positions of `level` around `targets` grown by `pad` tiles, minus `inner`.
-    fn ring(&self, level: u8, targets: &[(u32, u32)], pad: i64, inner: &HashSet<(u32, u32)>) -> Vec<(u32, u32)> {
+    pub(super) fn ring(&self, level: u8, targets: &[(u32, u32)], pad: i64, inner: &HashSet<(u32, u32)>) -> Vec<(u32, u32)> {
         if targets.is_empty() {
             return Vec::new();
         }
@@ -77,7 +121,7 @@ impl Planner {
         out
     }
 
-    fn by_distance(&self, level: u8, v: &mut [(u32, u32)]) {
+    pub(super) fn by_distance(&self, level: u8, v: &mut [(u32, u32)]) {
         let Some(view) = self.view else { return };
         let (cy, cx) = ((view.bbox_l0[0] + view.bbox_l0[2]) as f64 / 2.0, (view.bbox_l0[1] + view.bbox_l0[3]) as f64 / 2.0);
         let d = |&(tx, ty): &(u32, u32)| {
@@ -114,14 +158,14 @@ impl Planner {
         match mode {
             Mode::Odon => {
                 out.with_visible = keys(&pad1);
-                if chans.len() >= 16 || out.pad1_positions * chans.len() > cache_slots {
+                if chans.len() >= self.tune.channels || out.pad1_positions * chans.len() > cache_slots {
                     out.skipped = "odon: many channels or over the cache";
                     out.skip_code = 2;
-                } else if out.pad1_positions <= 16 {
+                } else if out.pad1_positions <= self.tune.gate {
                     let inner: HashSet<(u32, u32)> = visible.iter().copied().chain(pad1.iter().copied()).collect();
                     let mut ring2 = self.ring(level, &a.tiles, 2, &inner);
                     self.by_distance(level, &mut ring2);
-                    ring2.truncate(48);
+                    ring2.truncate(self.tune.ring2);
                     out.after = keys(&ring2);
                 }
             }
@@ -138,7 +182,7 @@ impl Planner {
                     out.skip_code = 5;
                 } else {
                     let mut k = keys(&pad1);
-                    k.truncate(48);
+                    k.truncate(self.tune.limited);
                     out.after = k;
                     out.in_flight = Some(1);
                 }

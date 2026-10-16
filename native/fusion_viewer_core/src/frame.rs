@@ -11,6 +11,8 @@ mod compose;
 mod drawlog;
 mod pace;
 pub mod phase_time;
+mod shown;
+pub(crate) use shown::shown_rows;
 pub use compose::{draw_labels, ComposeKey};
 pub use pace::Pacing;
 
@@ -156,7 +158,8 @@ pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) ->
             replanned = true;                // its fine was planned just now
         }
     }
-    if replanned {
+    // R7c step 3: hybrid withdrew helpers of a target now complete
+    if replanned || core.planner.take_reissue() {
         core.issue();
     }
     core.prune_held();
@@ -191,8 +194,26 @@ pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) ->
     let t_up = Instant::now();
     let deadline = Some(pacing.deadline(started, t_up));
     let may_grow = monotonic() - core.last_input >= core.cfg.growth_quiet_s;
+    // R7c step 3: odon / hybrid's helper levels (between the target and the
+    // coarsest) are optional -- uploaded after the rest, and a full store
+    // only defers them (never "cannot draw in one pass")
+    let helper = |t: &crate::geom::TileAt| core.planner.order != crate::plan::levels::Order::Cur
+        && core.planner.admission_level().is_some_and(|l| t.level > l && t.level < coarsest);
+    let (optional, items): (Vec<_>, Vec<_>) = items.into_iter().partition(|(k, _, _)| helper(&k.1));
+    let need: HashSet<_> = required.iter().filter(|k| !helper(&k.1)).copied().collect();
     let gpu = core.gpu.as_mut().unwrap();
-    let prep = gpu.store.prepare(&gpu.gl, &items, &mandatory, &required, deadline, may_grow);
+    let mut prep = gpu.store.prepare(&gpu.gl, &items, &mandatory, &need, deadline, may_grow);
+    if !optional.is_empty() && prep.error.is_none() {
+        let more = gpu.store.prepare(&gpu.gl, &optional, &HashSet::new(), &required, deadline, may_grow);
+        prep.uploaded.extend(more.uploaded);
+        // helpers the full store cannot take wait for a change (a landing
+        // tile repaints), not for the next frame: no endless repaint
+        if !more.capacity {
+            prep.deferred += more.deferred;
+            prep.deferred_growth += more.deferred_growth;
+        }
+        prep.error = more.error;
+    }
     for key in &prep.uploaded {
         core.trace.stamp("gpu", Some(*key), vec![]);
     }

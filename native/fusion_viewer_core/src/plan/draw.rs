@@ -6,7 +6,8 @@ use crate::geom::TileAt;
 use std::collections::HashSet;
 
 impl Planner {
-    /// Everything still owed, coarse first, then fine (unordered within).
+    /// Everything still owed, coarse first, then fine -- the target's and
+    /// (R7c step 3) the helper levels' -- unordered within.
     pub fn wanted(&self) -> (Vec<(Ch, TileAt)>, Vec<(Ch, TileAt)>) {
         let coarsest = self.pyr.coarsest();
         let (across, down) = self.pyr.grid(coarsest);
@@ -26,7 +27,7 @@ impl Planner {
         let mut fine = Vec::new();
         for &c in &self.active {
             if let Some(p) = self.plans.get(&c) {
-                fine.extend(p.expected.iter().map(|&t| (c, t)));
+                fine.extend(p.expected.iter().chain(&p.aux).map(|&t| (c, t)));
             }
         }
         (coarse, fine)
@@ -35,16 +36,22 @@ impl Planner {
     /// The tiles of channel `c` worth drawing, coarse first then fine
     /// coarsest-level first (`_publish_body` + `_drawn_fine`): a finer
     /// stand-in is left out once every target cell it touches is on the
-    /// GPU. Empty while the channel's coarse is incomplete.
+    /// GPU. Empty while the channel's coarse is incomplete -- except under
+    /// R7c step 3's odon / hybrid, where the coarse tiles landed so far are
+    /// candidates at once (whether the channel is shown is `gate`'s call).
     pub fn drawn(&mut self, c: Ch, on_gpu: &dyn Fn(Ch, TileAt) -> bool) -> Vec<TileAt> {
-        if !self.coarse_complete(c) {
+        let a = self.admission().cloned();
+        let early = self.order != super::levels::Order::Cur
+            && a.as_ref().is_some_and(|a| !a.coarse_only && !a.base_overflow);
+        if !self.coarse_complete(c) && !early {
             return Vec::new();
         }
         let coarsest = self.pyr.coarsest();
         let (across, down) = self.pyr.grid(coarsest);
+        let got = self.coarse.get(&c);
         let mut out: Vec<TileAt> = (0..down)
-            .flat_map(|ty| (0..across).map(move |tx| TileAt { level: coarsest, tx, ty })).collect();
-        let a = self.admission().cloned();
+            .flat_map(|ty| (0..across).map(move |tx| TileAt { level: coarsest, tx, ty }))
+            .filter(|t| got.is_some_and(|k| k.got.contains(t))).collect();
         let Some(fine) = self.fine.get(&c) else { return out };
         let mut tiles: Vec<TileAt> = fine.keys().copied().collect();
         tiles.sort_by_key(|t| (std::cmp::Reverse(t.level), t.ty, t.tx));

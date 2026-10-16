@@ -18,7 +18,8 @@ Measurement only, loaded with a9_drive: nothing here changes the program.
       with "capture": {"out": PREFIX, "seconds": S}, a9_framecap grabs the
       canvas (root window, global rectangle) for S seconds, and the first
       injection is due 0.5 s after it is up (plan §4: 0.5 s before);
-      with "at_t0": {"step": N} or {"camera": [cx, cy, scale]} (R6 §12.4),
+      with "at_t0": {"step": N} or {"camera": [cx, cy, scale]} (R6 §12.4)
+      or {"tick": CHANNEL, "on": true} (R7c step 3: a channel ticked),
       that step change / Step1 jump happens (with "rect": "last_refshot"
       the capture and the start point use Step1's picture as the last
       settled shot found it) 0.5 s after the capture is up,
@@ -229,6 +230,13 @@ def _do_xstroke(drv, a, _t):
             t = time.monotonic()
             if "step" in what:
                 getattr(drv.w, f"_go_to_step{int(what['step'])}")()
+            elif "tick" in what:
+                # R7c step 3 §5.1: a channel ticked as a click does
+                dock = getattr(drv.w, "_channel_dock", None)
+                row = dock.row(what["tick"]) if dock is not None else None
+                if row is None:
+                    raise RuntimeError(f"no row {what['tick']!r}")
+                row.checkbox.setChecked(bool(what.get("on", True)))
             else:
                 mount = getattr(drv.w, "_step1_mount", None)
                 if mount.apply_camera(*(float(v) for v in what["camera"])):

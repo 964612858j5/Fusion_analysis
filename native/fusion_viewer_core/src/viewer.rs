@@ -159,6 +159,8 @@ impl ViewerCore {
         let mut planner = planner;
         planner.unavailable.extend(missing);              // drawn by nobody, read by nobody
         planner.prefetch = crate::plan::prefetch::Mode::from_env();      // R7c step 2
+        planner.tune = crate::plan::prefetch::Tune::from_env();
+        planner.order = crate::plan::levels::Order::from_env();          // R7c step 3
         let sources = Arc::new(sources);
         let faults = Arc::new(crate::fault::Faults::from_env());
         let pool = Pool::start(Arc::new(source), pyr.clone(), Arc::clone(&sources), raw_kind, budget,

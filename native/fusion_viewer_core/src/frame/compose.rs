@@ -6,7 +6,7 @@
 //! stays, `label_compositions` grows; R3 plan §2.1).
 
 use super::phase_time::{self as pt, PhaseClock};
-use super::{drawn_rows, FrameReport};
+use super::{drawn_rows, shown_rows, FrameReport};
 use crate::geom::{roi_scissor_box, TileAt};
 use crate::plan::Ch;
 use crate::viewer::ViewerCore;
@@ -41,7 +41,8 @@ pub struct ComposeKey {
 pub(super) fn draw(core: &mut ViewerCore, rep: &mut FrameReport, fbo: u32, w: i32, h: i32,
                    view: [f64; 4], base_overflow: bool, pc: &mut PhaseClock)
                    -> Option<(Vec<(Ch, Vec<TileAt>)>, bool)> {
-    let rows = if base_overflow { Vec::new() } else { drawn_rows(core) };
+    // R7c step 3: the candidates, less the channels the gate keeps back
+    let rows = if base_overflow { Vec::new() } else { let r = drawn_rows(core); shown_rows(core, r, view) };
     let viewer_frames = core.frames;
     let gpu = core.gpu.as_mut().unwrap();
     if pc.on {

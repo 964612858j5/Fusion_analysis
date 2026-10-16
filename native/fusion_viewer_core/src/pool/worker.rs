@@ -10,16 +10,25 @@ use std::sync::Arc;
 
 pub(super) fn worker(s: Arc<Shared>) {
     loop {
-        let key = {
+        let (key, started_ahead) = {
             let mut q = s.queue.lock().unwrap();
             loop {
                 if q.closed {
                     return;
                 }
-                if let Some(k) = q.jobs.pop_front() {
+                // the first job that may start: a read-ahead one only while
+                // fewer than its limit are being read (R7c step 2)
+                let ahead_busy = q.ahead_reading.len();
+                let open = |k: &Key| !q.prefetch.contains(k) || q.prefetch_limit.is_none_or(|n| ahead_busy < n);
+                if let Some(i) = q.jobs.iter().position(open) {
+                    let k = q.jobs.remove(i).unwrap();
                     s.busy.fetch_add(1, Ordering::SeqCst);
                     q.reading.insert(k);
-                    break k;
+                    let ahead = q.prefetch.contains(&k);
+                    if ahead {
+                        q.ahead_reading.insert(k);
+                    }
+                    break (k, ahead);
                 }
                 q = s.work.wait(q).unwrap();
             }
@@ -35,7 +44,8 @@ pub(super) fn worker(s: Arc<Shared>) {
                 crate::read_split::reset();
                 let (w0, c0) = (crate::clock::monotonic(), crate::clock::thread_cpu());
                 let still = || s.queue.lock().unwrap().wanted.contains(&key);
-                let got = if s.faults.read_fails(key) {
+                let fails = if started_ahead { s.faults.ahead_read_fails(key) } else { s.faults.read_fails(key) };
+                let got = if fails {
                     Err(crate::error::CoreError::Io("injected read failure (test)".into()))
                 } else {
                     read_tile(&s, key, &still)
@@ -54,7 +64,7 @@ pub(super) fn worker(s: Arc<Shared>) {
                 };
                 match got {
                     Ok(None) => {                    // cancelled: the plan left it
-                        s.queue.lock().unwrap().reading.remove(&key);
+                        s.queue.lock().unwrap().release(&key);
                         s.trace.stamp("read", Some(key), timing(false, true));
                         s.stale.fetch_add(1, Ordering::Relaxed);
                         None
@@ -73,13 +83,21 @@ pub(super) fn worker(s: Arc<Shared>) {
                         // no longer in flight and queues it afresh
                         let mut q = s.queue.lock().unwrap();
                         let stale = !q.wanted.contains(&key);
+                        let mut cached_bytes = 0;
                         if stale {
-                            q.reading.remove(&key);
+                            q.release(&key);
                         } else {
-                            s.cache.lock().unwrap().insert(key, Arc::clone(&t));
+                            let mut c = s.cache.lock().unwrap();
+                            c.insert(key, Arc::clone(&t));
+                            cached_bytes = c.bytes();
                         }
                         drop(q);
-                        s.trace.stamp("read", Some(key), timing(false, stale));
+                        let mut rec = timing(false, stale);
+                        if s.trace.on() {
+                            // measurement: the CPU cache's bytes after this read (R7c step 2)
+                            rec.push(("cache_mb", cached_bytes as f64 / 1048576.0));
+                        }
+                        s.trace.stamp("read", Some(key), rec);
                         if stale {
                             s.stale.fetch_add(1, Ordering::Relaxed);
                             None
@@ -92,18 +110,32 @@ pub(super) fn worker(s: Arc<Shared>) {
                         // `reading`: whoever queues it next sees it (lock
                         // order: never failures inside queue here)
                         *s.last_error.lock().unwrap() = format!("{key:?}: {e}");
+                        // quiet only while it is still read ahead (or nobody's):
+                        // one that came into view meanwhile is the picture's
+                        // failure -- counted, and the GUI told (codex review)
+                        let quiet = started_ahead && {
+                            let q = s.queue.lock().unwrap();
+                            q.prefetch.contains(&key) || !q.wanted.contains(&key)
+                        };
                         {
                             let mut f = s.failures.lock().unwrap();
                             let entry = f.per_key.entry(key).or_insert((0, 0.0));
                             *entry = (entry.0 + 1, crate::clock::monotonic());
-                            f.consecutive += 1;
-                            f.longest_run = f.longest_run.max(f.consecutive);
+                            // a read-ahead failure (R7c step 2) is held back
+                            // like any other, but is not the picture's: no
+                            // run, no notice -- it cannot make the GUI give up
+                            if !quiet {
+                                f.consecutive += 1;
+                                f.longest_run = f.longest_run.max(f.consecutive);
+                            }
                         }
-                        s.queue.lock().unwrap().reading.remove(&key);
+                        s.queue.lock().unwrap().release(&key);
                         s.trace.stamp("read", Some(key), timing(true, false));
                         s.errors.fetch_add(1, Ordering::Relaxed);
-                        if let Some(n) = &s.notifier {
-                            n.notify();              // the GUI decides: retry or fall back
+                        if !quiet {
+                            if let Some(n) = &s.notifier {
+                                n.notify();          // the GUI decides: retry or fall back
+                            }
                         }
                         None
                     }
@@ -113,18 +145,21 @@ pub(super) fn worker(s: Arc<Shared>) {
         if let Some(t) = tile {
             let bytes = t.data.len();
             let mut q = s.queue.lock().unwrap();
-            while !q.closed && q.wanted.contains(&key) && !q.results.is_empty()
+            // a read-ahead key is cached already and nobody waits for it --
+            // decided after any wait, as the plan may change meanwhile
+            while !q.prefetch.contains(&key) && !q.closed && q.wanted.contains(&key) && !q.results.is_empty()
                 && (q.results.len() >= RESULT_CAPACITY || q.result_bytes + bytes > s.max_result_bytes) {
                 q = s.room.wait(q).unwrap();
             }
-            let deliver = !q.closed && q.wanted.contains(&key);
+            let ahead = q.prefetch.contains(&key);
+            let deliver = !ahead && !q.closed && q.wanted.contains(&key);
             if deliver {
                 q.results.push_back((key, t));
                 q.result_bytes += bytes;
-            } else if !q.closed {
+            } else if !ahead && !q.closed {
                 s.stale.fetch_add(1, Ordering::Relaxed);
             }
-            q.reading.remove(&key);
+            q.release(&key);
             drop(q);
             if deliver {
                 s.trace.stamp("done", Some(key), vec![]);

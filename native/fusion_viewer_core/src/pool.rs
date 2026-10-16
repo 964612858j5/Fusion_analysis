@@ -45,6 +45,21 @@ struct Queue {
     reading: std::collections::HashSet<Key>,
     results: VecDeque<(Key, Arc<Tile>)>,
     closed: bool,
+    /// R7c step 2: read-ahead keys (cached, never handed over) and how
+    /// many of them may be read at once (None: no limit)
+    prefetch: std::collections::HashSet<Key>,
+    prefetch_limit: Option<usize>,
+    /// keys started as read-ahead, held until their read ends: a newer plan
+    /// does not free their place (`prefetch_limit` counts these)
+    ahead_reading: std::collections::HashSet<Key>,
+}
+
+impl Queue {
+    /// A read ended (cached, stale, cancelled or failed).
+    fn release(&mut self, key: &Key) {
+        self.reading.remove(key);
+        self.ahead_reading.remove(key);
+    }
 }
 
 pub struct Shared {
@@ -147,7 +162,9 @@ impl Pool {
                                                    | Some(crate::corrected::Source::DisplayTiff { .. }))).collect();
         let shared = Arc::new(Shared {
             queue: Mutex::new(Queue { jobs: VecDeque::new(), wanted: Default::default(), result_bytes: 0,
-                                     reading: Default::default(), results: VecDeque::new(), closed: false }),
+                                     reading: Default::default(), results: VecDeque::new(), closed: false,
+                                     prefetch: Default::default(), prefetch_limit: None,
+                                     ahead_reading: Default::default() }),
             work: Condvar::new(), room: Condvar::new(), busy: AtomicUsize::new(0),
             reads: AtomicUsize::new(0), stale: AtomicUsize::new(0), errors: AtomicUsize::new(0),
             max_result_bytes: result_bytes,
@@ -174,7 +191,15 @@ impl Pool {
     /// tile too soon after its failure, or out of retries, stays wanted but
     /// is not queued -- decided under the queue lock, with the submission.
     pub fn set_jobs(&self, jobs: Vec<Key>) {
+        self.set_jobs_ahead(jobs, Default::default(), None);
+    }
+
+    /// `set_jobs` with read-ahead keys among the jobs (R7c step 2): they
+    /// are read into the cache only, at most `limit` at once.
+    pub fn set_jobs_ahead(&self, jobs: Vec<Key>, prefetch: std::collections::HashSet<Key>, limit: Option<usize>) {
         let mut q = self.shared.queue.lock().unwrap();
+        q.prefetch = prefetch;
+        q.prefetch_limit = limit;
         q.wanted = jobs.iter().copied().collect();
         let now = crate::clock::monotonic();
         let f = self.shared.failures.lock().unwrap();

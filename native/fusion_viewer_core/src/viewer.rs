@@ -9,7 +9,7 @@
 use crate::admit::Budgets;
 use crate::cache::{Key, Tile};
 use crate::clock::monotonic;
-use crate::geom::{Pyramid, TileAt};
+use crate::geom::Pyramid;
 use crate::gpu_store::Store;
 use crate::notify::Notifier;
 use crate::plan::{Ch, Planner, View};
@@ -63,6 +63,7 @@ pub struct Config {
 
 mod failures;
 mod formats;
+mod issue;
 mod gl_life;
 pub mod labels;
 mod memory;
@@ -112,6 +113,9 @@ pub struct ViewerCore {
     pub last_error: String,
     /// keys asked for and still owed: only a NEW want is a trace "req"
     issued: std::collections::HashSet<Key>,
+    /// R7c step 2: read-ahead keys asked for (kept apart from `issued`, the
+    /// picture's own, which failed-read checks look at)
+    issued_ahead: std::collections::HashSet<Key>,
     /// test-only fault injection (`fault`); inert in the product
     pub faults: Arc<crate::fault::Faults>,
     /// GL initialisations so far (`attach_gl`)
@@ -154,6 +158,7 @@ impl ViewerCore {
         let planner = Planner::new(pyr.clone(), budgets, cfg.max_coarse_tiles);
         let mut planner = planner;
         planner.unavailable.extend(missing);              // drawn by nobody, read by nobody
+        planner.prefetch = crate::plan::prefetch::Mode::from_env();      // R7c step 2
         let sources = Arc::new(sources);
         let faults = Arc::new(crate::fault::Faults::from_env());
         let pool = Pool::start(Arc::new(source), pyr.clone(), Arc::clone(&sources), raw_kind, budget,
@@ -164,7 +169,7 @@ impl ViewerCore {
                      display: Vec::new(), smooth: true, fusion: false, polygon: None, raw_kind,
                      last_input: -1e9, paused: false,
                      held: HashMap::new(), frames: 0, last_error: String::new(),
-                     issued: Default::default(), faults, attaches: 0, labels: Default::default(),
+                     issued: Default::default(), issued_ahead: Default::default(), faults, attaches: 0, labels: Default::default(),
                      lab: Default::default() }
     }
 
@@ -207,50 +212,6 @@ impl ViewerCore {
         crate::frame::Pacing { since: monotonic() - self.last_input, input_hot_s: self.cfg.input_hot_s,
                                upload_hot_s: self.cfg.upload_hot_s, hot_upload_ms: self.cfg.hot_upload_ms,
                                frame_budget_ms: self.cfg.frame_budget_ms }
-    }
-
-    /// Hand the planner's wants to the pool: cache hits are delivered at
-    /// once (one picture, as the binding's `immediate` batch), the rest are
-    /// queued coarse first, then fine near-to-far, all channels of one
-    /// position together.
-    pub fn issue(&mut self) {
-        let (coarse, mut fine) = self.planner.wanted();
-        let order: HashMap<Ch, usize> = self.planner.active().iter().enumerate().map(|(i, c)| (*c, i)).collect();
-        if self.cfg.legacy_order {
-            fine.sort_by_key(|(c, t)| (order.get(c).copied(), t.level, t.ty, t.tx));
-        } else if let Some(v) = self.planner.view() {
-            let cy = (v.bbox_l0[0] + v.bbox_l0[2]) as f64 / 2.0;
-            let cx = (v.bbox_l0[1] + v.bbox_l0[3]) as f64 / 2.0;
-            let pyr = &self.pyr;
-            let dist = |t: &TileAt| {
-                let r = pyr.tile_world_rect(*t).unwrap_or([0.0; 4]);
-                let (dx, dy) = ((r[0] + r[1]) / 2.0 - cx, (r[2] + r[3]) / 2.0 - cy);
-                ((dx * dx + dy * dy).sqrt() * 1000.0) as u64
-            };
-            fine.sort_by_key(|(c, t)| (dist(t), t.ty, t.tx, order.get(c).copied()));
-        }
-        let mut jobs = Vec::with_capacity(coarse.len() + fine.len());
-        let mut hits = Vec::new();
-        let mut now_issued = std::collections::HashSet::with_capacity(coarse.len() + fine.len());
-        {
-            let mut cache = self.pool.shared().cache.lock().unwrap();
-            let tiers = coarse.into_iter().map(|k| (k, 0.0)).chain(fine.into_iter().map(|k| (k, 1.0)));
-            for (key, fine) in tiers {
-                if !self.issued.contains(&key) {
-                    self.trace.stamp("req", Some(key), vec![("fine", fine)]);
-                }
-                now_issued.insert(key);
-                match cache.get(&key) {
-                    Some(tile) => hits.push((key, tile)),
-                    None => jobs.push(key),
-                }
-            }
-        }
-        self.issued = now_issued;
-        for (key, tile) in hits {
-            self.deliver(key, tile);
-        }
-        self.pool.set_jobs(jobs);
     }
 
     /// A tile in hand: the planner takes it or not (late / not wanted).

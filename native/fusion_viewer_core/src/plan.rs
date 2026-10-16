@@ -51,13 +51,16 @@ pub struct Planner {
     texels: HashMap<Ch, u64>,
     /// channels refused (coarse over budget); never drawn
     pub unavailable: HashSet<Ch>,
+    /// R7c step 2: read-ahead (`prefetch`)
+    pub prefetch: prefetch::Mode,
 }
 
 impl Planner {
     pub fn new(pyr: Pyramid, budgets: Budgets, max_coarse_tiles: usize) -> Self {
         Planner { pyr, budgets, max_coarse_tiles, active: Vec::new(), coarse: HashMap::new(),
                   fine: HashMap::new(), plans: HashMap::new(), view: None, consumed: None,
-                  epoch: 0, admission: None, texels: HashMap::new(), unavailable: HashSet::new() }
+                  epoch: 0, admission: None, texels: HashMap::new(), unavailable: HashSet::new(),
+                  prefetch: prefetch::Mode::Off }
     }
 
     /// The total budget admission uses (the raw budget less the GPU
@@ -260,6 +263,7 @@ impl Planner {
 }
 
 mod draw;
+pub mod prefetch;
 
 #[cfg(test)]
 #[path = "plan_tests.rs"]

@@ -5,6 +5,7 @@
 //!
 //!   tile:N   the first tile asked for fails its first N reads
 //!   all:N    the first N reads fail, whatever the tile
+//!   ahead:N  the first N READ-AHEAD reads fail (R7c step 2), none other
 //!   paint:N  frame N reports an error
 //!   reinit   every GL initialisation after the first fails
 //!   init     the first GL initialisation fails (the mount falls back at start)
@@ -19,6 +20,7 @@ enum Kind {
     None,
     Tile(u32),
     All(u32),
+    Ahead(u32),
     Paint(u64),
     Reinit,
     Init,
@@ -39,6 +41,7 @@ impl Faults {
         let kind = match name.trim() {
             "tile" => Kind::Tile(n as u32),
             "all" => Kind::All(n as u32),
+            "ahead" => Kind::Ahead(n as u32),
             "paint" => Kind::Paint(n),
             "reinit" => Kind::Reinit,
             "init" => Kind::Init,
@@ -53,6 +56,14 @@ impl Faults {
     }
 
     /// Does this read fail? (Called once per read attempt.)
+    /// A read-ahead read (R7c step 2): fails under `ahead:N`, else as any read.
+    pub fn ahead_read_fails(&self, key: Key) -> bool {
+        match self.kind {
+            Kind::Ahead(n) => self.take_one(n),
+            _ => self.read_fails(key),
+        }
+    }
+
     pub fn read_fails(&self, key: Key) -> bool {
         match self.kind {
             Kind::Tile(n) => {

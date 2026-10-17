@@ -168,11 +168,13 @@ dependencies:
     - DeepCell==0.12.10
     - DeepCell_Toolbox==0.12.1
     - DeepCell_Tracking==0.6.5
+    - et_xmlfile==2.0.0
     - ImageIO==2.37.3
     - Jinja2==3.1.6
     - Keras-Preprocessing==1.1.2
     - Markdown==3.10.2
     - MarkupSafe==3.0.3
+    - openpyxl==3.1.5
     - PyOpenGL==3.1.10
     - PyQt5==5.15.11
     - PyQt5-Qt5==5.15.18

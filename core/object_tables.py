@@ -326,5 +326,40 @@ def read_table(path):
     return table
 
 
+# ── other modules' typed tables (A4-G8: pyarrow stays in this module) ──
+#
+# TMA F1 (docs/tma_foundation_application.md §3): the TMA core table goes
+# through these two, so no other module imports pyarrow. They know nothing
+# of cells or regions: a caller names its schema and columns.
+
+def write_typed_table(path, columns, rows, schema_name: str, schema_version: str):
+    """Write `rows` (dicts) as a parquet table of `columns` ((name,
+    pyarrow type name) pairs) under `schema_name` / `schema_version`,
+    atomically."""
+    import pyarrow as pa
+    schema = pa.schema([pa.field(c, getattr(pa, t)()) for c, t in columns],
+                       metadata={"schema": schema_name, "schema_version": str(schema_version)})
+    table = pa.Table.from_pylist([{c: r[c] for c, _ in columns} for r in rows], schema=schema)
+    _write_parquet(table, path)
+    return path
+
+
+def read_typed_table(path, columns, schema_name: str, schema_version: str):
+    """The rows (dicts) of a table written by `write_typed_table`, its
+    schema name, version and columns checked; raises `ObjectTableError`."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    table = pq.read_table(path)
+    meta = {k.decode(): v.decode() for k, v in (table.schema.metadata or {}).items()}
+    if meta.get("schema") != schema_name or meta.get("schema_version") != str(schema_version):
+        raise ObjectTableError(f"{path}: schema {meta.get('schema')!r} version "
+                               f"{meta.get('schema_version')!r}, expected {schema_name!r} {schema_version!r}")
+    got = [(f.name, str(f.type)) for f in table.schema]
+    want = [(c, str(getattr(pa, t)())) for c, t in columns]
+    if got != want:
+        raise ObjectTableError(f"{path}: columns {got} are not {want}")
+    return table.to_pylist()
+
+
 __all__ = ["build_cells", "build_regions", "read_table", "label_geometry", "ObjectTableError",
-           "CELL_COLUMNS", "REGION_COLUMNS", "ProjectSchemaError"]
+           "CELL_COLUMNS", "REGION_COLUMNS", "ProjectSchemaError", "write_typed_table", "read_typed_table"]

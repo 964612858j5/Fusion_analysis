@@ -47,7 +47,10 @@ KINDS = ("raw_slide", "corrected_channel", "fused", "segmentation_run", "step4_h
          "corrected_coarse_levels",
          # block DV-D: what a user deletion moved into the trash (appended;
          # the entries of the moved artifacts are never rewritten)
-         "deletion")
+         "deletion",
+         # TMA F1 (docs/tma_foundation_application.md): the study record and
+         # the map sheet it was built from
+         "tma_map_sheet")
 
 FLAG_RUN_ID_COLLISION = "segmentation_run_id_collision"
 FLAG_REGION_MISMATCH = "region_mismatch"

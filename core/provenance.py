@@ -50,7 +50,9 @@ KINDS = ("raw_slide", "corrected_channel", "fused", "segmentation_run", "step4_h
          "deletion",
          # TMA F1 (docs/tma_foundation_application.md): the study record and
          # the map sheet it was built from
-         "tma_map_sheet")
+         "tma_map_sheet",
+         # TMA F2: the candidate cores found on the slide
+         "tma_dearray")
 
 FLAG_RUN_ID_COLLISION = "segmentation_run_id_collision"
 FLAG_REGION_MISMATCH = "region_mismatch"

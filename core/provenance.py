@@ -52,7 +52,9 @@ KINDS = ("raw_slide", "corrected_channel", "fused", "segmentation_run", "step4_h
          # the map sheet it was built from
          "tma_map_sheet",
          # TMA F2: the candidate cores found on the slide
-         "tma_dearray")
+         "tma_dearray",
+         # TMA F3: a locked layout version (numbering, pieces, regions)
+         "tma_layout")
 
 FLAG_RUN_ID_COLLISION = "segmentation_run_id_collision"
 FLAG_REGION_MISMATCH = "region_mismatch"

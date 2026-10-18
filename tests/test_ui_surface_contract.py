@@ -214,6 +214,11 @@ def test_a_full_step_walk_opens_no_window_of_its_own(app):
         for step in (0, 1, 2, 3, 1, 0):
             w._set_step_active(step)
             QtWidgets.QApplication.processEvents()
+        # TMA F3: the TMA page and back
+        w._go_to_tma()
+        QtWidgets.QApplication.processEvents()
+        w._go_to_step0()
+        QtWidgets.QApplication.processEvents()
         after = {(type(t).__name__, t.windowTitle())
                  for t in QtWidgets.QApplication.topLevelWidgets()
                  if t.isVisible()}
@@ -285,5 +290,49 @@ def test_step1_keeps_its_ruled_layout_and_entries(app):
         assert w._step1_scroll is None
         assert not isinstance(w._step1_page_widget.parentWidget(),
                               QtWidgets.QScrollArea)
+    finally:
+        _close(w)
+
+
+def test_the_tma_page_keeps_its_ruled_entry_and_tabs(app):
+    """TMA F3 (docs/tma_f3_page_application.md §0, §2.1; UI_SURFACE_RULES §4):
+    the entry is a step-bar LABEL after the steps (the bar still holds no
+    button), the page sits after Step1.5 so the steps keep indices 0-4, and
+    its tab row is blank (plan §2.1)."""
+    w = _window(app)
+    try:
+        assert w._tma_lbl.text() == "○ TMA"
+        assert isinstance(w._tma_lbl, QtWidgets.QLabel)
+        assert w._stack.indexOf(w._tma) == w._stack.count() - 1 == 6
+        assert [w._stack.indexOf(p) for p in (w._step0, w._step2, w._step3, w._step4)] == [0, 2, 3, 4]
+        f = w._tma.frame
+        assert [f.left_tabs.tabText(i) for i in range(f.left_tabs.count())] == [""]
+        assert [f.right_tabs.tabText(i) for i in range(f.right_tabs.count())] == [""]
+        w._go_to_tma()
+        assert w._stack.currentWidget() is w._tma
+        assert "bold" in w._tma_lbl.styleSheet() and "bold" not in w._step0_lbl.styleSheet()
+        w._go_to_step0()
+        assert "bold" not in w._tma_lbl.styleSheet()
+    finally:
+        _close(w)
+
+
+def test_tma_entry_is_a_no_viewer_transition_and_a_running_tma_job_refuses_close(app, monkeypatch):
+    """TMA F3 review (codex_tma_f3_p34_1.out B1, B3): entering the TMA page
+    is Step4's transition (no shared viewer on screen), and a TMA job that is
+    still running refuses the close before anything else is stopped."""
+    w = _window(app)
+    try:
+        w._go_to_tma()
+        assert w._current_step == 4 and w._stack.currentWidget() is w._tma
+        assert "bold" in w._tma_lbl.styleSheet() and "bold" not in w._step4_lbl.styleSheet()
+        stopped = []
+        monkeypatch.setattr(w._step0, "stop_background_jobs", lambda: stopped.append(1), raising=False)
+        monkeypatch.setattr(w._tma, "shutdown", lambda: False)
+        from PyQt5 import QtGui
+        ev = QtGui.QCloseEvent()
+        w.closeEvent(ev)
+        assert not ev.isAccepted() and stopped == []
+        monkeypatch.undo()
     finally:
         _close(w)

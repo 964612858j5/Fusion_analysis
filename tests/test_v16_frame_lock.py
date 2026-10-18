@@ -305,3 +305,64 @@ def test_content_wider_than_the_column_never_widens_it(rig):
     for step in (0, 2, 3):
         _enter(rig, step)
         assert abs(_split(rig, step).sizes()[0] - 250) <= 2, step
+
+
+# ── TMA F3 (docs/tma_f3_page_application.md §2.1): the TMA page is a framed
+# page whose left column shares the channel column's width. It is reached by
+# widget (index 6), so it is entered with `_go_to_tma`, not `_enter`.
+
+def _enter_tma(rig):
+    rig.w._go_to_tma()
+    _pump()
+
+
+def _tma_parts(rig):
+    w, frame = rig.w, rig.w._tma.frame
+    tool = frame.right_tabs.currentWidget().layout().itemAt(0).widget()
+    return {
+        "title": _rect(w, frame.title_slot),
+        "left tab bar row": _rect(w, frame.left_tabs.tabBar())[1::2],
+        "right tab bar row": _rect(w, frame.right_tabs.tabBar())[1::2],
+        "left column": _rect(w, frame.left_tabs),
+        "right column": _rect(w, frame.right_tabs),
+        "left pane": _rect(w, frame.left_tabs.currentWidget()),
+        "tool row": _rect(w, tool),
+        "bottom": _rect(w, frame.bottom_slot),
+    }
+
+
+@pytest.mark.parametrize("size", SIZES[:2])
+def test_tma_shares_the_frame(rig, size):
+    rig.w.resize(*size)
+    _pump()
+    _enter(rig, 1)
+    one = _frame_parts(rig, 1)
+    _enter_tma(rig)
+    assert rig.w._stack.currentWidget() is rig.w._tma
+    assert rig.w._stack.indexOf(rig.w._tma) == 6
+    tma = _tma_parts(rig)
+    assert {k: (one[k], tma[k]) for k in one if one[k] != tma[k]} == {}
+
+
+def test_a_drag_on_tma_moves_every_column_page_and_back(rig):
+    _enter_tma(rig)
+    split = rig.w._tma.channel_column_splitter()
+    _drag(rig, split, 420)
+    for step in (0, 1, 2, 3):
+        _enter(rig, step)
+        assert abs(_split(rig, step).sizes()[0] - 420) <= 2, step
+    _drag(rig, _split(rig, 1), 380)
+    _enter_tma(rig)
+    assert abs(split.sizes()[0] - 380) <= 2
+
+
+def test_tma_holds_the_one_floor_and_opens_at_the_one_share(rig):
+    from block01.ui.step_frame import CHANNEL_COLUMN_HARD_FLOOR as floor
+    from block01.ui.step_frame import CHANNEL_COLUMN_OPENING_FRACTION as share
+    _enter_tma(rig)
+    split = rig.w._tma.channel_column_splitter()
+    usable = split.width() - split.handleWidth()
+    assert abs(split.sizes()[0] - round(usable * share)) <= 2
+    _drag(rig, split, 40)
+    assert floor <= split.sizes()[0] <= floor + 4
+    assert split.widget(0).minimumWidth() == floor

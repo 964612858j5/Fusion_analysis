@@ -115,6 +115,7 @@ from .step3_page import Step3Page
 from .step3_mask_bar import Step3MaskBar
 from ..core import step3_masks
 from .step4_page import Step4Page
+from .tma.tma_page import TmaPage
 
 STEP1_PATCH_PREVIEW_MAX_PX = 1024
 
@@ -741,12 +742,19 @@ class MainWindow(QMainWindow):
         self._step4_lbl.setStyleSheet(
             "font-size:12px;color:#555;padding:4px 12px;"
         )
+        # TMA F3 (docs/tma_f3_page_application.md, user ruling 2026-10-17):
+        # the TMA page's entry, a label like the steps', after them.
+        self._tma_lbl = QLabel("○ TMA")
+        self._tma_lbl.setStyleSheet(
+            "font-size:12px;color:#555;padding:4px 12px;"
+        )
         for lbl, handler in (
             (self._step0_lbl, self._go_to_step0),
             (self._step1_lbl, self._go_to_step1),
             (self._step2_lbl, self._go_to_step2),
             (self._step3_lbl, self._go_to_step3),
             (self._step4_lbl, self._go_to_step4),
+            (self._tma_lbl, self._go_to_tma),
         ):
             lbl.setCursor(Qt.PointingHandCursor)
             lbl.mousePressEvent = lambda _ev, fn=handler: fn()
@@ -759,6 +767,8 @@ class MainWindow(QMainWindow):
         step_bar.addWidget(self._step3_lbl)
         step_bar.addWidget(QLabel("  →  "))
         step_bar.addWidget(self._step4_lbl)
+        step_bar.addWidget(QLabel("   |   "))
+        step_bar.addWidget(self._tma_lbl)
         step_bar.addStretch()
 
         # ── Block01 chrome: the global windows, reachable from EVERY step ──
@@ -1518,6 +1528,15 @@ class MainWindow(QMainWindow):
         self._step1_5 = Step15BackgroundCorrectionPage()
         self._stack.addWidget(self._step1_5)
 
+        # TMA F3: appended after Step1.5 (index 6), reached by widget like it;
+        # its left column shares the channel column's width.
+        self._tma = TmaPage(metrics=self._frame_metrics,
+                            title_bar=self._frame_title_bar("TMA — Cores"))
+        self._tma.open_in_step1.connect(self._tma_open_in_step1)
+        self._stack.addWidget(self._tma)
+        split = self._tma.channel_column_splitter()
+        split.splitterMoved.connect(lambda _pos, _i, s=split: self._on_channel_column_dragged(s))
+
         # Every step is a render context for the ONE Tissue Preview, and they
         # are all registered before any of them is made active -- so a step
         # transition never has to create one, and a step with no context
@@ -1706,7 +1725,8 @@ class MainWindow(QMainWindow):
         return [getattr(getattr(self, "_step0", None), "_bg_c_split", None),
                 getattr(self, "_step1_main_split", None),
                 getattr(step2, "channel_column_splitter", lambda: None)(),
-                getattr(step3, "channel_column_splitter", lambda: None)()]
+                getattr(step3, "channel_column_splitter", lambda: None)(),
+                getattr(self.__dict__.get("_tma"), "channel_column_splitter", lambda: None)()]
 
     @staticmethod
     def _fraction_of(split):
@@ -1816,7 +1836,8 @@ class MainWindow(QMainWindow):
         return [getattr(getattr(self, "_step0", None), "_bg_c_split", None),
                 getattr(self, "_step1_main_split", None),
                 getattr(step2, "channel_column_splitter", lambda: None)(),
-                getattr(step3, "channel_column_splitter", lambda: None)()]
+                getattr(step3, "channel_column_splitter", lambda: None)(),
+                getattr(self.__dict__.get("_tma"), "channel_column_splitter", lambda: None)()]
 
     def _fix_step1_split_ratio(self):
         """Both pages show the one channel-column share.
@@ -2940,6 +2961,10 @@ class MainWindow(QMainWindow):
         """
         info = dict(info or {})
         gen = int(info.get("gen") or 0)
+        # TMA F3 (plan §2.5): the TMA page works on the COMMITTED dataset,
+        # saved handoff or not.
+        self._tma_committed = {"ome_path": info.get("ome_path") or "",
+                               "output_dir": info.get("output_dir") or ""}
         # Block A7 (U10): another slide -- the old position is no place on it
         # (unless the new slide's first fit has already been recorded).
         new_slide = os.path.realpath(info["ome_path"]) if info.get("ome_path") else ""
@@ -4961,6 +4986,63 @@ class MainWindow(QMainWindow):
             self._rm_auto_step1 = False
             self._load_previous_step1_session(auto=True)
 
+    # ── TMA F3 (docs/tma_f3_page_application.md §2) ─────────────────────
+    def _go_to_tma(self):
+        """Open the TMA page on the committed dataset: its project folder and
+        slide. The transition is Step4's (`_set_step_active(4)`): a page with
+        no shared viewer, so Step1's / Step3's viewers pause and the display
+        scope and context are left as for Step4 (plan §4, review B1)."""
+        if self._current_step == 1:
+            self._stop_all_loaders()
+        committed = self.__dict__.get("_tma_committed") or {}
+        ctx = self.step0_output or {}
+        roi_ctx = getattr(self._step0, "_roi_context", None) or {}
+        where = (roi_ctx.get("project_dir") or committed.get("output_dir") or ctx.get("roi_dir")
+                 or ctx.get("output_dir") or "")
+        project = run_store.project_dir_of(where) if where else None
+        slide = (committed.get("ome_path") or getattr(self.loader, "filepath", None)
+                 or ctx.get("ome_tiff_path"))
+        self._tma.set_context(project, slide if project else None)
+        self._stack.setCurrentWidget(self._tma)
+        self._set_step_active(4)
+        self._step4_lbl.setStyleSheet("font-size:12px;color:#555;padding:4px 12px;")
+        self._tma_lbl.setStyleSheet("font-size:12px;font-weight:bold;color:#61afef;padding:4px 12px;"
+                                    "background:#1a2a3a;border-radius:4px;")
+        self._apply_channel_column_fraction()
+
+    def _tma_open_in_step1(self, bbox):
+        """The TMA page's "Step1": enter Step1 through its own checks, wait
+        until it is really on screen with its viewer mounted (it may retry and
+        return at once), then the Viewer tab and the core's box."""
+        slide = getattr(self.loader, "filepath", None)
+        want = os.path.abspath(self._tma.slide_path or "")    # the slide of THIS request
+        if not slide or os.path.abspath(slide) != want:
+            self._tma.say("Step1 has another slide open (or none); open this slide in Step0 first.")
+            return
+        self._go_to_step1()
+        deadline = time.monotonic() + 10.0
+
+        def poll():
+            mount = getattr(self, "_step1_mount", None)
+            on_step1 = (self._current_step == 1 and self._stack.currentIndex() == 1
+                        and mount is not None and mount.host.stack is not None)
+            if on_step1:
+                now = getattr(self.loader, "filepath", None)
+                if not now or os.path.abspath(now) != want:
+                    return                              # another slide by now: no jump
+                tabs = self.__dict__.get("_step1_right_tabs")
+                if tabs is not None:
+                    for i in range(tabs.count()):
+                        if tabs.tabText(i) == "Viewer":
+                            tabs.setCurrentIndex(i)
+                mount.show_patch(tuple(int(v) for v in bbox))
+                return
+            if time.monotonic() > deadline:
+                self._tma.say("Step1 did not open (see its message); the core was not shown.")
+                return
+            QTimer.singleShot(100, poll)
+        QTimer.singleShot(0, poll)
+
     def _go_to_step1_5(self):
         """Open Step 1.5 (Background Correction + Channel Conditioning / Remap).
 
@@ -5545,6 +5627,8 @@ class MainWindow(QMainWindow):
         self._step2_lbl.setStyleSheet(_on  if active == 2 else _off)
         self._step3_lbl.setStyleSheet(_on  if active == 3 else _off)
         self._step4_lbl.setStyleSheet(_on  if active == 4 else _off)
+        if self.__dict__.get("_tma_lbl") is not None:
+            self._tma_lbl.setStyleSheet(_off)
         self._update_next_button()
         if active == 1:
             self._match_step1_bottom_bar()
@@ -7214,6 +7298,14 @@ class MainWindow(QMainWindow):
         return page.apply_draft(run_store.from_records(draft, run_store.project_dir_of(roi)))
 
     def closeEvent(self, event):
+        # TMA F3, FIRST (before anything is stopped): the page's two jobs
+        # (finding cores, the thumbnail) are waited for, a few seconds at
+        # most; one still running refuses the close with nothing stopped yet.
+        tma = self.__dict__.get("_tma")
+        if tma is not None and not tma.shutdown():
+            event.ignore()
+            print("[TMA] a TMA job is still running; close again in a moment")
+            return
         self._rm_save_view(self.__dict__.get("_current_step"))
         if self._perf_heartbeat is not None:
             self._perf_heartbeat.stop()

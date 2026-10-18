@@ -498,6 +498,25 @@ row, and the duplicate Tissue Preview button in the step bar.
 * **Intensity** -- the shared window, opened from Step0's and Step1's own
   existing entries. In BOTH steps that entry lives inside the `Channels`
   frame: it edits the selected channel, so it belongs with the channel list.
+* **The TMA page** (TMA F3, user ruling 2026-10-17;
+  `docs/tma_f3_page_application.md`, `ui/tma/`) -- reached from the step
+  bar's last entry, the LABEL `○ TMA` after the steps (a label like theirs,
+  not a button); the page is the stack's last page (after Step1.5), so the
+  steps keep indices 0-4. It is a framed page: title bar `TMA — Cores` with
+  the study / slide, `Version:` (the draft and the locked versions),
+  `Discard draft` and `Lock` (`New draft from this version` on a locked
+  one); the tab row is blank (one invisible tab per column); the left
+  column (sharing the one channel-column share) holds
+  `Choose map sheet…`, `Find cores`, the numbering panel (Start / End /
+  Order, `Reverse` / `Confirm` / `Cancel`, the preview, the selected core's
+  number box with `Number` / `Custom`) and the core table (`Show:` /
+  `Find:`, columns Run, Position, Donor, Sample, Status, Pieces, Tissue);
+  the right column's tool row is `Select`, `Line`, `Clicks`, `Merge`,
+  `Circle`, `Undo`, `Redo`, `Prev`, `Next`, `Step1`, over the slide map.
+  Right-click menus on a circle (Remove from core, Confirm number, Remove
+  number, Leave out… / Restore) and on a table row (Confirm missing… /
+  Clear 'missing', Exclude… / Include again, Accept). The lock asks for two
+  confirmations in one dialog. No other window.
 
 ## 5. How this rule is enforced
 

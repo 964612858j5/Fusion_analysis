@@ -55,6 +55,7 @@
 - 结果为去阵列 artifact（新增 kind `tma_dearray`），带版本；**不写区域**。
 - 验收：Slice1 上与用户确认的方向一致（180°，每列自下而上）；以人工标注的图像对应关系为准，报告遗漏、误配、待确认；其余三张报告方向判定与定位结果。不以"凑够 N 个"为通过条件。
 ### F3 TMA 页面：方向确认、手工校正、锁定（新界面）
+- **2026-10-17 调整（用户裁定，见 `docs/tma_f3_page_application.md` 第四版）**：编号改为 9 月规范（`docs/tma_core_editing_and_mapping.md`）的分段拖线 / 连续点击 / 单颗编号，由用户指定顺序，方向在逐段确认中处理；不做"拆"、要做"并"；写 `roi_config.json` 推迟到 F4（F3 只存锁定版本）。下面原文保留作历史。
 - 独立模块（如 `ui/tma/`），`main_window.py` 只接线；形式在 F3 申请中给出草图请用户确认，`tests/test_ui_surface_contract.py` 与 UI_SURFACE_RULES 相应更新。
 - 功能：整片缩略图上每个核心画圈并标位置标签与供体；状态着色；核心表（点行跳转）；方向确认（显示自动判定与次佳，一键翻转 / 旋转）；增、删、拆、并、改编号、拖动 / 调整圈；核心选择（供 F4）；锁定 → 生成版本（§3），写区域到 `roi_config.json`。
 - 看图：TMA 页面的缩略图与 Step0 一样不接入 Rust 看图引擎（用户已裁定 Step0 维持现状）；大图浏览走现有 Step1 看图。
@@ -86,3 +87,9 @@ F1 2–3 天；F2 5–7 天（含方向判定）；F3 5–7 天（含界面确�
 - 测试：`tests/test_tma_f2_dearray.py` 15 项（合成片：亮 / 暗核、粘连对、贴边、光晕不误检；三层金字塔上中心误差约 0.2 像素；空片；坏尺寸与参数；上 / 左贴边；微米尺寸；登记失败仍保存；保存版本与登记）。与 F1、对象表、项目身份、来源记录合跑 118 通过、1 失败（`test_v16_provenance` 子进程 CLI 用例，去掉本段改动后同样失败，环境问题）。
 - 真片 Slice1：第 4 层，148 个候选，4.5 秒；修正坐标换算后所有中心统一移动 10.6 像素（第 4 层半像素偏差的预期大小，约 5 µm）。两枚很暗的核心只找到一部分、小块 Tonsil 碎片漏检，留给 F3 手工校正。
 - codex（astra low）两轮：第一轮必须修 1 项（粗层坐标换算未按像素中心）已修，另 3 项建议已做；第二轮无必须修，"可以提交"，其建议（说明 artifact_id 只在返回值中、补登记失败与微米尺寸测试、写明角部限制）已做。
+### F3（2026-10-17，未提交，等用户真机验收）
+- 方案：`docs/tma_f3_page_application.md` 第四版（codex 审 5 轮）；按 9 月规范 `docs/tma_core_editing_and_mapping.md`（已复制进 v17）。用户授权全部新机制，"开始"。
+- 实现：`core/tma/{layout,layout_geometry,layout_lock}.py`；`ui/tma/{tma_page,page_view,page_actions,map_tools,core_map,core_table,numbering_panel,draft,workers}.py`；`core/provenance.py` 加 `tma_layout`；`ui/main_window.py` 接线（步骤条"○ TMA"、页面栈 6、共用栏宽、进入走 Step4 的无看图切换、Step1 跳转、关闭时先等 TMA 任务）；`UI_SURFACE_RULES.md` §4。
+- 测试：`tests/test_tma_f3_layout.py`、`tests/test_tma_f3_page.py` 共 43 项；界面约束、页面框架各加 TMA 检查。全量回归无 F3 引起的失败。
+- 审核：codex astra high 逐部分审核，问题与裁决全部记录在 `docs/tma_f3_decisions_log.md`；最后一轮"已关闭，按规则 7 停止加固"。
+- 真片 Slice1 离屏检查：148 个候选、143 个初始核心、5 块碎块，缩略图与圈对齐，打开 + 找核心约 5 秒。

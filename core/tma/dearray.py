@@ -17,6 +17,12 @@ them for now; the TMA page lets the user do them, F3).
   a core; a piece much larger than one core, or somewhat larger and clearly
   not convex (touching cores), is split by a watershed on its distance
   transform, seeded a fraction of a core radius apart.
+* Outlines (format 2, Regions plan §3): each piece's mask grown by
+  `margin_frac` of a core diameter; the grown ring is given to the nearest
+  piece, and only in that ring a one-pixel gap is kept where two pieces
+  meet -- the pieces themselves are never trimmed. The outer contour runs
+  through the centres of the boundary pixels, is simplified by half a
+  pixel and mapped to whole level-0 pixels (A3 `level_to_global`).
 * Measures, in level-0 pixels: centre, equivalent radius, area, the
   circularity 4*pi*A/P**2, the solidity, whether it touches the slide's
   edge, and its tissue fraction (foreground share of the expected-size
@@ -43,7 +49,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2            # 2: each candidate has an ``outline`` (Regions R1); 1 is still read
+READABLE_SCHEMAS = (1, 2)
 PARAMS = {
     "min_core_px": 80,        # choose the coarsest level where a core is at least this wide
     "texture_frac": 0.06,     # local standard deviation window, as a fraction of the core diameter
@@ -51,7 +58,9 @@ PARAMS = {
     "thr_frac": 0.8,          # threshold between the glass level and Otsu's (0.8 fits TMA138 Slice1)
     "close_frac": 0.04,       # closing radius
     "open_frac": 0.03,        # opening radius
-    "min_area_frac": 0.10,    # smallest piece kept, as a fraction of a core's area
+    "min_area_frac": 0.01,    # smallest piece kept (before the margin), as a fraction of a core's area:
+                              # fragments are kept for the user to merge (Regions R1; was 0.10)
+    "margin_frac": 0.06,      # outlines grow by this many core diameters: larger than the tissue (user 2026-10-18: 3% too tight)
     "split_area_frac": 1.6,   # a piece larger than this many cores is split ...
     "split_concave_area_frac": 1.15,  # ... and so is one above this many cores that is
     "split_solidity": 0.85,           #     clearly not convex (two discs joined)
@@ -189,6 +198,55 @@ def measure(fg: np.ndarray, labels: np.ndarray, n: int, split_of: Dict, diameter
     return out
 
 
+def grown_parts(labels: np.ndarray, margin: int) -> np.ndarray:
+    """Each piece grown by `margin` pixels: a grown pixel goes to the
+    nearest piece; a grown pixel touching another piece's pixel is dropped
+    (the gap). Pixels of the pieces themselves keep their label."""
+    from scipy import ndimage as ndi
+    if not labels.any():
+        return labels.copy()
+    dist, (iy, ix) = ndi.distance_transform_edt(labels == 0, return_indices=True)
+    near = labels[iy, ix]
+    grown = np.where(dist <= margin, near, 0).astype(labels.dtype)
+    added = (labels == 0) & (grown > 0)
+    pad = np.pad(grown, 1)
+    h, w = grown.shape
+    clash = np.zeros(grown.shape, bool)
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if dy or dx:
+                nb = pad[1 + dy:1 + dy + h, 1 + dx:1 + dx + w]
+                clash |= (nb > 0) & (nb != grown)
+    grown[added & clash] = 0
+    return grown
+
+
+def outlines(labels: np.ndarray, n: int, diameter_px: float, params: Dict, to_level0, shape0) -> List[List[List[int]]]:
+    """One outline per piece (in label order 1..n), level-0 whole pixels
+    ``[[x, y], ...]``, clipped to the slide."""
+    import cv2
+    margin = max(1, int(round(params["margin_frac"] * diameter_px)))
+    grown = grown_parts(labels, margin)
+    h0, w0 = shape0
+    out = []
+    for k in range(1, n + 1):
+        m = (grown == k).astype(np.uint8)
+        found, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if not found:
+            out.append([])
+            continue
+        c = max(found, key=cv2.contourArea)
+        c = cv2.approxPolyDP(c, 0.5, True)
+        poly = []
+        for q in c[:, 0, :]:
+            gx, gy = to_level0(float(q[0]), float(q[1]))
+            xy = [min(max(int(round(gx)), 0), w0 - 1), min(max(int(round(gy)), 0), h0 - 1)]
+            if not poly or poly[-1] != xy:
+                poly.append(xy)
+        out.append(poly)
+    return out
+
+
 def detect_cores(slide_path: str, *, core_diameter_um: Optional[float] = None,
                  core_diameter_px: Optional[float] = None, channel=0, level: Optional[int] = None,
                  params: Optional[Dict] = None) -> Dict:
@@ -224,8 +282,10 @@ def detect_cores(slide_path: str, *, core_diameter_um: Optional[float] = None,
     d_lv = core_diameter_px / float(np.sqrt(scale[0] * scale[1]))   # cores are round; levels are ~isotropic
     fg = foreground(signal, d_lv, p)
     labels, n, split_of = _pieces(fg, d_lv, p)
-    cands = measure(fg, labels, n, split_of, d_lv, scale,
-                    to_level0=lambda x, y: frames.level_to_global(x, y, lv))
+    to0 = lambda x, y: frames.level_to_global(x, y, lv)       # noqa: E731
+    cands = measure(fg, labels, n, split_of, d_lv, scale, to_level0=to0)
+    for c, poly in zip(cands, outlines(labels, n, d_lv, p, to0, shapes[0])):
+        c["outline"] = poly
     return {
         "schema_version": SCHEMA_VERSION,
         "slide_path": os.path.abspath(slide_path),
@@ -285,6 +345,6 @@ def save_candidates(project_dir, result: Dict, slide_id: str) -> Dict:
 def load_candidates(project_dir, version: int) -> Dict:
     with open(candidates_path(project_dir, version), "r", encoding="utf-8") as f:
         rec = json.load(f)
-    if rec.get("schema_version") != SCHEMA_VERSION:
+    if rec.get("schema_version") not in READABLE_SCHEMAS:
         raise ValueError(f"dearray candidates v{version}: schema_version {rec.get('schema_version')!r}")
     return rec

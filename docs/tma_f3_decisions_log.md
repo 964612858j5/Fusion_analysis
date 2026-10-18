@@ -158,3 +158,27 @@
 - **第 6 条**：取消"必须同一列 / 同一行"的限制（用户裁定，推翻 codex 第一轮第 4 项）。起止之间按所选顺序取记录，可以跨列、跨行；线可以横着、竖着、斜着画。
 
 需要先写方案、经用户批准再做的：第 1 条（复刻 Step1 的看图和通道面板）、第 3 条里"圈略大于组织"、第 4 条（自然贴合的轮廓）。
+
+---
+## Regions 模块方案第四版获批（2026-10-18）
+- 方案：`docs/region_qc_module_plan.md` 第四版。codex astra high 两轮复审通过；开工前另由 Mythos 5.1、Opus 5.5 审核。
+- 用户裁定：
+  - 通道与 Step1 / Step3 共用，勾选就是融合；
+  - Step0 不动；
+  - Mythos 的建议全部采纳，排除标注按片子存；
+  - **不处理"重开项目后 Step1 自动恢复会话会覆盖 Regions 改过的通道"**：Regions 的通道只用来复核模糊区域，被覆盖可以接受。
+- 分段执行：R1 → R2 → R3。每段交 codex astra high 审核，并经用户真机验收后才进入下一段。
+
+## R1 底层逻辑（2026-10-18）
+- 新增 `core/regions/`，包括 document、geometry、numbering、lock、migrate 五个文件；`core/tma/dearray.py` 升到第 2 版（自然轮廓、保留 1% 以上的碎块）；`core/provenance.py` 加 `regions_layout`。
+- 测试 `tests/test_regions_r1.py` 共 23 项；F1、F2、F3 的旧测试照常通过。
+- Slice1 实测：153 个候选，其中 143 个核心大小、10 个碎块（原来是 148 个）；6 秒；轮廓截图见 scratchpad 的 `r1_outlines_crop.png`。
+- codex 第一轮（`codex_regions_r1_1.out`）提出 5 项必须修，都已改好：
+  1. 同一个工作区在 Step0 重新 Save 过以后，前后两次交接都要记下来，不能后一次覆盖前一次；
+  2. 来源记录的作用范围填整片的区域编号；
+  3. 被质控排除的核心，里面的排除区仍然算属于这个核心；
+  4. 读取草稿和锁定版本时，核对片子身份，不是同一张片子就拒绝；
+  5. F3 旧数据如果是不认识的格式，就拒绝转换，旧文件原地保留。
+
+  建议项也做了：重新打开时清掉上次的工作区信息；有对应表却没给研究信息时拒绝锁定；补了"轮廓完整包住组织"的测试。
+- 用户 2026-10-18：外扩余量 3% 太紧，改为 6%（`core/tma/dearray.py` 的 `margin_frac`）。Slice1 重跑后仍是 153 个候选；新图：`/sda1/Fusion/tma_accept_slice1/r1_check/*_6pct.png`。

@@ -53,8 +53,12 @@ KINDS = ("raw_slide", "corrected_channel", "fused", "segmentation_run", "step4_h
          "tma_map_sheet",
          # TMA F2: the candidate cores found on the slide
          "tma_dearray",
-         # TMA F3: a locked layout version (numbering, pieces, regions)
-         "tma_layout")
+         # TMA F3: a locked layout version (numbering, pieces, regions);
+         # kept for reading -- Regions writes regions_layout instead
+         "tma_layout",
+         # Regions R1 (docs/region_qc_module_plan.md): a locked version of the
+         # slide's annotation document (TMA cores + blur / fold exclusions)
+         "regions_layout")
 
 FLAG_RUN_ID_COLLISION = "segmentation_run_id_collision"
 FLAG_REGION_MISMATCH = "region_mismatch"

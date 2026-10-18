@@ -6,6 +6,8 @@ Every edit goes through `do(fn, ...)`: the draft is copied before, `fn`
 edit leaves the draft as it was. A drag is ONE step (Odon records one
 snapshot per drag, app.rs:5292): `begin_drag()` on press, `end_drag()` on
 release. A read-only holder (a locked version) refuses every edit.
+`revision` names the draft's state: every new step gets a new one, undo /
+redo bring the old one back (Regions' "unsaved changes" compares it).
 """
 
 from __future__ import annotations
@@ -29,6 +31,8 @@ class DraftHolder:
         self._undo: List[Dict] = []
         self._redo: List[Dict] = []
         self._drag: Optional[Dict] = None
+        self.revision = 0
+        self._revisions = 0
 
     # ── edits ──
     def do(self, fn, *args, **kw):
@@ -76,16 +80,16 @@ class DraftHolder:
     def undo(self) -> bool:
         if not self.can_undo:
             return False
-        self._redo.append(self.d)
-        self.d = self._undo.pop()
+        self._redo.append((self.d, self.revision))
+        self.d, self.revision = self._undo.pop()
         self._save()
         return True
 
     def redo(self) -> bool:
         if not self.can_redo:
             return False
-        self._undo.append(self.d)
-        self.d = self._redo.pop()
+        self._undo.append((self.d, self.revision))
+        self.d, self.revision = self._redo.pop()
         self._save()
         return True
 
@@ -95,9 +99,11 @@ class DraftHolder:
             raise ReadOnly("a locked version is read-only; make a draft from it first")
 
     def _push(self, before):
-        self._undo.append(before)
+        self._undo.append((before, self.revision))
         del self._undo[:-UNDO_LIMIT]
         self._redo.clear()
+        self._revisions += 1
+        self.revision = self._revisions
         self._save()
 
     def _save(self):

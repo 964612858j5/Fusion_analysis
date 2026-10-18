@@ -38,6 +38,46 @@ def circle_polygon(cy: float, cx: float, r: float, shape: Tuple[int, int]) -> Po
     return out
 
 
+def ellipse_polygon(y0: float, x0: float, y1: float, x1: float, shape: Tuple[int, int]) -> Polygon:
+    """The 64-gon inscribed in the box of two opposite corners (the Circle
+    tool, drawn like Photoshop's elliptical marquee), clipped to the slide."""
+    cy, cx, ry, rx = (y0 + y1) / 2, (x0 + x1) / 2, abs(y1 - y0) / 2, abs(x1 - x0) / 2
+    out = []
+    for k in range(CIRCLE_VERTICES):
+        a = 2 * math.pi * k / CIRCLE_VERTICES
+        out.append(_clip(cx + rx * math.cos(a), cy - ry * math.sin(a), shape))
+    return out
+
+
+UNION_MAX_PIXELS = 100_000_000
+
+
+def union_outline(polys: Sequence[Polygon], shape):
+    """(outline, None) -- the one outer outline of polygons that touch or
+    overlap (Merge ▸ Union; holes inside are filled, vertices simplified
+    within one pixel) -- or (None, reason): "apart" when they make more than
+    one region (4-connected pixels), "too_far" when their box exceeds
+    `UNION_MAX_PIXELS`. Rasterised at full resolution like `fill`."""
+    import cv2
+    polys = [p for p in polys if len(p) >= 3]
+    if not polys:
+        return None, "apart"
+    y0, y1, x0, x1 = bbox_of([q for p in polys for q in p], shape)
+    if (y1 - y0 + 2) * (x1 - x0 + 2) > UNION_MAX_PIXELS:
+        return None, "too_far"
+    canvas = np.zeros((y1 - y0 + 2, x1 - x0 + 2), dtype=np.uint8)       # a free border: outlines close
+    for p in polys:
+        cv2.fillPoly(canvas, [np.array([[x - x0 + 1, y - y0 + 1] for x, y in p], dtype=np.int32)], color=1)
+    n, _labels = cv2.connectedComponents(canvas, connectivity=4)
+    if n != 2:                                                           # background + one region
+        return None, "apart"
+    found, _ = cv2.findContours(canvas, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    ring = cv2.approxPolyDP(max(found, key=cv2.contourArea), 1.0, True)
+    if len(ring) < 3:
+        return None, "apart"
+    return [_clip(int(q[0][0]) + x0 - 1, int(q[0][1]) + y0 - 1, shape) for q in ring], None
+
+
 def area(poly: Sequence[Sequence[float]]) -> float:
     if len(poly) < 3:
         return 0.0

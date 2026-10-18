@@ -110,7 +110,7 @@ def test_the_tissue_navigator_lands_the_regions_viewer_whatever_tool_is_in_use(a
         assert rig.w._btn_regions_tissue_nav.text() == "Tissue Navigator"
         page = rig.w._regions
         page._set_tool("line")
-        page.ctl.press(10.0, 10.0)                                     # a line being drawn
+        page.ctl.press(10.0, 10.0)                                     # a line being dragged
         shown = []
         monkeypatch.setattr(rig.w._display, "show_navigator", lambda *a, **k: shown.append((a, k)))
         rig.w._btn_regions_tissue_nav.click()                         # the real button

@@ -153,17 +153,37 @@ def _label_of(page, uid):
     return page.cores.labels_by_key()[key]["label"] if key else None
 
 
+def _drag(page, a, b, steps=4, ctrl=False):
+    """A left drag on the viewer, as the overlay feeds it to the tool."""
+    assert page.ctl.press(*a, ctrl) is True
+    for k in range(1, steps + 1):
+        f = k / steps
+        page.ctl.drag(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, finish=k == steps)
+    page.ctl.released()                                               # the button comes up (the overlay says so)
+
+
+def _merge(page, mode="Group"):
+    """Merge ▾ -> an item (the button only opens its menu)."""
+    act = next(a for a in page.btn_merge.menu().actions() if a.text().startswith(mode))
+    act.trigger()
+
+
+def _line(page, a, b):
+    page._set_tool("line")
+    _drag(page, _centre(*a), _centre(*b))
+
+
 def test_number_by_line_and_clicks_merge_undo_and_lock(app, env, monkeypatch):
     page = _page(app, env, monkeypatch)
     assert all(len(p["polygon"]) >= 3 for p in page.holder.d["pieces"].values())      # outlines, not circles
-    page._set_tool("line")
+    assert page.ctl.tool is None and not any(b.isChecked() for b in page.family_buttons.values())
     _set_target(page, "X1-Y01", "X1-Y03", "Along column")
-    assert page.ctl.press(*_centre(1, 1))
-    page.ctl.drag(*_centre(1, 3), finish=True)
+    _line(page, (1, 1), (1, 3))                                       # a drag along the column
     assert page.cores.numbering.btn_confirm.isEnabled()
     page.cores.numbering.btn_confirm.click()
     assert sorted(filter(None, (_label_of(page, u) for u in page.holder.d["cores"]))) == ["X1-Y01", "X1-Y02", "X1-Y03"]
     page._set_tool("click")
+    assert page.family_buttons["Annotate"].text() == "Annotate: Clicks ▾"
     _set_target(page, "X2-Y01", "X2-Y02", "Along column")
     for y in (1, 2):
         page.ctl.click(*_centre(2, y))
@@ -172,47 +192,69 @@ def test_number_by_line_and_clicks_merge_undo_and_lock(app, env, monkeypatch):
     assert len(page.ctl.sequence) == 2
     page.cores.numbering.btn_confirm.click()
     assert sum(1 for u in page.holder.d["cores"] if _label_of(page, u)) == 5
-    # a drawn circle merged into X1-Y01, then undone
+    # a circle drawn by a drag, merged into X1-Y01 with the Merge button, then undone
     page._set_tool("circle")
     cy, cx = _centre(1, 1)
-    assert page.ctl.press(cy, cx + 100)
-    page.ctl.drag(cy, cx + 110, finish=True)
+    _drag(page, (cy - 10, cx + 90), (cy + 10, cx + 110))              # one corner, then the opposite
     frag = page.selected
     assert page.holder.d["pieces"][frag]["source"] == "drawn"
+    drawn = page.holder.d["pieces"][frag]["owner"]                    # a core of its own: yellow
+    assert drawn and page.holder.d["cores"][drawn]["mapping"] == "unmatched"
+    assert next(it for it in page.viewer.overlay.items if it["id"] == frag)["color"] == "#fdd835"
     page._set_tool("select")
     page.ctl.click(cy, cx)
     core = page.selected_core()
-    page._set_tool("merge")
-    page.ctl.click(cy, cx + 100)
+    assert not page.btn_merge.isEnabled()                             # one piece: nothing to merge
+    page.ctl.click(cy, cx + 100, ctrl=True)                           # Ctrl+click adds the fragment
+    assert page.selection[-1] == frag and page.selected is None and page.btn_merge.isEnabled()
+    _merge(page)
+    assert page.holder.d["pieces"][frag]["owner"] == core
     assert page.holder.d["cores"][core]["mapping"] == "review"
     page.undo()
-    assert page.holder.d["pieces"][frag]["owner"] is None
-    page.edit(D.drop_piece, frag, "dust")
-    monkeypatch.setattr(type(page), "_confirm_coverage", lambda self: True)
-    page.btn_lock.click()
-    assert page.view_version == ("regions", 1) and page.holder.read_only
-    assert K.load_draft(page.ctx["project_dir"]) is None
-    assert page.btn_lock.text() == "New draft from this version"
-    page.btn_lock.click()
-    assert page.view_version is None and page.holder.d["based_on"] == 1
+    own = page.holder.d["pieces"][frag]["owner"]                      # back to its own core (drawn = a core)
+    assert own != core and page.holder.d["cores"][own]["pieces"] == [frag]
+    page.select(frag)
+    page._delete_selected()                                           # Delete: the piece is gone
+    assert frag not in page.holder.d["pieces"]
+    page.btn_save.click()                                             # Save: any time, editing goes on
+    rec = K.load_saved(page.ctx["project_dir"])
+    assert rec["save_count"] == 1 and not page.holder.read_only
+    assert page.lbl_saved.text().startswith("Saved ")
+    key = next(iter(page.holder.d["positions"]))
+    page.edit(D.set_run, key, not page.holder.d["positions"][key]["run"])
+    assert "unsaved changes" in page.lbl_saved.text()
+    page.btn_save.click()
+    assert K.load_saved(page.ctx["project_dir"])["save_count"] == 2 and "unsaved" not in page.lbl_saved.text()
     page.shutdown()
 
 
-def test_select_drag_moves_only_the_selected_piece_else_pans(app, env, monkeypatch):
+def test_select_drag_moves_the_selected_piece_as_a_preview_until_enter(app, env, monkeypatch):
     page = _page(app, env, monkeypatch)
     page._set_tool("select")
     assert page.ctl.press(5.0, 5.0) is False                          # glass: the view pans
-    assert page.ctl.press(*_centre(1, 1)) is False                    # not selected yet: pans
+    assert page.ctl.press(*_centre(1, 1)) is True and page.ctl._drag is None   # not selected yet: a click
+    page.ctl.released()
     page.ctl.click(*_centre(1, 1))
     pid = page.selected
     before = [list(q) for q in page.holder.d["pieces"][pid]["polygon"]]
-    assert page.ctl.press(*_centre(1, 1)) is True
     cy, cx = _centre(1, 1)
-    page.ctl.drag(cy + 10, cx + 20, finish=True)
+    _drag(page, (cy, cx), (cy + 10, cx + 20))
+    _drag(page, (cy + 10, cx + 20), (cy + 20, cx + 40))               # a second drag, same transform
+    assert page.holder.d["pieces"][pid]["polygon"] == before          # the document waits for Enter
+    shown = page.viewer.overlay.live
+    assert shown["id"] == pid and shown["dash"] and shown["polygon"] != before   # a dashed live preview
+    assert pid not in [it["id"] for it in page.viewer.overlay.items]  # not in the cached layer
+    page.undo()                                                       # Ctrl+Z: back one drag
+    assert page.ctl.transform is not None and page.ctl.transform.history
+    page._key("enter")
     after = page.holder.d["pieces"][pid]["polygon"]
     assert all(a[0] - b[0] == 20 and a[1] - b[1] == 10 for a, b in zip(after, before))
     page.undo()
-    assert page.holder.d["pieces"][pid]["polygon"] == before          # one drag = one step
+    assert page.holder.d["pieces"][pid]["polygon"] == before          # the whole transform = one step
+    _drag(page, (cy, cx), (cy + 30, cx + 30))
+    page._escape()                                                    # Esc: dropped, the tool stays
+    assert page.ctl.transform is None and page.ctl.tool == "select"
+    assert page.holder.d["pieces"][pid]["polygon"] == before
     page.shutdown()
 
 
@@ -224,18 +266,22 @@ def test_the_overlay_routes_a_left_drag_to_the_tool_or_to_the_view(app, env, mon
     for _ in range(20):
         app.processEvents()
 
-    def ev(kind, y, x, button=QtCore.Qt.LeftButton):
+    def ev(kind, y, x, button=QtCore.Qt.LeftButton, buttons=None):
         pos = ov.to_widget(x, y)
-        return QMouseEvent(kind, QtCore.QPointF(pos), button, button, QtCore.Qt.NoModifier)
+        return QMouseEvent(kind, QtCore.QPointF(pos), button, button if buttons is None else buttons,
+                           QtCore.Qt.NoModifier)
+    assert ov.eventFilter(vp, ev(QtCore.QEvent.MouseButtonPress, 5, 5)) is False          # no tool: pans
+    ov.eventFilter(vp, ev(QtCore.QEvent.MouseButtonRelease, 5, 5))
     page._set_tool("select")
-    assert ov.eventFilter(vp, ev(QtCore.QEvent.MouseButtonPress, 5, 5)) is False          # goes to pyqtgraph
+    assert ov.eventFilter(vp, ev(QtCore.QEvent.MouseButtonPress, 5, 5)) is False          # blank ground: pans
     assert ov.eventFilter(vp, ev(QtCore.QEvent.MouseButtonRelease, 5, 5)) is False
     page._set_tool("circle")
     cy, cx = _centre(1, 1)
-    assert ov.eventFilter(vp, ev(QtCore.QEvent.MouseButtonPress, cy, cx + 100)) is True    # the tool takes it
-    assert ov.eventFilter(vp, ev(QtCore.QEvent.MouseMove, cy, cx + 115, QtCore.Qt.NoButton)) is True
     n = len(page.holder.d["pieces"])
-    assert ov.eventFilter(vp, ev(QtCore.QEvent.MouseButtonRelease, cy, cx + 115)) is True
+    assert ov.eventFilter(vp, ev(QtCore.QEvent.MouseButtonPress, cy, cx + 100)) is True    # Circle takes it
+    ov.eventFilter(vp, ev(QtCore.QEvent.MouseMove, cy + 12, cx + 112, QtCore.Qt.NoButton, QtCore.Qt.LeftButton))
+    assert page.viewer.overlay.circle is not None                                         # the preview follows
+    assert ov.eventFilter(vp, ev(QtCore.QEvent.MouseButtonRelease, cy + 15, cx + 115)) is True
     assert len(page.holder.d["pieces"]) == n + 1
     page.shutdown()
 
@@ -258,7 +304,7 @@ def test_single_number_conflict_and_draft_restored_on_reopen(app, env, monkeypat
     from block01.ui.regions.page import RegionsPage
     again = RegionsPage()
     again.set_context(page.ctx)
-    assert again.holder is not None and again.view_version is None
+    assert again.holder is not None and not again.holder.read_only
     assert again.holder.d["cores"] == page.holder.d["cores"]
     assert again.holder.d["session"]["workspace_id"] == "full"
     page.shutdown()
@@ -275,7 +321,7 @@ def test_an_roi_workspace_shows_the_cores_read_only(app, env, monkeypatch):
     assert not roi.cores.btn_find.isEnabled() and not roi.cores.numbering.isEnabled()
     assert roi.cores.lbl_roi.isVisibleTo(roi.cores)
     roi._set_tool("line")
-    assert roi.ctl.press(*_centre(1, 1)) is False
+    assert roi.ctl.press(*_centre(1, 1)) is True and roi.ctl._drag is None      # no line here
     page.shutdown()
 
 
@@ -299,18 +345,15 @@ def test_the_table_shows_the_map_sheet_before_find_cores(app, env, monkeypatch):
     page.shutdown()
 
 
-def test_prev_next_and_row_clicks_jump_the_shared_camera(app, env, monkeypatch):
+def test_row_clicks_jump_the_shared_camera(app, env, monkeypatch):
     page = _page(app, env, monkeypatch)
-    page._set_tool("line")
+    assert not hasattr(page, "btn_next") and not hasattr(page, "btn_outlines")        # removed (user 2026-10-18)
     _set_target(page, "X1-Y01", "X1-Y03", "Along column")
-    page.ctl.press(*_centre(1, 1))
-    page.ctl.drag(*_centre(1, 3), finish=True)
+    _line(page, (1, 1), (1, 3))
     page.cores.numbering.btn_confirm.click()
-    page.btn_next.click()
-    page.btn_next.click()
     key = next(c["position_key"] for c in page.holder.d["cores"].values() if c["position_key"])
     page.cores.row_clicked("position", key, False)
-    assert len(page.jumps) == 3 and all(len(b) == 4 for b in page.jumps)
+    assert len(page.jumps) == 1 and len(page.jumps[0]) == 4 and page.selected is not None
     page.shutdown()
 
 
@@ -342,37 +385,41 @@ def test_an_roi_workspace_cannot_edit_shapes(app, env, monkeypatch):
     roi.ctl.click(*_centre(1, 1))
     pid = roi.selected
     assert pid is not None                                            # selecting is fine
+    roi.ctl.click(*_centre(1, 2), ctrl=True)
+    assert len(roi.selection) == 2 and not roi.btn_merge.isEnabled()
     before = json.dumps(roi.holder.d, sort_keys=True)
-    assert roi.ctl.press(*_centre(1, 1)) is False                     # no move / scale
+    roi.select(pid)
+    assert roi.ctl.press(*_centre(1, 1)) is True and roi.ctl._drag is None   # a click, no move / scale
     roi._set_tool("circle")
-    assert roi.ctl.press(*_centre(1, 1)) is False                     # no new piece
+    roi.ctl.press(*_centre(1, 1))
+    roi.ctl.drag(*_centre(1, 2), finish=True)                         # no new piece
+    roi.ctl.released()
     roi._delete_selected()
-    roi._set_tool("merge")
-    roi.ctl.click(*_centre(1, 2))
+    roi.merge_selected()
     assert json.dumps(roi.holder.d, sort_keys=True) == before
     page.shutdown()
 
 
 def test_a_click_on_a_core_adjusts_the_line_instead_of_starting_a_new_one(app, env, monkeypatch):
     page = _page(app, env, monkeypatch)
-    page._set_tool("line")
     _set_target(page, "X1-Y01", "X1-Y03", "Along column")
-    assert page.ctl.press(*_centre(1, 1))
-    page.ctl.drag(*_centre(1, 3), finish=True)
+    _line(page, (1, 1), (1, 3))
     assert len(page.ctl.sequence) == 3
-    assert page.ctl.press(*_centre(1, 2)) is False                   # on a core: not a new line
-    page.ctl.click(*_centre(1, 2))
+    assert page.ctl.press(*_centre(1, 2)) is True
+    page.ctl.drag(*_centre(1, 2), finish=True)
+    page.ctl.released()
+    page.ctl.click(*_centre(1, 2))                                    # on a core of the finished line
     assert len(page.ctl.sequence) == 2 and page.ctl.line is not None
     page.shutdown()
 
 
-def test_lock_needs_the_cores_once_a_map_sheet_is_chosen(app, env, monkeypatch):
+def test_save_works_before_find_cores_and_lists_it_as_open(app, env, monkeypatch):
     page = _page(app, env, monkeypatch, find=False)
     page.cores.btn_map.click()
-    shown = []
-    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: shown.append(a[2])))
-    page.btn_lock.click()
-    assert shown and "Find cores first" in shown[0] and page.view_version is None
+    page.btn_save.click()                                             # never refused
+    rec = K.load_saved(page.ctx["project_dir"])
+    assert any("cores are not found yet" in p for p in rec["open_issues"]) and not rec["complete"]
+    assert "open" in page.lbl_saved.text() and "cores are not found yet" in page.lbl_saved.toolTip()
     page.shutdown()
 
 
@@ -386,10 +433,18 @@ def test_undo_keeps_the_live_session_and_unreadable_versions_are_refused(app, en
     assert page.holder.d["session"]["handoff_sha256"] == "cd" * 32
     assert any(h["sha256"] == "cd" * 32 for h in page.holder.d["handoffs"].values())
     import os as _os
-    bad = _os.path.join(page.ctx["project_dir"], "tma", "regions_v7.json")
-    with open(bad, "w") as f:
-        json.dump({"schema_version": 2, "kind": "regions_layout", "slide_id": "slide_ffffffffffffffff"}, f)
-    assert page._open_locked(("regions", 7)) is False                 # another slide: refused, no crash
+    pd = page.ctx["project_dir"]
+    for name in ("regions.json", "regions_v7.json"):                  # another slide's files
+        with open(_os.path.join(pd, "tma", name), "w") as f:
+            json.dump({"schema_version": 2, "kind": "regions_layout", "slide_id": "slide_ffffffffffffffff",
+                       "document": {}}, f)
+    page.flush_draft()
+    K.discard_draft(pd)
+    from block01.ui.regions.page import RegionsPage
+    again = RegionsPage()
+    again.set_context(page.ctx)                                       # refused with a message, no crash
+    assert again.holder is not None and again.holder.d["slide_id"] == page.ctx["slide_id"]
+    assert "cannot be read" in again.cores.lbl_info.text()
     page.shutdown()
 
 
@@ -404,9 +459,11 @@ def test_another_workspace_starts_a_fresh_undo_history(app, env, monkeypatch):
     page.shutdown()
 
 
-def test_a_handle_drag_scales_about_the_centre_and_autosave_waits_for_a_pause(app, env, monkeypatch):
+def test_the_transform_box_works_as_photoshops_and_autosave_waits_for_enter(app, env, monkeypatch):
+    import numpy as np
     from block01.core.regions import geometry as G
     from block01.core.regions import lock as KK
+    from block01.core.regions import transform as T
     page = _page(app, env, monkeypatch)
     page.flush_draft()
     writes = []
@@ -417,19 +474,85 @@ def test_a_handle_drag_scales_about_the_centre_and_autosave_waits_for_a_pause(ap
     page.ctl.click(cy, cx)
     pid = page.selected
     poly = page.holder.d["pieces"][pid]["polygon"]
-    a0, c0 = G.area(poly), G.centroid(poly)
-    xs = [q[0] for q in poly]
-    ys = [q[1] for q in poly]
-    corner = (min(ys), max(xs))
-    monkeypatch.setattr(page.ctl, "handle_at", lambda y, x: True)
-    assert page.ctl.press(*corner)
-    page.ctl.drag(c0[0] + (corner[0] - c0[0]) * 1.2, c0[1] + (corner[1] - c0[1]) * 1.2, finish=True)
-    poly2 = page.holder.d["pieces"][pid]["polygon"]
-    assert abs(G.area(poly2) / a0 - 1.44) < 0.05
-    assert abs(G.centroid(poly2)[0] - c0[0]) < 2 and abs(G.centroid(poly2)[1] - c0[1]) < 2
+    q = T.box_quad(poly)
+    (x0, y0), (x1, y1) = q[0], q[2]
+    assert page.viewer.overlay.handles_for is not None
+    # the bottom-right corner, freely: the top-left corner stays put
+    _drag(page, (y1, x1), (y1 + 30, x1 + 10))
+    p2 = np.array(page.ctl.transform.preview())
+    assert abs(p2[:, 0].min() - x0) < 1 and abs(p2[:, 1].min() - y0) < 1
+    assert abs(p2[:, 0].max() - (x1 + 10)) < 1 and abs(p2[:, 1].max() - (y1 + 30)) < 1
+    page.undo()
+    # Shift keeps the ratio, Alt scales about the centre
+    from PyQt5.QtCore import Qt
+    assert page.ctl.press(y1, x1)
+    page.ctl.drag(y1 + 40, x1 + 40, finish=True, mods=int(Qt.ShiftModifier | Qt.AltModifier))
+    page.ctl.released()
+    p3 = np.array(page.ctl.transform.preview())
+    w0, h0 = x1 - x0, y1 - y0
+    w3, h3 = np.ptp(p3[:, 0]), np.ptp(p3[:, 1])
+    assert abs(w3 / w0 - h3 / h0) < 0.02 and w3 > w0
+    assert abs(p3[:, 0].mean() - np.array(poly)[:, 0].mean()) < 2
+    page.undo()
+    # just outside a corner: a rotation about the centre (Shift: 15 degrees)
+    tol = 8 * page.view.screen_px()
+    assert page.ctl.box_hit(y0 - 2 * tol, x0 - 2 * tol) == ("rotate", 0)
+    assert page.ctl.press(y0 - 2 * tol, x0 - 2 * tol)
+    page.ctl.drag(y0 - 2 * tol, x1 + 4 * tol, finish=True, mods=int(Qt.ShiftModifier))
+    page.ctl.released()
+    th = page.ctl.transform.theta
+    assert abs(th) > 0.1 and abs(th / np.radians(15) - round(th / np.radians(15))) < 1e-9
+    # rotated, an edge handle still scales along the box's own side
+    quad = page.ctl.transform.quad
+    right = T.handle_points(quad)[5]
+    assert page.ctl.press(right[1], right[0])
+    page.ctl.drag(right[1] + 20 * np.sin(th), right[0] + 20 * np.cos(th), finish=True)
+    page.ctl.released()
+    q2 = page.ctl.transform.quad
+    assert np.allclose(q2[0], quad[0]) and np.allclose(q2[3], quad[3])  # the left side stays
+    # Ctrl on a corner: only that corner moves (distort)
+    c = q2[2]
+    assert page.ctl.press(c[1], c[0], True)
+    page.ctl.drag(c[1] + 15, c[0] + 5, finish=True)
+    page.ctl.released()
+    q3 = page.ctl.transform.quad
+    assert np.allclose(q3[:2], q2[:2]) and np.allclose(q3[3], q2[3]) and not np.allclose(q3[2], q2[2])
+    a0 = G.area(poly)
     assert writes == []
+    page._key("enter")
+    assert page.ctl.transform is None and G.area(page.holder.d["pieces"][pid]["polygon"]) != a0
     _wait(app, lambda: writes, ms=3000)
     assert len(writes) == 1
+    page.shutdown()
+
+
+def test_a_pending_transform_is_applied_before_anything_else(app, env, monkeypatch):
+    from block01.core.regions import document as D
+    page = _page(app, env, monkeypatch)
+    page._set_tool("select")
+    cy, cx = _centre(1, 1)
+    page.ctl.click(cy, cx)
+    pid = page.selected
+    before = [list(q) for q in page.holder.d["pieces"][pid]["polygon"]]
+    _drag(page, (cy, cx), (cy + 10, cx + 10))
+    page.ctl.click(*_centre(1, 2))                                    # another selection
+    assert page.holder.d["pieces"][pid]["polygon"] != before and page.ctl.transform is None
+    page.select(pid)
+    _drag(page, (cy + 10, cx + 10), (cy + 20, cx + 20))
+    key = next(iter(page.holder.d["positions"]))
+    page.edit(D.set_run, key, True)                                   # any edit
+    assert page.ctl.transform is None
+    page.undo()                                                       # the Run tick
+    page.undo()                                                       # the second move
+    assert page.holder.d["pieces"][pid]["polygon"][0][0] == before[0][0] + 10
+    _drag(page, (cy + 10, cx + 10), (cy + 30, cx + 30))
+    page.frame.left_tabs.setCurrentWidget(page.exclusions)           # a tab switch
+    assert page.holder.d["pieces"][pid]["polygon"][0][0] == before[0][0] + 30
+    page.frame.left_tabs.setCurrentWidget(page.cores)
+    page.select(pid)
+    _drag(page, (cy + 30, cx + 30), (cy + 40, cx + 40))
+    page.set_context(dict(page.ctx, full_wsi=False, workspace_id="roi_a"))   # another workspace
+    assert page.holder.d["pieces"][pid]["polygon"][0][0] == before[0][0] + 40
     page.shutdown()
 
 
@@ -446,34 +569,68 @@ def test_a_late_find_cores_result_does_not_touch_an_roi_workspace(app, env, monk
     page.shutdown()
 
 
-def test_the_outlines_can_be_hidden_and_shown(app, env, monkeypatch):
+def test_line_and_circle_drags_hold_the_view_and_the_wheel_zooms_between_them(app, env, monkeypatch):
+    """User 2026-10-18: Line and Circle are drags; while one is lit a left
+    drag never pans, the wheel zooms unless a drag is under way (a Line
+    drag's wheel sets the band width); Select / no tool pans again."""
     page = _page(app, env, monkeypatch)
-    ov = page.viewer.overlay
-    assert ov.items
-    page.btn_outlines.setChecked(False)
-    assert ov.items == []
-    page._set_tool("line")
     _set_target(page, "X1-Y01", "X1-Y03", "Along column")
-    page.ctl.press(*_centre(1, 1))
+    page._set_tool("line")
+    assert page.ctl.wheel(120, dragging=False) is False               # zooms
+    assert page.ctl.press(*_centre(1, 1)) is True                     # the drag is the line's
+    page.ctl.drag(*_centre(1, 2))
+    assert page.ctl.line is not None and len(page.ctl.sequence) == 2
+    band = page.ctl.band
+    assert page.ctl.wheel(120, dragging=True) is True and page.ctl.band > band
     page.ctl.drag(*_centre(1, 3), finish=True)
-    assert ov.line is not None and ov.items == []                     # the line still shows
-    page.btn_outlines.setChecked(True)
-    assert ov.items
-    page.shutdown()
-
-
-def test_hidden_outlines_are_neither_picked_nor_edited(app, env, monkeypatch):
-    page = _page(app, env, monkeypatch)
-    page._set_tool("select")
-    page.ctl.click(*_centre(1, 1))
-    assert page.selected is not None
-    page.btn_outlines.setChecked(False)
-    assert page.selected is None
-    page.ctl.click(*_centre(1, 1))
-    assert page.selected is None
-    before = json.dumps(page.holder.d["pieces"], sort_keys=True)
-    assert page.ctl.press(*_centre(1, 1)) is False                    # the view pans
+    page.ctl.released()
+    assert len(page.ctl.sequence) == 3
+    assert page.ctl.press(5.0, 5.0) is True                           # still no pan with Line lit
+    page.ctl.drag(5.0, 5.0, finish=True)
+    page.ctl.released()
     page._set_tool("circle")
-    assert page.ctl.press(*_centre(1, 1)) is False
-    assert json.dumps(page.holder.d["pieces"], sort_keys=True) == before
+    assert page.ctl.press(400.0, 600.0) is True
+    page.ctl.drag(440.0, 640.0)
+    assert page.ctl.wheel(120, dragging=True) is True                 # swallowed mid-drag
+    page._escape()                                                    # Esc: the circle goes, the tool off
+    assert page.ctl.preview_circle() is None and page.ctl.tool is None
+    page.ctl.drag(400.0, 650.0, finish=True)                          # the late release commits nothing
+    page.ctl.released()
+    n = len(page.holder.d["pieces"])
+    assert n == 5 and page.ctl.press(5.0, 5.0) is False               # no tool: pans
     page.shutdown()
+
+
+def test_esc_cancels_a_line_and_its_preview_and_ctrl_z_steps_back_one_level(app, env, monkeypatch):
+    page = _page(app, env, monkeypatch)
+    _set_target(page, "X1-Y01", "X1-Y03", "Along column")
+    _line(page, (1, 1), (1, 3))
+    assert page.ctl.sequence
+    page._escape()
+    assert page.ctl.line is None and page.ctl.sequence == [] and page.ctl.tool is None
+    assert not page.cores.numbering.btn_confirm.isEnabled()
+    # Ctrl+Z: the half-done drag, then the unconfirmed preview, then the last edit; the tool stays lit
+    key = next(iter(page.holder.d["positions"]))
+    page.edit(D.set_run, key, True)
+    _line(page, (1, 1), (1, 3))
+    assert page.ctl.press(*_centre(2, 1)) is True
+    page.ctl.drag(*_centre(2, 2))
+    assert page.ctl.busy()
+    page.undo()
+    assert not page.ctl.busy() and page.ctl.tool == "line"
+    page.ctl.drag(*_centre(2, 2), finish=True)                        # the release after it: nothing
+    page.ctl.released()
+    _line(page, (1, 1), (1, 3))
+    assert page.ctl.has_preview()
+    page.undo()
+    assert not page.ctl.has_preview() and page.holder.d["positions"][key]["run"] and page.ctl.tool == "line"
+    page.undo()
+    assert not page.holder.d["positions"][key]["run"] and page.ctl.tool == "line"
+    page.frame.left_tabs.setCurrentWidget(page.exclusions)
+    assert page.ctl.tool is None                                      # numbering is the Cores tab's
+    page._set_tool("select")
+    page.ctl.click(*_centre(1, 1))                                    # a core, in the Exclusions tab
+    assert "Cores tab" in page.exclusions.lbl_info.text()
+    page.shutdown()
+
+

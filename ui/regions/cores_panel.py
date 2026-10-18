@@ -118,11 +118,11 @@ class CoresPanel(QWidget, CoresActions):
         self.numbering.setEnabled(cores_ok)
 
     # ── the overlay ──
-    def draw(self, view):
+    def draw_parts(self):
+        """(items, selected ids, handle polygon, order labels) of the pieces."""
         h = self.page.holder
         if h is None:
-            view.set_items([])
-            return
+            return [], set(), None, {}
         d = h.d
         labels = self.labels_by_key()
         items = []
@@ -143,19 +143,14 @@ class CoresPanel(QWidget, CoresActions):
                     elif c["custom_label"]:
                         it["label"] = f"{c['custom_label']} (custom)"
             items.append(it)
-        sel = set()
-        core = self.page.selected_core()
-        if core is not None:
-            sel = set(d["cores"][core]["pieces"])
-        elif self.page.selected is not None:
-            sel = {self.page.selected}
+        sel = set(self.page.selection)        # the unit is one piece, never the whole core (§9)
         handles = None
-        if self.page.selected in d["pieces"] and not h.read_only and self.page.ctl.tool == "select":
+        if self.page.selected in d["pieces"]:
             handles = d["pieces"][self.page.selected]["polygon"]
         order = {}
         for k, obj in enumerate(self.page.ctl.sequence, start=1):
             order[d["cores"][obj]["pieces"][0] if obj in d["cores"] else obj] = str(k)
-        view.set_items(items, selected=sel, handles_for=handles, order_labels=order)
+        return items, sel, handles, order
 
     # ── the table ──
     def refresh(self):

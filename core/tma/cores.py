@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 SCHEMA_NAME = "tma_cores"
 SCHEMA = "1"
@@ -61,7 +61,9 @@ def table_path(project_dir, version: int) -> str:
     return os.path.join(project_dir, STUDY_DIR, f"tma_cores_v{int(version)}.parquet")
 
 
-def write_table(project_dir, rows: List[Dict], version: int) -> str:
+def write_table(project_dir, rows: List[Dict], version: int, path: Optional[str] = None) -> str:
+    """`path`: where to write instead of the numbered file (Regions' Save
+    overwrites one ``tma_cores.parquet``; `version` is then its save count)."""
     from ..object_tables import write_typed_table
     for r in rows:
         if tuple(sorted(r)) != tuple(sorted(COLUMNS)):
@@ -71,7 +73,7 @@ def write_table(project_dir, rows: List[Dict], version: int) -> str:
     keys = [r["position_key"] for r in rows]
     if len(set(keys)) != len(keys):
         raise CoreTableError("repeated position_key")
-    return write_typed_table(table_path(project_dir, version), TYPES, rows, SCHEMA_NAME, SCHEMA)
+    return write_typed_table(path or table_path(project_dir, version), TYPES, rows, SCHEMA_NAME, SCHEMA)
 
 
 def read_table(path) -> List[Dict]:

@@ -306,7 +306,7 @@ def test_the_regions_page_keeps_its_ruled_entry_and_tabs(app):
     """Regions (docs/region_qc_module_plan.md §4; UI_SURFACE_RULES §4): the
     entry is a step-bar LABEL between Step 0 and Step 1 (the bar still holds
     no button), the page sits after Step1.5 so the steps keep indices 0-4,
-    its tabs are `Channels` | `Cores` and `Viewer`, and the old TMA entry is
+    its tabs are `Channels` | `Cores` | `Exclusions` and `Viewer`, and the old TMA entry is
     gone."""
     w = _window(app)
     try:
@@ -320,7 +320,7 @@ def test_the_regions_page_keeps_its_ruled_entry_and_tabs(app):
         assert w._stack.indexOf(w._regions) == w._stack.count() - 1 == 6
         assert [w._stack.indexOf(p) for p in (w._step0, w._step2, w._step3, w._step4)] == [0, 2, 3, 4]
         f = w._regions.frame
-        assert [f.left_tabs.tabText(i) for i in range(f.left_tabs.count())] == ["Channels", "Cores"]
+        assert [f.left_tabs.tabText(i) for i in range(f.left_tabs.count())] == ["Channels", "Cores", "Exclusions"]
         assert [f.right_tabs.tabText(i) for i in range(f.right_tabs.count())] == ["Viewer"]
         _enter_regions(w)
         assert w._current_step == w.REGIONS_STEP and w._stack.currentWidget() is w._regions

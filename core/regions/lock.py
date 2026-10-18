@@ -1,15 +1,21 @@
-"""Regions lock and files (plan §3): the checks before a lock, the locked
-version, the draft file and the version numbers.
+"""Regions files (plan §3; Save instead of Lock, user 2026-10-18).
 
-* ``<project>/tma/regions_draft.json`` -- the draft, written atomically.
-* ``<project>/tma/regions_v<n>.json`` -- a locked version (the whole
-  document as drawn, exclusions never clipped, plus the regions computed
-  at lock), and ``tma_cores_v<n>.parquet`` (F1's schema) when a map sheet
-  is attached. Version numbers continue after every older file
-  (``tma_layout_v*``, ``tma_cores_v*``, ``regions_v*``); nothing is
-  overwritten. Registered as ``regions_layout``.
-* Lock checks in two parts: the cores (F3's rules) when a map sheet is
-  attached; the exclusions always.
+* ``<project>/tma/regions_draft.json`` -- the working copy, saved
+  automatically (written atomically): nothing is lost between Saves.
+* ``<project>/tma/regions.json`` -- the result, written by Save at any
+  time and overwritten by the next one (no versions): the regions computed
+  from the document (cores, exclusions never clipped) plus the whole
+  document itself, so a reopen continues exactly where the user was; and
+  ``tma_cores.parquet`` (F1's schema) when a map sheet is attached. A Save
+  is never refused for unfinished work: what is still open
+  (`open_issues`: the F3 core rules when a map sheet is attached, the
+  exclusion checks always) is written into the file (``complete`` false)
+  for later steps to see. The table is written first and ``regions.json``
+  records its checksum: a Save interrupted between the two is seen by
+  `table_matches`. Registered as ``regions_layout`` under the content's
+  checksum (an unchanged Save registers nothing new and keeps its count).
+* ``regions_v<n>.json`` -- the numbered versions an earlier build locked:
+  only read, as the starting point when no ``regions.json`` exists yet.
 """
 
 from __future__ import annotations
@@ -21,10 +27,12 @@ import os
 from typing import Dict, List, Optional, Tuple
 
 from . import geometry as G
-from .document import (SCHEMA_VERSION, RegionsError, _now, core_centre, exclusion_type, shape_of,
+from .document import (SCHEMA_VERSION, RegionsError, _now, core_centre, exclusion_type, piece_counter, shape_of,
                        status_text)
 
 DRAFT_FILE = "regions_draft.json"
+SAVED_FILE = "regions.json"
+TABLE_FILE = "tma_cores.parquet"
 DRAFT_POSITION_FIELDS = (("observed", None), ("missing_reason", ""), ("qc", "unreviewed"),
                          ("qc_reasons", []), ("run", False))
 
@@ -36,6 +44,14 @@ def _dir(project_dir):
 
 def draft_path(project_dir) -> str:
     return os.path.join(_dir(project_dir), DRAFT_FILE)
+
+
+def saved_path(project_dir) -> str:
+    return os.path.join(_dir(project_dir), SAVED_FILE)
+
+
+def table_path(project_dir) -> str:
+    return os.path.join(_dir(project_dir), TABLE_FILE)
 
 
 def version_path(project_dir, version: int) -> str:
@@ -50,13 +66,6 @@ def _numbered(project_dir, pre, suf):
             if f.startswith(pre) and f.endswith(suf) and f[len(pre):-len(suf)].isdigit():
                 out.add(int(f[len(pre):-len(suf)]))
     return out
-
-
-def taken_versions(project_dir) -> List[int]:
-    """Every version number used by any file, old or new."""
-    return sorted(v for v in (_numbered(project_dir, "regions_v", ".json")
-                              | _numbered(project_dir, "tma_layout_v", ".json")
-                              | _numbered(project_dir, "tma_cores_v", ".parquet")) if v >= 1)
 
 
 def locked_versions(project_dir) -> List[int]:
@@ -164,9 +173,10 @@ def exclusion_problems(d: Dict, channel_names: Optional[List[str]] = None) -> Li
     return out
 
 
-def lock_problems(d: Dict, study: Optional[Dict], channel_names: Optional[List[str]] = None) -> List[str]:
-    """Why the document cannot be locked; [] when it can. The core part
-    only when a map sheet is attached."""
+def open_issues(d: Dict, study: Optional[Dict], channel_names: Optional[List[str]] = None) -> List[str]:
+    """What is still unfinished ([] = complete): never blocks a Save. The
+    core part only when a map sheet is attached. Raises only when the
+    document and the study do not belong together."""
     if d.get("map_sha256") and study is None:
         raise RegionsError("the document has a map sheet: its study is needed to check the cores")
     if study is not None and d.get("map_sha256") and study["map_sheet"]["sha256"] != d["map_sha256"]:
@@ -190,26 +200,29 @@ def exclusion_cores(d: Dict, excl: Dict[str, Dict], cores: Dict[str, Dict]) -> D
     return out
 
 
-# ── lock ────────────────────────────────────────────────────────────────
+# ── save ────────────────────────────────────────────────────────────────
 
-def lock(project_dir, d: Dict, study: Optional[Dict], channel_names: Optional[List[str]] = None) -> Dict:
-    """Write the next locked version and register ``regions_layout``.
-    Refuses while `lock_problems` lists anything or the coverage is
-    unconfirmed."""
+def save(project_dir, d: Dict, study: Optional[Dict], channel_names: Optional[List[str]] = None) -> Dict:
+    """Write ``regions.json`` (and the core table), replacing the last
+    Save, and register ``regions_layout``. Unfinished work is saved as it
+    is and listed in ``open_issues``; a core whose outline has no area gets
+    no region."""
     from .. import provenance as prov
     from ..project_identity import region_id
-    problems = lock_problems(d, study, channel_names)
-    if not d.get("coverage_confirmed"):
-        problems.append("the coverage is not confirmed")
-    if problems:
-        raise RegionsError("; ".join(problems))
-    version = (taken_versions(project_dir) or [0])[-1] + 1
-    path = version_path(project_dir, version)
-    if os.path.exists(path):
-        raise FileExistsError(path)
+    issues = open_issues(d, study, channel_names)
+    if study is not None and d.get("map_sha256") is None and study.get("map_sheet"):
+        issues.insert(0, "the map sheet is chosen but the cores are not found yet")
+    path = saved_path(project_dir)
+    try:
+        old = load_saved(project_dir)
+    except (RegionsError, ValueError, OSError):
+        old = None
+    content = _content_sha(d, issues)
+    same = old is not None and old.get("content_sha256") == content
+    count = int(old.get("save_count", 0)) + (0 if same else 1) if old else 1   # an unchanged Save: the same count
     shape = shape_of(d)
-    cores_out, table = {}, None
-    creg = core_regions(d) if d.get("map_sha256") else {}
+    cores_out, table, table_sha = {}, None, None
+    creg = {k: g for k, g in (core_regions(d) if d.get("map_sha256") else {}).items() if G.has_area(g)}
     if study is not None and d.get("map_sha256"):
         from ..tma import cores as tc
         occupied = {p["position_id"]: bool(p["donor_block_id"]) for p in study["map_sheet"]["positions"]}
@@ -217,7 +230,7 @@ def lock(project_dir, d: Dict, study: Optional[Dict], channel_names: Optional[Li
         rows = []
         for row in tc.draft_rows(study):
             key = row["position_key"]
-            row["layout_version"] = version
+            row["layout_version"] = count
             row["status"] = status_text(d, key, occupied[row["position_id"]])
             uid = held.get(key)
             if uid:
@@ -229,23 +242,29 @@ def lock(project_dir, d: Dict, study: Optional[Dict], channel_names: Optional[Li
                 cores_out[uid] = {"position_key": key, "pieces": list(d["cores"][uid]["pieces"]),
                                   "mapping": d["cores"][uid]["mapping"], "region_id": rid}
             rows.append(row)
-        if os.path.exists(tc.table_path(project_dir, version)):
-            raise FileExistsError(tc.table_path(project_dir, version))
-        table = tc.write_table(project_dir, rows, version)
+        table = tc.write_table(project_dir, rows, count, path=table_path(project_dir))
+        with open(table, "rb") as f:
+            table_sha = hashlib.sha256(f.read()).hexdigest()
     excl = exclusion_regions(d)
-    links = exclusion_cores(d, excl, core_regions(d, include_excluded=True) if d.get("map_sha256") else {})
+    links = exclusion_cores(d, excl, {k: g for k, g in (core_regions(d, include_excluded=True)
+                                                        if d.get("map_sha256") else {}).items() if G.has_area(g)})
     excl_out = {uid: dict(d["exclusions"][uid], type=g["type"], region_id=g["region_id"],
                           bbox_fullres=g["bbox_fullres"], core_uid=links[uid])
                 for uid, g in excl.items()}
-    rec = {"schema_version": SCHEMA_VERSION, "kind": "regions_layout", "version": version,
-           "based_on": d.get("based_on"), "created_at": _now(), "slide_id": d["slide_id"],
+    doc = copy.deepcopy(d)
+    doc["session"] = None
+    rec = {"schema_version": SCHEMA_VERSION, "kind": "regions_layout", "save_count": count,
+           "saved_at": _now(), "slide_id": d["slide_id"],
            "slide_shape": list(shape), "map_sha256": d.get("map_sha256"),
            "candidates_version": d.get("candidates_version"), "core_diameter_px": d.get("core_diameter_px"),
            "coordinates": "level-0 pixels, origin top-left, x right, y down; bbox [y0, y1, x0, x1] half-open",
-           "coverage_confirmed": d["coverage_confirmed"], "pieces": copy.deepcopy(d["pieces"]),
-           "cores": cores_out, "positions": copy.deepcopy(d["positions"]), "exclusions": excl_out,
-           "handoffs": copy.deepcopy(d["handoffs"]), "operations": d["operations"],
-           "run": sorted(k for k, v in d["positions"].items() if v["run"])}
+           "complete": not issues, "open_issues": issues, "content_sha256": content,
+           "table": {"file": TABLE_FILE, "sha256": table_sha, "layout_version": count} if table else None,
+           "pieces": copy.deepcopy(d["pieces"]), "cores": cores_out, "positions": copy.deepcopy(d["positions"]),
+           "exclusions": excl_out, "handoffs": copy.deepcopy(d["handoffs"]),
+           "piece_counter": piece_counter(d),
+           "run": sorted(k for k, v in d["positions"].items() if v["run"]),
+           "document": doc}
     os.makedirs(os.path.dirname(path), exist_ok=True)
     prov.write_json_atomic(path, rec)
     entries = prov.load_entries(project_dir)
@@ -258,18 +277,58 @@ def lock(project_dir, d: Dict, study: Optional[Dict], channel_names: Optional[Li
     unresolved = [{"role": "step0_handoff", "workspace_id": h["workspace_id"], "path": h["path"],
                    "sha256": h["sha256"]} for _k, h in sorted(d["handoffs"].items())]
     whole = region_id(d["slide_id"], "full_wsi", [0, shape[0], 0, shape[1]])   # the document covers the slide
-    with open(path, "rb") as f:
-        token = hashlib.sha256(f.read()).hexdigest()
+    token = content                               # the content, not the save time: an unchanged Save registers nothing new
     aid = prov.safe_register(project_dir, "regions_layout", prov.location(project_dir, path), token,
                              slide_id=d["slide_id"], depends_on=deps, operates_on=[whole],
                              unresolved_inputs=unresolved,
-                             parameters={"version": version, "based_on": d.get("based_on"), "scope": "full_wsi",
-                                         "cores": len(cores_out), "exclusions": len(excl_out),
+                             parameters={"save_count": count, "scope": "full_wsi", "complete": not issues,
+                                         "open_issues": len(issues), "cores": len(cores_out),
+                                         "exclusions": len(excl_out),
                                          "table": os.path.basename(table) if table else None},
                              software={"module": "core.regions.lock", "commit": prov.git_commit()})
     if aid is None:
         print(f"[Regions] {path} saved but NOT registered in the provenance")
     return rec
+
+
+def _content_sha(d: Dict, issues: List[str]) -> str:
+    """What a Save holds, without when it was made or the workspace open
+    at the time."""
+    doc = dict(d, session=None)
+    return hashlib.sha256(json.dumps([doc, issues], sort_keys=True, default=str).encode()).hexdigest()
+
+
+def table_matches(project_dir, rec: Dict) -> bool:
+    """Whether ``tma_cores.parquet`` is the table of this Save (False: a
+    Save was interrupted between the two files -- Save again)."""
+    t = rec.get("table")
+    if t is None:
+        return not os.path.isfile(table_path(project_dir)) or rec.get("map_sha256") is None
+    if not os.path.isfile(table_path(project_dir)):
+        return False
+    with open(table_path(project_dir), "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest() == t["sha256"]
+
+
+def load_saved(project_dir, slide_id: Optional[str] = None) -> Optional[Dict]:
+    """The last Save, or None."""
+    path = saved_path(project_dir)
+    if not os.path.isfile(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        rec = json.load(f)
+    if rec.get("schema_version") != SCHEMA_VERSION or rec.get("kind") != "regions_layout" or "document" not in rec:
+        raise RegionsError(f"{path}: not a Regions file this program reads")
+    _check_slide(path, rec, slide_id)
+    return rec
+
+
+def draft_from_saved(rec: Dict) -> Dict:
+    """The working document of a Save, exactly as it was."""
+    d = copy.deepcopy(rec["document"])
+    d["session"] = None
+    d["piece_counter"] = piece_counter(d)
+    return d
 
 
 def _check_slide(what, rec, slide_id):
@@ -293,8 +352,14 @@ def draft_from_locked(rec: Dict) -> Dict:
     d.update(map_sha256=rec.get("map_sha256"), candidates_version=rec.get("candidates_version"),
              core_diameter_px=rec.get("core_diameter_px"), pieces=copy.deepcopy(rec["pieces"]),
              handoffs=copy.deepcopy(rec.get("handoffs", {})))
+    from .document import piece_counter
+    d["piece_counter"] = int(rec.get("piece_counter") or 0)
+    d["piece_counter"] = piece_counter(d)
     d["positions"] = {k: {f: copy.deepcopy(v.get(f, dflt)) for f, dflt in DRAFT_POSITION_FIELDS}
                       for k, v in rec["positions"].items()}
+    for p in d["pieces"].values():                    # an owner the version does not list: none
+        if p.get("owner") not in rec["cores"]:
+            p["owner"] = None
     for uid, c in rec["cores"].items():
         d["cores"][uid] = {"pieces": list(c["pieces"]), "position_key": c["position_key"], "custom_label": None,
                            "mapping": "matched"}

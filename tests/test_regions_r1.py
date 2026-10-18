@@ -161,7 +161,7 @@ def test_conflicts_rebind_swap_custom_and_review():
     with pytest.raises(D.RegionsError):
         N.swap(d, a, b)                                                # b has no number
     N.set_custom(d, b, "EXTRA")
-    assert any("custom core EXTRA" in p for p in K.lock_problems(d, s))
+    assert any("custom core EXTRA" in p for p in K.open_issues(d, s))
     cy, cx = _place(2, 2)
     frag = D.add_circle_piece(d, cy, cx + 150, 20)
     c22 = next(u for u in d["cores"] if _label(d, u) == "X2-Y02")
@@ -212,66 +212,71 @@ def test_exclusion_checks_and_the_link_to_the_overlapping_core():
     inside = D.add_exclusion(d, G.circle_polygon(cy, cx, 30, SHAPE), ["fold"])
     apart = D.add_exclusion(d, G.circle_polygon(1300, 1000, 30, SHAPE), ["blur"], channels=["CD8"])
     twin = D.add_exclusion(d, G.circle_polygon(cy, cx, 30, SHAPE), ["fold"])
-    probs = K.lock_problems(d, s, channel_names=["DAPI"])
+    probs = K.open_issues(d, s, channel_names=["DAPI"])
     assert any("the same shape and type" in p for p in probs)
     assert any("unknown channels ['CD8']" in p for p in probs)
     D.delete_exclusion(d, twin)
     D.update_exclusion(d, apart, channels="all")
-    assert K.lock_problems(d, s, channel_names=["DAPI"]) == []
+    assert K.open_issues(d, s, channel_names=["DAPI"]) == []
     excl = K.exclusion_regions(d)
     links = K.exclusion_cores(d, excl, K.core_regions(d))
     assert _label(d, links[inside]) == "X1-Y01" and links[apart] is None
 
 
-def test_a_document_without_a_map_sheet_locks_its_exclusions_only(project):
+def test_a_document_without_a_map_sheet_saves_its_exclusions_only(project):
     d = D.new_document(SID, SHAPE)
     D.add_exclusion(d, G.circle_polygon(400, 400, 50, SHAPE), ["blur"])
-    d["coverage_confirmed"] = "2026-10-18T10:00:00"
-    rec = K.lock(project, d, None)
-    assert rec["version"] == 1 and rec["cores"] == {} and len(rec["exclusions"]) == 1
-    assert not os.path.exists(tc.table_path(project, 1))
+    rec = K.save(project, d, None)
+    assert rec["save_count"] == 1 and rec["cores"] == {} and len(rec["exclusions"]) == 1 and rec["complete"]
+    assert not os.path.exists(K.table_path(project))
     e = next(iter(rec["exclusions"].values()))
     assert e["type"] == "blur" and e["region_id"].startswith("reg_") and e["core_uid"] is None
 
 
-# ── lock, versions, provenance ──────────────────────────────────────────
+# ── save, provenance ────────────────────────────────────────────────────
 
-def test_lock_writes_both_files_counts_up_after_old_files_and_registers(project):
+def test_save_overwrites_one_result_any_time_lists_what_is_open_and_registers(project):
     s, d = _finished("rot180")
     D.set_session(d, "ws_full", "/p/rois/ws_full/step0/x.json", "22" * 32)
     D.add_exclusion(d, G.circle_polygon(*_place(2, 2, "rot180"), 30, SHAPE), ["blur"])
-    os.makedirs(K._dir(project), exist_ok=True)
-    open(os.path.join(K._dir(project), "tma_layout_v3.json"), "w").close()   # an F3 version exists
-    with pytest.raises(D.RegionsError):
-        K.lock(project, d, s)                                          # coverage not confirmed
-    d["coverage_confirmed"] = "2026-10-18T10:00:00"
-    rec = K.lock(project, d, s)
-    assert rec["version"] == 4 and K.locked_versions(project) == [4]
-    rows = tc.read_table(tc.table_path(project, 4))
+    a = next(u for u in d["cores"] if _label(d, u) == "X1-Y01")
+    key = d["cores"][a]["position_key"]
+    D.unbind(d, a)                                                     # unfinished: saved all the same
+    rec = K.save(project, d, s)
+    assert rec["save_count"] == 1 and not rec["complete"]
+    assert any("no number" in p for p in rec["open_issues"])
+    assert K.draft_from_saved(K.load_saved(project)) == dict(d, session=None)      # exactly as it was
+    rows = tc.read_table(K.table_path(project))
     from block01.core.project_identity import region_id
     for r in (r for r in rows if r["region_id"]):
         g = json.loads(r["geometry"])
         assert r["region_id"] == region_id(SID, "TMA_core", g["bbox_fullres"], g["polygon_fullres"])
+    assert key not in {r["position_key"] for r in rows if r["region_id"]}
     e = [e for e in prov.load_entries(project) if e["kind"] == "regions_layout"]
     assert len(e) == 1 and e[0]["unresolved_inputs"] == [
         {"role": "step0_handoff", "workspace_id": "ws_full", "path": "/p/rois/ws_full/step0/x.json", "sha256": "22" * 32}]
-    d2 = K.draft_from_locked(K.load_locked(project, 4))
-    assert d2["based_on"] == 4 and len(d2["exclusions"]) == 1 and set(d2["cores"]) == set(rec["cores"])
-    d2["coverage_confirmed"] = "x"
-    assert K.lock(project, d2, s)["version"] == 5
+    N.apply_binding(d, N.plan_binding(d, [a], N.records_by_ids(s, [1])), "single")
+    rec2 = K.save(project, d, s)                                       # the same file, replaced
+    assert rec2["save_count"] == 2 and rec2["complete"], rec2["open_issues"]
+    names = sorted(os.listdir(K._dir(project)))
+    assert "regions.json" in names and "tma_cores.parquet" in names
+    assert not [n for n in names if n.startswith(("regions_v", "tma_cores_v"))]   # no versions
+    assert {r["layout_version"] for r in tc.read_table(K.table_path(project))} == {2}
 
 
-def test_overlapping_cores_and_degenerate_outlines_block_the_lock():
+def test_overlapping_cores_and_degenerate_outlines_are_listed_and_still_saved(project):
     s, d = _finished()
     a = next(u for u in d["cores"] if _label(d, u) == "X1-Y01")
     b = next(u for u in d["cores"] if _label(d, u) == "X1-Y02")
     pb = d["cores"][b]["pieces"][0]
     D.translate_shape(d, pb, -120, 0)
-    assert any("overlap" in p for p in K.lock_problems(d, s))
+    assert any("overlap" in p for p in K.open_issues(d, s))
     D.translate_shape(d, pb, 120, 0)
     pa = d["cores"][a]["pieces"][0]
     D.translate_shape(d, pa, 0, -10000)                                # pushed off the slide: clipped to a line
-    assert any("degenerate" in p for p in K.lock_problems(d, s))
+    assert any("degenerate" in p for p in K.open_issues(d, s))
+    rec = K.save(project, d, s)
+    assert rec["cores"][a]["region_id"] is None and not rec["complete"]  # no region, still saved
 
 
 def test_draft_file_round_trip_and_discard(project):
@@ -410,8 +415,7 @@ def test_a_workspace_saved_again_keeps_both_handoffs(project):
     D.add_exclusion(d, G.circle_polygon(300, 300, 40, SHAPE), ["blur"])
     D.set_session(d, "ws_a", "/a.json", "bb" * 32)                    # Step0 saved again
     D.add_exclusion(d, G.circle_polygon(700, 700, 40, SHAPE), ["fold"])
-    d["coverage_confirmed"] = "x"
-    K.lock(project, d, None)
+    K.save(project, d, None)
     e = [e for e in prov.load_entries(project) if e["kind"] == "regions_layout"][0]
     assert sorted(h["sha256"] for h in e["unresolved_inputs"]) == ["aa" * 32, "bb" * 32]
     from block01.core.project_identity import region_id
@@ -450,18 +454,17 @@ def test_readers_refuse_another_slide_and_unknown_f3_schemas(project):
         json.dump(dict(_f3_draft(), slide_id="slide_ffffffffffffffff"), f)
     with pytest.raises(D.RegionsError):
         M.migrate_draft(project, SHAPE, slide_id=SID)
-    d.update(coverage_confirmed="x")
     D.add_exclusion(d, G.circle_polygon(300, 300, 40, SHAPE), ["blur"])
-    K.lock(project, d, None)
+    K.save(project, d, None)
     with pytest.raises(D.RegionsError):
-        K.load_locked(project, K.locked_versions(project)[-1], slide_id="slide_ffffffffffffffff")
+        K.load_saved(project, slide_id="slide_ffffffffffffffff")
 
 
-def test_a_document_with_a_map_sheet_needs_its_study_to_lock():
+def test_a_document_with_a_map_sheet_needs_its_study_to_save():
     s, d = _finished()
     with pytest.raises(D.RegionsError):
-        K.lock_problems(d, None)
+        K.open_issues(d, None)
     other = _study()
     other["map_sheet"] = dict(other["map_sheet"], sha256="cd" * 32)
     with pytest.raises(D.RegionsError):
-        K.lock_problems(d, other)
+        K.open_issues(d, other)

@@ -1,6 +1,6 @@
 """What the `Cores` tab's buttons and menus do (plan §4; ported from F3's
 `ui/tma/page_actions.py` onto the Regions document): confirm a numbering,
-number one core, the piece / position menus, Prev / Next, the map sheet,
+number one core, the piece / position menus, the map sheet,
 Find cores. Every edit goes through `page.edit` (one undo step). A mixin
 of `CoresPanel`.
 """
@@ -117,22 +117,18 @@ class CoresActions:
         elif kind == "core":
             uid = ident
         if uid is not None:
-            page.selected = d["cores"][uid]["pieces"][0]
+            sid = d["cores"][uid]["pieces"][0]
             polys = [d["pieces"][p]["polygon"] for p in d["cores"][uid]["pieces"]]
         elif kind == "piece":
-            page.selected = ident
+            sid = ident
             polys = [d["pieces"][ident]["polygon"]]
         else:
             return
         self._jump_to(polys)
-        page.refresh_view()
+        page.select(sid)
 
     def _jump_to(self, polys):
-        """Centre the viewer on shapes with a margin (a jump of the shared camera)."""
-        box = G.bbox_of([q for p in polys for q in p], self.page.shape())
-        y0, y1, x0, x1 = box
-        m = max(y1 - y0, x1 - x0)
-        self.page.jump_to([y0 - m, y1 + m, x0 - m, x1 + m])
+        self.page.jump_to_shapes(polys)
 
     def run_toggled(self, key, on):
         self.page.edit(D.set_run, key, on)
@@ -179,8 +175,9 @@ class CoresActions:
         d = h.d
         p = d["pieces"][pid]
         m = QMenu(page)
+        ids = page.selected_pieces() if pid in page.selection else [pid]
         if p["dropped"]:
-            m.addAction("Restore", lambda: page.edit(D.restore_piece, pid))
+            m.addAction("Restore", lambda: page.edit(D.restore_piece, pid))   # an old "left out" piece
         else:
             if p["owner"] is not None:
                 c = d["cores"][p["owner"]]
@@ -190,31 +187,9 @@ class CoresActions:
                     m.addAction("Confirm number", lambda: page.edit(N.confirm_number, p["owner"]))
                 if c["position_key"]:
                     m.addAction("Remove number", lambda: page.edit(D.unbind, p["owner"]))
-            m.addAction("Leave out…", lambda: self._ask_drop(pid))
+        m.addAction("Delete" if len(ids) == 1 else f"Delete {len(ids)} pieces",
+                    lambda: page.edit(D.delete_pieces, ids))
         m.exec_(QCursor.pos())
-
-    def _ask_drop(self, pid):
-        reason, ok = QInputDialog.getText(self.page, "Leave out", "Reason:", text="not tissue")
-        if ok:
-            self.page.edit(D.drop_piece, pid, reason or "left out")
-
-    # ── Prev / Next ──
-    def step_core(self, delta):
-        page = self.page
-        h = page.holder
-        if h is None:
-            return
-        recs = self.labels_by_key()
-        d = h.d
-        order = [u for _pid, u in sorted((recs[c["position_key"]]["position_id"], u) for u, c in d["cores"].items()
-                                         if c["position_key"] in recs)]
-        if not order:
-            return
-        cur = page.selected_core()
-        i = order.index(cur) + delta if cur in order else (0 if delta > 0 else len(order) - 1)
-        uid = order[i % len(order)]
-        page.select(d["cores"][uid]["pieces"][0])
-        self._jump_to([d["pieces"][p]["polygon"] for p in d["cores"][uid]["pieces"]])
 
     # ── study, cores ──
     def choose_map(self):
@@ -274,15 +249,16 @@ class CoresActions:
             return
         n = len(rec["candidates"])
         h = page.holder
-        has_cores = h is not None and bool(h.d["pieces"])
+        has_cores = h is not None and not h.read_only and (bool(h.d["pieces"]) or bool(h.d.get("map_sha256")))
         if has_cores and QMessageBox.question(
                 page, "New candidates", f"Found {n} candidates (v{rec['version']}). Replace the cores of the draft "
-                "with them? The exclusions are kept.") != QMessageBox.Yes:
+                "with them? All numbering and position marks (missing, QC, Run) are cleared; the exclusions are "
+                "kept.") != QMessageBox.Yes:
             page.refresh()
             return
         if h is None or h.read_only:
             page._open_draft(D.new_document(page.ctx["slide_id"], page.shape()))
-        page.selected = None                      # piece ids are reused by the new candidates
+        page.selected = None
         page.ctl.cancel()
         page.edit(D.attach_tma, self.study, rec)
         self.say(f"Candidates v{rec['version']}: {n} found")

@@ -19,20 +19,38 @@ from __future__ import annotations
 from PyQt5 import QtWidgets
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QKeySequence
-from PyQt5.QtWidgets import QButtonGroup, QComboBox, QHBoxLayout, QLabel, QPushButton, QShortcut, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import (QHBoxLayout, QLabel, QMenu, QPushButton, QShortcut, QToolButton,
+                             QVBoxLayout, QWidget)
 
 from ...core.regions import document as D
 from ...core.regions import lock as K
 from ..tma.draft import DraftHolder
 from .cores_panel import CoresPanel
+from .exclusions_panel import ExclusionsPanel
 from .tools import ToolController
+from .shapes import ShapesMixin
 from .versions import VersionsMixin
 
-TOOL_BUTTONS = (("Select", "select", "Select; drag the selected shape to move it, its handles to scale it"),
-                ("Line", "line", "Number by line: drag along the cores; the wheel sets the band width"),
-                ("Clicks", "click", "Number by clicks: click the cores in order; Backspace drops the last, Enter ends"),
-                ("Merge", "merge", "Merge: with a core selected, click pieces to add them to it"),
-                ("Circle", "circle", "Draw a circle: press at the centre, drag out the radius"))
+# the three tool families (docs/regions_tools_redesign.md §1, §9): a click on
+# the button opens its menu; choosing an item lights the family
+FAMILIES = (("Select", (("Click", "select", "Click a shape; Ctrl+click adds / removes; a drag on blank "
+                                            "ground pans. The selected shape has a transform box as Photoshop's "
+                                            "Ctrl+T: drag inside to move, a handle to resize (Shift keeps the "
+                                            "ratio, Alt about the centre), just outside a corner to rotate "
+                                            "(Shift: 15°), Ctrl+corner to distort; Enter applies, Esc cancels"),
+                        ("Rectangle", "select_rect", "Drag a rectangle: the shapes whose centre is inside"),
+                        ("Ellipse", "select_ellipse", "Drag an ellipse: the shapes whose centre is inside"),
+                        ("Polygon", "select_polygon", "Click the corners; Enter / double-click / the first "
+                                                      "point closes it: the shapes whose centre is inside"))),
+            ("Mask", (("Circle", "circle", "Press on the outline, drag to the opposite side: the press stays on the "
+                                          "outline (Shift: a circle on that diameter, Alt: from the centre)"),
+                      ("Polygon", "polygon", "Click the vertices; Enter or a click on the first closes it, "
+                                             "Backspace drops the last"),
+                      ("Vertex", "vertex", "Drag one vertex of the selected shape"))),
+            ("Annotate", (("Line", "line", "Drag a line along the cores (the wheel while dragging sets the band "
+                                           "width); a click on a core of the line adds / removes it"),
+                          ("Clicks", "click", "Click the cores in order; Backspace drops the last, Enter ends"))))
+CORE_TOOLS = ("line", "click")
 VIEWER_PENDING_TEXT = "The whole-slide view opens when Regions is entered."
 
 
@@ -51,11 +69,20 @@ class _NoView:
     def set_circle(self, *a):
         pass
 
+    def set_draft_polygon(self, *a):
+        pass
+
+    def set_marquee(self, *a):
+        pass
+
+    def set_live(self, *a):
+        pass
+
     def screen_px(self):
         return 1.0
 
 
-class RegionsPage(QWidget, VersionsMixin):
+class RegionsPage(QWidget, VersionsMixin, ShapesMixin):
     intensity_requested = pyqtSignal()
 
     def __init__(self, parent=None, metrics=None, title_bar=None):
@@ -63,8 +90,9 @@ class RegionsPage(QWidget, VersionsMixin):
         self.setObjectName("regions_page")
         self.ctx = {}
         self.holder = None
-        self.view_version = None           # None = draft; ("regions", n) / ("f3", n) = read-only
-        self.selected = None
+        self._saved_info = None            # the last Save: {"at", "issues"}
+        self._saved_at_mark = None
+        self.selection = []                # the selected shapes (pieces or exclusions), in click order
         self.view = _NoView()
         self.jump_box = None               # set by the window: callable(bbox) -> bool
         self.ctl = ToolController(self)
@@ -87,14 +115,13 @@ class RegionsPage(QWidget, VersionsMixin):
         row = bar.layout() if bar.layout() is not None else QHBoxLayout(bar)
         self.lbl_study = QLabel("")
         row.addWidget(self.lbl_study)
-        row.addWidget(QLabel("Version:"))
-        self.version_box = QComboBox()
-        self.version_box.setMinimumWidth(170)
-        row.addWidget(self.version_box)
-        self.btn_discard = QPushButton("Discard draft")
-        self.btn_lock = QPushButton("Lock")
-        row.addWidget(self.btn_discard)
-        row.addWidget(self.btn_lock)
+        self.lbl_saved = QLabel("")
+        row.addWidget(self.lbl_saved)
+        self.btn_revert = QPushButton("Revert to saved")
+        self.btn_save = QPushButton("Save")
+        self.btn_save.setToolTip("Save now (replaces the last Save); unfinished work is saved as it is")
+        row.addWidget(self.btn_revert)
+        row.addWidget(self.btn_save)
         self.frame.set_title(bar)
 
         chan = QWidget()
@@ -114,28 +141,51 @@ class RegionsPage(QWidget, VersionsMixin):
         self.frame.left_tabs.addTab(chan, "Channels")
         self.cores = CoresPanel(self)
         self.frame.left_tabs.addTab(self.cores, "Cores")
+        self.exclusions = ExclusionsPanel(self)
+        self.frame.left_tabs.addTab(self.exclusions, "Exclusions")
 
         right = QWidget()
         rl = QVBoxLayout(right)
         tools = QHBoxLayout()
-        self.tool_group = QButtonGroup(self)
-        for i, (text, key, tip) in enumerate(TOOL_BUTTONS):
-            b = QPushButton(text)
+        self.family_buttons = {}
+        for fam, items in FAMILIES:
+            b = QToolButton()
+            b.setText(f"{fam} ▾")
             b.setCheckable(True)
-            b.setToolTip(tip)
-            b.setProperty("tool", key)
-            self.tool_group.addButton(b, i)
+            b.setPopupMode(QToolButton.InstantPopup)       # a click opens the menu (user 2026-10-18)
+            b.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            menu = QMenu(b)
+            for text, key, tip in items:
+                act = menu.addAction(text)
+                act.setToolTip(tip)
+                act.setData(key)
+                act.triggered.connect(lambda _c=False, k=key: self._set_tool(k))
+            menu.setToolTipsVisible(True)
+            b.setMenu(menu)
+            b.setProperty("family", fam)
+            self.family_buttons[fam] = b
             tools.addWidget(b)
-        self.tool_group.button(0).setChecked(True)
-        # user 2026-10-18: the outlines can be hidden to look at the tissue
-        self.btn_outlines = QPushButton("Outlines")
-        self.btn_outlines.setCheckable(True)
-        self.btn_outlines.setChecked(True)
-        self.btn_outlines.setToolTip("Show / hide the core outlines")
-        tools.addWidget(self.btn_outlines)
-        self.btn_undo, self.btn_redo = QPushButton("Undo"), QPushButton("Redo")
-        self.btn_prev, self.btn_next = QPushButton("Prev"), QPushButton("Next")
-        for b in (self.btn_undo, self.btn_redo, self.btn_prev, self.btn_next):
+        self.btn_merge = QToolButton()               # user 2026-10-18: two kinds, the user chooses
+        self.btn_merge.setText("Merge ▾")
+        self.btn_merge.setPopupMode(QToolButton.InstantPopup)
+        mmenu = QMenu(self.btn_merge)
+        mmenu.setToolTipsVisible(True)
+        for text, mode, tip in (("Group (same core)", "group",
+                                 "The pieces belong to one core; each keeps its own outline"),
+                                ("Union (fuse outlines)", "union",
+                                 "The pieces fuse into one outline (e.g. a patch drawn onto a core); "
+                                 "they must touch")):
+            act = mmenu.addAction(text)
+            act.setToolTip(tip)
+            act.triggered.connect(lambda _c=False, m=mode: self.merge_selected(m))
+        self.btn_merge.setMenu(mmenu)
+        tools.addWidget(self.btn_merge)
+        self.btn_undo, self.btn_redo = QToolButton(), QToolButton()
+        self.btn_undo.setText("↶")
+        self.btn_redo.setText("↷")
+        self.btn_undo.setToolTip("Undo (Ctrl+Z): first the half-done action, then the last edit")
+        self.btn_redo.setToolTip("Redo (Ctrl+Shift+Z)")
+        for b in (self.btn_undo, self.btn_redo):
             tools.addWidget(b)
         tools.addStretch()
         notice = QLabel(VIEWER_PENDING_TEXT)
@@ -148,16 +198,11 @@ class RegionsPage(QWidget, VersionsMixin):
         self.frame.right_tabs.addTab(right, "Viewer")
 
         self.btn_intensity.clicked.connect(self.intensity_requested.emit)
-        self.btn_lock.clicked.connect(self._lock_or_branch)
-        self.btn_discard.clicked.connect(self._discard_draft)
-        self.version_box.activated.connect(self._version_chosen)
-        self.tool_group.buttonClicked.connect(lambda b: self._set_tool(b.property("tool")))
-        self.btn_outlines.toggled.connect(self._outlines_toggled)
+        self.btn_save.clicked.connect(self._save)
+        self.btn_revert.clicked.connect(self._revert_to_saved)
         self.btn_undo.clicked.connect(self.undo)
         self.btn_redo.clicked.connect(self.redo)
-        self.btn_prev.clicked.connect(lambda: self.cores.step_core(-1))
-        self.btn_next.clicked.connect(lambda: self.cores.step_core(+1))
-        self.frame.left_tabs.currentChanged.connect(lambda _i: self.ctl.cancel())
+        self.frame.left_tabs.currentChanged.connect(self._tab_changed)
         for keys, fn in ((QKeySequence.Undo, self.undo), (QKeySequence("Ctrl+Shift+Z"), self.redo),
                          (QKeySequence(Qt.Key_Delete), self._delete_selected),
                          (QKeySequence(Qt.Key_Escape), self._escape),
@@ -197,6 +242,7 @@ class RegionsPage(QWidget, VersionsMixin):
         """`ctx`: project_dir, slide_path, slide_id, shape, workspace_id,
         handoff_path, handoff_sha256, full_wsi, channel_names. The same
         context keeps the open document; another one reloads."""
+        self.commit_transform()                   # in the old context, before anything changes
         key = (ctx.get("project_dir"), ctx.get("slide_id"))
         if key == (self.ctx.get("project_dir"), self.ctx.get("slide_id")) and self.holder is not None:
             moved = (ctx.get("workspace_id"), ctx.get("full_wsi")) != (self.ctx.get("workspace_id"),
@@ -208,13 +254,17 @@ class RegionsPage(QWidget, VersionsMixin):
                 # another workspace: the undo history stays with the one it was
                 # made in (an ROI workspace must not undo whole-slide core edits)
                 self.flush_draft()
+                was_saved = self._saved_mark() == self._saved_at_mark
                 self.holder = DraftHolder(self.holder.d, autosave=lambda _d: self._save_timer.start())
+                if was_saved:                         # the same document in a new holder: still saved
+                    self._saved_at_mark = self._saved_mark()
             self._apply_session()
             self.refresh()
             return
         self.flush_draft()
         self.ctx = dict(ctx)
-        self.holder, self.selected, self.view_version = None, None, None
+        self.holder, self.selection = None, []
+        self._saved_info = self._saved_at_mark = None
         self.ctl.cancel()
         self.cores.reset()
         if ctx.get("project_dir") and ctx.get("slide_id"):
@@ -229,17 +279,17 @@ class RegionsPage(QWidget, VersionsMixin):
         except D.RegionsError as exc:
             self.say(str(exc))
             return
-        versions = K.locked_versions(self.ctx["project_dir"])
-        if draft is not None:
-            self._open_draft(draft)
-        elif versions:
-            if not self._open_locked(("regions", versions[-1])):
-                return
-        else:
-            d = D.new_document(self.ctx["slide_id"], self.shape())
-            if self.cores.study is not None and self.cores.candidates is not None:
-                D.attach_tma(d, self.cores.study, self.cores.candidates)
-            self._open_draft(d)
+        if draft is None:
+            self._start_document()
+            return
+        self._open_draft(draft)                   # the working copy: unsaved changes may be in it
+        try:
+            rec = K.load_saved(self.ctx["project_dir"], self.ctx["slide_id"])
+        except (D.RegionsError, ValueError, OSError):
+            rec = None
+        if rec is not None:                       # unsaved unless the working copy is the Save itself
+            same = K.draft_from_saved(rec) == dict(draft, session=None)
+            self._remember_saved(rec, None if same else ("differs",))
 
     def _apply_session(self):
         if self.holder is not None and not self.holder.read_only:
@@ -248,27 +298,9 @@ class RegionsPage(QWidget, VersionsMixin):
 
     def _open_draft(self, d):
         self.flush_draft()
-        self.view_version = None
         self.holder = DraftHolder(d, autosave=lambda _d: self._save_timer.start())
         self._apply_session()
         K.save_draft(self.ctx["project_dir"], d)
-
-    def _open_locked(self, which) -> bool:
-        """Open a locked version read-only; a version this slide / program
-        cannot read is refused with a message (False)."""
-        from ...core.regions import migrate as M
-        kind, n = which
-        try:
-            if kind == "regions":
-                d = K.draft_from_locked(K.load_locked(self.ctx["project_dir"], n, self.ctx["slide_id"]))
-            else:
-                d = M.load_f3_locked(self.ctx["project_dir"], n, self.shape(), self.ctx["slide_id"])
-        except (D.RegionsError, ValueError, KeyError, OSError) as exc:
-            self.say(f"Version {n} cannot be opened: {exc}")
-            return False
-        self.view_version = which
-        self.holder = DraftHolder(d, read_only=True)
-        return True
 
     def flush_draft(self):
         if self._save_timer.isActive():
@@ -302,6 +334,7 @@ class RegionsPage(QWidget, VersionsMixin):
     def edit(self, fn, *args, **kw):
         if self.holder is None:
             return None
+        self.commit_transform()                   # every edit applies a pending transform first
         try:
             out = self.holder.do(fn, *args, **kw)
         except Exception as exc:                            # noqa: BLE001
@@ -311,69 +344,119 @@ class RegionsPage(QWidget, VersionsMixin):
         return out
 
     def undo(self):
+        """Ctrl+Z steps back one level and never turns the tool off (user
+        2026-10-18): a half-done action first, then an unconfirmed
+        numbering preview, then the last edit."""
+        if self.ctl.busy():
+            self.ctl.abort_gesture()
+            return
+        if self.ctl.pressed:
+            self.ctl.abort_gesture()          # the click still under the button: that is the one level
+            return
+        if self.ctl.transform is not None:    # a pending transform: back one drag (the document untouched)
+            if not self.ctl.transform.step_back():
+                self.ctl.transform = None
+            self.refresh_view()
+            return
+        if self.ctl.has_preview():
+            self.ctl.cancel()
+            return
         if self.holder is not None and self.holder.undo():
             self._apply_session()             # the history is the geometry's; the session stays the live one
             self.refresh()
 
     def redo(self):
+        if self.ctl.transform is not None:
+            return
         if self.holder is not None and self.holder.redo():
             self._apply_session()
             self.refresh()
 
-    def select(self, pid):
-        self.selected = pid
-        core = self.selected_core()
-        if core is not None:
-            self.cores.table.select_ident(self.holder.d["cores"][core]["position_key"] or core)
-        elif pid is not None:
-            self.cores.table.select_ident(pid)
-        self.refresh_view()
-
-    def selected_core(self):
-        if self.holder is None or self.selected not in self.holder.d["pieces"]:
-            return None
-        return self.holder.d["pieces"][self.selected]["owner"]
-
-    def jump_to(self, bbox):
-        if self.jump_box is not None:
-            self.jump_box(list(bbox))
-
     def say(self, text):
+        """A message on the open tab (Cores and Exclusions each have a line)."""
         self.cores.say(text)
+        self.exclusions.lbl_info.setText(text)
 
     def piece_menu(self, pid):
-        if self.cores_editable():
-            self.cores.piece_menu(pid)
+        self.shape_menu(pid)
 
     def _set_tool(self, tool):
-        if tool in ("line", "click", "merge") and not self.cores_editable():
+        self.commit_transform()
+        if tool in CORE_TOOLS and not self.cores_editable():
             self.say("TMA numbering is done in a whole-slide workspace.")
+        if tool in CORE_TOOLS and self.exclusions_tab_open():
+            self.say("Numbering is done in the Cores tab.")
+            tool = None
         self.ctl.set_tool(tool)
+        self._show_tool()
+
+    def _show_tool(self):
+        """The lit family shows its tool: "Select: Rectangle ▾"."""
+        for fam, items in FAMILIES:
+            b = self.family_buttons[fam]
+            hit = next((text for text, key, _t in items if key == self.ctl.tool), None)
+            b.setChecked(hit is not None)
+            b.setText(f"{fam}: {hit} ▾" if hit else f"{fam} ▾")
 
     def _key(self, name):
+        if name == "enter" and self.ctl.transform is not None and not self.ctl.busy():
+            self.commit_transform()
+            return
         self.ctl.key(name)
 
-    def _escape(self):
-        if self.ctl.key("escape"):
+    # ── the pending free transform (§10.5) ──
+    def commit_transform(self):
+        """Apply the pending transform: one ordinary edit (one undo step)."""
+        s = self.ctl.transform
+        self.ctl.transform = None
+        if s is not None and self.ctl._drag is not None and self.ctl._drag[0] == "xf":
+            self.ctl._drag = None                 # applied mid-drag: the rest of that drag does nothing
+            self.ctl._swallow = True
+        if s is None:
             return
-        if self.ctl.tool != "select":
-            self.tool_group.button(0).setChecked(True)
-            self.ctl.set_tool("select")
-        else:
-            self.select(None)
+        if not s.changed or self.holder is None or self.holder.read_only:
+            self.refresh_view()                   # back where it was: the shape returns to the cached layer
+            return
+        if s.drag is not None:
+            s.end()
+        if s.sid not in self.holder.d["pieces"] and s.sid not in self.holder.d["exclusions"]:
+            return
+        shape = self.shape()
+        poly = [[min(max(int(round(x)), 0), shape[1] - 1), min(max(int(round(y)), 0), shape[0] - 1)]
+                for x, y in s.preview()]
+        try:
+            self.holder.do(D.set_polygon, s.sid, poly)
+        except Exception as exc:                            # noqa: BLE001
+            self.say(f"The transform was not applied: {exc}")
+        self.refresh()
 
-    def _delete_selected(self):
-        if self.selected is not None and self.holder is not None and not self.holder.read_only \
-                and self.cores_editable():
-            self.edit(D.drop_piece, self.selected, "left out")
+    def cancel_transform(self):
+        if self.ctl.transform is not None:
+            self.ctl.transform = None
+            self.refresh_view()
+
+    def _escape(self):
+        """Esc: the half-done action goes and the tool is turned off (the
+        view pans again). A pending transform is dropped first, the tool kept."""
+        had_transform = self.ctl.transform is not None
+        if self.ctl.busy() or self.ctl.pressed:
+            self.ctl.abort_gesture()
+        if had_transform:
+            self.cancel_transform()
+            return
+        self.ctl.set_tool(None)
+        self._show_tool()
 
     # ── refresh ──
     def refresh(self):
         self.ctl.prune()
-        if self.holder is not None and self.selected is not None and self.selected not in self.holder.d["pieces"]:
-            self.selected = None
+        if self.holder is not None:
+            self.selection = [s for s in self.selection if s in self.holder.d["pieces"] or s in self.holder.d["exclusions"]]
+        else:
+            self.selection = []
         self._refresh_title()
         self.cores.refresh()
+        self.exclusions.refresh()
         self.refresh_view()
         self.numbering_changed()
         self._sync_enabled()
@@ -382,37 +465,72 @@ class RegionsPage(QWidget, VersionsMixin):
         self.cores.numbering_changed()
         self.refresh_view()
 
-    def outlines_visible(self) -> bool:
-        return self.btn_outlines.isChecked()
-
-    def _outlines_toggled(self, on):
-        if not on:                         # nothing invisible stays selected or editable
-            self.selected = None
-            self.ctl.cancel()
-        self.refresh_view()
-
     def refresh_view(self):
-        if self.btn_outlines.isChecked():
-            self.cores.draw(self.view)
-        else:
-            self.view.set_items([])
+        items, _sel, _h, order = self.cores.draw_parts()
+        items = items + self.exclusions.draw_items()
+        sel = set(self.selection) | self.ctl.marquee_hits()     # the marquee's catch shows live
+        xf = self.ctl.transform
+        live = None
+        if xf is not None:                                       # the pending transform: drawn live, dashed
+            live = next((dict(it, polygon=xf.preview(), dash=True) for it in items if it["id"] == xf.sid), None)
+            items = [it for it in items if it["id"] != xf.sid]
+        single = self.selected
+        poly = None
+        if self.holder is not None and single is not None and not self.holder.read_only:
+            shapes = self.holder.d["exclusions" if self.exclusions_tab_open() else "pieces"]
+            poly = shapes[single]["polygon"] if single in shapes else None
+        box = self.ctl.box() if self.ctl.tool == "select" and self.ctl.can_edit() else None
+        self.view.set_items(items, selected=sel, handles_for=None,
+                            order_labels=order, vertices_for=poly if self.ctl.tool == "vertex" else None)
+        self.view.set_live(live, None if box is None else [list(q) for q in box])
+        self.refresh_preview()
         self.view.set_line(self.ctl.line_band())
         self.view.set_sequence(self.ctl.sequence_points() if self.ctl.tool == "click" else [])
+
+    def refresh_preview(self):
+        """Only what follows the mouse (the polygon being clicked, a marquee,
+        the circle): cheap enough for every mouse move."""
+        self.view.set_draft_polygon(self.ctl.draft_points())
+        self.view.set_marquee(self.ctl.marquee_preview())
         self.view.set_circle(self.ctl.preview_circle())
+        self._sync_undo()
+
+    def refresh_live(self):
+        """A transform drag: only the moving shape and its box."""
+        xf = self.ctl.transform
+        if xf is None:
+            return
+        item = getattr(self.view, "live", None)
+        item = dict(item, polygon=xf.preview()) if item else None
+        self.view.set_live(item, [list(q) for q in xf.quad])
+        self._sync_undo()
+
+    def _sync_undo(self):
+        h = self.holder                                    # ↶ also steps back a half-done gesture
+        editable = h is not None and not h.read_only
+        self.btn_undo.setEnabled(editable and (h.can_undo or self.ctl.busy() or self.ctl.has_preview()
+                                               or self.ctl.transform is not None))
+        self.btn_redo.setEnabled(editable and h.can_redo and self.ctl.transform is None)
 
     def _sync_enabled(self):
         has = self.holder is not None
         editable = has and not self.holder.read_only
-        for b in self.tool_group.buttons():
-            b.setEnabled(editable or b.property("tool") == "select")
-        self.btn_undo.setEnabled(editable and self.holder.can_undo)
-        self.btn_redo.setEnabled(editable and self.holder.can_redo)
-        self.btn_lock.setEnabled(has)
-        self.btn_lock.setText("New draft from this version" if has and self.holder.read_only else "Lock")
-        self.btn_discard.setEnabled(editable)
+        self.family_buttons["Mask"].setEnabled(editable)
+        self.family_buttons["Annotate"].setEnabled(editable and self.cores_editable() and not self.exclusions_tab_open())
+        why = self.merge_blocker()
+        self.btn_merge.setEnabled(why is None)
+        self.btn_merge.setToolTip("Merge the selected pieces into one core" + (f" ({why})" if why else ""))
+        self._sync_undo()
+        self.btn_save.setEnabled(editable and bool(self.ctx.get("project_dir")))
+        self.btn_revert.setEnabled(editable and self._saved_info is not None)
         self.cores.sync_enabled(editable)
+
+    def hideEvent(self, event):  # noqa: N802
+        self.commit_transform()                   # leaving Regions applies a pending transform
+        super().hideEvent(event)
 
     def shutdown(self):
         from ..tma import workers
+        self.commit_transform()
         self.flush_draft()
         return workers.shutdown()

@@ -51,7 +51,7 @@ def new_document(slide_id: str, slide_shape: Tuple[int, int], based_on: Optional
     return {"schema_version": SCHEMA_VERSION, "slide_id": slide_id, "slide_shape": [int(v) for v in slide_shape],
             "based_on": based_on, "map_sha256": None, "candidates_version": None, "core_diameter_px": None,
             "pieces": {}, "cores": {}, "positions": {}, "exclusions": {}, "handoffs": {},
-            "operations": [], "coverage_confirmed": None, "session": None}
+            "operations": [], "coverage_confirmed": None, "session": None, "piece_counter": 0}
 
 
 def attach_tma(d: Dict, study: Dict, candidates: Dict) -> None:
@@ -66,6 +66,7 @@ def attach_tma(d: Dict, study: Dict, candidates: Dict) -> None:
     shape = tuple(d["slide_shape"])
     dia = float(candidates["core_diameter_px"])
     core_area = math.pi * (dia / 2) ** 2
+    d["piece_counter"] = piece_counter(d)          # the old pieces' highest id, before they go
     d.update(map_sha256=sheet["sha256"], candidates_version=int(candidates["version"]), core_diameter_px=dia,
              pieces={}, cores={}, positions={})
     for p in sheet["positions"]:
@@ -81,6 +82,7 @@ def attach_tma(d: Dict, study: Dict, candidates: Dict) -> None:
                             "tissue": c.get("tissue_fraction"), "owner": None, "dropped": None}
         if c["area"] >= CORE_PIECE_FRAC * core_area:
             new_core(d, [pid])
+    d["piece_counter"] = max(piece_counter(d), *[int(c["candidate_id"]) for c in candidates["candidates"]] or [0])
     log(d, {"kind": "attach_tma", "candidates_version": d["candidates_version"]})
 
 
@@ -108,8 +110,17 @@ def shape_of(d: Dict) -> Tuple[int, int]:
 
 # ── pieces and cores ────────────────────────────────────────────────────
 
+def piece_counter(d) -> int:
+    """The highest piece number used in this version line (plan §9.1): kept
+    in the document; an old document without it starts at its highest id."""
+    have = max([int(k[1:]) for k in d["pieces"] if k[1:].isdigit()] or [0])
+    return max(int(d.get("piece_counter") or 0), have)
+
+
 def _next_piece_id(d):
-    return f"p{1 + max([int(k[1:]) for k in d['pieces'] if k[1:].isdigit()] or [0])}"
+    n = piece_counter(d) + 1
+    d["piece_counter"] = n                     # never reused, even after a deletion
+    return f"p{n}"
 
 
 def add_piece(d: Dict, polygon) -> str:
@@ -129,6 +140,15 @@ def add_circle_piece(d: Dict, cy: float, cx: float, r: float) -> str:
     if not (r > 0 and all(math.isfinite(v) for v in (cy, cx, r))):
         raise RegionsError("a circle needs a finite centre and a positive radius")
     return add_piece(d, G.circle_polygon(cy, cx, r, shape_of(d)))
+
+
+def add_drawn_core(d: Dict, polygon) -> str:
+    """A shape drawn in the Cores tab (user 2026-10-18): a new piece that is
+    at once its own core -- not numbered, shown like a Find-cores core.
+    Returns the piece id."""
+    pid = add_piece(d, polygon)
+    new_core(d, [pid])
+    return pid
 
 
 def new_core(d: Dict, piece_ids: Sequence[str]) -> str:
@@ -204,10 +224,17 @@ def unmerge(d: Dict, piece_id: str) -> None:
     log(d, {"kind": "unmerge", "core": uid, "piece": piece_id})
 
 
+def release_position(d, key):
+    """A position left without its core (plan §9.1): what was seen there is
+    unconfirmed again, its QC judgement stays, its Run tick goes."""
+    pos = d["positions"][key]
+    pos["observed"], pos["missing_reason"], pos["run"] = None, "", False
+
+
 def _delete_core(d, uid):
     key = d["cores"][uid]["position_key"]
     if key:
-        d["positions"][key]["observed"] = None
+        release_position(d, key)
     del d["cores"][uid]
 
 
@@ -374,3 +401,144 @@ def exclusion_type(reasons: Sequence[str]) -> str:
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+# ── batch delete and merge (docs/regions_tools_redesign.md §9.1) ───────
+
+def delete_pieces(d: Dict, piece_ids: Sequence[str]) -> None:
+    """Delete pieces (they vanish -- user 2026-10-18): out of the document
+    and out of their core; a core keeping other pieces goes to review, one
+    losing its last piece goes and releases its position. The F2 candidate
+    file is untouched."""
+    ids = [p for p in dict.fromkeys(piece_ids) if p in d["pieces"]]
+    d["piece_counter"] = piece_counter(d)          # an old document: fix its highest id before it goes
+    touched = set()
+    for pid in ids:
+        uid = d["pieces"][pid]["owner"]
+        if uid is not None and uid in d["cores"]:
+            d["cores"][uid]["pieces"].remove(pid)
+            touched.add(uid)
+        del d["pieces"][pid]
+    for uid in touched:
+        if not d["cores"][uid]["pieces"]:
+            _delete_core(d, uid)
+        else:
+            _to_review(d, uid)
+    log(d, {"kind": "delete_pieces", "pieces": ids})
+
+
+def delete_exclusions(d: Dict, uids: Sequence[str]) -> None:
+    ids = [u for u in dict.fromkeys(uids) if u in d["exclusions"]]
+    for u in ids:
+        del d["exclusions"][u]
+    log(d, {"kind": "delete_exclusions", "exclusions": ids})
+
+
+def _position_number(d, key, study):
+    from ..tma.cores import position_key
+    sheet = study["map_sheet"] if study else None
+    if sheet:
+        for p in sheet["positions"]:
+            if position_key(d["slide_id"], sheet["sha256"], p["position_id"]) == key:
+                return int(p["position_id"])
+    return 10 ** 9
+
+
+def merge_plan(d: Dict, piece_ids: Sequence[str], study: Optional[Dict]) -> Dict:
+    """What merging `piece_ids` would do: the receiving core (None = a new
+    one), the cores whose numbers are released, the custom labels cleared.
+    Rules (plan §9.1): by owning core, not by piece count; several numbered
+    cores -> the smallest position number wins (custom labels give way to
+    position numbers; among custom labels only, the alphabetically first)."""
+    ids = [p for p in dict.fromkeys(piece_ids) if p in d["pieces"] and not d["pieces"][p]["dropped"]]
+    if len(ids) < 2:
+        raise RegionsError("select at least two pieces to merge")
+    owners = [d["pieces"][p]["owner"] for p in ids]
+    cores = [u for u in dict.fromkeys(o for o in owners if o)]
+    if len(cores) == 1 and all(owners):
+        return {"pieces": ids, "receiver": cores[0], "released": [], "cleared_labels": [], "noop": True}
+    pos = [u for u in cores if d["cores"][u]["position_key"]]
+    cus = [u for u in cores if not d["cores"][u]["position_key"] and d["cores"][u]["custom_label"]]
+    if pos:
+        receiver = min(pos, key=lambda u: _position_number(d, d["cores"][u]["position_key"], study))
+    elif cus:
+        receiver = min(cus, key=lambda u: d["cores"][u]["custom_label"])
+    elif cores:
+        receiver = max(cores, key=lambda u: (owners.count(u), -owners.index(u)))
+    else:
+        receiver = None
+    released = [u for u in pos if u != receiver]
+    cleared = [u for u in cus if u != receiver]
+    return {"pieces": ids, "receiver": receiver, "released": released, "cleared_labels": cleared, "noop": False}
+
+
+def merge_pieces(d: Dict, piece_ids: Sequence[str], study: Optional[Dict] = None) -> Optional[str]:
+    """Merge the pieces into one core as `merge_plan` says (one undo step
+    when called through the draft holder). Returns the receiving core."""
+    plan = merge_plan(d, piece_ids, study)
+    if plan["noop"]:
+        return plan["receiver"]
+    for u in plan["released"]:                    # their numbers are released
+        key = d["cores"][u]["position_key"]
+        d["cores"][u]["position_key"], d["cores"][u]["mapping"] = None, "unmatched"
+        release_position(d, key)
+    for u in plan["cleared_labels"]:
+        d["cores"][u]["custom_label"] = None
+    receiver = plan["receiver"]
+    if receiver is None:
+        receiver = new_core(d, [])
+    moved = False
+    for pid in plan["pieces"]:
+        old = d["pieces"][pid]["owner"]
+        if old == receiver:
+            continue
+        if old is not None:
+            d["cores"][old]["pieces"].remove(pid)
+            if not d["cores"][old]["pieces"]:
+                del d["cores"][old]               # its number (if any) was released above
+        d["pieces"][pid]["owner"] = receiver
+        d["cores"][receiver]["pieces"].append(pid)
+        moved = True
+    if moved:
+        _to_review(d, receiver)
+    log(d, {"kind": "merge_pieces", "core": receiver, "pieces": plan["pieces"],
+            "released": plan["released"], "cleared_labels": plan["cleared_labels"]})
+    return receiver
+
+
+def union_pieces(d: Dict, piece_ids: Sequence[str], study: Optional[Dict] = None) -> str:
+    """Merge ▸ Union (user 2026-10-18, plan §10.5): the selected pieces fuse
+    into ONE new piece (their outer outline, holes filled) owned by the core
+    `merge_plan` picks -- that core keeps its id, number, QC and Run; the
+    other numbered cores are released as in Group; unselected pieces stay.
+    Pieces in one core fuse too. Returns the new piece id."""
+    ids = [p for p in dict.fromkeys(piece_ids) if p in d["pieces"] and not d["pieces"][p]["dropped"]]
+    if len(ids) < 2:
+        raise RegionsError("select at least two pieces to fuse")
+    outline, why = G.union_outline([d["pieces"][p]["polygon"] for p in ids], shape_of(d))
+    if outline is None:
+        raise RegionsError("these pieces are too far apart to fuse" if why == "too_far" else
+                           "these pieces do not touch, so they cannot be fused; use Group to put them in one core")
+    plan = merge_plan(d, ids, study)
+    for u in plan["released"]:
+        key = d["cores"][u]["position_key"]
+        d["cores"][u]["position_key"], d["cores"][u]["mapping"] = None, "unmatched"
+        release_position(d, key)
+    for u in plan["cleared_labels"]:
+        d["cores"][u]["custom_label"] = None
+    receiver = plan["receiver"] or new_core(d, [])
+    pid = _next_piece_id(d)                       # first: the receiver is never left empty
+    d["pieces"][pid] = {"polygon": outline, "source": "union", "candidate_id": None, "tissue": None,
+                        "owner": receiver, "dropped": None}
+    d["cores"][receiver]["pieces"].append(pid)
+    for old in ids:
+        owner = d["pieces"].pop(old)["owner"]
+        if owner is not None:
+            d["cores"][owner]["pieces"].remove(old)
+            if owner != receiver and not d["cores"][owner]["pieces"]:
+                del d["cores"][owner]             # its number (if any) was released above
+    if d["cores"][receiver]["position_key"]:
+        _to_review(d, receiver)
+    log(d, {"kind": "union_pieces", "core": receiver, "piece": pid, "from": ids,
+            "released": plan["released"], "cleared_labels": plan["cleared_labels"]})
+    return pid

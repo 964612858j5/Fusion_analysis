@@ -509,18 +509,48 @@ row, and the duplicate Tissue Preview button in the step bar.
   internal step id is 5. A framed page: title bar `Step 0.5 — Regions` with
   `Tissue Navigator` (as Step1's / Step3's; a click lands the Regions viewer
   whatever tool is in use; ROIs and patches read-only there) and the slide /
-  study, `Version:` (draft, locked versions, F3's read-only
-  versions), `Discard draft` and `Lock` (`New draft from this version` on a
-  locked one); left tabs `Channels` (the one channel dock with Step1's
+  study, the saved line (`Saved hh:mm · n open · unsaved changes`; its
+  tooltip lists what is still open), `Revert to saved` and `Save` (user
+  2026-10-18: Save at any time, never refused for unfinished work, one
+  result per slide replaced by each Save; no versions, no lock); left tabs `Channels` (the one channel dock with Step1's
   rows -- the channel state is Step1's / Step3's, so a tick is the fusion
   command -- and `Intensity…`) and `Cores` (`Choose map sheet…`, `Find
-  cores`, the numbering panel, the core table); right tab `Viewer` whose
-  tool row is `Select`, `Line`, `Clicks`, `Merge`, `Circle`, `Outlines`
-  (a toggle: show / hide the core outlines, user 2026-10-18), `Undo`,
-  `Redo`, `Prev`, `Next`, over a third resident Step1 viewer with a
+  cores`, the numbering panel, the core table) and `Exclusions` (R3: the
+  blur / fold exclusion list -- number, reasons, channels, area, core --,
+  the reason boxes `Blur` / `Fold` / `Other`, `All channels` + `Channels…`
+  (a channel checklist dialog) and `Note`); right tab `Viewer` whose tool
+  row is three drop-down buttons, a `Merge` button and two icon buttons
+  (user 2026-10-18, docs/regions_tools_redesign.md §9): `Select ▾`
+  (`Click` -- Ctrl+click adds / removes --, `Rectangle`, `Ellipse`,
+  `Polygon`: the shapes whose centre is inside; with `Click` the one
+  selected shape has Photoshop's free-transform box -- drag inside to move,
+  a handle to resize (Shift keeps the ratio, Alt about the centre), just
+  outside a corner to rotate (Shift: 15°), Ctrl+corner to distort; a
+  dashed preview until Enter, Esc cancels it), `Mask ▾` (`Circle`: an
+  ellipse through the press and the pointer, diagonally opposite (the press
+  stays on the outline), Shift a circle on that diameter, Alt from the
+  centre; `Polygon`: a vertex at each press; `Vertex`; a shape
+  drawn in the Cores tab is at once its own unnumbered core, yellow),
+  `Annotate ▾` (`Line`, `Clicks`; Cores tab only);
+  a click on the button opens its menu, the lit one reads e.g.
+  `Select: Rectangle ▾`, none is lit on opening and there is no "none"
+  item (Esc turns the tool off); `Merge ▾` (two or more selected pieces:
+  `Group (same core)` or `Union (fuse outlines)` -- they must touch; the
+  smallest number stays, a dialog names the numbers released); `↶` / `↷`
+  (undo / redo). No outline toggle, no Prev / Next. The shape tools work
+  on the open tab's shapes (pieces, or exclusions drawn hatched); Line and
+  Circle are drags, so while one is lit a left drag never pans; the wheel
+  zooms unless a drag is under way (during a Line drag it sets the band
+  width); with no tool or `Select: Click` a drag on blank ground pans, and
+  Space held pans with any tool. Ctrl+Z steps back one level (the
+  half-done gesture, then an unconfirmed numbering, then the last edit)
+  and keeps the tool; Delete removes the selected shapes. Over a third
+  resident Step1 viewer with a
   transparent overlay (outlines, labels, the numbering line). Right-click
-  menus on a shape and on a table row as in F3. The lock asks for two
-  confirmations in one dialog. No other window.
+  menus on a shape (an exclusion: `Delete exclusion`; a piece: `Delete`,
+  no `Leave out…`) and on a table row as in F3. `Revert to saved` and
+  Merge ask for confirmation; the channel checklist is the only other
+  dialog. No other window.
 
 ## 5. How this rule is enforced
 

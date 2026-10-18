@@ -4,7 +4,8 @@ TMA designer workbook (`TMA138.x.xlsx`) and check it strictly.
 The workbook has four sheets:
 
 * ``Information`` -- key / value rows: block name, layout name, layout size
-  ``"<rows>x<cols>"``, core diameter, number of donors and of cores.
+  ``"<rows>x<cols>"``, core diameter, number of donors and of cores;
+  the project name when present (kept, never checked).
 * ``<block id>`` (e.g. ``RB_1``) -- the layout grid: a header row ``X1..Xn``,
   a first column ``Y1..Ym``, and in each OCCUPIED cell its position id
   ``(X - 1) * rows + Y`` (every column numbered top to bottom).
@@ -88,6 +89,7 @@ class MapSheet:
     declared_donors: Optional[int]
     positions: Dict[int, Position] = field(default_factory=dict)
     has_spot_slide: bool = False
+    project_name: str = ""      # Information "Project name" (e.g. TMA138), "" when absent
 
     def occupied(self) -> List[Position]:
         return [p for _, p in sorted(self.positions.items()) if p.occupied]
@@ -99,6 +101,7 @@ class MapSheet:
             "rows": self.rows, "cols": self.cols, "layout_name": self.layout_name,
             "diameter_mm": self.diameter_mm, "declared_cores": self.declared_cores,
             "declared_donors": self.declared_donors, "has_spot_slide": self.has_spot_slide,
+            "project_name": self.project_name,
             "positions": [{"position_id": p.position_id, "x": p.x, "y": p.y,
                            "donor_block_id": p.donor_block_id, "sample_id": p.sample_id,
                            "core_height": p.core_height, "annotation": p.annotation,
@@ -336,4 +339,5 @@ def _parse(path, wb, problems) -> MapSheet:
                     block_id=block, block_name=info.get("tma block name", ""), rows=rows, cols=cols,
                     layout_name=info.get("layout name", ""), diameter_mm=diameter_mm,
                     declared_cores=declared_cores, declared_donors=declared_donors,
-                    positions=positions, has_spot_slide=has_spot)
+                    positions=positions, has_spot_slide=has_spot,
+                    project_name=info.get("project name", ""))

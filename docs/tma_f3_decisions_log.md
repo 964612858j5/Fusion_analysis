@@ -397,3 +397,18 @@
   - 没做完的事项写进文件，并显示在 Save 旁边，不阻止保存；
   - 标题栏是保存状态、`Revert to saved`、`Save`；
   - 草稿照常自动保存，重开时恢复。
+
+### F4 设计与第一段（2026-10-18）
+- 用户提出 F4 思路，codex 和 Mythos 各审两轮后，用户裁定：
+  - 打孔 TMA 编号 = Annotation Name；
+  - 不额外置 0，分割后只保留核心内、排除区外的细胞；
+  - 碰到排除区的细胞直接不输出；
+  - "待复核"的核心不参与，质控未复核的核心可以参与；
+  - 部分通道排除这次一起做。
+- 定稿见 `docs/f4_regions_downstream_plan.md` 第二版、2.1 版修订。
+- 第一段（快照与规则，不接界面）：
+  - `core/regions/analysis.py`：选核心、冻结快照、科学内容哈希；
+  - `core/regions/raster.py`：每个形状在自己外框上栅格化一次；
+  - `core/regions/objects.py`：细胞归属、排除、测量 NaN 代码；
+  - `core/tma/map_sheet.py`：读 Project name；
+  - 测试 `tests/test_f4_analysis.py`。

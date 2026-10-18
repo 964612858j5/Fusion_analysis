@@ -214,8 +214,10 @@ def test_a_full_step_walk_opens_no_window_of_its_own(app):
         for step in (0, 1, 2, 3, 1, 0):
             w._set_step_active(step)
             QtWidgets.QApplication.processEvents()
-        # TMA F3: the TMA page and back
-        w._go_to_tma()
+        # Regions (Step 0.5): the page and back (entered the way
+        # `_go_to_regions` enters it once the handoff is ready)
+        w._stack.setCurrentWidget(w._regions)
+        w._set_step_active(w.REGIONS_STEP)
         QtWidgets.QApplication.processEvents()
         w._go_to_step0()
         QtWidgets.QApplication.processEvents()
@@ -294,41 +296,61 @@ def test_step1_keeps_its_ruled_layout_and_entries(app):
         _close(w)
 
 
-def test_the_tma_page_keeps_its_ruled_entry_and_tabs(app):
-    """TMA F3 (docs/tma_f3_page_application.md §0, §2.1; UI_SURFACE_RULES §4):
-    the entry is a step-bar LABEL after the steps (the bar still holds no
-    button), the page sits after Step1.5 so the steps keep indices 0-4, and
-    its tab row is blank (plan §2.1)."""
+def _enter_regions(w):
+    w._stack.setCurrentWidget(w._regions)
+    w._set_step_active(w.REGIONS_STEP)
+    QtWidgets.QApplication.processEvents()
+
+
+def test_the_regions_page_keeps_its_ruled_entry_and_tabs(app):
+    """Regions (docs/region_qc_module_plan.md §4; UI_SURFACE_RULES §4): the
+    entry is a step-bar LABEL between Step 0 and Step 1 (the bar still holds
+    no button), the page sits after Step1.5 so the steps keep indices 0-4,
+    its tabs are `Channels` | `Cores` and `Viewer`, and the old TMA entry is
+    gone."""
     w = _window(app)
     try:
-        assert w._tma_lbl.text() == "○ TMA"
-        assert isinstance(w._tma_lbl, QtWidgets.QLabel)
-        assert w._stack.indexOf(w._tma) == w._stack.count() - 1 == 6
+        assert w._regions_lbl.text() == "○ Step 0.5: Regions"
+        assert isinstance(w._regions_lbl, QtWidgets.QLabel)
+        assert not hasattr(w, "_tma_lbl") and not hasattr(w, "_tma")
+        bar = w.findChild(QtWidgets.QHBoxLayout, "block01_step_bar")
+        labels = [bar.itemAt(i).widget() for i in range(bar.count()) if bar.itemAt(i).widget() is not None]
+        order = [labels.index(x) for x in (w._step0_lbl, w._regions_lbl, w._step1_lbl)]
+        assert order == sorted(order)
+        assert w._stack.indexOf(w._regions) == w._stack.count() - 1 == 6
         assert [w._stack.indexOf(p) for p in (w._step0, w._step2, w._step3, w._step4)] == [0, 2, 3, 4]
-        f = w._tma.frame
-        assert [f.left_tabs.tabText(i) for i in range(f.left_tabs.count())] == [""]
-        assert [f.right_tabs.tabText(i) for i in range(f.right_tabs.count())] == [""]
-        w._go_to_tma()
-        assert w._stack.currentWidget() is w._tma
-        assert "bold" in w._tma_lbl.styleSheet() and "bold" not in w._step0_lbl.styleSheet()
+        f = w._regions.frame
+        assert [f.left_tabs.tabText(i) for i in range(f.left_tabs.count())] == ["Channels", "Cores"]
+        assert [f.right_tabs.tabText(i) for i in range(f.right_tabs.count())] == ["Viewer"]
+        _enter_regions(w)
+        assert w._current_step == w.REGIONS_STEP and w._stack.currentWidget() is w._regions
+        assert "bold" in w._regions_lbl.styleSheet() and "bold" not in w._step0_lbl.styleSheet()
         w._go_to_step0()
-        assert "bold" not in w._tma_lbl.styleSheet()
+        assert "bold" not in w._regions_lbl.styleSheet()
     finally:
         _close(w)
 
 
-def test_tma_entry_is_a_no_viewer_transition_and_a_running_tma_job_refuses_close(app, monkeypatch):
-    """TMA F3 review (codex_tma_f3_p34_1.out B1, B3): entering the TMA page
-    is Step4's transition (no shared viewer on screen), and a TMA job that is
+def test_regions_shares_step1s_channels_and_needs_a_saved_step0(app, monkeypatch):
+    """User ruling 2026-10-18: Regions' channel state IS Step1's (scope,
+    rows, Navigator picture); it is entered only after Step0's Save; a job
     still running refuses the close before anything else is stopped."""
     w = _window(app)
     try:
-        w._go_to_tma()
-        assert w._current_step == 4 and w._stack.currentWidget() is w._tma
-        assert "bold" in w._tma_lbl.styleSheet() and "bold" not in w._step4_lbl.styleSheet()
+        said = []
+        monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: said.append(a[2])))
+        w._step1_context_ready = False
+        w.step0_output = {}
+        w._go_to_regions()
+        assert said and w._stack.currentWidget() is not w._regions        # refused, said on screen
+        assert w._DISPLAY_SCOPES[w.REGIONS_STEP] == w._DISPLAY_SCOPES[1] == "step1"
+        assert w._STEP_CONTEXTS[w.REGIONS_STEP] is w._STEP_CONTEXTS[1]
+        _enter_regions(w)
+        dock = w._channel_dock
+        assert dock.parentWidget() is w._regions.channels_host().parentWidget()
         stopped = []
         monkeypatch.setattr(w._step0, "stop_background_jobs", lambda: stopped.append(1), raising=False)
-        monkeypatch.setattr(w._tma, "shutdown", lambda: False)
+        monkeypatch.setattr(w._regions, "shutdown", lambda: False)
         from PyQt5 import QtGui
         ev = QtGui.QCloseEvent()
         w.closeEvent(ev)

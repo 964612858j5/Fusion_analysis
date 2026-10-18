@@ -6,7 +6,7 @@ number box.
 The target is either a start and an end record with an order (along a
 column / row, or the reverse), or a custom list made by Ctrl+clicking
 table rows. The panel only holds and shows; the page computes the plan
-(`core.tma.layout.plan_binding`) and hands it to `show_plan`.
+(`core.regions.numbering.plan_binding`) and hands it to `show_plan`.
 """
 
 from __future__ import annotations

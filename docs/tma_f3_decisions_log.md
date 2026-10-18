@@ -182,3 +182,83 @@
 
   建议项也做了：重新打开时清掉上次的工作区信息；有对应表却没给研究信息时拒绝锁定；补了"轮廓完整包住组织"的测试。
 - 用户 2026-10-18：外扩余量 3% 太紧，改为 6%（`core/tma/dearray.py` 的 `margin_frac`）。Slice1 重跑后仍是 153 个候选；新图：`/sda1/Fusion/tma_accept_slice1/r1_check/*_6pct.png`。
+
+## R2 模块外壳 + 编号迁移（2026-10-18，待审）
+- 新建 `ui/regions/`，共 9 个文件。除方案列出的 page、mount、overlay、tools、cores_panel 外，为了每个文件不超过约 400 行，另拆出 `cores_actions.py`（Cores 标签页的操作）和 `versions.py`（版本与锁定）。
+- 删掉 F3 的独立页面：`ui/tma/tma_page.py`、`page_view.py`、`page_actions.py`、`map_tools.py`、`core_map.py`。旧的 `core/tma/layout*.py` 和 `tests/test_tma_f3_layout.py` 也删掉，内容已由 R1 的 `core/regions/` 及其测试取代。
+- 主窗口：
+  - 步骤条在 Step 0 和 Step 1 之间加"○ Step 0.5: Regions"；
+  - 新增步骤号 5，页面放在页面栈第 6 位；
+  - 进入检查抽成共用函数，Step1 原有行为不变；
+  - Regions 和 Step1 / Step3 共用显示范围、导航小图和通道面板；
+  - 视野联动；
+  - 第三个看图的打开、暂停、恢复、关闭和同步；
+  - 叠加 / 融合模式跟随 Step1；
+  - 关闭程序时先检查 Regions。
+- 测试：
+  - `tests/test_tma_f3_page.py` 改写成 Regions 的页面测试（8 项，用一个 pyqtgraph 视图代替 Step1 看图）；
+  - 界面约束和页面框架测试改为针对 Regions（39 项通过）；
+  - 通道面板测试改为 5 个挂载位置，其中 `test_the_step0_panel_looks_like_the_baseline_panel` 这一项失败是老问题，上次全量回归时就有。
+- codex 第一轮（`codex_regions_r2_1.out`）提出 7 项必须修，都已改好：
+  1. 叠加层原来没有显示出来；现在会显示，并且有新的画面层（例如 Rust 换成 Python GPU）出现时，自动回到最上层；
+  2. ROI 工作区原来还能移动、缩放、画圈、删除核心；现在全部禁止，只能选中查看；
+  3. 从 Step0 直接进 Regions 时，导航小图点击原来不跳转；现在已接上；
+  4. 用 Line 画好线后，点某个核心原来会被当成重新画线；现在改为把这个核心加入或移出这条线；
+  5. 选了对应表但还没找核心时，原来照样能锁定；现在会提示先找核心；
+  6. 撤销 / 重做时，工作区信息原来会退回到旧的那次交接；现在始终保持当前的；
+  7. 读不了的版本（别的片子、不认识的格式），现在给出提示，不再报错崩溃。
+
+  建议项也做了：找到新候选、替换核心之后，清掉当前选择和没做完的工具操作。
+- 新增 `tests/test_regions_r2.py`（3 项，用真实窗口和真实看图）：
+  - 第三个看图能打开，叠加层可见，离开后暂停，关闭后能重新打开；
+  - 通道是 Step1 那一份；
+  - 视野在 Step0 → Regions → Step1 之间双向联动；
+  - 没有交接时拒绝进入；
+  - 跳转会写进共用视野。
+
+  页面测试增加到 13 项。
+- codex 第二轮（`codex_regions_r2_2.out`）：上一轮 7 项里，6 项确认已修好。第 2 项（ROI 工作区只读）还剩一个缺口：在整片工作区改过核心，再切到 ROI 工作区，点撤销或重做仍会改动核心。已修：换工作区时，撤销记录从头开始。另外补了两项测试：拖角上的点按中心缩放；连续改动只在停手后自动保存一次。
+- codex 第三轮（`codex_regions_r2_3.out`）：撤销记录的修复已确认。又发现一个缺口："找核心"的结果如果在切到 ROI 工作区之后才到，仍会改动核心。已修：换工作区时，旧任务的结果直接丢弃；ROI 工作区收到任何找核心结果，都不改核心。补了测试。
+- codex 第四轮（`codex_regions_r2_4.out`）：确认已全部关闭，按规则 7 停止加固。
+
+### R2 全量回归（2026-10-18）
+- 302 个测试文件，打开 GPU 开关，4 个并行。
+- 有失败的 17 个文件都和 R2 无关：
+  - 13 个是上次就记录过的老问题或环境问题；
+  - `test_step1_gpu_sources`、`test_step1_gpu_takeover` 在 R2 之前的代码副本（`cecf58c`）上同样失败；
+  - `test_step1_overlay_preview`、`test_v16_5_r0_gl_lifecycle` 单独重跑都通过，前者在旧副本上反而失败了一次，属于不稳定的测试；
+  - `test_step2_engine_unified` 是 4 路并行时超时，上次单独跑全部通过。
+- 结论：没有 R2 引起的回归。
+
+### R2 真机验收步骤（给用户）
+启动程序：`cd /sda1/Fusion/a9_bench && /root/micromamba/envs/fusion_mesmer/bin/python -m block01.main`
+
+1. 在 Step0 打开 Slice1，整片（不画 ROI）点 Save。也可以直接用上次的项目 `/sda1/Fusion/tma_accept_slice1`。
+2. 点顶部步骤条的"○ Step 0.5: Regions"（在 Step 0 和 Step 1 之间）。如果没有 Save，会弹窗说明不能进入。
+3. 右边应该是和 Step1 一样的多通道大图，左边有 Channels 和 Cores 两个标签页。
+   - Channels：勾几个通道，调亮度（`Intensity…`）。
+   - 点 Step 1，应显示同样的通道；在 Step1 改了，回到 Regions 也一样。
+4. 视野联动：在 Regions 拖动、缩放到某处，进 Step1 应在同一个位置；反过来也一样。Step0 也一样。
+5. Cores：
+   - 对应表已经选过的会直接显示；
+   - 点 `Find cores`，会提示"替换草稿里的核心"，选是；
+   - 轮廓应贴合组织（外扩 6%），而且在大图上拖动、缩放、改变窗口大小以后，轮廓和组织都对得上。
+6. 编号：
+   - `Line`：在大图上沿一列拖线，确认；
+   - `Clicks`：依次点核心，回车，确认；
+   - 选中一个核心，用 `Number` 单颗编号；
+   - `Merge` 并入碎块；
+   - `Circle` 补画；
+   - `Select` 下拖动已选中的块可以移动，拖 8 个点可以缩放；
+   - 撤销、重做；`Prev` / `Next`；点表格某一行，大图跳过去。
+7. 空白处左键拖动是平移画面；右键单击圈会弹出菜单。
+8. 记一下切换速度和内存：Step0、Regions、Step1 之间来回切几次。
+9. 可选：用 Python 显示路径再试一遍，启动命令前加 `BLOCK01_STEP1_BACKEND=python`。
+
+### R2 用户真机验收第一轮（2026-10-18）
+- 通过：视野联动、通道联动、轮廓、Line 工具。
+- 新要求，已做：
+  1. 工具行加了 `Outlines` 开关，用来显示 / 隐藏核心轮廓，默认显示；
+  2. Regions 的标题栏加了 `Tissue Navigator`（和 Step1 / Step3 一样）。在小图上点一下，大图就跳过去，即使正在画线、画圈也照样跳。ROI 和小块在这里只读。
+- 测试：页面测试 17 项、真实窗口测试 4 项、界面约束和页面框架测试 39 项，全部通过。`UI_SURFACE_RULES.md` 已同步更新。
+- codex 审这两处新增（`codex_regions_r2_5.out`）时发现一个问题，已修：轮廓隐藏后，原来还能点中、拖动看不见的核心。现在隐藏时会清掉当前选择，看不见的核心既点不中也改不了，左键拖动就是平移画面；编号线照常可以画。另外按建议，标题栏按钮改为直接引用标题栏，测试改为点真实的按钮。

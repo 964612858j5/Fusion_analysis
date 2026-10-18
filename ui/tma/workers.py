@@ -1,7 +1,6 @@
-"""The TMA page's background work (F3, docs/tma_f3_page_application.md
-§2.5): finding cores (F2's `detect_cores` + `save_candidates`) and the
-thumbnail read (the pyramid, through `OmeTiffSource`). Each job carries the
-dataset generation it was started for; the page drops a result of an older
+"""Background work of the Regions `Cores` tab (first written for F3's TMA
+page): finding cores (F2's `detect_cores` + `save_candidates`). Each job
+carries the dataset generation it was started for; the page drops a result of an older
 one. Every started thread is kept in `LIVE` until Qt reports it finished,
 so none is destroyed while running; `shutdown` asks them to stop and waits
 (application close, plan §4).
@@ -48,37 +47,5 @@ class DetectWorker(QThread):
             # page usable, so the job always ends with done / failed
             rec = da.save_candidates(self.project_dir, res, self.slide_id)
             self.done.emit(self.gen, rec)
-        except Exception as exc:                            # noqa: BLE001
-            self.failed.emit(self.gen, f"{type(exc).__name__}: {exc}")
-
-
-class ThumbWorker(QThread):
-    """The thumbnail: the nucleus channel at the pyramid level nearest to
-    1/`downsample`, read through the PixelSource (`OmeTiffSource`). Not
-    Step0's `OverviewLoaderThread`: that one decodes the full-resolution
-    channel and keeps every n-th pixel (15 s for a whole slide,
-    core/io_loader.py:155-158)."""
-    done = pyqtSignal(int, object)       # generation, ndarray
-    failed = pyqtSignal(int, str)
-
-    def __init__(self, gen, slide_path, channel, downsample=32):
-        super().__init__()
-        self.gen, self.slide_path, self.channel, self.downsample = gen, slide_path, channel, downsample
-
-    def run(self):
-        try:
-            from ...sources.ome_tiff import OmeTiffSource
-            src = OmeTiffSource(self.slide_path)
-            try:
-                h0 = src.level_shape(0)[0]
-                lv = 0
-                for k in range(src.level_count()):
-                    if h0 / src.level_shape(k)[0] <= self.downsample * 1.5:
-                        lv = k
-                h, w = src.level_shape(lv)
-                arr, _origin = src.read_region(self.channel, lv, 0, h, 0, w)
-            finally:
-                src.close()
-            self.done.emit(self.gen, arr)
         except Exception as exc:                            # noqa: BLE001
             self.failed.emit(self.gen, f"{type(exc).__name__}: {exc}")

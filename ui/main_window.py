@@ -115,7 +115,8 @@ from .step3_page import Step3Page
 from .step3_mask_bar import Step3MaskBar
 from ..core import step3_masks
 from .step4_page import Step4Page
-from .tma.tma_page import TmaPage
+from .regions.mount import RegionsViewerHost
+from .regions.page import RegionsPage
 
 STEP1_PATCH_PREVIEW_MAX_PX = 1024
 
@@ -742,10 +743,11 @@ class MainWindow(QMainWindow):
         self._step4_lbl.setStyleSheet(
             "font-size:12px;color:#555;padding:4px 12px;"
         )
-        # TMA F3 (docs/tma_f3_page_application.md, user ruling 2026-10-17):
-        # the TMA page's entry, a label like the steps', after them.
-        self._tma_lbl = QLabel("○ TMA")
-        self._tma_lbl.setStyleSheet(
+        # Regions (docs/region_qc_module_plan.md, user ruling 2026-10-18):
+        # "Step 0.5" between Step0 and Step1 -- TMA cores and blur / fold
+        # exclusion annotation; a label like the steps'.
+        self._regions_lbl = QLabel("○ Step 0.5: Regions")
+        self._regions_lbl.setStyleSheet(
             "font-size:12px;color:#555;padding:4px 12px;"
         )
         for lbl, handler in (
@@ -754,11 +756,13 @@ class MainWindow(QMainWindow):
             (self._step2_lbl, self._go_to_step2),
             (self._step3_lbl, self._go_to_step3),
             (self._step4_lbl, self._go_to_step4),
-            (self._tma_lbl, self._go_to_tma),
+            (self._regions_lbl, self._go_to_regions),
         ):
             lbl.setCursor(Qt.PointingHandCursor)
             lbl.mousePressEvent = lambda _ev, fn=handler: fn()
         step_bar.addWidget(self._step0_lbl)
+        step_bar.addWidget(QLabel("  →  "))
+        step_bar.addWidget(self._regions_lbl)
         step_bar.addWidget(QLabel("  →  "))
         step_bar.addWidget(self._step1_lbl)
         step_bar.addWidget(QLabel("  →  "))
@@ -767,8 +771,6 @@ class MainWindow(QMainWindow):
         step_bar.addWidget(self._step3_lbl)
         step_bar.addWidget(QLabel("  →  "))
         step_bar.addWidget(self._step4_lbl)
-        step_bar.addWidget(QLabel("   |   "))
-        step_bar.addWidget(self._tma_lbl)
         step_bar.addStretch()
 
         # ── Block01 chrome: the global windows, reachable from EVERY step ──
@@ -1528,13 +1530,25 @@ class MainWindow(QMainWindow):
         self._step1_5 = Step15BackgroundCorrectionPage()
         self._stack.addWidget(self._step1_5)
 
-        # TMA F3: appended after Step1.5 (index 6), reached by widget like it;
-        # its left column shares the channel column's width.
-        self._tma = TmaPage(metrics=self._frame_metrics,
-                            title_bar=self._frame_title_bar("TMA — Cores"))
-        self._tma.open_in_step1.connect(self._tma_open_in_step1)
-        self._stack.addWidget(self._tma)
-        split = self._tma.channel_column_splitter()
+        # Regions (docs/region_qc_module_plan.md): appended after Step1.5
+        # (stack index 6), internal step id REGIONS_STEP; its left column
+        # shares the channel column's width; its viewer is a third resident
+        # Step1 mount, built on first entry like Step3's.
+        regions_bar = self._frame_title_bar("Step 0.5 — Regions")
+        self._regions = RegionsPage(metrics=self._frame_metrics, title_bar=regions_bar)
+        # the Tissue Navigator entry, as Step1's / Step3's (user 2026-10-18):
+        # a click jumps the Regions viewer whatever tool is in use
+        nav = QPushButton("Tissue Navigator")
+        nav.setToolTip(self._btn_step1_tissue_nav.toolTip())
+        nav.setStyleSheet(self._step0._btn_tissue_nav.styleSheet())
+        nav.clicked.connect(self._show_regions_tissue_navigator)
+        regions_bar.layout().addWidget(nav)
+        self._btn_regions_tissue_nav = nav
+        self._regions.intensity_requested.connect(self._show_intensity_window)
+        self._regions.jump_box = self._regions_jump_box
+        self._regions_view = RegionsViewerHost(self, self._regions)
+        self._stack.addWidget(self._regions)
+        split = self._regions.channel_column_splitter()
         split.splitterMoved.connect(lambda _pos, _i, s=split: self._on_channel_column_dragged(s))
 
         # Every step is a render context for the ONE Tissue Preview, and they
@@ -1726,7 +1740,7 @@ class MainWindow(QMainWindow):
                 getattr(self, "_step1_main_split", None),
                 getattr(step2, "channel_column_splitter", lambda: None)(),
                 getattr(step3, "channel_column_splitter", lambda: None)(),
-                getattr(self.__dict__.get("_tma"), "channel_column_splitter", lambda: None)()]
+                getattr(self.__dict__.get("_regions"), "channel_column_splitter", lambda: None)()]
 
     @staticmethod
     def _fraction_of(split):
@@ -1837,7 +1851,7 @@ class MainWindow(QMainWindow):
                 getattr(self, "_step1_main_split", None),
                 getattr(step2, "channel_column_splitter", lambda: None)(),
                 getattr(step3, "channel_column_splitter", lambda: None)(),
-                getattr(self.__dict__.get("_tma"), "channel_column_splitter", lambda: None)()]
+                getattr(self.__dict__.get("_regions"), "channel_column_splitter", lambda: None)()]
 
     def _fix_step1_split_ratio(self):
         """Both pages show the one channel-column share.
@@ -2334,10 +2348,20 @@ class MainWindow(QMainWindow):
         is looking at. Coming back composes ONCE, which is what picks up
         everything that moved while Step1 was away.
         """
+        host = self.__dict__.get("_regions_view")
         if active == 1:
             self._step3_follow_step(active)        # pause Step3's first
+            if host is not None:
+                host.follow(active, self.REGIONS_STEP)
             return self._step1_follow_step(active)
         result = self._step1_follow_step(active)   # pause Step1's first
+        if active == self.REGIONS_STEP:
+            self._step3_follow_step(active)
+            if host is not None:
+                host.follow(active, self.REGIONS_STEP)
+            return result
+        if host is not None:
+            host.follow(active, self.REGIONS_STEP)
         self._step3_follow_step(active)
         return result
 
@@ -2461,6 +2485,9 @@ class MainWindow(QMainWindow):
                      else self.__dict__.get("_step3_mount"))
             return bool(mount is not None and mount.host.stack is not None
                         and mount.apply_camera(cx, cy, scale))
+        if step == self.REGIONS_STEP:
+            host = self.__dict__.get("_regions_view")
+            return bool(host is not None and host.apply_camera(cx, cy, scale))
         return False
 
     def _step1_sync_whole_slide_source(self, reason="handoff"):
@@ -2478,6 +2505,8 @@ class MainWindow(QMainWindow):
             # has no source to rebind.
             return False
         self._step3_sync_whole_slide_source(reason)
+        if self.__dict__.get("_regions_view") is not None:
+            self._regions_view.sync(reason)
         if mount is None or mount.host.stack is None:
             return False
         try:
@@ -2570,6 +2599,8 @@ class MainWindow(QMainWindow):
             mount = getattr(self, "_step1_mount", None)
         elif self._current_step == 3:
             mount = self.__dict__.get("_step3_mount")
+        elif self._current_step == self.REGIONS_STEP:
+            mount = getattr(self.__dict__.get("_regions_view"), "mount", None)
         else:
             return False
         if mount is None or mount.host.stack is None:
@@ -2587,6 +2618,11 @@ class MainWindow(QMainWindow):
         must give Step3's, never Step1's (which may delete an ROI)."""
         self._display.show_navigator(_CTX_STEP3, roi_policy="read_only",
                                      patch_editable=True)
+
+    def _show_regions_tissue_navigator(self):
+        """Open the shared Tissue Preview from Regions: Step1's picture (the
+        channel state is shared), the ROIs and patches read-only."""
+        self._display.show_navigator(_CTX_STEP1, roi_policy="read_only", patch_editable=False)
 
     def _show_tissue_navigator(self):
         """Open the shared Tissue Preview from Step1.
@@ -2961,10 +2997,6 @@ class MainWindow(QMainWindow):
         """
         info = dict(info or {})
         gen = int(info.get("gen") or 0)
-        # TMA F3 (plan §2.5): the TMA page works on the COMMITTED dataset,
-        # saved handoff or not.
-        self._tma_committed = {"ome_path": info.get("ome_path") or "",
-                               "output_dir": info.get("output_dir") or ""}
         # Block A7 (U10): another slide -- the old position is no place on it
         # (unless the new slide's first fit has already been recorded).
         new_slide = os.path.realpath(info["ome_path"]) if info.get("ome_path") else ""
@@ -3146,8 +3178,11 @@ class MainWindow(QMainWindow):
         self.prev_status.setText(status_text)
 
         # 7. Downstream pages, through their public entry points only.
-        # Step3's viewer draws the old dataset: closed, reopened on entry.
+        # Step3's viewer draws the old dataset: closed, reopened on entry;
+        # so does Regions' (its document is the old slide's too).
         self._close_step3_viewer()
+        if self.__dict__.get("_regions_view") is not None:
+            self._regions_view.close()
         if hasattr(self, "_step2"):
             self._step2.set_rois([])
             if hasattr(self._step2, "set_roi_context"):
@@ -4915,15 +4950,12 @@ class MainWindow(QMainWindow):
         return {"run": run_dir, "label": label, "tag": tag, "zarr": first, "regions": regions,
                 "rois": rois, "tooltip": label + (f"\n{source}" if source else "")}
 
-    @_perf("switch.go_step1")
-    def _go_to_step1(self):
-        # Step1 reads the handoff from DISK. While a patch edit is still being
-        # written, the newest geometry is in Step0's memory and one revision
-        # ahead of the file, so entering now would run Step1 on the previous
-        # geometry without saying so.
-        # `self.__dict__`, not getattr: a QWidget whose __init__ never ran
-        # raises on a missing attribute rather than returning the default,
-        # and this method is driven that way by the handoff-contract tests.
+    def _handoff_ready(self, retry, say):
+        """Is Step0's handoff on disk and loaded? "ready" (it is, loading it
+        when needed), "waiting" (a patch write is in flight: `retry` is called
+        again in 150 ms, at most 40 times) or "refused" (`say` tells why).
+        Step1 and Regions enter through it (Regions R2: extracted from
+        `_go_to_step1`, its behaviour unchanged)."""
         page = self.__dict__.get("_step0")
         ready = getattr(page, "geometry_ready_for_consumers", None)
         # NOT "is the worker busy": the page is told the outcome through a
@@ -4943,16 +4975,15 @@ class MainWindow(QMainWindow):
             self.prev_status.setText(
                 "Saving the patch geometry… Step1 opens once the new Step0 "
                 "handoff is on disk.")
-            QtCore.QTimer.singleShot(150, self._go_to_step1)
-            return
+            QtCore.QTimer.singleShot(150, retry)
+            return "waiting"
         self._step1_entry_waits = 0
         if waiting:
-            self.prev_status.setText(
-                "Step1 is not ready: the patch geometry on disk is not the "
+            say("Step1 is not ready: the patch geometry on disk is not the "
                 "geometry on screen"
                 + (f" ({blocked})." if blocked else
                    " — the write is still running."))
-            return
+            return "refused"
         if not getattr(self, "_step1_context_ready", False):
             accepted = False
             handoff = self.step0_output or {}
@@ -4970,11 +5001,22 @@ class MainWindow(QMainWindow):
                 with perf_trace.span("step1.entry.load_handoff"):
                     accepted = self._load_step0_roi_result(auto=True) is True
             if not accepted:
-                self.prev_status.setText(
-                    "Step1 is not ready: load a valid Step0 handoff or use Load Previous Step1 Session."
-                )
-                return
+                say("Step1 is not ready: load a valid Step0 handoff or use Load Previous Step1 Session.")
+                return "refused"
             self._step1_context_ready = True
+        return "ready"
+
+    @_perf("switch.go_step1")
+    def _go_to_step1(self):
+        # Step1 reads the handoff from DISK. While a patch edit is still being
+        # written, the newest geometry is in Step0's memory and one revision
+        # ahead of the file, so entering now would run Step1 on the previous
+        # geometry without saying so.
+        # `self.__dict__`, not getattr: a QWidget whose __init__ never ran
+        # raises on a missing attribute rather than returning the default,
+        # and this method is driven that way by the handoff-contract tests.
+        if self._handoff_ready(self._go_to_step1, self.prev_status.setText) != "ready":
+            return
         with perf_trace.span("step1.entry.total"):
             with perf_trace.span("step1.entry.show_page"):
                 self._stack.setCurrentIndex(1)
@@ -4986,62 +5028,70 @@ class MainWindow(QMainWindow):
             self._rm_auto_step1 = False
             self._load_previous_step1_session(auto=True)
 
-    # ── TMA F3 (docs/tma_f3_page_application.md §2) ─────────────────────
-    def _go_to_tma(self):
-        """Open the TMA page on the committed dataset: its project folder and
-        slide. The transition is Step4's (`_set_step_active(4)`): a page with
-        no shared viewer, so Step1's / Step3's viewers pause and the display
-        scope and context are left as for Step4 (plan §4, review B1)."""
+    # ── Regions (docs/region_qc_module_plan.md §2) ───────────────────────
+    REGIONS_STEP = 5           # internal step id (the stack index is 6)
+
+    def _go_to_regions(self):
+        """Enter "Step 0.5: Regions" after Step0's Save: the same handoff
+        readiness as Step1 (the handoff is loaded here when it is not yet),
+        without entering Step1; a refusal is said on the page the user is on."""
+        if self._current_step == self.REGIONS_STEP:
+            return
+        state = self._handoff_ready(self._go_to_regions, self._regions_refused)
+        if state != "ready":
+            return
         if self._current_step == 1:
             self._stop_all_loaders()
-        committed = self.__dict__.get("_tma_committed") or {}
+        self._stack.setCurrentWidget(self._regions)
+        self._set_step_active(self.REGIONS_STEP)
+        self._regions.set_context(self._regions_context())
+
+    def _regions_refused(self, text):
+        QMessageBox.information(self, "Step 0.5: Regions", text.replace("Step1", "Regions"))
+
+    def _regions_context(self):
+        """The workspace the page edits in: project, slide, its id and size,
+        the Step0 handoff, whole slide or ROI, the channels."""
+        import hashlib
         ctx = self.step0_output or {}
-        roi_ctx = getattr(self._step0, "_roi_context", None) or {}
-        where = (roi_ctx.get("project_dir") or committed.get("output_dir") or ctx.get("roi_dir")
-                 or ctx.get("output_dir") or "")
-        project = run_store.project_dir_of(where) if where else None
-        slide = (committed.get("ome_path") or getattr(self.loader, "filepath", None)
-                 or ctx.get("ome_tiff_path"))
-        self._tma.set_context(project, slide if project else None)
-        self._stack.setCurrentWidget(self._tma)
-        self._set_step_active(4)
-        self._step4_lbl.setStyleSheet("font-size:12px;color:#555;padding:4px 12px;")
-        self._tma_lbl.setStyleSheet("font-size:12px;font-weight:bold;color:#61afef;padding:4px 12px;"
-                                    "background:#1a2a3a;border-radius:4px;")
-        self._apply_channel_column_fraction()
+        slide = str(getattr(self.loader, "filepath", "") or "")
+        roi_dir = str(ctx.get("roi_dir") or "")
+        project = run_store.project_dir_of(roi_dir or ctx.get("output_dir") or "")
+        out = {"project_dir": project, "slide_path": slide, "workspace_id": os.path.basename(roi_dir.rstrip("/")),
+               "handoff_path": str(ctx.get("step0_manifest_path") or ""), "handoff_sha256": "",
+               "channel_names": list(getattr(self.loader, "ch_map", {}) or {})}
+        try:
+            with open(out["handoff_path"], "rb") as f:
+                out["handoff_sha256"] = hashlib.sha256(f.read()).hexdigest()
+        except OSError:
+            pass
+        roi = self.__dict__.get("_active_roi") or {}
+        out["full_wsi"] = not roi or str(roi.get("type") or roi.get("analysis_region_type") or "") == "full_wsi" \
+            or not roi.get("polygon_fullres")
+        if project and slide:
+            from ..core import provenance as prov
+            from ..sources.ome_tiff import OmeTiffSource
+            try:
+                out["slide_id"] = prov.ensure_raw_slide(project, slide)
+                src = OmeTiffSource(slide)
+                try:
+                    out["shape"] = tuple(src.level_shape(0))
+                    out["pixel_um"] = src.physical_size()
+                finally:
+                    src.close()
+            except Exception as exc:                        # noqa: BLE001
+                print(f"[Regions] the slide could not be identified: {exc}")
+                out["slide_id"] = None
+        return out
 
-    def _tma_open_in_step1(self, bbox):
-        """The TMA page's "Step1": enter Step1 through its own checks, wait
-        until it is really on screen with its viewer mounted (it may retry and
-        return at once), then the Viewer tab and the core's box."""
-        slide = getattr(self.loader, "filepath", None)
-        want = os.path.abspath(self._tma.slide_path or "")    # the slide of THIS request
-        if not slide or os.path.abspath(slide) != want:
-            self._tma.say("Step1 has another slide open (or none); open this slide in Step0 first.")
-            return
-        self._go_to_step1()
-        deadline = time.monotonic() + 10.0
+    def _regions_jump_box(self, bbox):
+        return self._regions_view.show_box(bbox)
 
-        def poll():
-            mount = getattr(self, "_step1_mount", None)
-            on_step1 = (self._current_step == 1 and self._stack.currentIndex() == 1
-                        and mount is not None and mount.host.stack is not None)
-            if on_step1:
-                now = getattr(self.loader, "filepath", None)
-                if not now or os.path.abspath(now) != want:
-                    return                              # another slide by now: no jump
-                tabs = self.__dict__.get("_step1_right_tabs")
-                if tabs is not None:
-                    for i in range(tabs.count()):
-                        if tabs.tabText(i) == "Viewer":
-                            tabs.setCurrentIndex(i)
-                mount.show_patch(tuple(int(v) for v in bbox))
-                return
-            if time.monotonic() > deadline:
-                self._tma.say("Step1 did not open (see its message); the core was not shown.")
-                return
-            QTimer.singleShot(100, poll)
-        QTimer.singleShot(0, poll)
+    def _on_regions_camera(self, camera, reason=""):
+        return self._camera_write(self.REGIONS_STEP, camera, reason, jump=False)
+
+    def _on_regions_jump(self, camera, reason=""):
+        return self._camera_write(self.REGIONS_STEP, camera, reason, jump=True)
 
     def _go_to_step1_5(self):
         """Open Step 1.5 (Background Correction + Channel Conditioning / Remap).
@@ -5271,7 +5321,7 @@ class MainWindow(QMainWindow):
     #: composes exactly what Step1 would -- and follows a tick or a weight
     #: moved in Step3 at once. Step2 keeps the shared published spec.
     _STEP_CONTEXTS = {0: _CTX_STEP0, 1: _CTX_STEP1, 2: _CTX_STEP2,
-                      3: _CTX_STEP1}
+                      3: _CTX_STEP1, 5: _CTX_STEP1}       # 5: Regions draws Step1's picture
 
     def _channels_host_for(self, step):
         """The layout of the step's own `Channels` panel, or None."""
@@ -5286,6 +5336,8 @@ class MainWindow(QMainWindow):
             page = self._step2
         elif step == 3:
             page = self._step3
+        elif step == self.REGIONS_STEP:
+            page = self.__dict__.get("_regions")
         else:
             return None
         return getattr(page, "channels_host", lambda: None)()
@@ -5314,7 +5366,8 @@ class MainWindow(QMainWindow):
     #: 2b, user ruling 2026-09-26): Step1 and Step3 share their ticks, current
     #: channel, weights and fusion draft. Step2 does not start empty, though
     #: -- see `_seed_downstream_scope`.
-    _DISPLAY_SCOPES = {0: "step0", 1: "step1", 2: "step2", 3: "step1"}
+    _DISPLAY_SCOPES = {0: "step0", 1: "step1", 2: "step2", 3: "step1",
+                       5: "step1"}   # Regions shares Step1's channel state (user ruling 2026-10-18)
 
     #: The steps seeded from Step1's COMMITTED snapshot the first time they
     #: are opened, and again after Step1 commits something else.
@@ -5582,7 +5635,7 @@ class MainWindow(QMainWindow):
         # ...and the step being entered goes to where the user was, on the
         # viewer that is now on screen. Only this one: the other viewer is
         # hidden, and nothing here touches it.
-        if active in (0, 1, 3):
+        if active in (0, 1, 3, self.REGIONS_STEP):
             with perf_trace.span("step1.entry.camera", step=active):
                 self._apply_owner_camera_to(active)
         # THE ONE public channel dock follows the step by switching its
@@ -5594,7 +5647,8 @@ class MainWindow(QMainWindow):
             with perf_trace.span("step1.entry.dock_set_step", step=active):
                 # Step3's rows are Step1's rows (block 2b): the tick is the
                 # fusion command and the weight is editable there too.
-                dock.set_step(1 if active == 3 else active)
+                # Regions' rows are Step1's rows too (shared channel state).
+                dock.set_step(1 if active in (3, self.REGIONS_STEP) else active)
             with perf_trace.span("step1.entry.dock_mount", step=active):
                 self._mount_channels_dock(active)
         # The ONE place the shared navigator's edit policy is decided.  Every
@@ -5627,8 +5681,8 @@ class MainWindow(QMainWindow):
         self._step2_lbl.setStyleSheet(_on  if active == 2 else _off)
         self._step3_lbl.setStyleSheet(_on  if active == 3 else _off)
         self._step4_lbl.setStyleSheet(_on  if active == 4 else _off)
-        if self.__dict__.get("_tma_lbl") is not None:
-            self._tma_lbl.setStyleSheet(_off)
+        if self.__dict__.get("_regions_lbl") is not None:
+            self._regions_lbl.setStyleSheet(_on if active == self.REGIONS_STEP else _off)
         self._update_next_button()
         if active == 1:
             self._match_step1_bottom_bar()
@@ -7298,13 +7352,13 @@ class MainWindow(QMainWindow):
         return page.apply_draft(run_store.from_records(draft, run_store.project_dir_of(roi)))
 
     def closeEvent(self, event):
-        # TMA F3, FIRST (before anything is stopped): the page's two jobs
-        # (finding cores, the thumbnail) are waited for, a few seconds at
+        # Regions, FIRST (before anything is stopped): the page's draft is
+        # written and its job (finding cores) waited for, a few seconds at
         # most; one still running refuses the close with nothing stopped yet.
-        tma = self.__dict__.get("_tma")
-        if tma is not None and not tma.shutdown():
+        regions = self.__dict__.get("_regions")
+        if regions is not None and not regions.shutdown():
             event.ignore()
-            print("[TMA] a TMA job is still running; close again in a moment")
+            print("[Regions] a Regions job is still running; close again in a moment")
             return
         self._rm_save_view(self.__dict__.get("_current_step"))
         if self._perf_heartbeat is not None:
@@ -7423,6 +7477,10 @@ class MainWindow(QMainWindow):
             except Exception as exc:                        # noqa: BLE001
                 print(f"[Step3-Viewer] close failed: {exc}")
             self._step3_mount = None
+        # ...and Regions' (docs/region_qc_module_plan.md §2).
+        host = self.__dict__.get("_regions_view")
+        if host is not None:
+            host.forget()
         # The sink closes LAST, and finally: every loader has reported its own
         # `job.end` by now, so nothing is left to write and nothing can start
         # a second writer on a file the first one closed. Bounded, because a
@@ -7536,6 +7594,8 @@ class MainWindow(QMainWindow):
             mount3 = self.__dict__.get("_step3_mount")
             if mount3 is not None:
                 mount3.set_mode(mode)
+            if self.__dict__.get("_regions_view") is not None:
+                self._regions_view.set_mode(mode)
             self._schedule_step1_session_save()
 
     def _drop_overlay_cache_for(self, patch_idx):

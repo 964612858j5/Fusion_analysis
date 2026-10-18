@@ -2,7 +2,7 @@
 the current draft, undo / redo and the autosave. No Qt.
 
 Every edit goes through `do(fn, ...)`: the draft is copied before, `fn`
-(a `core.tma.layout` function) edits it, one undo step is pushed; a failing
+(a `core.regions` document function) edits it, one undo step is pushed; a failing
 edit leaves the draft as it was. A drag is ONE step (Odon records one
 snapshot per drag, app.rs:5292): `begin_drag()` on press, `end_drag()` on
 release. A read-only holder (a locked version) refuses every edit.

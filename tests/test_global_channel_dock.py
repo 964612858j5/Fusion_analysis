@@ -1262,8 +1262,16 @@ def test_the_one_panel_moves_between_the_steps_hosts(app):
             assert dock.parentWidget() is host.parentWidget(), step
             hosts[step] = host.parentWidget()
             assert len(_channels_boxes(w)) <= 1, step
-        # four different hosts, one dock
-        assert len({id(h) for h in hosts.values()}) == 4
+        # Regions (Step 0.5) is a fifth host of the same dock
+        w._stack.setCurrentWidget(w._regions)
+        w._set_step_active(w.REGIONS_STEP)
+        QtWidgets.QApplication.processEvents()
+        host = w._channels_host_for(w.REGIONS_STEP)
+        assert host is not None and dock.parentWidget() is host.parentWidget()
+        hosts[w.REGIONS_STEP] = host.parentWidget()
+        assert len(_channels_boxes(w)) <= 1
+        # five different hosts, one dock
+        assert len({id(h) for h in hosts.values()}) == 5
         assert w._display.channel_dock() is dock
     finally:
         w.hide()

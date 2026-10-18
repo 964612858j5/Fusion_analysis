@@ -496,26 +496,30 @@ row, and the duplicate Tissue Preview button in the step bar.
 * **Weights** -- edited in Step1's rows, and in Step3's, which are the same
   rows (block 2b). There is no separate weight window.
 * **Intensity** -- the shared window, opened from Step0's and Step1's own
-  existing entries. In BOTH steps that entry lives inside the `Channels`
+  existing entries, and from Regions' `Channels` tab (it shares Step1's
+  channel state). In BOTH steps that entry lives inside the `Channels`
   frame: it edits the selected channel, so it belongs with the channel list.
-* **The TMA page** (TMA F3, user ruling 2026-10-17;
-  `docs/tma_f3_page_application.md`, `ui/tma/`) -- reached from the step
-  bar's last entry, the LABEL `○ TMA` after the steps (a label like theirs,
-  not a button); the page is the stack's last page (after Step1.5), so the
-  steps keep indices 0-4. It is a framed page: title bar `TMA — Cores` with
-  the study / slide, `Version:` (the draft and the locked versions),
-  `Discard draft` and `Lock` (`New draft from this version` on a locked
-  one); the tab row is blank (one invisible tab per column); the left
-  column (sharing the one channel-column share) holds
-  `Choose map sheet…`, `Find cores`, the numbering panel (Start / End /
-  Order, `Reverse` / `Confirm` / `Cancel`, the preview, the selected core's
-  number box with `Number` / `Custom`) and the core table (`Show:` /
-  `Find:`, columns Run, Position, Donor, Sample, Status, Pieces, Tissue);
-  the right column's tool row is `Select`, `Line`, `Clicks`, `Merge`,
-  `Circle`, `Undo`, `Redo`, `Prev`, `Next`, `Step1`, over the slide map.
-  Right-click menus on a circle (Remove from core, Confirm number, Remove
-  number, Leave out… / Restore) and on a table row (Confirm missing… /
-  Clear 'missing', Exclude… / Include again, Accept). The lock asks for two
+* **Step 0.5: Regions** (user rulings 2026-10-17/18;
+  `docs/region_qc_module_plan.md`, `ui/regions/`) -- replaces F3's
+  stand-alone TMA page and its `○ TMA` entry. Reached from the step bar's
+  LABEL `○ Step 0.5: Regions` between `Step 0` and `Step 1` (a label like
+  theirs, not a button), only after Step0's Save (the same handoff
+  readiness as Step1; a refusal is said in a message box). The page is the
+  stack's last page (after Step1.5), so the steps keep indices 0-4; its
+  internal step id is 5. A framed page: title bar `Step 0.5 — Regions` with
+  `Tissue Navigator` (as Step1's / Step3's; a click lands the Regions viewer
+  whatever tool is in use; ROIs and patches read-only there) and the slide /
+  study, `Version:` (draft, locked versions, F3's read-only
+  versions), `Discard draft` and `Lock` (`New draft from this version` on a
+  locked one); left tabs `Channels` (the one channel dock with Step1's
+  rows -- the channel state is Step1's / Step3's, so a tick is the fusion
+  command -- and `Intensity…`) and `Cores` (`Choose map sheet…`, `Find
+  cores`, the numbering panel, the core table); right tab `Viewer` whose
+  tool row is `Select`, `Line`, `Clicks`, `Merge`, `Circle`, `Outlines`
+  (a toggle: show / hide the core outlines, user 2026-10-18), `Undo`,
+  `Redo`, `Prev`, `Next`, over a third resident Step1 viewer with a
+  transparent overlay (outlines, labels, the numbering line). Right-click
+  menus on a shape and on a table row as in F3. The lock asks for two
   confirmations in one dialog. No other window.
 
 ## 5. How this rule is enforced

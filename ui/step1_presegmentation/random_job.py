@@ -40,11 +40,18 @@ def run_generation(request):
     signal = loader.read_region_lowres(request["channel"], 0, h, 0, w, ds_int,
                                        normalize=False)
     mask = random_patches.tissue_mask(signal, ds_int)
-    result = random_patches.generate(
-        request["count"], request["height"], request["width"],
-        mask=mask, ds=ds_int, region=request.get("region") or (0, h, 0, w),
-        polygon=request.get("polygon"), existing=request.get("existing") or (),
-        seed=request.get("seed", random_patches.DEFAULT_SEED))
+    if request.get("cores") is not None:          # F4-2: a TMA with Regions: inside the selected cores
+        result = random_patches.generate_in_cores(
+            request["count"], request["height"], request["width"],
+            mask=mask, ds=ds_int, cores=request["cores"], avoid=request.get("avoid") or (),
+            existing=request.get("existing") or (), region=request.get("region"),
+            polygon=request.get("polygon"), seed=request.get("seed", random_patches.DEFAULT_SEED))
+    else:
+        result = random_patches.generate(
+            request["count"], request["height"], request["width"],
+            mask=mask, ds=ds_int, region=request.get("region") or (0, h, 0, w),
+            polygon=request.get("polygon"), existing=request.get("existing") or (),
+            seed=request.get("seed", random_patches.DEFAULT_SEED))
     return {"generation": result, "error": ""}
 
 

@@ -133,3 +133,83 @@ def model_input(kind, fused):
     if kind == "nucleus_zero":
         return np.stack([f1, np.zeros_like(f1)], axis=-1)
     raise ValueError(f"unknown input kind {kind!r}")
+
+
+# ── Regions (F4-2, docs/f4_regions_downstream_plan.md v2.1) ────────────
+#: Which kinds read the fused (membrane) channel besides the nucleus.
+_READS_FUSION = {"fusion_fusion_nucleus", "nucleus_fusion"}
+
+
+def seg_channels(method, fusion_config):
+    """The channel names a method's input is made of (its segmentation
+    channels S): the nucleus channel, plus every channel fused with a weight
+    for the kinds that read the fused channel. An exclusion touching one of
+    these invalidates segmentation; others only invalidate measurements."""
+    fcfg = fusion_config or {}
+    nucleus = fcfg.get("nucleus") or {}
+    out = set()
+    if nucleus.get("channel") and float(nucleus.get("weight", 0.0) or 0.0) > 0:
+        out.add(str(nucleus["channel"]))
+    if INPUT_KIND.get(method) in _READS_FUSION:
+        for data in (fcfg.get("groups") or {}).values():
+            if float(data.get("group_weight", 1.0) or 0.0) <= 0:
+                continue
+            out |= {str(ch) for ch, w in (data.get("channels") or {}).items() if float(w or 0.0) > 0}
+    return sorted(out)
+
+
+def _keep_only(arr, keep_ids):
+    lut_max = int(arr.max()) if arr.size else 0
+    if lut_max == 0:
+        return arr
+    lut = np.zeros(lut_max + 1, dtype=arr.dtype)
+    ids = np.fromiter((i for i in keep_ids if 0 < i <= lut_max), dtype=np.int64)
+    lut[ids] = ids.astype(arr.dtype)
+    return lut[arr]
+
+
+def regions_filter(method, raw, window, raster):
+    """The window's results with only the objects the Regions rules keep
+    (`core.regions.objects`): judged on the whole predicted objects of the
+    read window, BEFORE the patch crop. A nucleus follows the cell it lies in
+    (expansion methods: the same id; two outputs such as Mesmer
+    nuclear-guided: the cell holding most of its pixels); a nucleus in no
+    cell, or a nuclei-only output, is judged on its own. Returns (raw,
+    {output: dropped count})."""
+    from .regions.objects import ObjectTally
+    core, seg = raster.core_index(window), raster.seg_invalid(window)
+
+    def judge(arr):
+        t = ObjectTally(tma=raster.tma)
+        t.add(arr, core, seg)
+        v = t.verdicts()
+        return {i for i, x in v.items() if x.keep}, len(v)
+
+    out, dropped = dict(raw), {}
+    cell, nuc = raw.get("cell"), raw.get("nucleus")
+    if cell is not None:
+        keep, n = judge(cell)
+        dropped["cell"] = n - len(keep)
+        out["cell"] = _keep_only(cell, keep)
+        if nuc is not None and method in _expansion_methods():
+            out["nucleus"] = _keep_only(nuc, keep)
+            return out, dropped
+    if nuc is not None:
+        own_keep, n = judge(nuc)
+        if cell is not None:                      # follow the parent cell where there is one
+            fg = nuc > 0
+            pairs = np.unique(np.stack([nuc[fg], cell[fg]]).astype(np.int64), axis=1, return_counts=True)
+            best = {}
+            for (ni, ci), c in zip(pairs[0].T.tolist(), pairs[1].tolist()):
+                if ci and c > best.get(ni, (0, 0))[1]:
+                    best[ni] = (ci, c)
+            own_keep = {i for i in set(np.unique(nuc[fg]).tolist())
+                        if (best[i][0] in keep if i in best else i in own_keep)}
+        dropped["nucleus"] = n - len(own_keep)
+        out["nucleus"] = _keep_only(nuc, own_keep)
+    return out, dropped
+
+
+def _expansion_methods():
+    from ..seg_runner import engines as seg_engines
+    return seg_engines.EXPANSION_METHODS

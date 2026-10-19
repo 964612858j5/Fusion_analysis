@@ -412,3 +412,44 @@
   - `core/regions/objects.py`：细胞归属、排除、测量 NaN 代码；
   - `core/tma/map_sheet.py`：读 Project name；
   - 测试 `tests/test_f4_analysis.py`。
+- F4-1 已提交并推送（`d339021`）。用户批准第二段（Step1 接入），白名单见方案 C 节。
+- 第二段实现：
+  - 预分割开始时，每种模型输入冻结一份快照（`regions_<kind>.json` 放在运行目录里）。排除区是否影响分割，由该方法实际读取的通道决定（`preseg_input.seg_channels`）。
+  - 每个窗口的结果在裁到小块之前按规则筛掉核心外、碰到排除区的细胞（`preseg_input.regions_filter`）。细胞核跟随它所在的细胞：扩展类方法按相同编号，两路输出（例如 Mesmer）按重叠最多的细胞；不在任何细胞里的细胞核，以及只分割细胞核的方法，各自判定。
+  - 随机小块在选中的核心里逐个轮流取，避开排除区（`random_patches.generate_in_cores`）。
+  - 交接合同加入可选的 `regions`，**带完整快照**（并核对身份），删掉那次预分割也不影响交接。
+  - 随机小块：限制在当前工作区范围内，按轮廓避开排除区；TMA 选不出核心时直接提示，不退回全组织；每颗核心都至少有一轮尝试。
+  - 回到 Step1 时刷新结果栏；"有更新的 Save" 通过比较两份文件的内容校验和判断（不加缓存）。
+  - codex 审第二段：第一轮 7 处，第二轮 1 处，已改（`codex_f4_step1_1/2.out`）。
+  - 结果栏多一行 "Regions: n cores"；之后再 Save，提示 "a newer Regions result exists"。
+  - TMA 项目没有 Save 过就拒绝运行。
+  - 没有 Regions 的项目完全不读不写（连切片都不打开）。
+
+### 第二段真机验收中的反馈：编号面板（2026-10-18）
+- 用户反馈：
+  1. Start / End 要能手动输入、自动匹配；
+  2. 用鼠标选中一个核心后，没法给它单独分配编号；
+  3. Start 和 End 选同一个位置，无法分配给选中的核心；改 Start / End 时卡住了，Reverse、Confirm、Cancel 也是灰的；Order 没必要存在，核心数量和 Start…End 对上就能确认，点击 / 画线的顺序就是核心的顺序。
+- 原因：
+  - 编号面板只在 Line / Clicks 工具下启用；
+  - Order 选 "Custom" 时会把 Start / End 锁住（改为在表格里按住 Ctrl 点行）。
+- 修改：
+  - 去掉 Order。记录从 Start 走到 End（`numbering.walk_records`）：同一列按列走，同一行按行走，否则按位置编号；End 在前就倒着走；Start = End 就是一颗。
+  - Start / End 可以输入，按位置或样本号的任意部分匹配。
+  - `Select ▸ Click` 选中的核心（Ctrl 加选）按点击顺序参与编号，一颗也可以。
+  - Reverse 翻转顺序，Cancel 清空选择。
+  - 编号预览在图上标出 1、2、3。
+  - 去掉了"Custom（Ctrl+点表格行）"。
+- 用户继续反馈（2026-10-19）：
+  1. 遮罩和排除区应能互换：选中遮罩后到 Exclusions 里选 blur / fold / other，就转成排除区，不必在 Exclusions 面板里才能画。
+     实现：
+     - 在 Cores 选中的核心遮罩切到 Exclusions 时会被带过去，顶部出现 `Make exclusions`，按下方勾选的原因、通道、备注转换；
+     - 右键核心遮罩 → `Make exclusion ▸ Blur / Fold / Other`；右键排除区 → `Make core mask`（变回黄色核心）；
+     - 每次转换一步撤销；核心空了就删掉并释放编号；ROI 工作区核心只读，不能转换。
+  2. 点 Reverse 后图上顺序变了，但面板的对应关系看不出变化。原因是列表只写 "1 → 位置"，不写是哪颗核心。现在列表写成 "1. core now X1-Y03 / core at (x, y) → X1-Y01  样本"，图上标 "1 → X1-Y01"，Reverse 后两处都看得出来。
+- 用户更正（2026-10-19）：
+  1. Reverse：列表按记录顺序排，每行前面是那颗核心最初点选 / 画线时的序号，点 Reverse 后从 1 2 3 变成 3 2 1；图上每颗核心的序号（它排第几、拿哪条记录）也随之倒过来。实现：Reverse 只是一个"倒序"开关，选择本身不变；列表显示原始序号，图上显示当前位置。
+  2. 去掉 `Make exclusions` 按钮。在 Exclusions 标签页，`Select ▸ Click` 也能点选核心遮罩，在 Cores 选中的遮罩切过来后保持选中；选中遮罩后勾一个原因（Blur / Fold / Other），它就变成排除区（一步撤销）。ROI 工作区不行。
+- 用户再次更正（2026-10-19）：
+  1. Reverse 只倒序号，不换记录：图上 "1 → X1-Y01、2 → X1-Y02、3 → X1-Y03" 点 Reverse 后变成 "3 → X1-Y01、2 → X1-Y02、1 → X1-Y03"，列表同样 3 2 1。每颗核心最后拿到的记录不变（用户选择的方案二）。想让记录反过来对应，就对调 Start 和 End。
+  2. 遮罩转排除区要可逆：把一个排除区的原因全部取消勾选，它就变回遮罩。原来的核心还在时回到那颗核心（有编号的会标为待复核），否则成为新的未编号核心。ROI 工作区仍然要求至少一个原因。

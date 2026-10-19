@@ -20,9 +20,12 @@ class ShapesMixin:
         return self.frame.left_tabs.currentWidget() is self.exclusions
 
     def _tab_changed(self, _i):
-        """Another tab: the tools work on its shapes; nothing half done stays."""
+        """Another tab: the tools work on its shapes; nothing half done stays.
+        Selected core masks stay selected (user 2026-10-19)."""
         self.commit_transform()                       # while the old tab's shapes are still the target
-        self.selection = []
+        # selected core masks stay selected: in Exclusions a reason makes them exclusions
+        self.selection = ([p for p in self.selected_pieces() if not self.holder.d["pieces"][p]["dropped"]]
+                          if self._can_convert_cores() else [])
         if self.ctl.busy() or self.ctl.pressed:
             self.ctl.abort_gesture()
         if self.ctl.tool in ("line", "click") and self.exclusions_tab_open():
@@ -106,6 +109,7 @@ class ShapesMixin:
                 self.cores.table.select_ident(self.holder.d["cores"][core]["position_key"] or core)
             else:
                 self.cores.table.select_ident(pid)
+        self.cores.numbering_changed()                # Select ▸ Click numbers in the clicked order
         self.refresh_view()
         self._sync_enabled()
 
@@ -136,6 +140,36 @@ class ShapesMixin:
             ids = self.selected_pieces()
             if ids:
                 self.edit(D.delete_pieces, ids)
+
+    # ── masks <-> exclusions (user 2026-10-18) ──
+    def masks_to_exclusions(self, ids, reasons, channels, note):
+        """Selected core masks given a reason in the Exclusions tab become
+        exclusions (one undo step); the new exclusions are selected."""
+        if not self._can_convert_cores():
+            return
+        uids = self.edit(D.pieces_to_exclusions, ids, reasons, channels, note)
+        if uids:
+            self.select_many(uids)
+
+    def _can_convert_cores(self) -> bool:
+        return self.holder is not None and not self.holder.read_only and self.cores_editable()
+
+    def pieces_to_exclusions(self, ids, reason):
+        if not self._can_convert_cores():
+            return
+        uids = self.edit(D.pieces_to_exclusions, ids, [reason])
+        if uids:
+            self.say(f"{len(uids)} core mask(s) made {reason} exclusion(s); see the Exclusions tab.")
+
+    def exclusion_to_core(self, uid):
+        """An exclusion back to a core mask; it stays selected (here, ticking
+        a reason makes it an exclusion again)."""
+        if not self._can_convert_cores():
+            return
+        pids = self.edit(D.exclusions_to_cores, [uid])
+        if pids:
+            self.select_many(pids)
+            self.say("It is a core mask again.")
 
     # ── Merge ──
     def merge_blocker(self):

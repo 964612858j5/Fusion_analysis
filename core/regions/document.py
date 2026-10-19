@@ -28,7 +28,7 @@ from __future__ import annotations
 import math
 import uuid
 from datetime import datetime
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import geometry as G
 
@@ -542,3 +542,48 @@ def union_pieces(d: Dict, piece_ids: Sequence[str], study: Optional[Dict] = None
     log(d, {"kind": "union_pieces", "core": receiver, "piece": pid, "from": ids,
             "released": plan["released"], "cleared_labels": plan["cleared_labels"]})
     return pid
+
+
+# ── masks <-> exclusions (user 2026-10-18) ──────────────────────────────
+
+def pieces_to_exclusions(d: Dict, piece_ids: Sequence[str], reasons: Sequence[str], channels="all",
+                         note: str = "") -> List[str]:
+    """Core masks become exclusions with `reasons` / `channels`, keeping their
+    outline: the pieces go as a Delete does (a core left empty goes and
+    frees its number) and an exclusion is added for each. Returns the new
+    exclusion ids."""
+    ids = [p for p in dict.fromkeys(piece_ids) if p in d["pieces"]]
+    if not ids:
+        raise RegionsError("no core mask to turn into an exclusion")
+    polys = [[list(q) for q in d["pieces"][p]["polygon"]] for p in ids]
+    out = [add_exclusion(d, poly, reasons, channels, note) for poly in polys]
+    for uid, p in zip(out, ids):                    # where it came from: a way back
+        d["exclusions"][uid]["from_core"] = d["pieces"][p]["owner"]
+    delete_pieces(d, ids)
+    log(d, {"kind": "pieces_to_exclusions", "pieces": ids, "exclusions": out})
+    return out
+
+
+def exclusions_to_cores(d: Dict, uids: Sequence[str]) -> List[str]:
+    """Exclusions become core masks: back into the core they came from when
+    it is still there (a numbered one is then to be confirmed again),
+    otherwise each a new unnumbered core, as a shape drawn in the Cores tab.
+    Returns the new piece ids."""
+    ids = [u for u in dict.fromkeys(uids) if u in d["exclusions"]]
+    if not ids:
+        raise RegionsError("no exclusion to turn into a core mask")
+    out = []
+    for u in ids:
+        e = d["exclusions"][u]
+        core = e.get("from_core")
+        if core and core in d["cores"]:
+            pid = add_piece(d, e["polygon"])
+            d["pieces"][pid]["owner"] = core
+            d["cores"][core]["pieces"].append(pid)
+            _to_review(d, core)
+        else:
+            pid = add_drawn_core(d, e["polygon"])
+        out.append(pid)
+    delete_exclusions(d, ids)
+    log(d, {"kind": "exclusions_to_cores", "exclusions": ids, "pieces": out})
+    return out

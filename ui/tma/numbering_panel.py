@@ -1,12 +1,13 @@
-"""The TMA page's numbering panel (F3, docs/tma_f3_page_application.md
-§1): which map records this segment is for, the preview of "image k ->
-record", the count check and Confirm / Reverse / Cancel; and the single-core
-number box.
+"""The numbering panel (F3, docs/tma_f3_page_application.md §1; user
+2026-10-18): which map records this segment is for, the preview of "core k
+-> record", the count check and Confirm / Reverse / Cancel; and the
+single-core number box.
 
-The target is either a start and an end record with an order (along a
-column / row, or the reverse), or a custom list made by Ctrl+clicking
-table rows. The panel only holds and shows; the page computes the plan
-(`core.regions.numbering.plan_binding`) and hands it to `show_plan`.
+The target is a start and an end record, typed (matched as you type) or
+picked; there is no order to choose -- the records run from start to end
+(`numbering.walk_records`), and the cores are taken in the order they were
+clicked or lined up. The panel only holds and shows; the page computes the
+plan (`core.regions.numbering.plan_binding`) and hands it to `show_plan`.
 """
 
 from __future__ import annotations
@@ -18,9 +19,44 @@ from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (QComboBox, QCompleter, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                              QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget)
 
-ORDERS = (("Along column", "column"), ("Along row", "row"),
-          ("Along column, reversed", "column_rev"), ("Along row, reversed", "row_rev"),
-          ("Custom (Ctrl+click table rows)", "custom"))
+
+class RecordBox(QComboBox):
+    """A record chooser you can type into: any part of "X1-Y05  donor"
+    matches (the first match is taken when typing ends); unmatched text
+    goes back to the current record."""
+
+    picked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.NoInsert)
+        self.lineEdit().editingFinished.connect(self._typed)
+        self.currentIndexChanged.connect(lambda _i: self.picked.emit())
+
+    def set_items(self, items):
+        self.blockSignals(True)
+        self.clear()
+        for text, data in items:
+            self.addItem(text, data)
+        comp = QCompleter([t for t, _d in items], self)
+        comp.setCaseSensitivity(Qt.CaseInsensitive)
+        comp.setFilterMode(Qt.MatchContains)
+        comp.activated.connect(self._typed)
+        self.setCompleter(comp)
+        self.blockSignals(False)
+
+    def _typed(self, *_a):
+        text = self.currentText().strip().lower()
+        hit = next((i for i in range(self.count()) if self.itemText(i).lower() == text), None)
+        if hit is None and text:
+            hit = next((i for i in range(self.count()) if text in self.itemText(i).lower()), None)
+        if hit is None:
+            hit = self.currentIndex()
+        if hit != self.currentIndex():
+            self.setCurrentIndex(hit)
+        elif hit >= 0:
+            self.setEditText(self.itemText(hit))
 
 
 class NumberingPanel(QWidget):
@@ -37,20 +73,17 @@ class NumberingPanel(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         grid = QGridLayout()
         grid.addWidget(QLabel("Start:"), 0, 0)
-        self.start = QComboBox()
+        self.start = RecordBox()
         grid.addWidget(self.start, 0, 1)
         grid.addWidget(QLabel("End:"), 0, 2)
-        self.end = QComboBox()
+        self.end = RecordBox()
         grid.addWidget(self.end, 0, 3)
-        grid.addWidget(QLabel("Order:"), 1, 0)
-        self.order = QComboBox()
-        for text, _key in ORDERS:
-            self.order.addItem(text)
-        grid.addWidget(self.order, 1, 1, 1, 3)
         lay.addLayout(grid)
-        self.custom_label = QLabel("")
-        self.custom_label.setWordWrap(True)
-        lay.addWidget(self.custom_label)
+        hint = QLabel("Type or pick the first and the last record. Cores are numbered in the order you "
+                      "click them (Select ▸ Click, Ctrl+click for more), click them (Annotate ▸ Clicks) "
+                      "or line them up (Annotate ▸ Line).")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
         row = QHBoxLayout()
         self.count = QLabel("Selected 0 / target 0")
         row.addWidget(self.count, 1)
@@ -73,11 +106,8 @@ class NumberingPanel(QWidget):
         single.addWidget(self.btn_bind)
         single.addWidget(self.btn_custom)
         lay.addLayout(single)
-        self.custom_ids: List[int] = []
-        self._labels: Dict[int, str] = {}
-        self.start.currentIndexChanged.connect(lambda _i: self.target_changed.emit())
-        self.end.currentIndexChanged.connect(lambda _i: self.target_changed.emit())
-        self.order.currentIndexChanged.connect(self._order_changed)
+        self.start.picked.connect(self.target_changed.emit)
+        self.end.picked.connect(self.target_changed.emit)
         self.btn_confirm.clicked.connect(self.confirm.emit)
         self.btn_reverse.clicked.connect(self.reverse.emit)
         self.btn_cancel.clicked.connect(self.cancel.emit)
@@ -88,54 +118,20 @@ class NumberingPanel(QWidget):
     # ── the map's records ──
     def set_records(self, records: List[Dict]):
         """Every non-empty map record: position_id, label, donor."""
-        self._labels = {r["position_id"]: r["label"] for r in records}
-        for box in (self.start, self.end):
-            box.blockSignals(True)
-            box.clear()
-            for r in records:
-                box.addItem(f"{r['label']}  {r['donor']}", r["position_id"])
-            box.blockSignals(False)
+        items = [(f"{r['label']}  {r['donor']}", r["position_id"]) for r in records]
+        self.start.set_items(items)
+        self.end.set_items(items)
         if records:
             self.end.setCurrentIndex(len(records) - 1)
         comp = QCompleter([f"{r['label']} {r['donor']}" for r in records])
         comp.setCaseSensitivity(Qt.CaseInsensitive)
         comp.setFilterMode(Qt.MatchContains)
         self.number.setCompleter(comp)
-        self.custom_ids = []
-        self._order_changed()
-
-    def order_key(self) -> str:
-        return ORDERS[self.order.currentIndex()][1]
+        self.target_changed.emit()
 
     def target(self):
-        """("range", start_id, end_id, order) or ("custom", [ids])."""
-        if self.order_key() == "custom":
-            return ("custom", list(self.custom_ids))
-        return ("range", self.start.currentData(), self.end.currentData(), self.order_key())
-
-    def add_custom(self, position_id: int):
-        if self.order_key() != "custom":
-            return
-        if position_id in self.custom_ids:
-            self.custom_ids.remove(position_id)
-        else:
-            self.custom_ids.append(position_id)
-        self._show_custom()
-        self.target_changed.emit()
-
-    def _order_changed(self, *_a):
-        custom = self.order_key() == "custom"
-        self.start.setEnabled(not custom)
-        self.end.setEnabled(not custom)
-        self._show_custom()
-        self.target_changed.emit()
-
-    def _show_custom(self):
-        if self.order_key() != "custom":
-            self.custom_label.setText("")
-            return
-        names = [self._labels.get(i, str(i)) for i in self.custom_ids]
-        self.custom_label.setText("Target: " + (", ".join(names) if names else "Ctrl+click rows in the table"))
+        """(start_id, end_id) -- None for one not chosen."""
+        return self.start.currentData(), self.end.currentData()
 
     # ── the preview ──
     def show_plan(self, plan, active: bool = False):
@@ -145,7 +141,7 @@ class NumberingPanel(QWidget):
         for b in (self.btn_confirm, self.btn_reverse, self.btn_cancel):
             b.setEnabled(active)
         if plan is None:
-            self.count.setText("Draw a line or click cores to number them")
+            self.count.setText("Select, click or line up cores to number them")
             self.btn_confirm.setText("Confirm")
             return
         n_sel = len(plan["pairs"]) if plan["ok"] else None
@@ -153,7 +149,7 @@ class NumberingPanel(QWidget):
         conflicts = {c["object"] for c in plan["conflicts"]}
         for k, pr in enumerate(plan["pairs"], start=1):
             r = pr["record"]
-            it = QListWidgetItem(f"{k} → {r['label']}  {r['donor']}")
+            it = QListWidgetItem(f"{pr.get('number') or k} → {r['label']}  {r['donor']}")
             if pr["object"] in conflicts:
                 it.setForeground(QColor("#c62828"))
             self.preview.addItem(it)

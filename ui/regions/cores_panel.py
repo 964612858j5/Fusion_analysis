@@ -54,8 +54,8 @@ class CoresPanel(QWidget, CoresActions):
         self.btn_find.clicked.connect(self.find_cores)
         self.numbering.target_changed.connect(self.page.numbering_changed)
         self.numbering.confirm.connect(self.confirm_numbering)
-        self.numbering.reverse.connect(self.page.ctl.reverse)
-        self.numbering.cancel.connect(self.page.ctl.cancel)
+        self.numbering.reverse.connect(self.reverse_numbering)
+        self.numbering.cancel.connect(self.cancel_numbering)
         self.numbering.bind_single.connect(self.bind_single)
         self.numbering.custom_single.connect(self.custom_single)
         self.table.row_clicked.connect(self.row_clicked)
@@ -148,8 +148,18 @@ class CoresPanel(QWidget, CoresActions):
         if self.page.selected in d["pieces"]:
             handles = d["pieces"][self.page.selected]["polygon"]
         order = {}
-        for k, obj in enumerate(self.page.ctl.sequence, start=1):
-            order[d["cores"][obj]["pieces"][0] if obj in d["cores"] else obj] = str(k)
+        seq = self.numbering_sequence() if self.numbering_allowed() else []   # no numbering here: no labels
+        target = {}
+        if seq and self.study is not None:                # each core shows the record it will get
+            try:
+                recs = self.target_records()
+                target = {o: r["label"] for o, r in zip(seq, recs)}
+            except D.RegionsError:
+                target = {}
+        for obj in seq:
+            k = self.shown_number(obj, seq)
+            text = f"{k} → {target[obj]}" if obj in target else str(k)
+            order[d["cores"][obj]["pieces"][0] if obj in d["cores"] else obj] = text
         return items, sel, handles, order
 
     # ── the table ──
@@ -218,31 +228,97 @@ class CoresPanel(QWidget, CoresActions):
         return f"{sum(w * t for w, t in vals) / sum(w for w, _ in vals):.2f}"
 
     # ── the numbering preview ──
+    def numbering_sequence(self):
+        """The cores to number, in the order they get the records: the
+        user's own order (`base_sequence`). Reverse only turns the shown
+        numbers round (user 2026-10-19), never which core gets which record."""
+        base = self.base_sequence()
+        if not base:
+            self.reversed = False                     # nothing chosen: Reverse starts afresh
+        return base
+
+    def shown_number(self, obj, seq):
+        """The number shown for `obj` in the list and on the viewer: its place
+        in the user's order, counted from the other end after Reverse."""
+        k = seq.index(obj) + 1
+        return len(seq) + 1 - k if self.__dict__.get("reversed") else k
+
+    def base_sequence(self):
+        """The cores in the user's own order: the line's / clicks' sequence,
+        or with Select ▸ Click the selected cores in the order they were
+        clicked (user 2026-10-18)."""
+        page, ctl = self.page, self.page.ctl
+        if ctl.tool in ("line", "click"):
+            return list(ctl.sequence)
+        if ctl.tool != "select" or page.holder is None or page.exclusions_tab_open():
+            return []
+        d, out = page.holder.d, []
+        for sid in page.selection:
+            p = d["pieces"].get(sid)
+            if p is None or p["dropped"]:
+                continue
+            obj = p["owner"] or sid
+            if obj not in out:
+                out.append(obj)
+        return out
+
+    def numbering_allowed(self) -> bool:
+        h = self.page.holder
+        return h is not None and not h.read_only and self.study is not None and self.page.cores_editable()
+
     def numbering_changed(self):
-        h, ctl = self.page.holder, self.page.ctl
-        active = h is not None and self.study is not None and ctl.tool in ("line", "click") and bool(ctl.sequence or ctl.line)
+        seq = self.numbering_sequence()
+        line = self.page.ctl.tool == "line" and self.page.ctl.line is not None   # even one through no core
+        active = self.numbering_allowed() and (bool(seq) or line)
         self.numbering.show_plan(self.current_plan() if active else None, active=active)
 
     def current_plan(self):
+        seq = self.numbering_sequence()
         try:
             records = self.target_records()
         except D.RegionsError as exc:
             return {"ok": False, "problems": [str(exc)], "pairs": [], "conflicts": [],
-                    "count_text": f"Selected {len(self.page.ctl.sequence)} / target ?"}
-        plan = N.plan_binding(self.page.holder.d, self.page.ctl.sequence, records)
-        plan["count_text"] = f"Selected {len(self.page.ctl.sequence)} / target {len(records)}"
+                    "count_text": f"Selected {len(seq)} / target ?"}
+        plan = N.plan_binding(self.page.holder.d, seq, records)
+        plan["count_text"] = f"Selected {len(seq)} / target {len(records)}"
+        for p in plan["pairs"]:                            # the number shown for the core (turned by Reverse)
+            p["number"] = self.shown_number(p["object"], seq) if p["object"] in seq else None
         if not plan["ok"]:
             plan["pairs"] = []
         return plan
 
     def target_records(self):
-        t = self.numbering.target()
-        if t[0] == "custom":
-            return N.records_by_ids(self.study, t[1])
-        _k, a, b, order = t
+        a, b = self.numbering.target()
         if a is None or b is None:
             raise D.RegionsError("choose the start and the end record")
-        return N.target_records(self.study, a, b, order)
+        return N.walk_records(self.study, a, b)
+
+    def select_preview_pending(self) -> bool:
+        """A Select ▸ Click numbering ready to confirm (Ctrl+Z drops it
+        before undoing an edit, as for a line)."""
+        page = self.page
+        if (page.ctl.tool != "select" or self.study is None or page.holder is None or page.holder.read_only
+                or not page.cores_editable() or not self.numbering_sequence()):
+            return False
+        plan = self.current_plan()
+        d = page.holder.d                         # already bound as planned (just confirmed): nothing pending
+        return bool(plan["ok"]) and any(
+            (d["cores"].get(p["core"] or "") or {}).get("position_key") != p["record"]["position_key"]
+            for p in plan["pairs"])
+
+    def reverse_numbering(self):
+        """Reverse (user 2026-10-19): the numbers turn round -- 1 2 3 becomes
+        3 2 1 in the list and on the viewer; each core keeps its record."""
+        self.reversed = not self.__dict__.get("reversed")
+        self.page.numbering_changed()
+
+    def cancel_numbering(self):
+        page = self.page
+        self.reversed = False
+        if page.ctl.tool == "select":
+            page.select(None)
+        else:
+            page.ctl.cancel()
 
     def project_dir(self):
         return self.page.ctx.get("project_dir")

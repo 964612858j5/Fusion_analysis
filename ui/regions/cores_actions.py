@@ -31,9 +31,13 @@ class CoresActions:
         extra = {}
         if page.ctl.line is not None:
             extra = {"line": [list(page.ctl.line[0]), list(page.ctl.line[1])], "band": page.ctl.band}
-        method = "line" if page.ctl.tool == "line" else "click"
+        method = {"line": "line", "click": "click"}.get(page.ctl.tool, "select")
         if page.edit(N.apply_binding, plan, method, rebind=bool(plan["conflicts"]), extra=extra) is not None:
+            self.reversed = False
+            if page.ctl.tool == "select":
+                page.select(None)                 # done: the next Ctrl+Z undoes this numbering
             page.ctl.cancel()
+            self.say(f"Numbered {len(plan['pairs'])} core(s).")
 
     def _record_from_text(self, text):
         t = (text or "").strip().lower()
@@ -102,11 +106,6 @@ class CoresActions:
     # ── table ──
     def row_clicked(self, kind, ident, ctrl):
         page = self.page
-        if kind == "position" and self.numbering.order_key() == "custom" and ctrl:
-            rec = self.labels_by_key().get(ident)
-            if rec and rec["donor"]:
-                self.numbering.add_custom(rec["position_id"])
-            return
         h = page.holder
         if h is None:
             return
@@ -189,6 +188,10 @@ class CoresActions:
                     m.addAction("Remove number", lambda: page.edit(D.unbind, p["owner"]))
         m.addAction("Delete" if len(ids) == 1 else f"Delete {len(ids)} pieces",
                     lambda: page.edit(D.delete_pieces, ids))
+        if not p["dropped"]:
+            sub = m.addMenu("Make exclusion" if len(ids) == 1 else f"Make {len(ids)} exclusions")
+            for reason, text in (("blur", "Blur"), ("fold", "Fold"), ("other", "Other")):
+                sub.addAction(text, lambda r=reason: page.pieces_to_exclusions(ids, r))
         m.exec_(QCursor.pos())
 
     # ── study, cores ──

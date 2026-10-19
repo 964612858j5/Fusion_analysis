@@ -358,6 +358,9 @@ class RegionsPage(QWidget, VersionsMixin, ShapesMixin):
                 self.ctl.transform = None
             self.refresh_view()
             return
+        if self.cores.select_preview_pending():   # a Select ▸ Click numbering not confirmed yet
+            self.select(None)
+            return
         if self.ctl.has_preview():
             self.ctl.cancel()
             return
@@ -452,6 +455,9 @@ class RegionsPage(QWidget, VersionsMixin, ShapesMixin):
         self.ctl.prune()
         if self.holder is not None:
             self.selection = [s for s in self.selection if s in self.holder.d["pieces"] or s in self.holder.d["exclusions"]]
+            if self.exclusions_tab_open() and not self._can_convert_cores():
+                # masks are picked here only to become exclusions; not in an ROI / a read-only version
+                self.selection = [s for s in self.selection if s in self.holder.d["exclusions"]]
         else:
             self.selection = []
         self._refresh_title()
@@ -509,7 +515,8 @@ class RegionsPage(QWidget, VersionsMixin, ShapesMixin):
         h = self.holder                                    # ↶ also steps back a half-done gesture
         editable = h is not None and not h.read_only
         self.btn_undo.setEnabled(editable and (h.can_undo or self.ctl.busy() or self.ctl.has_preview()
-                                               or self.ctl.transform is not None))
+                                               or self.ctl.transform is not None
+                                               or self.cores.select_preview_pending()))
         self.btn_redo.setEnabled(editable and h.can_redo and self.ctl.transform is None)
 
     def _sync_enabled(self):

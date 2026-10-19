@@ -139,8 +139,14 @@ row, and the duplicate Tissue Preview button in the step bar.
   three rows the strip scrolls instead of growing. `Random…` sits on its own
   line under them (block A2, user ruling 2026-09-24): count, width and height
   in a small dialog; the patches are drawn inside the ROI polygon, or in the
-  tissue without an ROI, never more than 40 % blank and never overlapping, and
+  tissue without an ROI -- in a TMA project with a saved Regions result,
+  inside the selected cores, each core in turn, clear of the exclusions
+  (F4-2) -- never more than 40 % blank and never overlapping, and
   join the patch list as drawn ones do. Only a shortfall is announced.
+  With a Regions result the results summary has a second line (F4-2):
+  `Regions: n cores` (plus how many ticked cores do not run, listed in the
+  terminal, and `a newer Regions result exists` after a later Save); a run
+  of a TMA project without a usable Regions Save is refused in a message.
   `Delete` beside it deletes the TICKED patches after one confirmation
   (user ruling, 2026-09-24): with `Select all` that is every patch; with no
   tick it is disabled. There is no separate "Delete all".
@@ -515,7 +521,19 @@ row, and the duplicate Tissue Preview button in the step bar.
   result per slide replaced by each Save; no versions, no lock); left tabs `Channels` (the one channel dock with Step1's
   rows -- the channel state is Step1's / Step3's, so a tick is the fusion
   command -- and `Intensity…`) and `Cores` (`Choose map sheet…`, `Find
-  cores`, the numbering panel, the core table) and `Exclusions` (R3: the
+  cores`, the numbering panel -- `Start` / `End` record boxes you can type
+  into (any part of the position or donor matches) or pick from, no order to
+  choose (records run start to end: along a column, a row, or by position),
+  the cores taken in the order they were clicked (`Select ▸ Click`, Ctrl for
+  more), clicked (`Annotate ▸ Clicks`) or lined up (`Annotate ▸ Line`);
+  `Reverse`, `Confirm`, `Cancel`; the preview lists the records in order,
+  each with the number of the core that gets it, and the viewer labels each
+  core `1 → X1-Y01`; Reverse turns only the numbers round (1 2 3 -> 3 2 1,
+  in the list and on the viewer), never which core gets which record (user
+  2026-10-19: to give the records the other way round, swap Start and End);
+  the single-core
+  number box -- the core
+  table) and `Exclusions` (R3: the
   blur / fold exclusion list -- number, reasons, channels, area, core --,
   the reason boxes `Blur` / `Fold` / `Other`, `All channels` + `Channels…`
   (a channel checklist dialog) and `Note`); right tab `Viewer` whose tool
@@ -547,8 +565,13 @@ row, and the duplicate Tissue Preview button in the step bar.
   and keeps the tool; Delete removes the selected shapes. Over a third
   resident Step1 viewer with a
   transparent overlay (outlines, labels, the numbering line). Right-click
-  menus on a shape (an exclusion: `Delete exclusion`; a piece: `Delete`,
-  no `Leave out…`) and on a table row as in F3. `Revert to saved` and
+  menus on a shape (an exclusion: `Delete exclusion`, `Make core mask`; a
+  piece: `Delete`, `Make exclusion ▸ Blur / Fold / Other`, no `Leave out…`;
+  in the Exclusions tab `Select ▸ Click` picks core masks too, and masks
+  selected in either tab stay selected across it: ticking a reason there
+  makes them exclusions, and unticking every reason of an exclusion makes it
+  a core mask again (back into its core when that is still there) -- user
+  2026-10-19; not in an ROI workspace) and on a table row as in F3. `Revert to saved` and
   Merge ask for confirmation; the channel checklist is the only other
   dialog. No other window.
 

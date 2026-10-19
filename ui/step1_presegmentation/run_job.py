@@ -261,6 +261,10 @@ class PresegRunJob:
                 rrec = json.load(f)
             raw = {k: (np.load(rrec[k]["path"]) if (rrec.get(k) or {}).get("status") == "ok" else None)
                    for k in ("cell", "nucleus")}
+            raster = self._regions_raster(t["method"])
+            if raster is not None:                        # F4-2: the Regions rules, before the crop
+                raw, dropped = preseg_input.regions_filter(t["method"], raw, rt["_window"], raster)
+                print(f"[Preseg] {t['task_id']}: Regions dropped {dropped}")
             own = preseg_input.own_local(t["patch_bbox"], rt["_window"])
             masks, paired = own_masks(t["method"], raw, own)
             for k in ("cell", "nucleus"):
@@ -271,6 +275,19 @@ class PresegRunJob:
                          runtime_s=rrec.get("runtime_s"), paired=paired)
         except Exception:  # noqa: BLE001
             self._settle(t, preseg_run.FAILED, "result: " + traceback.format_exc()[-2000:])
+
+    def _regions_raster(self, method):
+        """The frozen Regions snapshot of this method's input kind as a
+        raster (F4-2), or None for a run without Regions."""
+        entry = (self.run.get("regions") or {}).get(preseg_input.INPUT_KIND[method])
+        if not entry:
+            return None
+        cache = self.__dict__.setdefault("_rasters", {})
+        if entry["path"] not in cache:
+            from ...core.regions import analysis as A
+            from ...core.regions.raster import AnalysisRaster
+            cache[entry["path"]] = AnalysisRaster(A.load_snapshot(entry["path"]))
+        return cache[entry["path"]]
 
     # ── settling ─────────────────────────────────────────────────────
     def _settle(self, task, status, error, **kw):

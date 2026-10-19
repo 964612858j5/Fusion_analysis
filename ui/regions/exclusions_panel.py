@@ -100,10 +100,25 @@ class ExclusionsPanel(QWidget):
         sel = self.page.selected
         return sel if h is not None and sel in h.d["exclusions"] else None
 
+    def _selected_masks(self):
+        """Core masks selected here (no exclusion selected): a reason ticked
+        makes them exclusions (user 2026-10-19)."""
+        h = self.page.holder
+        if h is None or not self.page.exclusions_tab_open() \
+                or any(s in h.d["exclusions"] for s in self.page.selection):
+            return []
+        return [s for s in self.page.selection if s in h.d["pieces"]]
+
     def _fields_edited(self, *_a):
         if self._filling:
             return
         self.btn_channels.setEnabled(not self.cb_all.isChecked())
+        masks = self._selected_masks()
+        if masks:
+            reasons = self.reasons()
+            if reasons:
+                self.page.masks_to_exclusions(masks, reasons, self.channels(), self.note.text().strip())
+            return
         uid = self._selected_uid()
         if uid is None:                                      # the next exclusion's defaults
             self._defaults = (self.reasons(), list(self._channels) if not self.cb_all.isChecked() else [],
@@ -113,8 +128,11 @@ class ExclusionsPanel(QWidget):
             self._show_fields()
             return
         reasons = self.reasons()
-        if not reasons:                                      # at least one: put the old ones back
-            self.page.say("An exclusion needs at least one reason.")
+        if not reasons:                                      # no reason left: a core mask again (user 2026-10-19)
+            if self.page._can_convert_cores():
+                self.page.exclusion_to_core(uid)
+                return
+            self.page.say("An exclusion needs at least one reason (cores are not edited in this workspace).")
             self._show_fields()
             return
         e = self.page.holder.d["exclusions"][uid]
@@ -154,9 +172,15 @@ class ExclusionsPanel(QWidget):
     def _show_fields(self):
         """The selected exclusion's fields (or the defaults, untouched)."""
         uid = self._selected_uid()
+        masks = self._selected_masks()
         self.lbl_target.setText("Selected exclusion:" if uid else
-                                "Several exclusions selected." if self._several() else "For the next exclusion:")
-        if uid is None:
+                                "Several exclusions selected." if self._several() else
+                                f"{len(masks)} core mask(s) selected: tick a reason to make "
+                                f"{'it an exclusion' if len(masks) == 1 else 'them exclusions'}" if masks else
+                                "For the next exclusion:")
+        if masks:                                            # no reason yet: ticking one converts
+            e = {"reasons": [], "channels": self._defaults[1] or "all", "note": self._defaults[2]}
+        elif uid is None:
             reasons, chans, note = self._defaults
             e = {"reasons": reasons, "channels": chans or "all", "note": note}
         else:
@@ -257,4 +281,6 @@ class ExclusionsPanel(QWidget):
             return
         m = QMenu(self.page)
         m.addAction("Delete exclusion", lambda: self.page.edit(D.delete_exclusions, [uid]))
+        if self.page.cores_editable():
+            m.addAction("Make core mask", lambda: self.page.exclusion_to_core(uid))
         m.exec_(QCursor.pos())

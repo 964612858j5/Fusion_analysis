@@ -5,7 +5,10 @@ Step2 hook-up, step 2. No Qt. Save (Step1) writes the block under
 it back and checks it. The block carries everything that decides "the same
 result": the method and the combination's parameters exactly as the engine
 received them in Step1, the HALO, the pixels (`pixel_key`), the Fusion
-settings, which run and combination, and the engine identity OF THAT RUN.
+settings, which run and combination, and the engine identity OF THAT RUN;
+for a project with a Regions result also the frozen Regions snapshot of the
+method's input (optional key "regions": its identity and the whole snapshot,
+so the handoff never depends on the preseg run staying on disk; F4-2).
 
 A file is new-format only by its version number (`CONTRACT_KEY` present);
 a file without the key is an old file and keeps the old path (user ruling,
@@ -84,10 +87,26 @@ def build(run, combo_id, records):
         "combo_id": combo_id,
         "engine_identity": copy.deepcopy(ids[0]),
     }
+    regions = (run.get("regions") or {}).get(_kind(method))
+    if regions:                                   # F4-2: the frozen Regions snapshot Step2 must follow,
+        from .regions import analysis as RA       # carried whole: deleting the preseg run cannot lose it
+        try:
+            snap = RA.load_snapshot(regions["path"])
+        except (OSError, ValueError) as exc:
+            raise ContractError(f"the run's Regions snapshot cannot be read ({exc})")
+        if snap["identity"] != regions["identity"]:
+            raise ContractError("the run's Regions snapshot is not the one it ran with")
+        block["regions"] = {"input_kind": _kind(method), "identity": regions["identity"],
+                            "path": regions["path"], "snapshot": snap}
     missing = [k for k in REQUIRED if block.get(k) in (None, "")]
     if missing:
         raise ContractError(f"the run does not record: {', '.join(missing)}")
     return block
+
+
+def _kind(method):
+    from .preseg_input import INPUT_KIND
+    return INPUT_KIND.get(method)
 
 
 def validate(cfg):
@@ -107,6 +126,13 @@ def validate(cfg):
     rules = fixed_rules(block["method"])
     if any(block["params"].get(k, object()) != v for k, v in rules.items()):
         raise ContractError("the contract's parameters lack the method's fixed rules")
+    reg = block.get("regions")
+    if reg is not None:
+        if not isinstance(reg, dict) or not reg.get("identity") or not isinstance(reg.get("snapshot"), dict):
+            raise ContractError("the contract's Regions snapshot is incomplete")
+        from .regions import analysis as RA
+        if RA.identity(reg["snapshot"]) != reg["identity"]:
+            raise ContractError("the contract's Regions snapshot does not match its identity")
     ident = block["engine_identity"]
     if not isinstance(ident, dict) or ident.get("engine") != preseg_run.ps_engine(block["method"]):
         raise ContractError("the contract's engine identity does not fit its method")

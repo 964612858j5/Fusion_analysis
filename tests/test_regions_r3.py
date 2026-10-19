@@ -101,13 +101,15 @@ def test_select_vertex_reasons_channels_and_delete_each_one_undo_step(app, env, 
     page.exclusions.set_channel_choice(["CD8"])
     assert page.holder.d["exclusions"][uid]["channels"] == ["CD8"]
     page.exclusions.cb["blur"].setChecked(False)
-    page.exclusions.cb["other"].setChecked(False)                     # the last reason cannot go
+    page.exclusions.cb["other"].setChecked(False)                     # no reason left: a core mask
+    assert uid not in page.holder.d["exclusions"] and page.selected in page.holder.d["pieces"]
+    page.undo()                                                       # the exclusion back
     assert page.holder.d["exclusions"][uid]["reasons"] == ["other"]
-    assert page.exclusions.cb["other"].isChecked()                    # and the box shows it again
     page.undo()                                                       # blur back
     assert page.holder.d["exclusions"][uid]["reasons"] == ["blur", "other"]
     page.undo()                                                       # channels back
     assert page.holder.d["exclusions"][uid]["channels"] == "all"
+    page.select(uid)
     page._delete_selected()
     assert uid not in page.holder.d["exclusions"]
     page.undo()
@@ -967,4 +969,271 @@ def test_revert_in_another_workspace_shows_its_handoff_as_unsaved(app, env, monk
         page.set_context(dict(page.ctx, full_wsi=ws == "full", workspace_id=ws,
                               handoff_sha256=("ab" * 32) if ws == "full" else "ee" * 32))
     assert "unsaved" not in page.lbl_saved.text()
+    page.shutdown()
+
+
+# ── numbering without Order (user 2026-10-18) ────────────────────────────
+
+def test_the_records_walk_from_start_to_end_with_no_order_to_choose():
+    from block01.core.regions import numbering as N
+    from test_regions_r1 import _study
+    s = _study()
+    lab = lambda rs: [r["label"] for r in rs]                       # noqa: E731
+    assert lab(N.walk_records(s, 1, 3)) == ["X1-Y01", "X1-Y02", "X1-Y03"]          # one column
+    assert lab(N.walk_records(s, 3, 1)) == ["X1-Y03", "X1-Y02", "X1-Y01"]          # backwards
+    row = N.walk_records(s, 1, 9)                                                  # X1-Y01 .. X3-Y01: one row
+    assert lab(row) == ["X1-Y01", "X2-Y01", "X3-Y01"]
+    assert lab(N.walk_records(s, 2, 2)) == ["X1-Y02"]                              # one core
+    assert len(N.walk_records(s, 1, 6)) > 3                                        # across columns: by position
+
+
+def test_start_and_end_are_typed_and_matched(app, env, monkeypatch):
+    page = _page(app, env, monkeypatch)
+    nb = page.cores.numbering
+    nb.start.setEditText("x1-y03")
+    nb.start.lineEdit().editingFinished.emit()
+    assert nb.start.currentText().startswith("X1-Y03")
+    text = nb.end.itemText(1)                                       # "X1-Y02  D1"
+    nb.end.setEditText(text.split()[1].lower())                     # the donor id, any case
+    nb.end.lineEdit().editingFinished.emit()
+    assert nb.end.currentText() == text
+    nb.end.setEditText("nothing like this")
+    nb.end.lineEdit().editingFinished.emit()
+    assert nb.end.currentText() == text                             # unmatched: back to the record
+    page.shutdown()
+
+
+def test_select_click_numbers_cores_in_the_clicked_order_and_one_core_alone(app, env, monkeypatch):
+    page = _page(app, env, monkeypatch)
+    nb = page.cores.numbering
+    page._set_tool("select")
+    for y in (3, 1, 2):                                             # clicked bottom first
+        page.ctl.click(*_centre(1, y), ctrl=y != 3)
+    _set_target(page, "X1-Y01", "X1-Y03")
+    assert nb.count.text() == "Selected 3 / target 3" and nb.btn_confirm.isEnabled()
+    nb.btn_reverse.click()                                          # only the shown numbers turn round
+    assert page.cores.numbering_sequence()[0] == page.holder.d["pieces"][page.selection[0]]["owner"]
+    nb.btn_reverse.click()
+    nb.btn_confirm.click()
+    from test_tma_f3_page import _label_of
+    at = lambda y: page.ctl.object_at(*_centre(1, y))               # noqa: E731
+    assert [_label_of(page, at(y)) for y in (3, 1, 2)] == ["X1-Y01", "X1-Y02", "X1-Y03"]
+    page.ctl.click(*_centre(2, 1))                                  # one core, start = end
+    _set_target(page, "X2-Y02", "X2-Y02")
+    assert nb.btn_confirm.isEnabled()
+    nb.btn_confirm.click()
+    assert _label_of(page, page.ctl.object_at(*_centre(2, 1))) == "X2-Y02"
+    nb.btn_cancel.click()                                           # Cancel clears the selection
+    assert page.selection == [] and not nb.btn_confirm.isEnabled()
+    page.shutdown()
+
+
+def test_reverse_goes_by_core_undo_drops_a_ready_selection_first_and_an_empty_line_can_be_cancelled(app, env, monkeypatch):
+    from block01.core.regions import document as D
+    page = _page(app, env, monkeypatch)
+    nb = page.cores.numbering
+    d = page.holder.d
+    a = page.ctl.object_at(*_centre(1, 1))
+    b = page.ctl.object_at(*_centre(1, 2))
+    page._set_tool("circle")
+    cy, cx = _centre(1, 1)
+    _drag(page, (cy - 5, cx + 70), (cy + 5, cx + 80))                # a second piece, grouped into core a
+    extra = page.selected
+    page.select_many([d["cores"][a]["pieces"][0], extra])
+    _merge(page, "Group")
+    page._set_tool("select")
+    page.selection = [d["cores"][a]["pieces"][0], d["cores"][b]["pieces"][0], extra]
+    page._selection_changed()
+    assert page.cores.numbering_sequence() == [a, b]
+    nb.btn_reverse.click()                                            # the shown numbers turn, by core
+    assert page.cores.numbering_sequence() == [a, b]
+    assert [page.cores.shown_number(o, [a, b]) for o in (a, b)] == [2, 1]
+    _set_target(page, "X1-Y01", "X1-Y02")
+    n = len(page.holder.d["cores"])
+    page.undo()                                                       # first: the ready numbering goes
+    assert page.selection == [] and len(page.holder.d["cores"]) == n
+    page._set_tool("line")
+    _drag(page, (850, 50), (850, 300))                                # through no core
+    assert page.ctl.line is not None and nb.btn_cancel.isEnabled()
+    nb.btn_cancel.click()
+    assert page.ctl.line is None
+    page.shutdown()
+
+
+def test_ctrl_z_steps_back_a_pending_transform_before_the_numbering_and_roi_has_no_numbering_preview(app, env, monkeypatch):
+    page = _page(app, env, monkeypatch)
+    page._set_tool("select")
+    cy, cx = _centre(1, 1)
+    page.ctl.click(cy, cx)
+    pid = page.selected
+    _set_target(page, "X1-Y01", "X1-Y01")
+    assert page.cores.select_preview_pending() and page.btn_undo.isEnabled()
+    before = [list(q) for q in page.holder.d["pieces"][pid]["polygon"]]
+    _drag(page, (cy, cx), (cy + 15, cx + 15))                       # a transform preview
+    page.undo()                                                     # back the drag, nothing written
+    assert page.holder.d["pieces"][pid]["polygon"] == before and page.selection == [pid]
+    page.undo()                                                     # then the numbering preview
+    assert page.selection == [] and page.holder.d["pieces"][pid]["polygon"] == before
+    page.set_context(dict(page.ctx, full_wsi=False, workspace_id="roi_a"))
+    page.ctl.click(cy, cx)
+    assert not page.cores.select_preview_pending()                  # cores are read-only here
+    page.shutdown()
+
+
+def test_after_confirming_a_select_numbering_undo_undoes_the_numbering(app, env, monkeypatch):
+    from test_tma_f3_page import _label_of
+    page = _page(app, env, monkeypatch)
+    page._set_tool("select")
+    page.ctl.click(*_centre(1, 1))
+    _set_target(page, "X1-Y02", "X1-Y02")
+    page.cores.numbering.btn_confirm.click()
+    core = page.ctl.object_at(*_centre(1, 1))
+    assert _label_of(page, core) == "X1-Y02" and not page.cores.select_preview_pending()
+    page.btn_undo.click()                                          # the first Undo takes the numbering back
+    assert _label_of(page, page.ctl.object_at(*_centre(1, 1))) != "X1-Y02"
+    page.shutdown()
+
+
+# ── masks <-> exclusions and a visible Reverse (user 2026-10-18) ─────────
+
+def test_a_core_mask_given_a_reason_in_the_exclusions_tab_becomes_an_exclusion(app, env, monkeypatch):
+    page = _page(app, env, monkeypatch)
+    page._set_tool("select")
+    page.ctl.click(*_centre(1, 1))
+    page.ctl.click(*_centre(1, 2), ctrl=True)
+    ids = list(page.selection)
+    n_cores = len(page.holder.d["cores"])
+    _open_exclusions(page)
+    assert page.selection == ids                                     # still selected in Exclusions
+    assert "tick a reason" in page.exclusions.lbl_target.text()
+    assert not any(c.isChecked() for c in page.exclusions.cb.values())
+    page.exclusions.cb["fold"].setChecked(True)                      # the reason makes them exclusions
+    ex = page.holder.d["exclusions"]
+    assert len(ex) == 2 and all(e["reasons"] == ["fold"] for e in ex.values())
+    assert not any(p in page.holder.d["pieces"] for p in ids) and len(page.holder.d["cores"]) == n_cores - 2
+    assert set(page.selection) == set(ex)
+    page.undo()                                                      # one step back: the masks return
+    assert all(p in page.holder.d["pieces"] for p in ids) and page.holder.d["exclusions"] == {}
+    page.select(None)
+    page.ctl.click(*_centre(2, 1))                                   # a click picks a mask here too
+    assert page.selected in page.holder.d["pieces"]
+    page.shutdown()
+
+
+def test_right_click_turns_a_mask_into_an_exclusion_and_back(app, env, monkeypatch):
+    page = _page(app, env, monkeypatch)
+    pid = page.ctl.piece_at(*_centre(2, 1))
+    poly = [list(q) for q in page.holder.d["pieces"][pid]["polygon"]]
+    page.pieces_to_exclusions([pid], "blur")
+    uid = next(iter(page.holder.d["exclusions"]))
+    assert page.holder.d["exclusions"][uid]["polygon"] == poly and page.holder.d["exclusions"][uid]["reasons"] == ["blur"]
+    page.exclusion_to_core(uid)
+    assert page.holder.d["exclusions"] == {}
+    new = next(p for p, v in page.holder.d["pieces"].items() if v["polygon"] == poly)
+    assert page.holder.d["pieces"][new]["owner"] in page.holder.d["cores"]        # a yellow core again
+    page.shutdown()
+
+
+def test_reverse_shows_3_2_1_in_the_list_and_turns_the_viewer_numbers_round(app, env, monkeypatch):
+    page = _page(app, env, monkeypatch)
+    nb = page.cores.numbering
+    page._set_tool("select")
+    for y, ctrl in ((1, False), (2, True), (3, True)):
+        page.ctl.click(*_centre(1, y), ctrl=ctrl)
+    _set_target(page, "X1-Y01", "X1-Y03")
+    rows = lambda: [nb.preview.item(i).text().split(" →")[0] for i in range(nb.preview.count())]   # noqa: E731
+    ov = page.viewer.overlay
+    first = page.selection[0]
+    assert rows() == ["1", "2", "3"] and ov.order_labels[first].startswith("1 ")
+    nb.btn_reverse.click()
+    assert rows() == ["3", "2", "1"]                                 # the list: 3 2 1
+    assert ov.order_labels[first] == "3 → X1-Y01"                    # the viewer: the number turns, the record stays
+    nb.btn_confirm.click()
+    from test_tma_f3_page import _label_of
+    assert _label_of(page, page.ctl.object_at(*_centre(1, 1))) == "X1-Y01"   # each core keeps its record
+    page.shutdown()
+
+
+def test_an_roi_workspace_never_turns_core_masks_into_exclusions(app, env, monkeypatch):
+    page = _page(app, env, monkeypatch)
+    page.set_context(dict(page.ctx, full_wsi=False, workspace_id="roi_a"))
+    _open_exclusions(page)
+    page._set_tool("select")
+    page.ctl.click(*_centre(1, 1))                                   # not selectable here
+    assert page.selected is None
+    pid = page.ctl.piece_at(*_centre(1, 1))
+    page.masks_to_exclusions([pid], ["blur"], "all", "")
+    page.pieces_to_exclusions([pid], "blur")
+    assert pid in page.holder.d["pieces"] and page.holder.d["exclusions"] == {}
+    page.shutdown()
+
+
+
+
+def test_reverse_then_confirm_is_undone_by_one_ctrl_z_and_roi_shows_no_numbering_labels(app, env, monkeypatch):
+    from test_tma_f3_page import _label_of
+    page = _page(app, env, monkeypatch)
+    nb = page.cores.numbering
+    page._set_tool("select")
+    for y, ctrl in ((1, False), (2, True), (3, True)):
+        page.ctl.click(*_centre(1, y), ctrl=ctrl)
+    _set_target(page, "X1-Y01", "X1-Y03")
+    nb.btn_reverse.click()
+    nb.btn_confirm.click()
+    assert _label_of(page, page.ctl.object_at(*_centre(1, 1))) == "X1-Y01" and page.selection == []
+    page.undo()
+    assert _label_of(page, page.ctl.object_at(*_centre(1, 1))) is None   # one Ctrl+Z
+    page.set_context(dict(page.ctx, full_wsi=False, workspace_id="roi_a"))
+    page.ctl.click(*_centre(1, 1))
+    assert page.viewer.overlay.order_labels == {}
+    page.shutdown()
+
+
+def test_unticking_every_reason_turns_an_exclusion_back_into_its_core_mask(app, env, monkeypatch):
+    from test_tma_f3_page import _label_of
+    page = _page(app, env, monkeypatch)
+    _set_target(page, "X1-Y01", "X1-Y01")
+    page._set_tool("select")
+    page.ctl.click(*_centre(1, 1))
+    page.cores.numbering.btn_confirm.click()                         # a numbered core with one piece
+    pid = page.ctl.piece_at(*_centre(1, 1))
+    page.ctl.click(*_centre(1, 1))
+    _open_exclusions(page)
+    page.exclusions.cb["blur"].setChecked(True)                      # a mask -> an exclusion
+    uid = page.selected
+    assert uid in page.holder.d["exclusions"] and pid not in page.holder.d["pieces"]
+    page.exclusions.cb["blur"].setChecked(False)                     # no reason left -> a mask again
+    assert page.holder.d["exclusions"] == {}
+    back = page.selected
+    assert back in page.holder.d["pieces"] and "tick a reason" in page.exclusions.lbl_target.text()
+    owner = page.holder.d["pieces"][back]["owner"]
+    assert owner in page.holder.d["cores"]
+    page.undo()                                                      # one step each way
+    assert uid in page.holder.d["exclusions"]
+    page.shutdown()
+
+
+def test_an_exclusion_returns_into_the_core_it_came_from_when_that_core_is_still_there():
+    from block01.core.regions import document as D
+    from block01.core.regions import geometry as G
+    from test_regions_r1 import SHAPE, SID
+    d = D.new_document(SID, SHAPE)
+    a = D.add_drawn_core(d, G.circle_polygon(300, 300, 40, SHAPE))
+    b = D.add_piece(d, G.circle_polygon(300, 380, 30, SHAPE))
+    core = d["pieces"][a]["owner"]
+    D.merge_pieces(d, [a, b])
+    [uid] = D.pieces_to_exclusions(d, [b], ["fold"])
+    assert d["exclusions"][uid]["from_core"] == core and core in d["cores"]
+    [back] = D.exclusions_to_cores(d, [uid])
+    assert d["pieces"][back]["owner"] == core and back in d["cores"][core]["pieces"]
+
+
+def test_a_mask_selected_in_exclusions_is_dropped_when_the_workspace_becomes_an_roi(app, env, monkeypatch):
+    page = _page(app, env, monkeypatch)
+    page._set_tool("select")
+    page.ctl.click(*_centre(1, 1))
+    _open_exclusions(page)
+    assert page.selected in page.holder.d["pieces"]
+    page.set_context(dict(page.ctx, full_wsi=False, workspace_id="roi_a"))
+    assert page.selection == [] and "tick a reason" not in page.exclusions.lbl_target.text()
     page.shutdown()

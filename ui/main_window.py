@@ -5589,6 +5589,10 @@ class MainWindow(QMainWindow):
             # holds where the user is)
             self._rm_save_view(active)
         self._current_step = active
+        if active == 1 and previous != 1 and self.__dict__.get("_preseg_run") is not None:
+            # F4-2: back in Step1 (perhaps after a Regions Save): the
+            # results summary says so
+            QTimer.singleShot(0, self._refresh_preseg_results)
         # FIRST, so everything below reads this step's own answers. Silent:
         # it writes no owner field and starts no save -- see
         # `ChannelDisplayState.set_scope`.
@@ -5825,10 +5829,20 @@ class MainWindow(QMainWindow):
         if key is None or self.loader is None:
             QMessageBox.warning(self, "Run", "There is no Step0 result to run on.")
             return False
+        # F4-2: the Regions result frozen now, one snapshot per input kind
+        # (the exclusions that stop segmentation depend on the channels read).
+        roi0, _ = self._preseg_region(manifest)
+        regions, why = self._preseg_regions(methods, snapshot, roi0)
+        if why:
+            QMessageBox.warning(self, "Run", f"Cannot run: {why}.")
+            return False
         # Block PA-2: a finished result of the run on screen that nothing
         # has changed is kept (copied into the new run), not computed again.
         _, tasks = preseg_run.build_tasks("", methods, patches)
         reused = self._preseg_reusable(tasks, source, snapshot)
+        prev_regions = {k: v["identity"] for k, v in ((self._preseg_run or {}).get("regions") or {}).items()}
+        if prev_regions != {k: v["identity"] for k, v in (regions or {}).items()}:
+            reused = {}                           # other Regions rules: the kept cells would differ
         prev = self._preseg_run
         if (prev is not None and len(reused) == len(tasks)
                 and {t["task_id"] for t in tasks}
@@ -5855,6 +5869,18 @@ class MainWindow(QMainWindow):
                     run_store.discard(new_dir)
                 return False
         roi, bounds = self._preseg_region(manifest)
+        if regions:
+            from ..core.regions import analysis as RA
+            rdir = new_dir or preseg_run.run_dir(self._preseg_runs_root(), run_id)
+            for kind, snap in regions.items():
+                pd_ = snap.pop("_project_dir", "")
+                path = RA.save_snapshot(os.path.join(rdir, f"regions_{kind}.json"), snap)
+                regions[kind] = {"identity": snap["identity"], "path": path, "cores": len(snap["cores"]),
+                                 "project_dir": pd_,
+                                 "omitted": len([o for o in snap["omitted"] if o["reason"] != "not_ticked"])}
+            outside = self._patches_outside_regions(patches, path)
+            if outside:
+                print(f"[Step1] patches outside the selected cores (they will show no cells): {outside}")
         run = {
             "run_id": run_id,
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -5863,6 +5889,8 @@ class MainWindow(QMainWindow):
                                      for k in ("hash", "fusion_config", "display_mapping")}),
             "source": source, "halo_px": PRESEG_HALO_PX, "bounds": bounds, "roi": roi or {},
         }
+        if regions:
+            run["regions"] = regions
         spec = {"ome_path": self.loader.filepath, "name_map": self.loader.name_map,
                 "correction_config": self.loader.correction_config,
                 "corrected_zarr_path": self._corrected_zarr_path,
@@ -5889,6 +5917,129 @@ class MainWindow(QMainWindow):
               + (f", {len(reused)} kept from {prev['run_id']}" if reused else ""))
         job.start()
         return True
+
+    def _preseg_regions(self, methods, fusion, roi):
+        """F4-2: ({input kind: frozen snapshot} or None, refusal). None and no
+        refusal for a project without Regions (the old flow, unchanged); a
+        TMA project must have saved Regions."""
+        from ..core.regions import analysis as RA
+        from ..core.regions import lock as RK
+        from ..core.regions.document import RegionsError
+        from ..core.tma.study import StudyError, load_study
+        if not self._regions_files_present():
+            return None, ""                       # no Regions here: the old flow, nothing read or written
+        ctx = self._regions_context()
+        pd, sid = ctx.get("project_dir"), ctx.get("slide_id")
+        if not pd or not sid:
+            return None, ""
+        try:
+            study = load_study(pd)
+        except StudyError:
+            study = None
+        if study is not None and study.get("slide_id") != sid:
+            study = None
+        try:
+            saved = RK.load_saved(pd, sid)
+        except (RegionsError, ValueError, OSError) as exc:
+            return None, f"the Regions result cannot be read ({exc})"
+        if saved is None:
+            return (None, "this TMA project has no saved Regions result: Save in Regions first"
+                    if study is not None else "")
+        parent = ({"region_id": None, "bbox_fullres": roi["bbox_fullres"],
+                   "polygon_fullres": roi.get("polygon_fullres")} if roi else None)
+        fcfg = (fusion or {}).get("fusion_config") or {}
+        out = {}
+        for entry in methods:
+            kind = preseg_input.INPUT_KIND[entry["method"]]
+            if kind in out:
+                continue
+            try:
+                out[kind] = RA.build_snapshot(pd, sid, preseg_input.seg_channels(entry["method"], fcfg),
+                                              study=study, parent=parent)
+                out[kind]["_project_dir"] = pd        # where it came from (not part of its identity)
+            except RegionsError as exc:
+                omitted = getattr(exc, "omitted", None)
+                if omitted:
+                    print("[Step1] ticked cores that cannot run: "
+                          + "; ".join(f"{o['label']}: {RA.REASONS[o['reason']]}" for o in omitted))
+                return None, str(exc)
+        for snap in out.values():
+            omitted = [o for o in snap["omitted"] if o["reason"] != "not_ticked"]
+            if omitted:
+                print("[Step1] ticked cores not run: "
+                      + "; ".join(f"{o['label']}: {RA.REASONS[o['reason']]}" for o in omitted))
+            break
+        return out, ""
+
+    def _regions_files_present(self):
+        """Whether this project has a TMA study or a Regions Save at all
+        (cheap: no slide is opened, nothing is registered)."""
+        from ..core.regions import lock as RK
+        from ..core.tma.study import study_path
+        ctx = getattr(self, "step0_output", None) or {}
+        pd = run_store.project_dir_of(str(ctx.get("roi_dir") or "") or ctx.get("output_dir") or "")
+        return bool(pd) and (os.path.isfile(RK.saved_path(pd)) or os.path.isfile(study_path(pd)))
+
+    def _patches_outside_regions(self, patches, snapshot_path):
+        """Names of the patches holding no selected-core pixel (reported,
+        never removed or unticked)."""
+        from ..core.regions import analysis as RA
+        from ..core.regions.raster import AnalysisRaster
+        r = AnalysisRaster(RA.load_snapshot(snapshot_path))
+        return [p["name"] for p in patches if not r.has_core(tuple(int(v) for v in p["bbox"]))]
+
+    def _preseg_regions_line(self, run):
+        """The Regions part of the results summary (F4-2): what the run
+        froze, and whether Regions was saved again since (the Save's content
+        checksum against the one frozen -- an information line only)."""
+        reg = (run or {}).get("regions")
+        if not reg:
+            return ""
+        e = next(iter(reg.values()))
+        text = f"Regions: {e['cores']} cores"
+        if e["omitted"]:
+            text += f", {e['omitted']} ticked not run (see the terminal)"
+        try:
+            from ..core.regions import lock as RK
+            with open(e["path"], encoding="utf-8") as f:
+                frozen = json.load(f)["regions"]["content_sha256"]
+            with open(RK.saved_path(e["project_dir"]), encoding="utf-8") as f:
+                now = json.load(f).get("content_sha256")
+            if now != frozen:
+                text += " · a newer Regions Save exists"
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        return text
+
+    def _random_patch_cores(self, roi=None):
+        """F4-2: (selected-core polygons, exclusion polygons, refusal). A TMA
+        project draws only inside its selected cores (within the active
+        ROI); one whose Regions cannot give any is refused, never sent back
+        to the whole tissue. (None, None, "") without Regions or for an ROI
+        project -- the old rule."""
+        from ..core.regions import analysis as RA
+        from ..core.regions.document import RegionsError
+        if not self._regions_files_present():
+            return None, None, ""
+        ctx = self._regions_context()
+        pd, sid = ctx.get("project_dir"), ctx.get("slide_id")
+        if not pd or not sid:
+            return None, None, ""
+        parent = ({"region_id": None, "bbox_fullres": roi["bbox_fullres"],
+                   "polygon_fullres": roi.get("polygon_fullres")} if roi and roi.get("bbox_fullres") else None)
+        try:
+            snap = RA.build_snapshot(pd, sid, [], parent=parent)
+        except RegionsError as exc:
+            from ..core.tma.study import StudyError, load_study
+            try:
+                tma = load_study(pd) is not None
+            except StudyError:
+                tma = False
+            return (None, None, f"Random patches go inside the selected TMA cores, but {exc}." if tma else "")
+        if snap["mode"] != "tma":
+            return None, None, ""
+        return ([[(float(x), float(y)) for x, y in c["polygon"]] for c in snap["cores"]],
+                [[(float(x), float(y)) for x, y in e["polygon"]] for e in snap["exclusions"]], "")
 
     def _preseg_reusable(self, tasks, source, snapshot):
         """{task_id: record} of the run on screen that `tasks` may keep
@@ -6323,7 +6474,9 @@ class MainWindow(QMainWindow):
             combo = next(c for c in sel["run"]["combos"] if c["combo_id"] == sel["combo_id"])
             chosen = f"In use: {ps_display_name(combo['method'])}" + \
                 ("" if sel["run"] is run else " (from an earlier run)")
-        panel.set_summary(chosen or "Nothing chosen yet — press Use on a finished row.")
+        line = self._preseg_regions_line(run)
+        panel.set_summary((chosen or "Nothing chosen yet — press Use on a finished row.")
+                          + (f"\n{line}" if line else ""))
 
     def _preseg_selection_valid(self):
         sel = self._preseg_selected
@@ -6591,9 +6744,12 @@ class MainWindow(QMainWindow):
             poly = roi.get("polygon_fullres")
             if poly and len(poly) >= 3:
                 polygon = [(float(x), float(y)) for x, y in poly]
+        cores, avoid, why = self._random_patch_cores(roi)
+        if why:
+            return None, why
         return {"loader": loader, "channel": channel, "count": int(count),
                 "height": int(height), "width": int(width), "region": region,
-                "polygon": polygon,
+                "polygon": polygon, "cores": cores, "avoid": avoid,
                 # Block A6 G3: the dataset this request is about.
                 "dataset_gen": int(self._dataset_gen_seen),
                 "existing": [tuple(int(v) for v in p) for p in self._all_patches]}, ""
@@ -6605,9 +6761,10 @@ class MainWindow(QMainWindow):
             return
         if self._random_patch_job.start(request):
             self._random_patch_in_roi = bool(request["region"])
+            self._random_patch_in_cores = request.get("cores") is not None
             self._preseg_patches.set_random_busy(True)
             print(f"[Step1] random patches: {count} x {height}x{width}px requested "
-                  f"({'ROI polygon' if request['polygon'] else 'ROI bbox' if request['region'] else 'whole slide'})")
+                  f"({'selected TMA cores' if request.get('cores') is not None else 'ROI polygon' if request['polygon'] else 'ROI bbox' if request['region'] else 'whole slide'})")
 
     def _on_random_patches_done(self, answer):
         self._preseg_patches.set_random_busy(False)
@@ -6629,7 +6786,8 @@ class MainWindow(QMainWindow):
         page = self.__dict__.get("_step0")
         added = page.add_patches(gen.patches) if (page is not None and gen.patches) else []
         if gen.shortfall > 0:
-            where = ("inside the ROI" if getattr(self, "_random_patch_in_roi", False)
+            where = ("inside the selected cores" if getattr(self, "_random_patch_in_cores", False) else
+                     "inside the ROI" if getattr(self, "_random_patch_in_roi", False)
                      else "in the tissue")
             QMessageBox.information(
                 self, "Random patches",

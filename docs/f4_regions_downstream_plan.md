@@ -163,3 +163,61 @@
 8. **Step1 小块**：保持现有规则（完全在区域内、空白不超过 40%、互不重叠）。手动小块落在分析范围外的只报告，不删除、不改勾选。
 9. **旧 study 缺 Project name**：只在新快照里补；对应表文件不在或 sha256 不同就留空。不改写 `tma_study.json`。
 10. F4-1 白名单补全：`docs/f4_regions_downstream_plan.md`、`docs/tma_f3_decisions_log.md`。
+
+## E. 第三段（Step2 接入）实施细节（用户 2026-10-19 授权；按 Step2 代码调研写成）
+1. **何时启用**：只有参数文件的预分割合同里带 `regions`（完整快照）时启用。手动参数、没有合同的旧文件、HQ / HQ2 / CSD 旧路径一律不变（结果一字节不变）。
+2. **开始时的检查**（`SegmentMergeWorker.run`，在现有跳块检查之后）：
+   - 快照随合同已核对过身份；
+   - 复制一份到运行目录 `regions_snapshot.json`，Step4 读这份；
+   - 父区域必须和本次分割的区域一致：整片模式比外框 `[0, H, 0, W]`，ROI 模式比该 ROI 的外框；
+   - 带 Regions 的多 ROI 运行一律拒绝，并提示原因（快照只有一个父区域）；
+   - 不一致就拒绝，并说明原因。
+3. **强制跳块**：每个区域单独算出"读窗口里没有任何选中核心像素"的小块，在挂预取器之前定下来，与现有的组织跳块计划取并集；不受勾选影响，恢复模式也适用。
+   - 跳过的小块照常走现有 `_skip_tile`（页面显示 skipped），但另记一份清单；
+   - 运行元数据加 `regions.skipped_tiles`，不混进组织跳块的统计。
+   - 两个重复的小块循环（`_segment_one_zarr` 和整片模式的循环）都要改。
+4. **按细胞判定**（`core/seam_merge.py`）：
+   - `SeamMerger` 增加可选的 `judge(tile, local) -> {label: Verdict}`，由 worker 提供：在每个小块的读窗口上用 `ObjectTally` 一次算完（`AnalysisRaster` 的窗口查询，加上区域原点换成整片坐标），并逐个对象判断是否碰到父区域边界；
+   - 每个候选带上自己的判定。接缝候选的判定写进溢出文件的元数据列，`resolve` 选赢家时**不看**判定（不改变哪一块胜出）；
+   - `_write` 在分配编号**之前**：判定为不保留的直接丢弃，不占编号，计入 `regions_dropped_<原因>`，它的细胞核计入细胞核丢弃统计（`regions_cell`）。因此发布的编号仍是 1..N，`validate` 不变；
+   - 保留的细胞在分配编号后按编号顺序记下：核心序号、`core_fraction`、`touches_core_edge`、`analysis_include`、`touches_region_edge`，以及"只影响测量的排除区"位掩码（最多 52 个，超出则拒绝运行并说明）。
+   - 运行结束写 `global_cell_regions[_<区域>].npz`（先写 `.partial` 再改名，失败时清理），并在 `label_store["regions"]` 里引用：快照文件、身份、细胞表、丢弃统计、跳块数。
+   - Mesmer 两路输出：细胞核在小块内已与唯一的细胞配对，直接跟随该细胞；只分割细胞核的方法，细胞核本身被判定。
+5. **来源记录**（`core/provenance.py`）：`register_segmentation_run` 在快照存在时：
+   - `depends_on` 加上 `regions_layout`（按 Save 文件的位置和快照里的 `content_sha256` 查找）；
+   - 找不到就记入 `unresolved_inputs`；
+   - `parameters` 加快照身份和参与核心的 position_key。
+6. **不做**：按核心切块、稀疏存储、改接缝合并的排序或判定规则、改模型输入（不置 0）。
+7. **测试**（新建 `tests/test_f4_step2.py`）：
+   - 两个循环下的强制跳块和不受勾选影响；
+   - 接缝两侧细胞的判定与编号连续；
+   - 被丢细胞的细胞核计数；
+   - 细胞表与编号对齐；
+   - 父区域不一致、多 ROI 时拒绝；
+   - 没有 Regions 时输出完全不变；
+   - 来源记录的依赖。
+   - 另需真机整片跑一次，量时间、内存、临时磁盘和 Step3 流畅度。
+
+### E.8 按 codex 方案审查修订（`codex_f4_step2_plan_1.out`，修改后批准）
+1. **开始时的核对**（带 Regions 才做）：
+   - 页面：所选 fuse 运行记录的 Fusion 设置哈希（`params["fusion_settings"]["hash"]`）必须等于合同的 `fusion_settings_hash`，否则拒绝（快照里的分割通道 S 取自这份设置）；
+   - 合同方法的输入种类必须等于快照的 `input_kind`；
+   - worker 端核对：
+     - 切片：用 `project_identity.describe_slide` 由工作区清单的 `source_ome` 算出 slide_id，和快照的 slide_id 一致（不登记任何东西）；
+     - 父区域：整片模式要求父区域外框 = `[0, H, 0, W]`、没有多边形，且原点为 `(0, 0)`（不依赖 fused 的 `bbox_fullres` 属性）；ROI 模式要求 ROI 的外框和多边形与快照父区域一致，外框尺寸与输入数组一致；
+     - 带 Regions 的多 ROI 运行拒绝，与是否启用组织跳块无关。
+   - 冻结快照不会被最新的 Save 替换。
+2. **跳块记账**：Regions 清单独立初始化；在组织计划（包括恢复模式"不跳"）处理之后再并入；两个循环的读块函数都使用预先定好的集合；`_skip_tile` 显示不变，按原因分别记数。
+3. **事实表文件**：
+   - 写 `global_cell_regions[_<区域>].npz.partial` 时用文件对象，避免 NumPy 自动加 `.npz`；
+   - 成功后改名，失败、Stop、异常时删除这个文件；
+   - 表完成之前不发布结果。
+4. **表的编码**：
+   - 行数严格等于最终对象数，第 i 行对应编号 i+1；
+   - `core` 用 int32，无核心为 -1（ROI 项目也是 -1）；
+   - `core_fraction` 用 float32；
+   - `flags` 用 uint8：第 0 位 touches_core_edge，第 1 位 analysis_include，第 2 位 touches_region_edge；
+   - `meas_bits` 用 uint64：快照中"只影响测量"的排除区按出现顺序编号 0..k-1，超过 52 个拒绝；
+   - 表里另存编号到排除区 uid 的对照。
+5. `touches_region_edge` 完全按 `evaluate_object` 的条件：碰到父区域外框边界，或有像素落在父多边形之外。
+6. 被拒绝的细胞只统计最终被选中的那个版本，它的细胞核按不同编号计入 `regions_cell`，进入 `label_store` 的丢弃汇总。没有 Regions 时，元数据不新增任何字段。

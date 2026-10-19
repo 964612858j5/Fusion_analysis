@@ -50,6 +50,27 @@ def target_records(study: Dict, start_id: int, end_id: int, order: str) -> List[
             for p in ps[i:j + 1] if p["donor_block_id"]]
 
 
+def walk_records(study: Dict, start_id: int, end_id: int) -> List[Dict]:
+    """The map records from `start_id` to `end_id` with no order to choose
+    (user 2026-10-18): along the column when both lie in one column, along
+    the row when in one row, otherwise in position order (column by
+    column); walked backwards when the end comes first. Empty positions are
+    skipped; start == end is that one record."""
+    by = {p["position_id"]: p for p in study["map_sheet"]["positions"]}
+    if start_id not in by or end_id not in by:
+        raise RegionsError(f"positions {start_id} / {end_id} are not on the map")
+    a, b = by[start_id], by[end_id]
+    order = "row" if a["y"] == b["y"] and a["x"] != b["x"] else "column"
+    ps = sorted(by.values(), key=_order_key(order))
+    ids = [p["position_id"] for p in ps]
+    i, j = ids.index(start_id), ids.index(end_id)
+    seg = ps[i:j + 1] if i <= j else list(reversed(ps[j:i + 1]))
+    from ..tma.cores import position_key
+    sheet = study["map_sheet"]
+    return [_record(p, position_key(study["slide_id"], sheet["sha256"], p["position_id"]))
+            for p in seg if p["donor_block_id"]]
+
+
 def records_by_ids(study: Dict, ids: Sequence[int]) -> List[Dict]:
     """A custom target list in the order given; an empty position or a
     repeated id is refused."""

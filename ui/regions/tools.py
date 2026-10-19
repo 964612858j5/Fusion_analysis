@@ -119,7 +119,15 @@ class ToolController:
         return best[1] if best else None
 
     def shape_at(self, y, x) -> Optional[str]:
-        return self._smallest_at(self.shapes(), y, x)
+        """The shape a click picks: the open tab's -- and in Exclusions a core
+        mask too where no exclusion is (it becomes one once a reason is
+        ticked, user 2026-10-19)."""
+        sid = self._smallest_at(self.shapes(), y, x)
+        if sid is None and self.target() == "exclusions" and self.page._can_convert_cores():
+            sid = self.piece_at(y, x)
+            if sid is not None and self.doc["pieces"][sid]["dropped"]:
+                sid = None
+        return sid
 
     def piece_at(self, y, x) -> Optional[str]:
         d = self.doc

@@ -141,9 +141,9 @@ def _page(app, env, monkeypatch, find=True):
     return page
 
 
-def _set_target(page, start_label, end_label, order_text):
+def _set_target(page, start_label, end_label, order_text=None):
+    """Start and end records (there is no order to choose any more)."""
     nb = page.cores.numbering
-    nb.order.setCurrentIndex([nb.order.itemText(i) for i in range(nb.order.count())].index(order_text))
     for box, lab in ((nb.start, start_label), (nb.end, end_label)):
         box.setCurrentIndex(next(i for i in range(box.count()) if box.itemText(i).startswith(lab)))
 
@@ -629,8 +629,9 @@ def test_esc_cancels_a_line_and_its_preview_and_ctrl_z_steps_back_one_level(app,
     page.frame.left_tabs.setCurrentWidget(page.exclusions)
     assert page.ctl.tool is None                                      # numbering is the Cores tab's
     page._set_tool("select")
-    page.ctl.click(*_centre(1, 1))                                    # a core, in the Exclusions tab
-    assert "Cores tab" in page.exclusions.lbl_info.text()
+    page.ctl.click(*_centre(1, 1))                                    # a core mask, in the Exclusions tab:
+    assert page.selected in page.holder.d["pieces"]                   # picked, a reason would convert it
+    assert "tick a reason" in page.exclusions.lbl_target.text()
     page.shutdown()
 
 

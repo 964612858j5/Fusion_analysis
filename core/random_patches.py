@@ -236,3 +236,74 @@ def generate(n, height, width, *, mask, ds, region, polygon=None, existing=(),
         out.patches.append(cand)
         taken.append(cand)
     return out
+
+
+def _rect_meets_polygon(bbox, polygon):
+    """Does the rectangle (y0, y1, x0, x1) share any point with `polygon`?"""
+    y0, y1, x0, x1 = (float(v) for v in bbox)
+    poly = [(float(x), float(y)) for x, y in polygon]
+    if len(poly) < 3:
+        return False
+    if any(x0 <= x <= x1 and y0 <= y <= y1 for x, y in poly):
+        return True
+    corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    if any(_point_in_polygon(x, y, poly) for x, y in corners):
+        return True
+    sides = list(zip(corners, corners[1:] + corners[:1]))
+    return any(_segments_cross(poly[i], poly[(i + 1) % len(poly)], c, d)
+               for i in range(len(poly)) for c, d in sides)
+
+
+def generate_in_cores(n, height, width, *, mask, ds, cores, avoid=(), existing=(), region=None,
+                      polygon=None, seed=DEFAULT_SEED, max_blank=MAX_BLANK, tries_per_patch=TRIES_PER_PATCH):
+    """Draw up to `n` patches inside the selected TMA cores (F4-2): the same
+    rules as `generate` (wholly inside, at most `max_blank` blank, no
+    overlap), each patch wholly inside ONE core polygon -- and inside the
+    parent `region` box / `polygon` when given -- touching no `avoid`
+    polygon (the exclusions), the cores taken in turn so every core gets
+    patches before any gets a second. `cores`, `avoid`: [[(x, y), ...]]."""
+    height, width = int(height), int(width)
+    out = Generation(requested=int(n), seed=int(seed), ds=float(ds), region=(), polygon=True)
+    polys = [[(float(x), float(y)) for x, y in p] for p in cores if len(p) >= 3]
+    if n <= 0 or height <= 0 or width <= 0 or not polys:
+        return out
+    ii = integral_image(mask)
+    rng = np.random.default_rng(int(seed))
+    taken = [tuple(int(v) for v in p) for p in existing]
+    blocked = [[(float(x), float(y)) for x, y in b] for b in avoid if len(b) >= 3]
+    budget = int(tries_per_patch) * (int(n) + len(polys))   # every core gets one full turn, still bounded
+    dead = set()
+    k = 0
+    while len(out.patches) < n and out.tries < budget and len(dead) < len(polys):
+        i = k % len(polys)
+        k += 1
+        if i in dead:
+            continue
+        poly = polys[i]
+        xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+        ry0, ry1, rx0, rx1 = int(min(ys)), int(max(ys)), int(min(xs)), int(max(xs))
+        if ry1 - ry0 < height or rx1 - rx0 < width:
+            dead.add(i)                                  # too small for this patch size
+            continue
+        for _ in range(int(tries_per_patch)):
+            out.tries += 1
+            y0 = int(rng.integers(ry0, ry1 - height + 1))
+            x0 = int(rng.integers(rx0, rx1 - width + 1))
+            cand = (y0, y0 + height, x0, x0 + width)
+            if not rect_inside_polygon(cand, poly):
+                continue
+            if region is not None and not (region[0] <= y0 and y0 + height <= region[1]
+                                           and region[2] <= x0 and x0 + width <= region[3]):
+                continue
+            if polygon and not rect_inside_polygon(cand, polygon):
+                continue
+            if any(_overlap(cand, t) for t in taken) or any(_rect_meets_polygon(cand, b) for b in blocked):
+                continue
+            if blank_fraction(ii, ds, cand) > max_blank:
+                continue
+            out.patches.append(cand)
+            taken.append(cand)
+            break
+        else:
+            dead.add(i)                                  # this core has no room left
+    return out

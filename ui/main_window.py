@@ -1605,6 +1605,13 @@ class MainWindow(QMainWindow):
         regions_bar = self._frame_title_bar("Step 0.5 — Regions")
         self._regions = RegionsPage(metrics=self._frame_metrics, title_bar=regions_bar)
         self._style_regions_channels_header()
+        # Step1's / Step3's patch strip, first in the viewer's tool row (§13.10)
+        strip = PatchStrip(self)
+        strip.chosen.connect(lambda idx: self._select_regions_patch(idx))
+        self._regions.tools_row.insertWidget(0, strip.holder())
+        self._regions.tools_row.insertSpacing(1, 6)
+        self._regions_patch_strip = strip
+        self._rebuild_step3_patch_strip()
         # the Tissue Navigator entry, as Step1's / Step3's (user 2026-10-18):
         # a click jumps the Regions viewer whatever tool is in use
         nav = QPushButton("Tissue Navigator")
@@ -3506,6 +3513,9 @@ class MainWindow(QMainWindow):
         or patch indices.  Step-navigation state, layout and Step0's own state
         are not ours to clear.
         """
+        # a patch chosen in Regions for the OLD workspace's first Step1 entry
+        # (§13.10) is that workspace's, not the next one's
+        self.__dict__.pop("_rm_patch_after_restore", None)
         # 1. Silence anything that could still write Step1 state.  Stopping the
         #    loaders also DISCONNECTS them, so a thread that refuses to finish
         #    can no longer deliver the old dataset's pixels into the new one.
@@ -5449,6 +5459,14 @@ class MainWindow(QMainWindow):
         if self.__dict__.get("_rm_auto_step1"):
             self._rm_auto_step1 = False
             self._load_previous_step1_session(auto=True)
+            # §13.10: a patch chosen in Regions before this first Step1
+            # entry wins over the restored draft's, and is saved now
+            idx = self.__dict__.pop("_rm_patch_after_restore", None)
+            if idx is not None and 0 <= idx < len(self._all_patches):
+                # Step1's own patch selection: marks, indices AND the camera
+                # (the restore just landed on the draft's patch)
+                self._select_preview_patch(idx)
+                self._schedule_step1_session_save()
 
     # ── Regions (docs/region_qc_module_plan.md §2) ───────────────────────
     REGIONS_STEP = 5           # internal step id (the stack index is 6)
@@ -6020,11 +6038,13 @@ class MainWindow(QMainWindow):
         step0 = getattr(self, "_step0", None)
         step2 = getattr(self, "_step2", None)
         step3 = getattr(self, "_step3", None)
+        regions = self.__dict__.get("_regions")
         step_frame.hold_content_width(
             (getattr(step0, "left_panel", lambda: None)(),
              getattr(self, "_step1_left_panel", None),
              getattr(step2, "left_panel", lambda: None)(),
-             getattr(step3, "left_panel", lambda: None)()))
+             getattr(step3, "left_panel", lambda: None)(),
+             getattr(regions, "left_panel", lambda: None)()))     # §13.10: as Step1's
 
     def _match_step1_bottom_bar(self):
         """The save slot as tall as Step0's Per-Channel Decision frame, and
@@ -7393,7 +7413,8 @@ class MainWindow(QMainWindow):
         """Show `idx` as the selection in every strip and menu: the patch
         selection is global (plan step 3, user ruling)."""
         for strip in (self.__dict__.get("_patch_strip"),
-                      self.__dict__.get("_step3_patch_strip")):
+                      self.__dict__.get("_step3_patch_strip"),
+                      self.__dict__.get("_regions_patch_strip")):
             if strip is not None:
                 strip.set_selected(idx)
 
@@ -7409,16 +7430,37 @@ class MainWindow(QMainWindow):
 
     # ── Step3's strip: the same component, the same patches ───────────
     def _rebuild_step3_patch_strip(self):
-        """Step3's copy of the strip: the same names and colours, no load
-        glyphs (Step3 has no patch renderer to load)."""
-        strip = self.__dict__.get("_step3_patch_strip")
-        if strip is None:
-            return
+        """Step3's and Regions' copies of the strip (§13.10): the same names
+        and colours, no load glyphs (neither has a patch renderer to load)."""
         patches = self._all_patches
-        strip.rebuild(len(patches), self._patch_label)
-        for i, patch in enumerate(patches):
-            strip.set_entry(i, self._patch_label(i), patch_button_qss(_patch_color_of(patch, i)))
-        strip.set_selected(self._preview_patch_idx)
+        for strip in (self.__dict__.get("_step3_patch_strip"),
+                      self.__dict__.get("_regions_patch_strip")):
+            if strip is None:
+                continue
+            strip.rebuild(len(patches), self._patch_label)
+            for i, patch in enumerate(patches):
+                strip.set_entry(i, self._patch_label(i), patch_button_qss(_patch_color_of(patch, i)))
+            strip.set_selected(self._preview_patch_idx)
+
+    def _select_regions_patch(self, idx):
+        """A patch chosen in Regions: Regions' viewer lands on it (a jump to
+        the shared camera), and it is THE selection, as in Step3."""
+        if idx < 0 or idx >= len(self._all_patches):
+            return
+        self._sync_patch_selection_marks(idx)
+        self._preview_patch_idx = idx
+        self._selected_step1_patch_idx = idx
+        mount = getattr(self.__dict__.get("_regions_view"), "mount", None)
+        if mount is not None and mount.host.stack is not None:
+            try:
+                mount.show_patch(self._all_patches[idx])
+            except (IndexError, TypeError):
+                pass
+        if self.__dict__.get("_rm_auto_step1"):
+            # the opened workspace's Step1 draft is not restored yet and must
+            # not be overwritten: the choice is kept and applied after it
+            self._rm_patch_after_restore = idx
+        self._schedule_step1_session_save()
 
     def _select_step3_patch(self, idx):
         """A patch chosen in Step3: Step3's viewer lands on it, and it is THE

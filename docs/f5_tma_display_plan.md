@@ -587,3 +587,7 @@
 - 勾/取消调用通道面板自己的 `set_all_visible`；Regions 时面板处于只显示的一步，所以只改 Regions 范围的勾选（跳过不可批量切换的通道，如细胞核），从不碰 Step1 的勾选和融合。
 - 与 Step1/Step3 的 `Show all` 一样是普通开关（不跟随逐个勾选改变状态，不是三态）。
 - 每个通道走单个勾选同一条路径，所以 Regions 看图器与 Tissue preview 同样实时更新。
+
+### 13.10 Regions 的通道面板与 patch 按钮（用户 2026-10-20）
+- **通道面板与 Step1 一模一样**：Regions 的 `Channels` 框取 Step1/Step3 用的同一来源——框的 QSS 来自 `channel_dock.template.frame_qss()`（浅蓝边框、蓝色标题），所在列用 Step1 左栏同样的背景与上边距（3 px、间距 4），框内边距 4、间距 4；标题栏、frame 尺寸（`_frame_metrics`）与 Step1 本来就共用。测试离屏截图比对两个面板的标题区与边框像素。
+- **patch 按钮组**：Step1/Step3 用的 `PatchStrip` 放在 Regions 看图器工具行的最前面（同 Step3：strip 在行首）。名字、颜色、菜单与 Step1 同一份 patch 列表（`_rebuild_step3_patch_strip` 现同时填 Step3 与 Regions 的条）；选择是全局的（`_sync_patch_selection_marks` 同步三处）；点击 `_select_regions_patch` 让 Regions 看图器落到该 patch（`show_patch`，经跳转写入共享相机），并作为当前选择存入会话，同 Step3。

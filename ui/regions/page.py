@@ -125,12 +125,20 @@ class RegionsPage(QWidget, VersionsMixin, ShapesMixin):
         row.addWidget(self.btn_save)
         self.frame.set_title(bar)
 
+        # Step1's `Channels` frame, from Step1's sources (§13.10): the column's
+        # background and 3 px top inset, and the box's frame/title QSS from
+        # `channel_dock.template`, as Step1's and Step3's
+        from ..widgets.channel_dock import template as channel_template
         chan = QWidget()
+        chan.setStyleSheet("background:#1c1c1c;")
         cl = QVBoxLayout(chan)
         cl.setContentsMargins(0, 3, 0, 0)
+        cl.setSpacing(4)
         box = QtWidgets.QGroupBox("Channels")
+        box.setStyleSheet(channel_template.frame_qss())
         bl = QVBoxLayout(box)
         bl.setContentsMargins(4, 4, 4, 4)
+        bl.setSpacing(4)
         head = QHBoxLayout()
         self.btn_intensity = QPushButton("Intensity…")
         head.addWidget(self.btn_intensity)
@@ -198,6 +206,8 @@ class RegionsPage(QWidget, VersionsMixin, ShapesMixin):
         rl.addWidget(notice, 1)
         self._viewer_layout, self._viewer_notice = rl, notice
         self.frame.tool_row(rl, tools)
+        self.tools_row = tools                  # the window puts the patch strip first (§13.10)
+        self.channels_box = box
         self.frame.right_tabs.addTab(right, "Viewer")
 
         self.btn_intensity.clicked.connect(self.intensity_requested.emit)

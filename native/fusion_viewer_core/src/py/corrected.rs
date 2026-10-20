@@ -35,7 +35,7 @@ fn meta(d: &Bound<'_, PyDict>) -> PyResult<ArrayMeta> {
         .map_err(to_py_err)
 }
 
-fn spec(d: &Bound<'_, PyDict>) -> PyResult<ArraySpec> {
+pub(crate) fn spec(d: &Bound<'_, PyDict>) -> PyResult<ArraySpec> {
     let zattrs = item(d, "zattrs")?;
     Ok(ArraySpec { meta: meta(d)?, zarray: file_id(&item(d, "zarray")?)?,
                    zattrs: if zattrs.is_none() { None } else { Some(file_id(&zattrs)?) } })

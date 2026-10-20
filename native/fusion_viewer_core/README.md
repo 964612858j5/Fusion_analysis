@@ -38,6 +38,12 @@ logic. See the module table in `docs/v16_5_r0_interfaces.md` §8.
 | socket2 | the notice socket (fd / SOCKET) | MIT OR Apache-2.0 |
 | libc (unix), windows-sys (windows) | clock, file identity | MIT OR Apache-2.0 |
 
+Translated third-party code (not a crate): `src/fuse_powf.rs` is ARM
+optimized-routines' `powf` (v23.01, `56e3bf05`), MIT option, notice in
+`THIRD_PARTY_NOTICES.md` (shipped in the wheel's `.dist-info/licenses/`). Unlike
+Odon below, this code and its constants are copied on purpose: the fused image
+must match NumPy/glibc bit for bit (`docs/f5_rust_fusion_plan.md` §3).
+
 `cargo tree` lists the transitive ones; all are MIT, Apache-2.0, BSD or Zlib.
 One exception, at compile time only: `unicode-ident` ((MIT OR Apache-2.0) AND
 Unicode-3.0, a permissive licence) is used by pyo3's procedural macros

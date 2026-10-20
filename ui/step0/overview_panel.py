@@ -12,6 +12,8 @@ import shutil
 import uuid
 import weakref
 import contextlib
+import collections
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import numpy as np
@@ -330,9 +332,16 @@ class FullFusionWorker(QThread):
         # registered by the window once the data version is committed.
         self.register_provenance = True
         self.provenance_jobs = []
+        # Block F5: which engine fused each region ("rust" / "python"), and
+        # the Rust job of the region in hand (so Stop can cancel its reads).
+        self.engine_by_region = {}
+        self._fuse_job = None
 
     def stop(self):
         self._stop = True
+        job = self._fuse_job
+        if job is not None:
+            job.cancel()
 
     # ── helpers ───────────────────────────────────────────────────────
 
@@ -512,22 +521,143 @@ class FullFusionWorker(QThread):
         rows = np.unpackbits(packed[oy:oy + h, b0:b1], axis=1)
         return rows[:, ox - 8 * b0:ox - 8 * b0 + w].astype(bool)
 
-    def _unit_workers(self, n_units, n_channels):
+    #: Block F5-4 (plan §5.3, §8): writer threads of a region's store, at
+    #: most this many (and never more than the computing pool), and the
+    #: bytes one write holds -- the unit handed over, zarr's contiguous
+    #: chunk copies and their compressed frames, about three units' output.
+    MAX_WRITERS = 8
+    WRITE_COPIES = 3
+
+    def _writer_count(self):
+        return max(1, min(self.MAX_WRITERS, (os.cpu_count() or 2) // 2))
+
+    def _writer_bytes(self, n_writers):
+        """Memory the writer holds: every write in progress (`WRITE_COPIES`
+        units of output each) plus as many units queued for it."""
+        out = int(self.zarr_chunk) ** 2 * int(self.UNIT_CHUNKS_WIDE) * 4   # (h, w, 2) uint16
+        return int(n_writers) * out * (self.WRITE_COPIES + 1)
+
+    def _unit_workers(self, n_units, n_channels, rust_unit_bytes=None, reserve_bytes=0):
         """How many units at once: the Step0 Save rule (block CS P3) with a
         unit's own footprint -- each channel's float32 read and mapped
-        signal, plus the fusion's and the remap's temporaries."""
+        signal, plus the fusion's and the remap's temporaries. With a Rust
+        job (block F5), its own peak per unit (`_rust_unit_bytes`)."""
         from ...core import bg_parallel
         px = int(self.zarr_chunk) ** 2 * int(self.UNIT_CHUNKS_WIDE)
-        per_unit = px * (self.UNIT_BYTES_PER_PX + 8 * max(1, int(n_channels)))
-        return bg_parallel.choose_workers(os.cpu_count(), n_units,
-                                          bg_parallel.mem_available_bytes(),
+        per_unit = (int(rust_unit_bytes) if rust_unit_bytes is not None else
+                    px * (self.UNIT_BYTES_PER_PX + 8 * max(1, int(n_channels))))
+        avail = bg_parallel.mem_available_bytes()
+        if avail is not None:
+            avail = max(0, avail - int(reserve_bytes))
+        return bg_parallel.choose_workers(os.cpu_count(), n_units, avail,
                                           per_tile_bytes=per_unit)
 
+    #: Rust unit, bytes per pixel besides the channels' own samples (plan
+    #: §8): the u16 output and its Python copy (8) plus the polygon mask
+    #: and its unpacking (3).
+    RUST_BYTES_PER_PX = 11
+
+    def _rust_unit_bytes(self, sample_bytes, block_bytes):
+        """Peak bytes of one Rust unit (plan §8): every channel read held at
+        once (`sample_bytes`, per pixel, summed over the channels read),
+        the output and mask, and one source block in flight (compressed and
+        decoded, `block_bytes` each)."""
+        px = int(self.zarr_chunk) ** 2 * int(self.UNIT_CHUNKS_WIDE)
+        return px * (int(sample_bytes) + self.RUST_BYTES_PER_PX) + 2 * int(block_bytes)
+
+    #: Test hook only (plan §6): "python" makes every region use the Python
+    #: computation. Never set by the application.
+    ENGINE_ENV = "BLOCK01_FUSION_ENGINE"
+
+    def _build_fuse_job(self, raw_source, region_sources, channels, groups, group_weights,
+                        nucleus_ch, nucleus_w, rname):
+        """Block F5 (plan §5.2, §6): the region's Rust `FuseJob` and its
+        peak bytes per unit, or (None, None) -- then the region is computed
+        in Python, with the reason printed. Decided once, at the region's
+        start; a failure later in the run fails the run (ruling 4).
+
+        Only the channels with a committed window are given to Rust
+        (ruling 7): the others take no part, so they are not read."""
+        def python(reason):
+            print(f"[Fusion] region '{rname}': Python fusion ({reason})")
+            self.engine_by_region[rname] = "python"
+            return None, None
+
+        if os.environ.get(self.ENGINE_ENV, "").strip().lower() == "python":
+            return python(f"{self.ENGINE_ENV}=python")
+        if region_sources is None:
+            return python("the loader path")
+        try:
+            import fusion_viewer_core as _core
+        except Exception as exc:                       # noqa: BLE001 -- any import failure
+            return python(f"fusion_viewer_core not importable: {exc}")
+        if not hasattr(_core, "FuseJob"):
+            return python("this fusion_viewer_core has no FuseJob")
+        used = {nucleus_ch} | {ch for cw in (groups or {}).values() for ch in cw}
+        for ch in channels:
+            if ch in used and not self._remap_params.get(ch) and ch not in self._unmapped_reported:
+                self._unmapped_reported.add(ch)
+                print(f"[Fusion] {ch} has no committed display window; "
+                      "it takes no part in this fusion")
+        slots = [ch for ch in channels if self._remap_params.get(ch)]
+        slot = {ch: i for i, ch in enumerate(slots)}
+        try:
+            from ..step1_core_adapter import _array_spec, build_raw_manifest
+            specs, sample_bytes, block_bytes, raw_dtype = [], 0, 0, None
+            for ch in slots:
+                src, key = region_sources[ch]
+                if src is raw_source:
+                    if raw_dtype is None:
+                        raw_dtype = np.dtype(src.dtype(key))
+                    specs.append({"raw": int(key)})
+                    item = raw_dtype.itemsize
+                    sample_bytes += item if raw_dtype in (np.uint8, np.uint16) else item + 4
+                    th, tw = src.native_tile_shape(0)
+                    block_bytes = max(block_bytes, th * tw * item)
+                else:
+                    spec = _array_spec(src._array(ch))
+                    with open(os.path.join(spec["dir"], ".zarray")) as fh:
+                        shuffle = (json.load(fh).get("compressor") or {}).get("shuffle")
+                    if shuffle not in (0, 1):
+                        return python(f"{ch}: corrected Blosc shuffle {shuffle!r} is not decoded in Rust")
+                    by0, by1, bx0, bx1 = src.valid_bounds(0)
+                    specs.append({"corrected": spec, "bbox": [int(by0), int(by1), int(bx0), int(bx1)]})
+                    sample_bytes += 4
+                    block_bytes = max(block_bytes, spec["chunks"][0] * spec["chunks"][1] * 4)
+            plan = {
+                "channels": [{"name": ch, "source": sp, "window": self._remap_params[ch]}
+                             for ch, sp in zip(slots, specs)],
+                "groups": [(group_weights.get(g, 1.0), [(slot[ch], w) for ch, w in cw.items() if ch in slot])
+                           for g, cw in (groups or {}).items()],
+                "nucleus": (slot[nucleus_ch], nucleus_w) if nucleus_ch in slot else None,
+            }
+            manifest = (build_raw_manifest(raw_source._provider)
+                        if any("raw" in sp for sp in specs) else None)
+            job = _core.FuseJob(manifest, plan)
+        except Exception as exc:                       # noqa: BLE001 -- ruling 4: start-up only
+            return python(f"no Rust job: {type(exc).__name__}: {exc}")
+        print(f"[Fusion] region '{rname}': Rust fusion ({len(slots)} channels)")
+        self.engine_by_region[rname] = "rust"
+        return job, self._rust_unit_bytes(sample_bytes, block_bytes)
+
     def _compute_unit(self, tile, channels, region_sources, packed, ry0, rx0,
-                      groups, group_weights, nucleus_ch, nucleus_w):
+                      groups, group_weights, nucleus_ch, nucleus_w, job=None):
         """One unit, fused and polygon-cut: (h, w, 2) uint16, or None once
-        the run is stopped. Its channels are read here, one after another."""
+        the run is stopped. Its channels are read here, one after another.
+        With a Rust `job` (block F5) the whole unit is computed there: the
+        same pixels, bit for bit (docs/f5_rust_fusion_plan.md §3)."""
         ty0, ty1, tx0, tx1 = tile
+        if job is not None:
+            if self._stop:
+                return None
+            mask = None
+            if packed is not None:
+                mask = self._unpack_part(packed, ty0 - ry0, tx0 - rx0,
+                                         ty1 - ty0, tx1 - tx0).view(np.uint8).tobytes()
+            out = job.fuse_unit(ty0, ty1, tx0, tx1, mask)
+            if out is None:
+                return None
+            return np.frombuffer(out, dtype="<u2").reshape(ty1 - ty0, tx1 - tx0, 2)
         raw_cache = {}
         for ch in channels:
             if self._stop:
@@ -714,38 +844,82 @@ class FullFusionWorker(QThread):
                 # concurrency there is; a unit reads its channels itself, one
                 # after the other -- and come back IN ORDER to this thread,
                 # the one writer of the store. At most `n` units are held.
-                n_workers = self._unit_workers(n_tiles, len(all_channels))
+                # Block F5: the region's Rust job, decided here once
+                job, rust_bytes = self._build_fuse_job(raw_source, region_sources, all_channels, groups,
+                                                       group_weights, nucleus_ch, nucleus_w, rname)
+                self._fuse_job = job
+                if self._stop and job is not None:
+                    job.cancel()                 # a Stop pressed while it was built
+                # Block F5-4: the store is written by a small pool of its own
+                # (distinct chunks per unit), whose memory is set aside before
+                # the computing pool is sized (plan §8)
+                n_writers = self._writer_count()
+                n_workers = self._unit_workers(n_tiles, len(all_channels), rust_bytes,
+                                               reserve_bytes=self._writer_bytes(n_writers))
+                n_writers = max(1, min(n_writers, n_workers))
 
                 def _unit(tile, read_done):
                     read_done()                  # reads of units may overlap
                     return tile, self._compute_unit(
                         tile, all_channels, region_sources, packed, ry0, rx0,
-                        groups, group_weights, nucleus_ch, nucleus_w)
+                        groups, group_weights, nucleus_ch, nucleus_w, job=job)
 
                 # Block PA-5b fix 2b: Step2's nucleus overview, sampled from
                 # the very pixels written here (no re-read of the store)
                 overview = nucleus_overview.Sampler((rh, rw))
                 t0 = time.time()
-                with contextlib.closing(bg_parallel.ordered_results(
-                        _unit, tiles, n_workers,
-                        should_stop=lambda: self._stop)) as results:
-                    for i, ((ty0, ty1, tx0, tx1), fused) in enumerate(results):
-                        if self._stop or fused is None:
-                            self.error.emit("Fusion stopped by user.")
-                            return
-                        # Write to zarr (relative coords within this region)
-                        out_zarr[ty0 - ry0:ty1 - ry0, tx0 - rx0:tx1 - rx0, :] = fused
-                        overview.add(fused, ty0 - ry0, tx0 - rx0)
-                        del fused
 
-                        done_s = time.time() - region_t0
-                        eta = done_s / (i + 1) * (n_tiles - i - 1)
-                        self.progress.emit(
-                            reg_i * units + ((i + 1) * units) // max(1, n_tiles), total_units,
-                            f"[{rname}] ✓ Part [{i+1}/{n_tiles}]  "
-                            f"{time.time() - t0:.1f}s  ETA {eta/60:.1f} min"
-                        )
-                        t0 = time.time()
+                def _write(ty0, ty1, tx0, tx1, fused):
+                    # Write to zarr (relative coords within this region). A
+                    # unit owns its chunks (`_units` is on the store's own
+                    # grid), so writers never touch the same chunk.
+                    out_zarr[ty0 - ry0:ty1 - ry0, tx0 - rx0:tx1 - rx0, :] = fused
+
+                def _written(i, future):
+                    # The head of the queue is written: its exception (if any)
+                    # fails the run; progress is reported in unit order.
+                    nonlocal t0
+                    future.result()
+                    done_s = time.time() - region_t0
+                    eta = done_s / (i + 1) * (n_tiles - i - 1)
+                    self.progress.emit(
+                        reg_i * units + ((i + 1) * units) // max(1, n_tiles), total_units,
+                        f"[{rname}] ✓ Part [{i+1}/{n_tiles}]  "
+                        f"{time.time() - t0:.1f}s  ETA {eta/60:.1f} min"
+                    )
+                    t0 = time.time()
+
+                writes = collections.deque()          # (unit index, future), in unit order
+                writer = ThreadPoolExecutor(max_workers=n_writers, thread_name_prefix="fused-write")
+                try:
+                    with contextlib.closing(bg_parallel.ordered_results(
+                            _unit, tiles, n_workers,
+                            should_stop=lambda: self._stop)) as results:
+                        for i, ((ty0, ty1, tx0, tx1), fused) in enumerate(results):
+                            if self._stop or fused is None:
+                                self.error.emit("Fusion stopped by user.")
+                                return
+                            # the overview stays in unit order, from the very
+                            # pixels handed to the writer
+                            overview.add(fused, ty0 - ry0, tx0 - rx0)
+                            writes.append((i, writer.submit(_write, ty0, ty1, tx0, tx1, fused)))
+                            del fused
+                            while len(writes) >= n_writers or (writes and writes[0][1].done()):
+                                _written(*writes.popleft())
+                        while writes:
+                            if self._stop:
+                                self.error.emit("Fusion stopped by user.")
+                                return
+                            _written(*writes.popleft())
+                finally:
+                    # Stop, an error or the end: no write starts any more and
+                    # the running ones finish before this region's temporary
+                    # store can be removed (the computing pool has already
+                    # been joined by `ordered_results` above).
+                    writer.shutdown(wait=True, cancel_futures=True)
+                    writes.clear()
+
+                self._fuse_job = None            # the region's units are all done
 
                 # No preview PNG (user ruling 2026-10-02): nothing read it --
                 # Step2 draws its overview from the fused zarr itself -- and a
@@ -822,6 +996,7 @@ class FullFusionWorker(QThread):
             for leftover in list(self._tmp_stores):
                 shutil.rmtree(leftover, ignore_errors=True)
             self._tmp_stores = []
+            self._fuse_job = None
             for source in getattr(self, "_open_sources", []):
                 source.close()
             self._open_sources = []

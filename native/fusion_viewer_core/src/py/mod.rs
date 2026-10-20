@@ -2,6 +2,8 @@
 
 mod config;
 pub(crate) mod corrected;
+mod fuse;
+mod fuse_job;
 mod gil;
 mod gl;
 mod label_source;
@@ -29,8 +31,10 @@ fn fusion_viewer_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<corrected::Step1Reader>()?;
     m.add_class::<corrected::ZarrArray>()?;
     m.add_class::<corrected::CancelToken>()?;
+    m.add_class::<fuse_job::FuseJob>()?;
     gil::register(m)?;
     testing::register(m)?;
+    fuse::register(m)?;
     Ok(())
 }
 

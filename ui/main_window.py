@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import collections
+import contextlib
 import copy
 import time
 import weakref
@@ -80,7 +81,7 @@ from .step0.roi_context_model import (
     with_patch_ids)
 from .block01_display import (
     Block01DisplayServices, STEP0 as _CTX_STEP0, STEP1 as _CTX_STEP1,
-    STEP2 as _CTX_STEP2, STEP3 as _CTX_STEP3,
+    STEP2 as _CTX_STEP2, STEP3 as _CTX_STEP3, REGIONS as _CTX_REGIONS,
 )
 from .step0.config_panel import ConfigPanel
 from .step_frame import FRAME_TAB_QSS, StepFrame, StepFrameMetrics, free_tab_bar
@@ -342,6 +343,23 @@ def _hex_to_rgb01(value):
 
 class _ArtifactKindMismatch(Exception):
     """The zarr on disk was written for the other Step1 output kind."""
+
+
+class _ScopedTissueContext:
+    """A step that draws the window's own frame for ITS OWN ticks (Regions,
+    docs/f5_tma_display_plan.md §13.7): Overlay of its ticked channels at
+    full strength, or Step1's fusion with its ticks choosing what shows. It
+    publishes nothing -- the shared spec stays Step1's."""
+
+    def __init__(self, window, scope, display_only=True):
+        self._window, self._scope, self._display_only = window, scope, bool(display_only)
+
+    def tissue_render_mode(self):
+        return self._window.tissue_render_mode()
+
+    def tissue_render_snapshot(self, computed_only=True):
+        return self._window._tissue_snapshot(self._scope, display_only=self._display_only,
+                                             publish=False, computed_only=computed_only)
 
 
 class _SharedSpecTissueContext:
@@ -1586,6 +1604,7 @@ class MainWindow(QMainWindow):
         # Step1 mount, built on first entry like Step3's.
         regions_bar = self._frame_title_bar("Step 0.5 — Regions")
         self._regions = RegionsPage(metrics=self._frame_metrics, title_bar=regions_bar)
+        self._style_regions_channels_header()
         # the Tissue Navigator entry, as Step1's / Step3's (user 2026-10-18):
         # a click jumps the Regions viewer whatever tool is in use
         nav = QPushButton("Tissue Navigator")
@@ -1597,6 +1616,11 @@ class MainWindow(QMainWindow):
         self._regions.intensity_requested.connect(self._show_intensity_window)
         self._regions.saved.connect(self._on_regions_saved)   # §10: computed off the GUI thread, then drawn
         self._step1_cores_ready.connect(self._on_step1_cores_ready)
+        # §13: in Regions, Intensity follows Regions' own current channel
+        try:
+            self._display.state.selection_changed.connect(self._on_regions_selection)
+        except AttributeError:
+            pass
         self._regions.jump_box = self._regions_jump_box
         self._regions_view = RegionsViewerHost(self, self._regions)
         self._stack.addWidget(self._regions)
@@ -2971,9 +2995,9 @@ class MainWindow(QMainWindow):
                                      patch_editable=True)
 
     def _show_regions_tissue_navigator(self):
-        """Open the shared Tissue Preview from Regions: Step1's picture (the
-        channel state is shared), the ROIs and patches read-only."""
-        self._display.show_navigator(_CTX_STEP1, roi_policy="read_only", patch_editable=False)
+        """Open the shared Tissue Preview from Regions: Regions' own picture
+        (its display-only ticks, §13.7), the ROIs and patches read-only."""
+        self._display.show_navigator(_CTX_REGIONS, roi_policy="read_only", patch_editable=False)
 
     def _show_tissue_navigator(self):
         """Open the shared Tissue Preview from Step1.
@@ -3058,7 +3082,17 @@ class MainWindow(QMainWindow):
                 "stride": stride}
 
     def tissue_render_snapshot(self, computed_only=True):
-        """Everything Step1's whole-slide frame needs, as plain values.
+        """Step1's frame: Step1's ticks, the science's weights, the spec
+        published for the downstream steps. See `_tissue_snapshot`."""
+        return self._tissue_snapshot(self._DISPLAY_SCOPES.get(1, ""), display_only=False,
+                                     publish=True, computed_only=computed_only)
+
+    def _tissue_snapshot(self, scope, display_only=False, publish=True, computed_only=True):
+        """Everything a whole-slide frame needs, as plain values -- for
+        `scope`'s ticks (Step1's, or Regions' display-only ones, §13.7).
+        `display_only`: Overlay shows every ticked channel at 1.0;
+        `publish`: the frame's spec becomes the one downstream steps draw
+        (Step1 only).
 
         THE WHOLE SLIDE, not the current patch: this is a navigation
         thumbnail, and stretching a patch across it would be a picture of
@@ -3078,9 +3112,13 @@ class MainWindow(QMainWindow):
         """
         mode = self.tissue_render_mode()
         state = self._display.state
+        # the ticks of THIS context's scope, whatever step is on screen (§13)
+        with (state.using_scope(scope)
+              if scope and hasattr(state, "using_scope") else contextlib.nullcontext()):
+            step1_visible = list(self.config.visible_channels())
         if mode == tissue_compose.MODE_OVERLAY:
-            wanted = [ch for ch in self.config.visible_channels()]
-            weights = {ch: self._overlay_weight(ch) for ch in wanted}
+            wanted = list(step1_visible)
+            weights = {ch: (1.0 if display_only else self._overlay_weight(ch)) for ch in wanted}
         else:
             # THE TICK DECIDES WHAT THIS FRAME SHOWS, in Fusion as in
             # Overlay (user ruling, 2026-09-23). The effective config is
@@ -3090,7 +3128,7 @@ class MainWindow(QMainWindow):
             # spec are made of. An unticked nucleus leaves as `("", 0.0)`,
             # the shape the composer already reads as "no nucleus".
             effective = self._effective_fusion_config()
-            shown = set(self.config.visible_channels())
+            shown = set(step1_visible)
             groups = {name: {ch: weight
                              for ch, weight in (data.get("channels") or {}).items()
                              if ch in shown}
@@ -3108,6 +3146,11 @@ class MainWindow(QMainWindow):
                 wanted.extend(ch_weights.keys())
             wanted = sorted(set(ch for ch in wanted if ch))
         if not wanted:
+            if display_only:
+                # §13.7: nothing ticked in a display-only page is an EMPTY
+                # picture, said as one -- not "nothing yet" (which keeps the
+                # previous frame up)
+                return {"blank": True, "token": self._step0.tissue_dataset_token()}
             return None
         arrays, loading = {}, []
         for ch in wanted:
@@ -3205,8 +3248,10 @@ class MainWindow(QMainWindow):
             snapshot.update(fusion_bits)
             spec.update(fusion_bits)
         # Published, not kept: there is ONE spec for the process and the
-        # downstream contexts read it rather than copying it.
-        self._display.publish_render_spec(spec)
+        # downstream contexts read it rather than copying it. Step1's alone:
+        # Regions' picture is its own and never reaches Step2/Step3 (§13.7).
+        if publish:
+            self._display.publish_render_spec(spec)
         return snapshot
 
     def tissue_render_spec(self):
@@ -3276,6 +3321,10 @@ class MainWindow(QMainWindow):
         }
         for step_id, context in self._downstream_contexts.items():
             coordinator.register_context(step_id, context)
+        # Regions (§13.7): Regions' own ticks, display only, publishing nothing
+        coordinator.register_context(
+            _CTX_REGIONS, _ScopedTissueContext(self, self._DISPLAY_SCOPES.get(self.REGIONS_STEP, ""),
+                                               display_only=True))
         # The canonical colour settled: Step1's rows and its viewer follow it
         # like every other view, without Step0 and Step1 pushing at each other.
         self._display.state.color_changed.connect(
@@ -4298,7 +4347,11 @@ class MainWindow(QMainWindow):
         # new one says what it is, the old one keeps working for a reader
         # that predates the split. It is no longer the same fact as taking
         # part in the fusion, which is written separately below.
-        visible = set(self.config.visible_channels())
+        state = getattr(self._display, "state", None)
+        with (state.using_scope(self._DISPLAY_SCOPES.get(1, ""))       # §13: Step1's own ticks,
+              if state is not None and hasattr(state, "using_scope")     # even while Regions is up
+              else contextlib.nullcontext()):
+            visible = set(self.config.visible_channels())
         channel_visibility = {ch: (ch in visible)
                               for ch in (self.config.all_channels or [])}
         fusion_draft = self._display.fusion.draft_snapshot()
@@ -5693,7 +5746,7 @@ class MainWindow(QMainWindow):
     #: composes exactly what Step1 would -- and follows a tick or a weight
     #: moved in Step3 at once. Step2 keeps the shared published spec.
     _STEP_CONTEXTS = {0: _CTX_STEP0, 1: _CTX_STEP1, 2: _CTX_STEP2,
-                      3: _CTX_STEP1, 5: _CTX_STEP1}       # 5: Regions draws Step1's picture
+                      3: _CTX_STEP1, 5: _CTX_REGIONS}     # 5: Regions draws its own (§13.7)
 
     def _channels_host_for(self, step):
         """The layout of the step's own `Channels` panel, or None."""
@@ -5739,7 +5792,7 @@ class MainWindow(QMainWindow):
     #: channel, weights and fusion draft. Step2 does not start empty, though
     #: -- see `_seed_downstream_scope`.
     _DISPLAY_SCOPES = {0: "step0", 1: "step1", 2: "step2", 3: "step1",
-                       5: "step1"}   # Regions shares Step1's channel state (user ruling 2026-10-18)
+                       5: "regions"}   # Regions: its own display-only ticks (user ruling 2026-10-20, §13)
 
     #: The steps seeded from Step1's COMMITTED snapshot the first time they
     #: are opened, and again after Step1 commits something else.
@@ -5809,6 +5862,68 @@ class MainWindow(QMainWindow):
                                           origin=f"seed-{scope}")
         seeded[scope] = stamp
         print(f"[Step{step}] display seeded from committed {stamp[:12]}")
+        return True
+
+    def _on_regions_selection(self, channel):
+        if self.__dict__.get("_current_step") == self.REGIONS_STEP and channel:
+            self._display.focus_intensity(channel)
+
+    def _style_regions_channels_header(self):
+        """Regions' header row exactly as Step1's / Step3's (§13.7, §13.9):
+        `Show all` as wide as Step0's `Method ▾`, then `Intensity…` in
+        Step0's own stylesheet, with Step0's row insets and spacing and
+        Step1's rule under the row."""
+        page = self._regions
+        head = getattr(page, "channels_head", None)
+        box = getattr(page, "channels_box_layout", None)
+        if head is None or box is None:
+            return False
+        page.btn_intensity.setStyleSheet(self._step0._btn_intensity_window.styleSheet())
+        page.btn_intensity.setToolTip(self._btn_step1_intensity.toolTip())
+        # `Show all` (§13.9): the dock's own sweep -- in Regions the dock is in
+        # its display-only step, so it ticks Regions' own scope and nothing
+        # of Step1's; a plain toggle, as Step1's / Step3's are
+        show_all = _WidthMatchedCheckBox("Show all", self._step0._method_all)
+        show_all.setStyleSheet(self._step0._cb_all.styleSheet())
+        show_all.setToolTip("Tick or untick every marker channel here -- display only: "
+                            "Step1's ticks and fusion are not touched.")
+        show_all.toggled.connect(lambda on: self._channel_dock.set_all_visible(bool(on)))
+        head.insertWidget(0, show_all)
+        s0_host = self._step0._channels_host
+        s0 = s0_host.getContentsMargins()
+        bm = box.getContentsMargins()
+        head.setContentsMargins(s0[0] - bm[0], s0[1] - bm[1], s0[2] - bm[2], 0)
+        head.setSpacing(s0_host.itemAt(0).layout().spacing())
+        rule = QtWidgets.QFrame()
+        rule.setFrameShape(QtWidgets.QFrame.HLine)
+        rule.setStyleSheet("color:#333;")
+        box.insertWidget(box.indexOf(head) + 1 if box.indexOf(head) >= 0 else 1, rule)
+        self._regions_cb_all = show_all
+        return True
+
+    def _seed_regions_scope(self):
+        """Regions' own ticks start as Step1's CURRENT ones -- once per
+        dataset (§13): copied explicitly from Step1's scope over whatever
+        `set_scope` materialised; afterwards they are Regions' own and never
+        written back."""
+        state = getattr(self._display, "state", None)
+        if state is None or not hasattr(state, "using_scope"):
+            return False
+        ident = state.identity() if hasattr(state, "identity") else None
+        if self.__dict__.get("_regions_seeded_for", object()) == ident:
+            return False
+        step1 = self._DISPLAY_SCOPES.get(1, "")
+        with state.using_scope(step1):
+            visibility = dict(state.display_visibility())
+            selection = state.selected_channel()
+        regions = self._DISPLAY_SCOPES.get(self.REGIONS_STEP, "")
+        with state.using_scope(regions):
+            for channel in list(state.channel_order() or visibility):
+                state.set_display_visible(channel, bool(visibility.get(channel)), origin="seed-regions")
+            if selection:
+                state.set_selected_channel(selection, origin="seed-regions")
+        self._regions_seeded_for = ident
+        print("[Regions] channel ticks seeded from Step1's (display only from here on)")
         return True
 
     def _display_scope_is_step1(self):
@@ -5978,6 +6093,13 @@ class MainWindow(QMainWindow):
             # BEFORE the page catches up: a downstream step opening for the
             # first time after a commit takes its ticks from that commit.
             self._seed_downstream_scope(active)
+            if active == self.REGIONS_STEP:
+                self._seed_regions_scope()
+            if self.REGIONS_STEP in (active, previous):
+                # §13.6: set_scope announces no selection change, so an open
+                # Intensity window is pointed at THIS step's current channel
+                # (no selection written, no save scheduled)
+                self._display.focus_intensity(state.selected_channel())
             # THE PAGE CATCHES UP ONCE. Its consumers ignored every notice
             # made while another step was on screen, so entering it replays
             # its own answers -- rows, layer switches, current channel and the
@@ -6023,8 +6145,8 @@ class MainWindow(QMainWindow):
             with perf_trace.span("step1.entry.dock_set_step", step=active):
                 # Step3's rows are Step1's rows (block 2b): the tick is the
                 # fusion command and the weight is editable there too.
-                # Regions' rows are Step1's rows too (shared channel state).
-                dock.set_step(1 if active in (3, self.REGIONS_STEP) else active)
+                # Regions' rows are display-only, like Step2's (§13).
+                dock.set_step(1 if active == 3 else 2 if active == self.REGIONS_STEP else active)
             with perf_trace.span("step1.entry.dock_mount", step=active):
                 self._mount_channels_dock(active)
         # The ONE place the shared navigator's edit policy is decided.  Every
@@ -8300,6 +8422,9 @@ class MainWindow(QMainWindow):
         # `_resync_step1_display_from_state` replays Step1's own answers when
         # it comes back on screen.
         if not self._display_scope_is_step1():
+            if self.__dict__.get("_current_step") == self.REGIONS_STEP:
+                # §13.7: Regions' own tick redraws Regions' Tissue preview
+                self._display.coordinator.request_frame(kind="visibility", channel=channel)
             return
         if visible:
             # Showing a channel again is the user asking for it, so a previous
@@ -8509,6 +8634,9 @@ class MainWindow(QMainWindow):
         it, editable from every step; `show_intensity` points it at the
         channel, so nothing here reaches into Step0 to do it a second time.
         """
+        if self.__dict__.get("_current_step") == self.REGIONS_STEP:
+            # §13: Regions' own current channel (the Step1 panel ignores it)
+            return self._display.show_intensity(self._display.state.selected_channel())
         return self._display.show_intensity(self.config.current_channel())
 
     def _render_current_patch(self, reset_view=False):

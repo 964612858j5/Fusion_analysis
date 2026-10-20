@@ -521,3 +521,69 @@
 - 通道面板：codex 指出同宿主时本来就直接返回，此项删除。
 - Step0 加载：`build_default_stack` 改用 `switch_overview_for_current_channel()`（共享后台 overview 读取；送达时 `on_overview_delivered` 安装、起 floor、按 `_current_bbox` 发请求；之前 `_blocked_on_overview` 什么都不画不请求）。
 - codex 第 3 轮代码审核两处已改：worker 只在交接自带 `regions` 时才判"两份快照冲突"；`_check_preseg_contract` 的交接 Regions 融合设置绑定删除；Step2 提示文字更新。
+
+## 13. Regions 的通道勾选只管显示（用户 2026-10-20 选 A）
+
+### 13.0 现状与问题
+- Regions 与 Step1 共用通道状态（`MainWindow._DISPLAY_SCOPES[5] = "step1"`，`ui/main_window.py:5741`；2026-10-18 裁定），通道面板在 Regions 时按 Step1 的行工作（`dock.set_step(1 if active in (3, REGIONS_STEP) …)`，`:6027`）。Step1 行里的勾选是"使用这个通道"：同时改显示和**融合参与**（`ui/widgets/channel_dock/global_dock.py:929` `_on_row_visibility` → `use_channel`）。
+- 结果：在 Regions 为看图勾选通道，就改了 Step1 的融合草稿；2026-10-20 实测，一次保存把融合通道从 CD68/CD163/CD45RO/CD39/HsBAg 换成了 PD1/aSMA/…，预分割随之过时。
+
+### 13.1 改法
+1. **Regions 自己的显示范围**：`_DISPLAY_SCOPES[5] = "regions"`。`ChannelDisplayState` 的范围按名字自动建立（`_scope_store`，`ui/block01_display.py`），每个范围各有自己的勾选和当前通道；**颜色和显示窗口（Intensity）在所有范围之间共享**，与 Step0/Step2 现在的规则一致，不改。
+2. **通道面板**：Regions 时 `dock.set_step(2)`——Step2 的只显示行（勾选框、色块、名字；无权重、无参与，`global_dock._on_row_visibility` 在非 Step1 时只写显示）。Step3 仍用 Step1 的行（共用 Step1 范围），本节不动，只在此说明。
+3. **Regions 看图器读 Regions 的勾选**：`Step1WholeSlideMount` 新增构造参数 `display_scope`（默认 `"step1"`，现有三个 mount 行为不变），用在两处：`_spec()` 的 `draft_spec.build_spec(..., scope=display_scope)`（GPU 两条后端都经它），以及 CPU 合成 `Step1ComposeBinding(..., scope=display_scope)`（该类本来就有 `scope` 参数）。Regions 的 mount 传 `"regions"`。**不用 `display_filter`**：设了它的 mount 不允许 CPU 回退（§3.1），而 Regions 需要照旧可以回退。
+4. **两种模式**：Overlay 显示 Regions 勾选的通道（颜色、窗口共享）；Fusion 显示 Step1 的融合模型（组、权重、细胞核都来自 Step1 的草稿，Regions 勾选不写它），其中这一帧显示哪些融合通道由 Regions 的勾选决定——与 Step1 自己"勾选在两种模式下都表示此刻显示什么"的规则（`build_spec` MODE_FUSION 分支）一致。融合模型本身永远不被 Regions 改动。
+5. **首次进入时的初值**：Regions 范围在本数据集第一次进入 Regions 时，从 **Step1 当前的勾选和当前通道**复制（不是已保存的快照：Regions 是看图，不是跑任务）；之后是 Regions 自己的，不回写 Step1，也不再被 Step1 覆盖。按数据集身份（`state.identity()`）记一次，换数据集再复制一次。实现为 `_seed_regions_scope()`，在步骤切换 `scope_moved` 时与 `_seed_downstream_scope` 同处调用。
+6. **会话**：Step2 的范围不写会话（每次由已保存的设置播种），Regions 照此：不新增会话字段，每次打开程序、第一次进 Regions 时从 Step1 复制。
+7. **切回 Step1**：范围从 `regions` 回到 `step1`，现有的 `_resync_step1_display_from_state` 照常重放 Step1 自己的勾选（`:5990` 分支），Step1 的面板和看图器显示 Step1 自己的状态。
+8. **Tissue preview**：在 Regions 时仍是 Step1 的上下文（`_STEP_CONTEXTS[5] = _CTX_STEP1`，按 Step1 范围出图），不变。
+9. **Intensity 窗口**：权限仍按当前上下文（Step1 上下文），编辑的是当前范围的当前通道；窗口数值本来就共享。
+
+### 13.2 测试
+- Regions 里勾选/取消通道：Step1 的融合草稿（`effective_config()`、enabled、权重、草稿版本）完全不变；Step1 范围的勾选不变。
+- 首次进入 Regions：Regions 范围等于进入前 Step1 的勾选与当前通道；之后在 Step1 改勾选，Regions 不跟着变；换数据集再播种。
+- 通道面板在 Regions 为显示行（无权重、无参与）；Step3 仍为 Step1 行。
+- Regions mount 的 GPU 规格和 CPU 合成都用 `"regions"` 范围；其余 mount 仍用 `"step1"`。
+- 切回 Step1：Step1 面板与看图器回到 Step1 的勾选。
+- 复用：`test_regions_r*`、`test_tma_f3_page`、通道面板与 Step1 显示相关测试、`test_step1_*fusion*`、`test_block01_tissue_preview_contract`。
+
+### 13.3 白名单
+`ui/main_window.py`（`_DISPLAY_SCOPES[5]`、`dock.set_step` 映射、`_seed_regions_scope`）、`ui/step1_viewer_mount.py`（`display_scope` 参数及其两处使用）、`ui/regions/mount.py`（传 `display_scope="regions"`）、对应测试、本文档。
+
+### 13.4 风险
+- 依赖"各范围共享颜色和窗口"的现有设计：在 Regions 改某通道的颜色/窗口，Step1 里同一通道也变（与 Step0/Step2 现状相同，不是新问题）。
+- 旧会话里 Regions 期间写下的 Step1 勾选已经在 Step1 范围里，本改动不回滚它们。
+
+### 13.5 第 1 轮审核修订（`codex_f5_s13_plan_1.out`，替换 13.1 中对应条目）
+- **（P1）Overlay 的显示强度**：Step1 的 Overlay 按科学权重显示（`overlay_weight`，未参与融合的通道权重为 0，勾了也看不见）。Regions 只管显示，所以 Regions 的 Overlay 里**每个勾选的通道按 1.0 显示**，不看融合权重。实现：`draft_spec.build_spec(..., display_only=False)` 新增参数；为真时 Overlay 分支的通道 = 该范围勾选的通道（不再要求 `fusion_enabled` 或权重），权重一律 1.0；Fusion 分支不变。mount 新增参数 `display_only`（默认 False），与 `display_scope` 一起传给 `_spec()` 和 `Step1ComposeBinding`（后者加同名参数传给 `build_spec`）。Regions 的 mount 用 `display_scope="regions", display_only=True`。GPU 和 CPU 两条路都测"从未参与融合的通道在 Regions 勾上就能看见"。
+- **（P1）Step1 会话不收 Regions 的勾选**：`_step1_session_payload()` 里读显示勾选（`config.visible_channels()`）和当前通道时，固定在 Step1 范围读（`state.using_scope("step1")`）。离开 Regions 或在 Regions 关窗时写会话，写进去的仍是 Step1 自己的勾选；恢复照旧装进 Step1 范围。
+- **（P2）Intensity 跟 Regions 的当前通道**：在 Regions 时，`_show_intensity_window` 用当前（Regions）范围的 `state.selected_channel()`；另外接一条 `state.selection_changed` → 在 Regions 时 `self._display.focus_intensity(channel)`，让已打开的 Intensity 窗口跟着 Regions 的选择走。Intensity 的权限按计算锁定，不按步骤（更正 13.1.9 的说法）。
+- **（P2）Tissue preview**：`tissue_render_snapshot()` 读勾选的两处（Overlay 和 Fusion 分支）固定在 Step1 范围读，保证在 Regions 时 Tissue preview 仍是 Step1 的画面（13.1.8 的承诺由此兑现）。
+- **播种**：`set_scope("regions")` 会先从共享的基础状态建出 Regions 范围；`_seed_regions_scope()` 随后**显式**读 Step1 范围的勾选和当前通道并覆盖 Regions 范围，是否已播种只看"本数据集身份是否已记录"，不看范围是否存在。
+- **说明**：`Step1ViewerBinding.current_channel()` 仍读 Step1 范围，只影响 mount 打开时的起始通道，不影响合成（合成按 `display_scope`），不改。
+- **文档与旧测试**：`UI_SURFACE_RULES.md` 里关于 Regions 共用 Step1 通道状态的规则改为本节；`tests/test_regions_r2.py` 里断言 Regions 用 Step1 范围的旧测试改为断言 `"regions"`。
+- **白名单（替换 13.3）**：`ui/main_window.py`（`_DISPLAY_SCOPES[5]`、dock 映射、`_seed_regions_scope`、会话 payload 与 Tissue 快照固定 Step1 范围、Intensity 路由）、`ui/step1_draft_spec.py`（`display_only`）、`ui/step1_compose_binding.py`（`display_only` 传递）、`ui/step1_viewer_mount.py`（`display_scope`、`display_only`）、`ui/regions/mount.py`、`UI_SURFACE_RULES.md`、`tests/test_regions_r2.py`、新测试、本文档。
+- **验收补充**：实际画面像素（Regions 勾上一个从未参与融合的通道能看见）、关闭再打开后 Step1 的勾选不含 Regions 的、在 Regions 换当前通道时 Intensity 跟着换、两种模式、首次进入的播种。
+
+### 13.6 第 2 轮审核修订（`codex_f5_s13_plan_2.out`）
+- **（P2）切换步骤时 Intensity 重新对准**：`set_scope()` 只发 `scope_changed`，不发选择变化。所以在步骤切换的 `scope_moved` 处理里（播种之后），若离开或进入的是 Regions，就调用 `self._display.focus_intensity(state.selected_channel())`（当前已显示范围的当前通道）：只让已打开的 Intensity 窗口对准，不写选择、不安排会话保存。覆盖 Regions ↔ Step1/Step3 两个方向。验收：Step1 选 A、Regions 选 B，Intensity 开着来回切，始终对准当前步骤的当前通道。
+- **（P3）白名单加入** `tests/test_ui_surface_contract.py`：把 Regions 用 `"step1"` 范围的断言改为 `"regions"`，保留 Regions 用 Step1 渲染上下文（Tissue preview）的断言。
+
+### 13.7 验收反馈的三处修改（用户裁定 2026-10-20）
+1. **Regions 的 `Intensity…` 按钮与 Step0 一致**：样式直接取 Step0 那颗按钮的样式表（`Step0Page._btn_intensity_window.styleSheet()`，Step1/Step3 也是这样取的，`ui/main_window.py:958-966`、`:1708-1711`）；位置照 Step1 的标题行：行首放一个与 Step0 `Method ▾` 等宽的占位（复用 `_WidthMatchedCheckBox` 的取宽办法，做成不可见的占位控件，不加新功能），`Intensity…` 紧随其后，行距、边距取 Step0 `Channels` 标题行的（`:1003-1017` 的算法），下面一条分隔线同 Step1。样式不新造。由主窗口在建 Regions 页之后套用（Regions 页只把标题行和那颗按钮交出来）。
+2. **（用户裁定 2026-10-20，改写 13.1.8）Tissue preview 在 Regions 时显示 Regions 自己的画面**：Overlay 显示 Regions 勾选的通道（每个按 1.0），Fusion 显示 Regions 的 Fusion（Step1 的融合模型，按 Regions 的勾选决定这一帧显示哪些），随 Regions 的勾选、颜色、窗口实时更新。
+   - 新的渲染上下文 `REGIONS = "regions"`（`ui/block01_display.py` 的上下文名），`_STEP_CONTEXTS[5] = REGIONS`，注册一个 `_ScopedTissueContext`：它把主窗口现有的 `tissue_render_snapshot` 的计算按"范围 + 只管显示 + 是否发布"参数化后调用（`_tissue_snapshot(scope, display_only, publish)`）。Step1 的上下文仍是 `("step1", False, 发布)`；Regions 的是 `("regions", True, 不发布)`——**不发布共享 render spec**（那是 Step1 给 Step2/Step3 的），Step2/Step3 的画面不受 Regions 影响。
+   - 实时：颜色、窗口的变化本来就对任何上下文请求新帧（`TissuePreviewCoordinator._on_shared_color_changed` / `_on_shared_mapping_changed`）；勾选的变化目前只有 Step1 的处理会请求（`main_window.py:8365`，只在 Step1 范围），新增：显示范围为 `regions` 时，`state.visibility_changed` → `coordinator.request_frame(kind="visibility")`。模式切换本来就请求新帧。
+   - 弹窗的编辑权限、点击跳转不变（仍按 Regions 现有的 `read_only` 策略和跳转）。
+3. **Step1 与 Regions 的视野**：核实结果——Step0、Step1、Step3 和 Regions 本来就共用同一个相机（`CameraOwner`，`main_window.py:592`）；Regions 的拖动、滚轮、右键缩放经 `_on_regions_camera` 写入，表格跳转、Prev/Next、Tissue Navigator 点击经 `_on_regions_jump` 写入，进入哪个步骤就把这个相机放到那个步骤的看图器上（`_apply_owner_camera_to`，含 Step3）。在真实窗口的测试台上用真实滚轮和拖动事件验证：Step1 ↔ Regions 两个方向、反复切换、表格跳转、Navigator 点击，中心和缩放都一致；两个看图器的可视区大小也相同。**不改代码**，补一个用真实输入事件的回归测试（`tests/test_f5_regions_camera.py`）锁住这一点；如真机仍不一致，需要用户给出具体操作步骤（在哪一步、用什么方式移动的视野）再查。
+- 白名单增加：`ui/block01_display.py`（新上下文名 `REGIONS`）、`ui/regions/page.py`（交出标题行布局）、新测试 `tests/test_f5_regions_camera.py`；`ui/main_window.py` 的改动为上述 1、2 两项。
+
+### 13.8 代码审核修订（`codex_f5_s137_code_1.out`）
+- **（P2）Regions 一个通道都不勾时，Tissue preview 显示空画面（黑）**：只管显示的上下文在"没有勾选"时返回明确的空画面 `{"blank": True, "token": …}`，协调器（帧时钟路径和同步 `render_now` 路径）把黑图放到面板上，并把"上一帧"记为空；不再留着前一帧，也不退回 DAPI 缩略图。Step1 的行为不变。
+- **（P3）**相机测试：滚轮与拖动分别断言各自移动了视野；表格跳转与 Navigator 点击是对这两个入口的调用（与产品里按钮调用的是同一入口）；措辞限定为 Step0/1/3/Regions。
+
+### 13.9 Regions 的 `Show all`（用户 2026-10-20）
+- Regions 通道面板标题行加 `Show all`，与 Step1/Step3 是同一个控件：`_WidthMatchedCheckBox`（与 Step0 `Method ▾` 等宽，取代 13.7 的空白占位）、Step0 `Show all` 的样式表，位于行首、`Intensity…` 之前。
+- 勾/取消调用通道面板自己的 `set_all_visible`；Regions 时面板处于只显示的一步，所以只改 Regions 范围的勾选（跳过不可批量切换的通道，如细胞核），从不碰 Step1 的勾选和融合。
+- 与 Step1/Step3 的 `Show all` 一样是普通开关（不跟随逐个勾选改变状态，不是三态）。
+- 每个通道走单个勾选同一条路径，所以 Regions 看图器与 Tissue preview 同样实时更新。

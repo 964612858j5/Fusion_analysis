@@ -2,7 +2,7 @@
 and real viewers (the rig of `test_step1_shared_camera`): the third
 resident viewer opens on entry, pauses when another step is on screen and
 reopens after a close; the overlay is attached to the viewer on screen and
-visible; the channel scope is Step1's; the camera goes both ways between
+visible; the channel scope is Regions' own (display only, §13); the camera goes both ways between
 Step0, Regions and Step1; the entry check refuses without a handoff.
 """
 
@@ -42,7 +42,7 @@ def test_the_third_viewer_opens_carries_the_overlay_and_pauses_when_left(app, mo
         assert host.mount is not None and host.mount.host.stack is not None
         assert host.overlay is not None and host.overlay.isVisible()
         assert host.overlay.viewport() is host.mount.host.stack.view.graphics.viewport()
-        assert rig.w._display.state.scope() == "step1"
+        assert rig.w._display.state.scope() == "regions"      # §13: its own display-only ticks
         assert rig.w._channel_dock.parentWidget() is rig.w._regions.channels_host().parentWidget()
         rig.w._stack.setCurrentIndex(1)
         _in(rig, 1)

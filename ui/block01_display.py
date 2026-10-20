@@ -73,6 +73,8 @@ STEP0 = "step0"
 STEP1 = "step1"
 STEP2 = "step2"
 STEP3 = "step3"
+#: Regions (step 0.5): its own display-only picture (docs/f5_tma_display_plan.md §13.7)
+REGIONS = "regions"
 
 
 _UNSET = object()
@@ -1297,6 +1299,22 @@ class TissuePreviewCoordinator(QObject):
             # that makes a first frame possible.
             self.request_frame(kind="mapping", channel=channel)
 
+    def _publish_blank(self, token, rev):
+        """Put an empty (black) picture on every panel for `token`."""
+        import numpy as _np
+        black = _np.zeros((2, 2, 3), _np.uint8)
+        for panel in self._panels():
+            adopt = getattr(panel, "adopt_dataset", None)
+            if callable(adopt):
+                adopt(token)
+            setter = getattr(panel, "set_channel_image", None)
+            if callable(setter):
+                setter(black, token)
+        self._last_publish = self._now()
+        self._last_published = {"rev": rev, "owner": self._active, "mode": None, "token": token,
+                                "channels": (), "loading": ()}
+        tissue_log.note("frame.blank", owner=self._active, rev=rev)
+
     def _touches(self, channel):
         """Would a change to `channel` change the picture on screen?
 
@@ -1423,6 +1441,20 @@ class TissuePreviewCoordinator(QObject):
             snapshot = self._snapshot(context, rev)
         except Exception as exc:                            # noqa: BLE001
             print(f"[Block01] could not snapshot the tissue frame: {exc}")
+        if isinstance(snapshot, dict) and snapshot.get("blank"):
+            # An explicit EMPTY picture (Regions with nothing ticked, §13.7):
+            # the panels show black now -- not the previous step's frame, and
+            # not the DAPI overview `None` would give back. Owed, like any
+            # frame, while no panel is visible (A9-O1).
+            self._in_flight = False
+            if not self._any_panel_visible():
+                self._owed_rev = rev
+                self._last_publish = self._now()
+            else:
+                self._owed_rev = None
+                self._publish_blank(snapshot.get("token"), rev)
+            self._maybe_arm_next()
+            return
         if snapshot is None:
             # Nothing drawable yet -- no arrays resident, nothing ticked. The
             # context has been asked to fetch what it is missing; its arrival
@@ -1513,6 +1545,8 @@ class TissuePreviewCoordinator(QObject):
             payload = ask()
         if not payload:
             return None
+        if payload.get("blank"):
+            return payload                       # an explicit empty picture (§13.7)
         arrays = payload.get("arrays") or {}
         if not arrays:
             return None
@@ -1586,6 +1620,9 @@ class TissuePreviewCoordinator(QObject):
             print(f"[Block01] could not snapshot the tissue frame: {exc}")
             return None
         if snapshot is None:
+            return None
+        if snapshot.get("blank"):                # §13.7: the empty picture, drawn now
+            self._publish_blank(snapshot.get("token"), rev)
             return None
         snapshot["coalesced"] = 0
         snapshot["input_rev"] = rev

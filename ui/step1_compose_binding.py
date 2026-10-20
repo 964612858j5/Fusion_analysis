@@ -46,8 +46,9 @@ class Step1ComposeBinding(QtCore.QObject):
                               "state-installed"})
 
     def __init__(self, coordinator, domain, state, mode=MODE_OVERLAY,
-                 scope=STEP1_SCOPE, layer=None, parent=None):
+                 scope=STEP1_SCOPE, layer=None, parent=None, display_only=False):
         super().__init__(parent)
+        self._display_only = bool(display_only)   # §13: a display-only page's overlay
         self._coordinator = coordinator
         self._domain = domain
         self._state = state
@@ -65,7 +66,7 @@ class Step1ComposeBinding(QtCore.QObject):
     def spec(self):
         """The current draft and display, as one composition spec."""
         return draft_spec.build_spec(self._domain, self._state, self._mode,
-                                     scope=self._scope)
+                                     scope=self._scope, display_only=self._display_only)
 
     # ── the wiring ────────────────────────────────────────────────────
     def attach_layer(self, layer):

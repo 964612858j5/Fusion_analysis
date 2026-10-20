@@ -132,6 +132,9 @@ class CoresActions:
     def run_toggled(self, key, on):
         self.page.edit(D.set_run, key, on)
 
+    def runs_set(self, keys, on):
+        self.page.edit(D.set_runs, list(keys), on)
+
     def row_menu(self, kind, ident, pos):
         page = self.page
         h = page.holder

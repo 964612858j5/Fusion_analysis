@@ -61,6 +61,7 @@ class CoresPanel(QWidget, CoresActions):
         self.numbering.custom_single.connect(self.custom_single)
         self.table.row_clicked.connect(self.row_clicked)
         self.table.run_toggled.connect(self.run_toggled)
+        self.table.runs_set.connect(self.runs_set)
         self.table.context_requested.connect(self.row_menu)
 
     # ── state ──

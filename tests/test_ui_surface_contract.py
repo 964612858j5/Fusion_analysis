@@ -343,8 +343,10 @@ def test_regions_shares_step1s_channels_and_needs_a_saved_step0(app, monkeypatch
         w.step0_output = {}
         w._go_to_regions()
         assert said and w._stack.currentWidget() is not w._regions        # refused, said on screen
-        assert w._DISPLAY_SCOPES[w.REGIONS_STEP] == w._DISPLAY_SCOPES[1] == "step1"
-        assert w._STEP_CONTEXTS[w.REGIONS_STEP] is w._STEP_CONTEXTS[1]
+        # §13 (user ruling 2026-10-20): Regions' ticks are its own, display only
+        assert w._DISPLAY_SCOPES[w.REGIONS_STEP] == "regions" and w._DISPLAY_SCOPES[1] == "step1"
+        # §13.7 (user ruling 2026-10-20): the Tissue preview draws Regions' own picture
+        assert w._STEP_CONTEXTS[w.REGIONS_STEP] == "regions" != w._STEP_CONTEXTS[1]
         _enter_regions(w)
         dock = w._channel_dock
         assert dock.parentWidget() is w._regions.channels_host().parentWidget()

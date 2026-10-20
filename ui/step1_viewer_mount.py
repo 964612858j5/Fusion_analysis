@@ -149,9 +149,15 @@ class Step1WholeSlideMount(QtCore.QObject):
 
     def __init__(self, window, host=None, parent=None, *, gpu=True,
                  gpu_layer_factory=None, camera_reason="step1", labels=False,
-                 display_filter=None, navigator=True, raw_texture_bytes=None):
+                 display_filter=None, navigator=True, raw_texture_bytes=None,
+                 display_scope=STEP1_SCOPE, display_only=False):
         super().__init__(parent)
         self._window = window
+        #: docs/f5_tma_display_plan.md §13 (Regions): whose ticks this viewer
+        #: draws, and whether its Overlay shows every ticked channel at full
+        #: strength regardless of the fusion's weights. Defaults: Step1's.
+        self._display_scope = str(display_scope or STEP1_SCOPE)
+        self._display_only = bool(display_only)
         #: docs/f5_tma_display_plan.md 3.1 (Step2's small viewer): a function
         #: that narrows Step1's display spec (DAPI only). Set, this viewer
         #: never composes on the CPU -- that path reads the plain Step1 spec --
@@ -293,7 +299,8 @@ class Step1WholeSlideMount(QtCore.QObject):
 
     def _spec(self):
         """Step1's display spec, narrowed by `display_filter` when set."""
-        spec = draft_spec.build_spec(self._domain, self._state, self._mode, scope=STEP1_SCOPE)
+        spec = draft_spec.build_spec(self._domain, self._state, self._mode, scope=self._display_scope,
+                                     display_only=self._display_only)
         return self._display_filter(spec) if self._display_filter is not None else spec
 
     # ── opening ───────────────────────────────────────────────────────
@@ -508,7 +515,7 @@ class Step1WholeSlideMount(QtCore.QObject):
         if self.compose is None:
             self.compose = Step1ComposeBinding(
                 self.coordinator, self._domain, self._state, mode=self._mode,
-                parent=self)
+                scope=self._display_scope, display_only=self._display_only, parent=self)
             self.compose.attach_layer(self.layer)
         self.layer.attach()
         self._connect_view_rect()

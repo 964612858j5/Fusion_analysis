@@ -322,6 +322,13 @@ def set_run(d: Dict, key: str, run: bool) -> None:
     log(d, {"kind": "run", "position_key": key, "run": bool(run)})
 
 
+def set_runs(d: Dict, keys, run: bool) -> None:
+    """Run on / off for several positions: one edit (one undo step)."""
+    for key in keys:
+        d["positions"][key]["run"] = bool(run)
+    log(d, {"kind": "run", "position_keys": list(keys), "run": bool(run)})
+
+
 def unbind(d: Dict, uid: str) -> None:
     c = d["cores"][uid]
     if c["position_key"]:

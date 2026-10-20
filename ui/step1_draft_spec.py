@@ -92,7 +92,7 @@ def fusion_channels(config):
     return sorted(wanted)
 
 
-def build_spec(domain, state, mode=MODE_OVERLAY, scope=STEP1_SCOPE):
+def build_spec(domain, state, mode=MODE_OVERLAY, scope=STEP1_SCOPE, display_only=False):
     """The whole composition spec, read from the two owners in one pass.
 
     Whole, not patched: every caller that wants a new frame builds a new spec
@@ -150,10 +150,17 @@ def build_spec(domain, state, mode=MODE_OVERLAY, scope=STEP1_SCOPE):
         # THE TICKED CHANNELS, at the weight the science gives them. A tick
         # is a display answer and the weight is a scientific one; the overlay
         # needs both, and neither is inferred from the other.
-        channels = [ch for ch in visible_channels(state, scope)
-                    if domain.fusion_enabled(ch) or overlay_weight(domain, ch)]
-        spec = {"mode": MODE_OVERLAY,
-                "weights": {ch: overlay_weight(domain, ch) for ch in channels}}
+        if display_only:
+            # A DISPLAY-ONLY page (Regions, docs/f5_tma_display_plan.md §13):
+            # every ticked channel shows, at full strength -- the fusion's
+            # participation and weights are Step1's science, not this view's.
+            channels = list(visible_channels(state, scope))
+            spec = {"mode": MODE_OVERLAY, "weights": {ch: 1.0 for ch in channels}}
+        else:
+            channels = [ch for ch in visible_channels(state, scope)
+                        if domain.fusion_enabled(ch) or overlay_weight(domain, ch)]
+            spec = {"mode": MODE_OVERLAY,
+                    "weights": {ch: overlay_weight(domain, ch) for ch in channels}}
 
     spec["colors"] = {}
     spec["mappings"] = {}

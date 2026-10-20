@@ -15,7 +15,8 @@ from typing import Dict, List
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
-                             QLineEdit, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+                             QLineEdit, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
+                             QWidget)
 
 COLUMNS = ("Run", "Position", "Donor", "Sample", "Status", "Pieces", "Tissue")
 FILTERS = ("All", "Open items", "Numbered", "Not numbered", "Missing", "Excluded", "Empty")
@@ -32,6 +33,7 @@ def status_en(text: str) -> str:
 class CoreTable(QWidget):
     row_clicked = pyqtSignal(str, str, bool)      # kind ("position" / "core" / "piece"), id, ctrl held
     run_toggled = pyqtSignal(str, bool)
+    runs_set = pyqtSignal(list, bool)                 # Run all / Run none on the rows shown
     context_requested = pyqtSignal(str, str, object)   # kind, id, global position
 
     def __init__(self, parent=None):
@@ -47,6 +49,15 @@ class CoreTable(QWidget):
         self.find = QLineEdit()
         self.find.setPlaceholderText("position / donor / sample")
         row.addWidget(self.find, 1)
+        # user ruling 2026-10-20: tick or untick Run for every core SHOWN (the
+        # Show / Find filter narrows it), in one edit
+        self.btn_run_all = QPushButton("Run all")
+        self.btn_run_none = QPushButton("Run none")
+        for b, on in ((self.btn_run_all, True), (self.btn_run_none, False)):
+            b.setToolTip(("Tick" if on else "Untick") + " Run for every position shown in the list "
+                         "(use Show / Find to narrow it first).")
+            b.clicked.connect(lambda _c=False, on=on: self._set_shown_runs(on))
+            row.addWidget(b)
         lay.addLayout(row)
         self.table = QTableWidget(0, len(COLUMNS))
         self.table.setObjectName("tma_core_table")
@@ -107,6 +118,9 @@ class CoreTable(QWidget):
         self.table.resizeColumnsToContents()
         self.table.setUpdatesEnabled(True)
         self.counts.setText(counts_text)
+        self._read_only = bool(read_only)
+        for b in (self.btn_run_all, self.btn_run_none):
+            b.setEnabled(not read_only)
         self._filling = False
         self._apply_filter()
 
@@ -148,6 +162,15 @@ class CoreTable(QWidget):
         if 0 <= row < len(self._rows):
             r = self._rows[row]
             self.context_requested.emit(r["kind"], r["id"], self.table.viewport().mapToGlobal(pos))
+
+    def _set_shown_runs(self, on):
+        """Run on / off for every tickable position row the filter shows."""
+        if getattr(self, "_read_only", False):
+            return
+        keys = [r["id"] for i, r in enumerate(self._rows)
+                if r["run"] is not None and not self.table.isRowHidden(i) and bool(r["run"]) != on]
+        if keys:
+            self.runs_set.emit(keys, bool(on))
 
     def _item_changed(self, item):
         if self._filling or item.column() != 0:

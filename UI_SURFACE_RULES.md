@@ -502,8 +502,8 @@ row, and the duplicate Tissue Preview button in the step bar.
 * **Weights** -- edited in Step1's rows, and in Step3's, which are the same
   rows (block 2b). There is no separate weight window.
 * **Intensity** -- the shared window, opened from Step0's and Step1's own
-  existing entries, and from Regions' `Channels` tab (it shares Step1's
-  channel state). In BOTH steps that entry lives inside the `Channels`
+  existing entries, and from Regions' `Channels` tab (Regions' own current
+  channel, user ruling 2026-10-20). In BOTH steps that entry lives inside the `Channels`
   frame: it edits the selected channel, so it belongs with the channel list.
 * **Step 0.5: Regions** (user rulings 2026-10-17/18;
   `docs/region_qc_module_plan.md`, `ui/regions/`) -- replaces F3's
@@ -518,9 +518,13 @@ row, and the duplicate Tissue Preview button in the step bar.
   study, the saved line (`Saved hh:mm · n open · unsaved changes`; its
   tooltip lists what is still open), `Revert to saved` and `Save` (user
   2026-10-18: Save at any time, never refused for unfinished work, one
-  result per slide replaced by each Save; no versions, no lock); left tabs `Channels` (the one channel dock with Step1's
-  rows -- the channel state is Step1's / Step3's, so a tick is the fusion
-  command -- and `Intensity…`) and `Cores` (`Choose map sheet…`, `Find
+  result per slide replaced by each Save; no versions, no lock); left tabs `Channels` (the one channel dock with
+  display-only rows, as Step2's: Regions has its OWN ticks and current
+  channel, seeded once per dataset from Step1's current ticks; a tick only
+  shows -- every ticked channel at full strength in Overlay -- and never
+  changes Step1's fusion or Step1's ticks; colours and Intensity windows are
+  shared as in every step (user ruling 2026-10-20,
+  `docs/f5_tma_display_plan.md` §13) -- and `Intensity…`) and `Cores` (`Choose map sheet…`, `Find
   cores`, the numbering panel -- `Start` / `End` record boxes you can type
   into (any part of the position or donor matches) or pick from, no order to
   choose (records run start to end: along a column, a row, or by position),

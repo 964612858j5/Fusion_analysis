@@ -136,6 +136,8 @@ class RegionsPage(QWidget, VersionsMixin, ShapesMixin):
         head.addWidget(self.btn_intensity)
         head.addStretch()
         bl.addLayout(head)
+        # the window styles and aligns this row as Step0's / Step1's (§13.7)
+        self.channels_head, self.channels_box_layout = head, bl
         self._channels_host = bl
         cl.addWidget(box, 1)
         self._left_panel = chan

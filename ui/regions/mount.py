@@ -2,9 +2,10 @@
 a third resident `Step1WholeSlideMount`, built with the real window like
 Step3's (`MainWindow._step3_whole_slide`, ui/main_window.py:1931-1954), so
 it shows Step1's data (raw or corrected channels by the Step0 decisions,
-clipped to the ROI) in Step1's display scope -- the channel state is
-Step1's / Step3's (user ruling 2026-10-18). It follows Step1's Overlay /
-Fusion mode as Step3's does.
+clipped to the ROI) in Regions' OWN display-only scope (user ruling
+2026-10-20, docs/f5_tma_display_plan.md §13: ticks here only show; they never
+change Step1's fusion). It follows Step1's Overlay / Fusion mode as Step3's
+does.
 
 The lifecycle mirrors Step3's: paused unless Regions is on screen, opened
 on the first entry, re-synced when the handoff moves, closed when the
@@ -33,7 +34,10 @@ class RegionsViewerHost:
         if self.mount is None:
             from ..step1_viewer_mount import Step1WholeSlideMount
             w = self.window
-            mount = Step1WholeSlideMount(w, parent=w, camera_reason="regions", labels=False)
+            # its own display-only ticks (docs/f5_tma_display_plan.md §13):
+            # ticking here never touches Step1's fusion
+            mount = Step1WholeSlideMount(w, parent=w, camera_reason="regions", labels=False,
+                                         display_scope="regions", display_only=True)
             mount.camera_sink = w._on_regions_camera
             mount.camera_jump_sink = w._on_regions_jump
             self.mount = mount

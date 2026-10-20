@@ -359,6 +359,9 @@ class _PanelController:
     def load_overview(self, ensure_floor=True):
         pass
 
+    def switch_overview_for_current_channel(self):
+        return False
+
     def attach_overlay(self, _o):
         pass
 

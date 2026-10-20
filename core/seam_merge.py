@@ -28,7 +28,7 @@ parameter); block N3b wires the locked rule into Step2.
 from __future__ import annotations
 
 import dataclasses
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy import ndimage as ndi
@@ -52,6 +52,7 @@ class Candidate:
     cx: float
     margin: float                        # signed distance to the own region's edge
     owned: bool                          # centroid in the own region (today's rule)
+    verdict: Optional[np.ndarray] = None  # Regions (F4-3): a `VERDICT_COLS` row, None without Regions
 
     @property
     def key(self):
@@ -307,6 +308,15 @@ def size_limit(areas, source):
             "step1_objects": int(areas.size)}
 
 
+#: The Regions verdict of a candidate (F4-3, docs/f4_regions_downstream_plan.md
+#: E.4/E.8), one float64 row: keep (1/0), the drop reason (`VERDICT_REASONS`
+#: index, 0 when kept), the core index (-1 none), the core fraction, the flag
+#: bits (`FLAG_*`) and the measurement-exclusion bits (exact below 2**53).
+VERDICT_COLS = 6
+VERDICT_REASONS = ("", "no_core", "outside_region", "exclusion")
+FLAG_TOUCHES_CORE_EDGE, FLAG_ANALYSIS_INCLUDE, FLAG_TOUCHES_REGION_EDGE = 1, 2, 4
+
+
 class SeamContractError(RuntimeError):
     """The merged labels break the LabelStore contract (a program defect)."""
 
@@ -326,7 +336,11 @@ class SeamMerger:
     def __init__(self, region_shape, tiles, spill_dir, with_nuclei=False,
                  tau=SEAM_MERGE["duplicate_overlap_threshold"],
                  min_free=SEAM_MERGE["minimum_writable_fraction"],
-                 table_sink=None, table_chunk=1 << 20, max_area=None):
+                 table_sink=None, table_chunk=1 << 20, max_area=None, judge=None):
+        """`judge(tile, local) -> {label: verdict row}` (F4-3): the Regions
+        verdict of every object of a tile's read window, computed once per
+        tile; with it, `_write` drops the rejected winners before they take
+        an id and records each written cell's row (`facts`, id order)."""
         import os
         self.shape = tuple(region_shape)
         self.tiles = list(tiles)
@@ -341,6 +355,8 @@ class SeamMerger:
         # contract: appended block by block, no Python list of ids)
         self.table_sink = table_sink
         self.max_area = int(max_area) if max_area else None
+        self.judge = judge
+        self._facts = np.zeros((1024 if judge else 0, VERDICT_COLS), np.float64)
         self._buf = np.zeros(int(table_chunk), np.uint32)
         self._nbuf = 0
         self.stats = {"candidates": 0, "interior_cells": 0, "touching_internal_edge": 0,
@@ -350,9 +366,20 @@ class SeamMerger:
                       "dropped_insufficient_free_pixels": 0,
                       "nuclei_dropped_seam_conflict": 0,
                       "oversized_objects_dropped": 0, "nuclei_dropped_oversized": 0}
+        if judge is not None:                    # only with Regions: the legacy record is unchanged
+            self.stats.update({f"regions_dropped_{r}": 0 for r in VERDICT_REASONS if r},
+                              nuclei_dropped_regions=0)
 
     # -- writing one kept candidate
     def _write(self, cand, nuc_crop, cells, nuclei):
+        v = cand.verdict
+        if v is not None and not v[0]:
+            # Regions (F4-3): the chosen version is rejected before it takes
+            # pixels or an id -- ids stay 1..N, no other version replaces it
+            self.stats[f"regions_dropped_{VERDICT_REASONS[int(v[1])]}"] += 1
+            if nuc_crop is not None:
+                self.stats["nuclei_dropped_regions"] += int(np.unique(nuc_crop[nuc_crop > 0]).size)
+            return 0
         y0, y1, x0, x1 = cand.bbox
         view = cells[y0:y1, x0:x1]
         free = cand.mask & (view == 0)
@@ -366,6 +393,10 @@ class SeamMerger:
         self.n_cells += 1
         cid = self.n_cells
         view[free] = cid
+        if self.judge is not None:               # its facts, in id order (row cid - 1)
+            if cid > self._facts.shape[0]:
+                self._facts = np.concatenate([self._facts, np.zeros_like(self._facts)])
+            self._facts[cid - 1] = v if v is not None else 0
         if nuc_crop is not None and nuclei is not None:
             nview = nuclei[y0:y1, x0:x1]
             for n in np.unique(nuc_crop[nuc_crop > 0]):
@@ -386,6 +417,10 @@ class SeamMerger:
         import os
         cands, touching = extract(tile, local, self.shape)
         self.stats["touching_internal_edge"] += touching
+        if self.judge is not None:
+            rows = self.judge(tile, local)
+            for c in cands:
+                c.verdict = rows[c.label]
         ry0, _ry1, rx0, _rx1 = tile.read
         seam, crops, written = [], [], 0
         cell_of = None
@@ -417,6 +452,7 @@ class SeamMerger:
         self.stats["candidates"] += len(seam)
         if seam:
             meta = np.array([(c.tile, c.label, *c.bbox, c.area, c.cy, c.cx, c.margin, c.owned)
+                             + (tuple(c.verdict) if self.judge is not None else ())
                              for c in seam], dtype=np.float64)
             masks = np.concatenate([c.mask.ravel() for c in seam])
             nucs = (np.concatenate([n.ravel() for n in crops]) if cell_of is not None
@@ -434,13 +470,14 @@ class SeamMerger:
             meta, masks, nucs = z["meta"], z["masks"], z["nucs"]
             pos = 0
             for row in meta:
-                t, lab, y0, y1, x0, x1, area, cy, cx, mg, owned = row
+                t, lab, y0, y1, x0, x1, area, cy, cx, mg, owned = row[:11]
+                verdict = np.array(row[11:11 + VERDICT_COLS]) if row.size > 11 else None
                 y0, y1, x0, x1 = int(y0), int(y1), int(x0), int(x1)
                 n = (y1 - y0) * (x1 - x0)
                 cands.append(Candidate(tile=int(t), label=int(lab), bbox=(y0, y1, x0, x1),
                                        mask=masks[pos:pos + n].reshape(y1 - y0, x1 - x0),
                                        area=int(area), cy=float(cy), cx=float(cx),
-                                       margin=float(mg), owned=bool(owned)))
+                                       margin=float(mg), owned=bool(owned), verdict=verdict))
                 crops.append(nucs[pos:pos + n].reshape(y1 - y0, x1 - x0) if nucs.size else None)
                 pos += n
         return cands, crops
@@ -458,6 +495,11 @@ class SeamMerger:
         self.flush_table()
         shutil.rmtree(self.spill_dir, ignore_errors=True)
         return self.record()
+
+    @property
+    def facts(self) -> np.ndarray:
+        """The written cells' Regions rows, row i = cell i + 1 (F4-3)."""
+        return self._facts[:self.n_cells]
 
     def flush_table(self):
         if self._nbuf and self.table_sink is not None:

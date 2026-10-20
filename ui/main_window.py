@@ -115,6 +115,8 @@ from .step3_page import Step3Page
 from .step3_mask_bar import Step3MaskBar
 from ..core import step3_masks
 from .step4_page import Step4Page
+from .regions.core_outlines import CoreOutlines
+from .step2_viewer import Step2DapiViewer
 from .regions.mount import RegionsViewerHost
 from .regions.page import RegionsPage
 
@@ -473,6 +475,39 @@ Step1Restore = collections.namedtuple(
 
 #: Where params chosen from a pre-segmentation result are marked as coming from.
 PRESEG_SOURCE = "preseg_selected"
+
+
+def preseg_chosen_params(run, combo_id):
+    """The parameters a chosen pre-segmentation result stands for, always
+    made from the run itself (never from widgets or a saved draft)."""
+    combo = next(c for c in run["combos"] if c["combo_id"] == combo_id)
+    # Mesmer: DeepCell's own preprocessing only, and the output its
+    # thresholds act on -- one definition with the contract Save writes.
+    params = dict(combo["params"], **preseg_contract.fixed_rules(combo["method"]))
+    chosen = {"method": combo["method"], "params": params,
+              "fusion_settings_hash": run["fusion"]["hash"],
+              "pixel_key": run["source"]["pixel_key"],
+              "preseg_run_id": run["run_id"], "combo_id": combo_id,
+              "halo_px": run.get("halo_px")}
+    for k in ("diameter", "flow_threshold", "cellprob_threshold"):
+        if k in params:
+            chosen[k] = params[k]
+    return chosen
+
+
+#: What each step's "TMA cores" switch shows (docs/f5_tma_display_plan.md 2.4).
+TMA_CORES_TIPS = {
+    "step1": ("Show the TMA cores of the last Regions Save: green = would be analysed in this "
+              "workspace, yellow = would not.\nNames appear when zoomed in."),
+    "step2": ("Show the TMA cores this run follows: green = analysed, yellow = not.\n"
+              "Before a run: the last Regions Save (a run freezes it when it starts, whatever "
+              "the parameters' source). Names appear when zoomed in."),
+    "step3": ("Show the TMA cores as they were when this run was started: green = analysed, "
+              "yellow = not.\nA run made before this was recorded shows only its analysed (green) "
+              "cores. Names appear when zoomed in."),
+}
+
+
 #: A run with more tasks than this asks first (R4).
 PRESEG_CONFIRM_TASKS = 10
 #: The HALO read around each patch: Step2's default Tile Grid overlap
@@ -500,6 +535,9 @@ class _PresegSignals(QtCore.QObject):
 
 
 class MainWindow(QMainWindow):
+    #: docs/f5_tma_display_plan.md §10: (seq, key, items, error) of a Step1
+    #: core-outline computation done off the GUI thread after a Regions Save.
+    _step1_cores_ready = pyqtSignal(object)
 
     #: The one public channel panel takes its width from the STEP's own
     #: Channels panel -- Step0's is the master -- so the window fixes no
@@ -1160,6 +1198,8 @@ class MainWindow(QMainWindow):
             "resolution. Turn off for crisp (nearest-neighbour) pixels.")
         self._btn_smooth.toggled.connect(self._set_smooth_pixels)
         sel_row.addWidget(self._btn_smooth)
+        self._btn_tma_cores_step1 = self._tma_cores_button("step1")
+        sel_row.addWidget(self._btn_tma_cores_step1)
         sel_row.addSpacing(8)
         # The frame's tool row (block A1b S1): a fixed height, the same in
         # every step, so the viewer under it starts on the same line.
@@ -1497,6 +1537,16 @@ class MainWindow(QMainWindow):
         self._step2 = Step2Page(metrics=self._frame_metrics,
                                 title_bar=self._frame_title_bar("Step 2 — Segmentation & Merge"))
         self._step2.go_back.connect(self._go_to_step1)
+        self._step2.saved_core_items = self._saved_core_items   # the TMA cores, as Step1's
+        self._step2.manual_regions = self._step2_manual_regions    # 9.2: every Step2 run follows them
+        # docs/f5_tma_display_plan.md part 3: Step2's zoomable DAPI picture
+        self._step2_viewer = Step2DapiViewer(self, self._step2)
+        self._step2.dapi_viewer = self._step2_viewer
+        self._step2.input_shown = lambda: QTimer.singleShot(
+            0, lambda: self._step2_viewer.follow(self.__dict__.get("_current_step") == 2))
+        self._btn_tma_cores_step2 = self._step2.btn_tma_cores
+        self._btn_tma_cores_step2.setToolTip(TMA_CORES_TIPS["step2"])
+        self._btn_tma_cores_step2.toggled.connect(lambda _on: self._on_tma_cores_toggled("step2"))
         self._step2.segmentation_done.connect(self._on_step2_complete)
         # Block RM (§5, §9): the Input drop-down
         self._step2.fuse_chosen.connect(self._rm_note_viewing)
@@ -1545,6 +1595,8 @@ class MainWindow(QMainWindow):
         regions_bar.layout().addWidget(nav)
         self._btn_regions_tissue_nav = nav
         self._regions.intensity_requested.connect(self._show_intensity_window)
+        self._regions.saved.connect(self._on_regions_saved)   # §10: computed off the GUI thread, then drawn
+        self._step1_cores_ready.connect(self._on_step1_cores_ready)
         self._regions.jump_box = self._regions_jump_box
         self._regions_view = RegionsViewerHost(self, self._regions)
         self._stack.addWidget(self._regions)
@@ -1705,7 +1757,8 @@ class MainWindow(QMainWindow):
             frame_qss=channel_template.frame_qss(),
             header_widgets=(show_all, intensity), header_margins=header_margins,
             header_spacing=header_spacing, weight_widgets=(reset, load),
-            mode_widgets=(self._btn_step3_mode_overlay, self._btn_step3_mode_fusion),
+            mode_widgets=(self._tma_cores_button("step3"), self._btn_step3_mode_overlay,
+                          self._btn_step3_mode_fusion),
             mask_widgets=(strip.holder(), bar.buttons["cell"], bar.buttons["nucleus"]),
             mask_hint=bar.hint, corner_widget=bar.corner())
         self._rebuild_step3_patch_strip()
@@ -1942,6 +1995,283 @@ class MainWindow(QMainWindow):
                 mount.install(layout, self.prev_gv)
         return mount
 
+    # ── the TMA cores over Step1 / Step2 / Step3 (docs/f5_tma_display_plan.md part 2) ──
+    def _tma_cores_button(self, which):
+        """The "TMA cores" switch of one step: on by default, kept in the
+        session, hidden while there is no core to draw."""
+        name = f"_btn_tma_cores_{which}"
+        btn = self.__dict__.get(name)
+        if btn is None:
+            btn = QPushButton("TMA cores")
+            btn.setCheckable(True)
+            btn.setChecked(True)
+            btn.setStyleSheet(MODE_BUTTON_QSS)
+            btn.setToolTip(TMA_CORES_TIPS[which])
+            btn.setVisible(False)
+            btn.toggled.connect(lambda _on, w=which: self._on_tma_cores_toggled(w))
+            setattr(self, name, btn)
+        return btn
+
+    def _tma_cores_shown(self, which):
+        btn = self.__dict__.get(f"_btn_tma_cores_{which}")
+        return True if btn is None else bool(btn.isChecked())
+
+    def _set_tma_cores_shown(self, which, on):
+        btn = self.__dict__.get(f"_btn_tma_cores_{which}")
+        if btn is not None and btn.isChecked() != bool(on):
+            btn.setChecked(bool(on))
+
+    def _on_tma_cores_toggled(self, which):
+        if which != "step2":                     # Step2's page redraws its own
+            self._refresh_core_outlines(which)
+        save = getattr(self, "_schedule_step1_session_save", None)
+        if callable(save):
+            save()
+
+    def _core_outlines(self, which):
+        co = self.__dict__.get(f"_core_outlines_{which}")
+        if co is None:
+            attr = {"step1": "_step1_mount", "step3": "_step3_mount"}[which]
+
+            def view(attr=attr):
+                m = self.__dict__.get(attr)
+                stack = getattr(getattr(m, "host", None), "stack", None) if m is not None else None
+                return getattr(stack, "view", None) if stack is not None else None
+            items = self._saved_core_items if which == "step1" else self._step3_core_items
+            co = CoreOutlines(view, items, lambda w=which: self._tma_cores_shown(w))
+            setattr(self, f"_core_outlines_{which}", co)
+        return co
+
+    def _refresh_core_outlines(self, which):
+        """Draw the TMA cores over that step's viewer now; the switch shows
+        only while there is something to draw."""
+        try:
+            n = self._core_outlines(which).refresh()
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[TMA cores] {which}: not drawn ({type(exc).__name__}: {exc})")
+            self._core_outlines(which).clear()
+            n = 0
+        btn = self.__dict__.get(f"_btn_tma_cores_{which}")
+        if btn is not None:
+            btn.setVisible(n > 0)
+        return n
+
+    def _regions_ids(self):
+        """(project dir, slide path, slide id) of this workspace -- what
+        `_regions_context` gives for them, without opening the slide.
+        GUI thread only: `ensure_raw_slide` may register the slide."""
+        ctx = getattr(self, "step0_output", None) or {}
+        pd = run_store.project_dir_of(str(ctx.get("roi_dir") or "") or ctx.get("output_dir") or "")
+        slide = str(getattr(getattr(self, "loader", None), "filepath", "") or "")
+        if not pd or not slide:
+            return pd, slide, None
+        from ..core import provenance as prov
+        try:
+            return pd, slide, prov.ensure_raw_slide(pd, slide)
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[TMA cores] the slide cannot be identified ({exc})")
+            return pd, slide, None
+
+    def _step1_core_parent(self):
+        roi = self.__dict__.get("_active_roi") or None
+        if not roi or not roi.get("bbox_fullres"):
+            return None
+        return {"region_id": None, "bbox_fullres": [int(v) for v in roi["bbox_fullres"]],
+                "polygon_fullres": [list(map(int, q)) for q in roi.get("polygon_fullres") or []] or None}
+
+    @staticmethod
+    def _step1_core_key(pd, slide, sid, parent):
+        """What Step1's core colours and names depend on (§10): the Save,
+        its table and the TMA study as files (present, mtime, size), the
+        slide and the workspace region. Stat calls only."""
+        from ..core.regions import lock as RK
+        from ..core.tma.study import study_path
+
+        def stat(path):
+            try:
+                st = os.stat(path)
+                return (True, st.st_mtime_ns, st.st_size)
+            except OSError:
+                return (False, 0, 0)
+        return (os.path.realpath(pd), stat(RK.saved_path(pd)), stat(RK.table_path(pd)), stat(study_path(pd)),
+                os.path.realpath(slide), sid, json.dumps(parent, sort_keys=True))
+
+    @staticmethod
+    def _compute_step1_core_items(pd, sid, parent):
+        """Step1's core items from the files (pure: no Qt, nothing written;
+        safe off the GUI thread): green where this workspace's analysis would
+        run the core, else yellow; all yellow when nothing can run."""
+        from ..core.regions import analysis as RA
+        from ..core.regions import display as RD
+        from ..core.regions import lock as RK
+        from ..core.regions.document import RegionsError
+        from ..core.tma.study import StudyError, load_study
+        try:
+            return RD.snapshot_items(RA.build_snapshot(pd, sid, [], parent=parent))
+        except RegionsError:                       # nothing can run: every saved core is yellow
+            try:
+                rec = RK.load_saved(pd, sid)
+                study = load_study(pd)
+            except (RegionsError, StudyError, ValueError, OSError):
+                return []
+            if rec is None:
+                return []
+            if study is not None and study.get("slide_id") != sid:
+                study = None
+            return RD.saved_items(rec["document"], study, ())
+
+    def _saved_core_items(self):
+        """Step1: the last Regions Save's cores, green where the analysis of
+        this workspace would run them, else yellow. One result per key (§10):
+        every caller on one step entry shares it, and a Save's
+        background computation fills it in advance."""
+        if not self._regions_files_present():
+            return []
+        pd, slide, sid = self._regions_ids()
+        if not pd or not sid:
+            return []
+        parent = self._step1_core_parent()
+        key = self._step1_core_key(pd, slide, sid, parent)
+        held = self.__dict__.get("_step1_cores_held")
+        if held is not None and held[0] == key:
+            return held[1]
+        t0 = time.perf_counter()
+        items = self._compute_step1_core_items(pd, sid, parent)
+        self._step1_cores_held = (key, items)
+        print(f"[TMA cores] step1: {len(items)} outlines from the last Save "
+              f"({(time.perf_counter() - t0) * 1000:.0f} ms, on screen)")
+        return items
+
+    def _on_regions_saved(self):
+        """A Regions Save: Step1's core items are computed off the GUI thread
+        (§10); the ids and the region are taken here, first."""
+        import copy
+        import threading
+        self._step1_cores_seq = seq = int(self.__dict__.get("_step1_cores_seq", 0)) + 1
+        if not self._regions_files_present():
+            return False
+        pd, slide, sid = self._regions_ids()
+        if not pd or not sid:
+            return False
+        parent = self._step1_core_parent()
+        key = self._step1_core_key(pd, slide, sid, parent)
+        frozen = copy.deepcopy(parent)
+        ready = self._step1_cores_ready
+
+        def work():
+            t0 = time.perf_counter()
+            try:
+                items, err = self._compute_step1_core_items(pd, sid, frozen), None
+            except Exception as exc:                        # noqa: BLE001
+                items, err = None, exc
+            ready.emit((seq, key, items, err, time.perf_counter() - t0))
+        threading.Thread(target=work, name="step1-core-outlines", daemon=True).start()
+        return True
+
+    def _on_step1_cores_ready(self, result):
+        """Back on the GUI thread: kept only if it is the latest Save's and
+        the key still holds; then the outlines on screen are redrawn."""
+        seq, key, items, err, secs = result
+        if seq != self.__dict__.get("_step1_cores_seq"):
+            return False                           # a later Save (or a new dataset) came since
+        if err is not None:
+            print(f"[TMA cores] step1 outlines not computed in advance ({err}); computed on entry")
+            return False
+        pd, slide, sid = self._regions_ids()
+        if not pd or not sid or self._step1_core_key(pd, slide, sid, self._step1_core_parent()) != key:
+            return False                           # the region or the files moved meanwhile
+        self._step1_cores_held = (key, items)
+        print(f"[TMA cores] step1: {len(items)} outlines ready in advance ({secs * 1000:.0f} ms, background)")
+        if self.__dict__.get("_current_step") == 1:
+            self._refresh_core_outlines("step1")
+        return True
+
+    def _step2_manual_regions(self, method, fused_path, rois, ask):
+        """docs/f5_tma_display_plan.md 9.2: the Regions snapshot a Step2 run
+        with manual parameters follows, frozen now from the last Save, on the
+        chosen fused input's own region and fusion settings.
+
+        Returns ``(request, refusal)``: ``(None, "")`` for a project without
+        a TMA study (the old run, unchanged); ``(None, text)`` refused;
+        ``(None, None)`` the user said No; else the request for the worker.
+        With no Run tick at all, `ask(text)` decides whether every eligible
+        core runs (the same Save, read once)."""
+        from ..core import preseg_input
+        from ..core.regions import analysis as RA
+        from ..core.regions import lock as RK
+        from ..core.regions.document import RegionsError
+        from ..core.tile_tissue import TissueUnavailable, fused_region
+        from ..core.tma.study import StudyError, load_study
+        if not self._regions_files_present():
+            return None, ""
+        t0 = time.perf_counter()
+        ctx = self._regions_context()
+        pd, sid = ctx.get("project_dir"), ctx.get("slide_id")
+        try:
+            study = load_study(pd) if pd else None
+        except StudyError as exc:
+            return None, f"the TMA study cannot be read ({exc})"
+        if study is not None and not sid:        # a TMA project whose slide cannot be told
+            return None, "the slide cannot be identified, so its TMA cores cannot be applied"
+        if study is None or study.get("slide_id") not in (None, sid):
+            return None, ""                      # not a TMA project on this slide: the old run
+        try:
+            saved = RK.load_saved(pd, sid)
+        except (RegionsError, ValueError, OSError) as exc:
+            return None, f"the Regions result cannot be read ({exc}): Save again in Regions"
+        if saved is None:
+            return None, "this TMA project has no saved Regions result: Save in Regions first"
+        kind = preseg_input.INPUT_KIND.get(method)
+        if kind is None:
+            return None, (f"{method} cannot follow the TMA cores (it has no per-cell core rules): "
+                          "choose another method")
+        try:
+            bbox = fused_region(fused_path)[0]
+            with open(os.path.join(os.path.dirname(os.path.abspath(fused_path)), "params.json"),
+                      encoding="utf-8") as f:
+                fusion = (json.load(f) or {}).get("fusion_settings") or {}
+        except (TissueUnavailable, OSError, ValueError) as exc:
+            return None, f"the fused input cannot say where it lies or how it was made ({exc})"
+        fcfg = fusion.get("fusion_config")
+        if not fcfg:
+            return None, "the fused input records no fusion settings: generate fused.zarr again in Step1"
+        poly = (rois[0].get("polygon_fullres") if rois else None) or None
+        parent = {"region_id": None, "bbox_fullres": [int(v) for v in bbox], "polygon_fullres": poly}
+        seg = preseg_input.seg_channels(method, fcfg)
+        try:
+            try:
+                snap = RA.build_snapshot(pd, sid, seg, study=study, parent=parent, saved=saved)
+            except RA.NothingTicked:
+                # the candidate is built BEFORE the question, and that one is what runs
+                snap = RA.build_snapshot(pd, sid, seg, study=study, parent=parent, saved=saved,
+                                         select=RA.SELECT_ALL_ELIGIBLE)
+                if not ask("No TMA core is selected (no Run tick in Regions).\n\n"
+                           f"All {len(snap['cores'])} eligible cores will be run by default. Cores "
+                           "whose numbering awaits review, QC-excluded cores and cores outside this "
+                           "region are still left out.\n\nContinue?"):
+                    return None, None
+        except RegionsError as exc:
+            return None, str(exc)
+        print(f"[Step2] TMA cores frozen for this run: {len(snap['cores'])} cores "
+              f"({snap['selection_mode']}), {(time.perf_counter() - t0) * 1000:.0f} ms")
+        return {"snapshot": snap, "identity": snap["identity"], "input_kind": kind,
+                "selection_mode": snap["selection_mode"],
+                "fusion_settings_hash": fusion.get("hash")}, ""
+
+    def _step3_core_items(self):
+        """Step3: the chosen run's frozen cores, as at its freeze."""
+        from ..core.regions import analysis as RA
+        from ..core.regions import display as RD
+        run_dir = self.__dict__.get("_step3_core_run_dir")
+        path = os.path.join(run_dir, "regions_snapshot.json") if run_dir else ""
+        if not path or not os.path.isfile(path):
+            return []
+        try:
+            return RD.snapshot_items(RA.load_snapshot(path))
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[TMA cores] step3: the run's Regions snapshot cannot be read ({exc})")
+            return []
+
     def _step3_whole_slide(self):
         """Step3's whole-slide viewer (block 2c-2): a second instance of
         Step1's mount, resident, in Step3's viewer slot. Its fallback widget
@@ -2147,6 +2477,8 @@ class MainWindow(QMainWindow):
         elif current is not None:
             self._project_state.clear_segmentation_run()     # nothing of it is listed
         self._step3_mask_key = entry.key if entry is not None else None
+        self._step3_core_run_dir = entry.run.run_dir if entry is not None else None
+        self._refresh_core_outlines("step3")
         several = {r.run_dir: len(step3_masks.run_regions(r)) > 1 for r in runs}
         project = run_store.project_dir_of(roi_dir) if roi_dir else None
         if entry is not None and run_store.kind_of(entry.run.run_dir) == "segment":
@@ -2320,10 +2652,22 @@ class MainWindow(QMainWindow):
         return True
 
     def _step1_whole_slide_step_changed(self, active):
+        viewer2 = self.__dict__.get("_step2_viewer")
+        if viewer2 is not None:
+            if active != 2:
+                viewer2.follow(False)              # paused: it reads nothing elsewhere
+            else:
+                QTimer.singleShot(0, lambda: viewer2.follow(self.__dict__.get("_current_step") == 2))
         if active != 1:
             # Leaving Step1 empties the montage's caches and ends its thread.
             self._close_montage_supply()
         result = self._step1_whole_slide_step_changed_inner(active)
+        if active in (1, 3):
+            # after the viewer on screen has (re)opened: the TMA cores over it
+            QTimer.singleShot(0, lambda w="step1" if active == 1 else "step3":
+                              self._refresh_core_outlines(w))
+        elif active == 2 and self.__dict__.get("_step2") is not None:
+            QTimer.singleShot(0, self._step2.refresh_core_outlines)   # a Save may have changed them
         if active == 1:
             # ...and COMING BACK draws it again (block B3): nothing else asks
             # for the montage's pictures on a step change, so only its
@@ -2510,7 +2854,9 @@ class MainWindow(QMainWindow):
         if mount is None or mount.host.stack is None:
             return False
         try:
-            return bool(mount.sync_source(reason))
+            moved = bool(mount.sync_source(reason))
+            QTimer.singleShot(0, lambda: self._refresh_core_outlines("step1"))   # its view may be new
+            return moved
         except Exception as exc:                            # noqa: BLE001
             print(f"[Step1-Viewer] rebind failed: {exc}")
             mount.restore_legacy()
@@ -2529,7 +2875,9 @@ class MainWindow(QMainWindow):
         if mount is None or mount.host.stack is None:
             return False
         try:
-            return bool(mount.sync_source(reason))
+            moved = bool(mount.sync_source(reason))
+            QTimer.singleShot(0, lambda: self._refresh_core_outlines("step3"))   # its view may be new
+            return moved
         except Exception as exc:                            # noqa: BLE001
             path = str(getattr(getattr(self, "loader", None), "filepath", "") or "")
             return self._step3_viewer_failed(mount, path, exc)
@@ -2601,6 +2949,9 @@ class MainWindow(QMainWindow):
             mount = self.__dict__.get("_step3_mount")
         elif self._current_step == self.REGIONS_STEP:
             mount = getattr(self.__dict__.get("_regions_view"), "mount", None)
+        elif self._current_step == 2 and self.__dict__.get("_step2_viewer") is not None \
+                and self._step2_viewer.shown():
+            mount = self._step2_viewer.mount       # user ruling 2026-10-19: Step2's picture follows too
         else:
             return False
         if mount is None or mount.host.stack is None:
@@ -3183,6 +3534,11 @@ class MainWindow(QMainWindow):
         self._close_step3_viewer()
         if self.__dict__.get("_regions_view") is not None:
             self._regions_view.close()
+        if self.__dict__.get("_step2_viewer") is not None:
+            self._step2_viewer.reset()             # the old dataset's picture goes; reopened on entry
+        # §10: the held Step1 core items and any computation under way are the old dataset's
+        self._step1_cores_held = None
+        self._step1_cores_seq = int(self.__dict__.get("_step1_cores_seq", 0)) + 1
         if hasattr(self, "_step2"):
             self._step2.set_rois([])
             if hasattr(self._step2, "set_roi_context"):
@@ -3993,6 +4349,9 @@ class MainWindow(QMainWindow):
             "current_channel": self.config.current_channel(),
             "preview_mode": self._step1_preview_mode,
             "smooth_pixels": gpu_memory.smooth_pixels(),
+            "tma_cores_step1": self._tma_cores_shown("step1"),
+            "tma_cores_step2": self._tma_cores_shown("step2"),
+            "tma_cores_step3": self._tma_cores_shown("step3"),
             "p2_params": self._p2_params,
             "segmentation_preview_history": self._seg_preview_history,
             "active_segmentation_method": self._active_segmentation_method,
@@ -4143,11 +4502,16 @@ class MainWindow(QMainWindow):
         if roi:
             try:
                 sess = run_store.load_session(roi)
-                sess = run_store.put_draft(sess, "step1", dict(
-                    run_store.to_records(payload, run_store.project_dir_of(roi)),
-                    edited_against=sess.get("editing")))
-                run_store.save_session(roi, sess)
-                print("[Step1] session autosaved")
+                draft = dict(run_store.to_records(payload, run_store.project_dir_of(roi)),
+                             edited_against=sess.get("editing"))
+                old = (sess.get("drafts") or {}).get("step1")
+                if isinstance(old, dict) and "saved_at" in old and \
+                        {k: v for k, v in old.items() if k != "saved_at"} == \
+                        {k: v for k, v in json.loads(json.dumps(draft, default=str)).items() if k != "saved_at"}:
+                    draft["saved_at"] = old["saved_at"]      # nothing changed: the file stays as it is
+                sess = run_store.put_draft(sess, "step1", draft)
+                if run_store.save_session(roi, sess):
+                    print("[Step1] session autosaved")
             except Exception:
                 print(f"[Step1] failed to autosave session:\n{traceback.format_exc()}")
             return
@@ -4207,6 +4571,8 @@ class MainWindow(QMainWindow):
         smooth = sess.get("smooth_pixels")
         if isinstance(smooth, bool) and smooth != previous_smooth:
             self._btn_smooth.setChecked(smooth)      # a display answer only
+        for which in ("step1", "step2", "step3"):    # the TMA core switches; on when absent
+            self._set_tma_cores_shown(which, sess.get(f"tma_cores_{which}", True) is not False)
         mode = str(sess.get("preview_mode") or "")
         mode_moved = (mode in (STEP1_PREVIEW_OVERLAY, STEP1_PREVIEW_FUSION)
                       and mode != self._step1_preview_mode)
@@ -4645,6 +5011,9 @@ class MainWindow(QMainWindow):
                 ok, _why = preseg_run.selectable(run, self._preseg_records, used, key, fhash)
                 if ok:
                     self._preseg_selected = {"run": run, "combo_id": used}
+                    # Made again from the run: the saved draft's copy may
+                    # have been overwritten by the method widgets.
+                    self._p2_params = preseg_chosen_params(run, used)
             self._refresh_preseg_results(current=current)
             self._check_save_unlock()
             # every patch's result on the montage, as after a run
@@ -5070,15 +5439,18 @@ class MainWindow(QMainWindow):
             or not roi.get("polygon_fullres")
         if project and slide:
             from ..core import provenance as prov
-            from ..sources.ome_tiff import OmeTiffSource
+            from ..core.project_identity import describe_slide
             try:
                 out["slide_id"] = prov.ensure_raw_slide(project, slide)
-                src = OmeTiffSource(slide)
-                try:
-                    out["shape"] = tuple(src.level_shape(0))
-                    out["pixel_um"] = src.physical_size()
-                finally:
-                    src.close()
+                # the size and the pixel size from the project's recorded
+                # description of this slide (§12.2: opening the slide here
+                # cost 0.34 s on every Regions entry); `describe_slide` opens
+                # it only when the record is missing or the file changed
+                manifest = run_store._load(os.path.join(project, "project_manifest.json")) or {}
+                _sid, desc = describe_slide(slide, manifest.get("sources"))
+                out["shape"] = tuple(int(v) for v in desc["level_shapes_yx"][0])
+                phys = desc.get("physical_size_yx_um")
+                out["pixel_um"] = (float(phys[0]), float(phys[1])) if phys else None
             except Exception as exc:                        # noqa: BLE001
                 print(f"[Regions] the slide could not be identified: {exc}")
                 out["slide_id"] = None
@@ -6001,15 +6373,30 @@ class MainWindow(QMainWindow):
             text += f", {e['omitted']} ticked not run (see the terminal)"
         try:
             from ..core.regions import lock as RK
-            with open(e["path"], encoding="utf-8") as f:
-                frozen = json.load(f)["regions"]["content_sha256"]
-            with open(RK.saved_path(e["project_dir"]), encoding="utf-8") as f:
-                now = json.load(f).get("content_sha256")
+            frozen = MainWindow._json_field_by_stat(self, e["path"], lambda d: d["regions"]["content_sha256"])
+            now = MainWindow._json_field_by_stat(self, RK.saved_path(e["project_dir"]),
+                                                 lambda d: d.get("content_sha256"))
             if now != frozen:
                 text += " · a newer Regions Save exists"
         except (OSError, ValueError, KeyError, TypeError):
             pass
         return text
+
+    def _json_field_by_stat(self, path, field):
+        """`field(json of path)`, read again only when the file changed
+        (path, size, mtime_ns) -- §12.2: the 1.8 MB regions.json was read on
+        every Step1 entry for one checksum. For this information line only."""
+        path = os.path.realpath(path)
+        st = os.stat(path)
+        key = (st.st_size, st.st_mtime_ns)
+        held = self.__dict__.setdefault("_json_fields_by_stat", {})
+        hit = held.get(path)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        with open(path, encoding="utf-8") as f:
+            value = field(json.load(f))
+        held[path] = (key, value)
+        return value
 
     def _random_patch_cores(self, roi=None):
         """F4-2: (selected-core polygons, exclusion polygons, refusal). A TMA
@@ -6536,18 +6923,7 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.Yes:
                 return False
         combo = next(c for c in run["combos"] if c["combo_id"] == combo_id)
-        # Mesmer: DeepCell's own preprocessing only, and the output its
-        # thresholds act on -- one definition with the contract Save writes.
-        params = dict(combo["params"], **preseg_contract.fixed_rules(combo["method"]))
-        chosen = {"method": combo["method"], "params": params,
-                  "fusion_settings_hash": run["fusion"]["hash"],
-                  "pixel_key": run["source"]["pixel_key"],
-                  "preseg_run_id": run["run_id"], "combo_id": combo_id,
-                  "halo_px": run.get("halo_px")}
-        for k in ("diameter", "flow_threshold", "cellprob_threshold"):
-            if k in params:
-                chosen[k] = params[k]
-        self._p2_params = chosen
+        self._p2_params = preseg_chosen_params(run, combo_id)
         self._params_source = PRESEG_SOURCE
         self._preseg_selected = {"run": run, "combo_id": combo_id}
         self._check_save_unlock()
@@ -7639,6 +8015,9 @@ class MainWindow(QMainWindow):
         host = self.__dict__.get("_regions_view")
         if host is not None:
             host.forget()
+        # ...and Step2's DAPI picture (docs/f5_tma_display_plan.md part 3).
+        if self.__dict__.get("_step2_viewer") is not None:
+            self._step2_viewer.close()
         # The sink closes LAST, and finally: every loader has reported its own
         # `job.end` by now, so nothing is left to write and nothing can start
         # a second writer on a file the first one closed. Bounded, because a
@@ -9047,7 +9426,10 @@ class MainWindow(QMainWindow):
                 self._params_source = None
                 self.btn_save.setEnabled(False)
                 self._fusion_bar_widget.setVisible(False)
-        elif is_stardist:
+        elif is_stardist and not (self._params_source == PRESEG_SOURCE
+                                  and (self._p2_params or {}).get("method") == method):
+            # A chosen pre-segmentation result of this method keeps its own
+            # parameters; the widgets' values are not the run's.
             self._p2_params = self.search.get_current_params()
             self._params_source = "direct_method"
             self._check_save_unlock()

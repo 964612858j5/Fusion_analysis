@@ -537,19 +537,19 @@ def test_real_factory_unwinds_when_load_overview_raises(app, tmp_path):
                      metadata={"Channel": {"Name": ["ch0", "ch1"]}})
 
     captured = {}
-    real_load = ExploreController.load_overview
+    real_load = ExploreController.switch_overview_for_current_channel
 
     def exploding_load(self, *a, **k):
         captured["controller"] = self
         raise RuntimeError("boom: overview level unreadable")
 
     threads_before = threading.active_count()
-    ExploreController.load_overview = exploding_load
+    ExploreController.switch_overview_for_current_channel = exploding_load
     try:
         with pytest.raises(RuntimeError, match="boom"):
             build_default_stack(path, "ch0", None)
     finally:
-        ExploreController.load_overview = real_load
+        ExploreController.switch_overview_for_current_channel = real_load
 
     ctrl = captured["controller"]
     assert ctrl._torn_down is True, "the controller was not torn down"
@@ -791,6 +791,12 @@ class _RecordingController:
     def load_overview(self, ensure_floor=True):
         _TIMELINE.append(("load_overview", {"ensure_floor": ensure_floor}))
 
+    def switch_overview_for_current_channel(self):
+        # §12 (2026-10-20): the factory reads the overview OFF the GUI thread;
+        # the delivery starts the floor itself when there is a method
+        _TIMELINE.append(("overview_async", {}))
+        return False
+
     def teardown(self, *, wait_for_floor=False):
         _TIMELINE.append(("teardown", {"wait_for_floor": wait_for_floor}))
 
@@ -856,9 +862,8 @@ def test_real_factory_orchestration_for_a_corrected_method(app, monkeypatch):
                         method="tophat", params=(15,))
 
     assert [name for name, _payload in _TIMELINE] == [
-        "set_selection", "load_overview", "setRange"]
+        "set_selection", "overview_async", "setRange"]
     assert _TIMELINE[0][1] == {"method": "tophat", "params": (15,)}
-    assert _TIMELINE[1][1] == {"ensure_floor": True}
     assert _TIMELINE[2][1] == ["padding", "xRange", "yRange"]
 
 
@@ -869,8 +874,7 @@ def test_real_factory_orchestration_for_original(app, monkeypatch):
     _patch_real_factory_dependencies(monkeypatch)
     build_default_stack("/data/slide.ome.tif", "CD8")
 
-    assert [name for name, _p in _TIMELINE] == ["load_overview", "setRange"]
-    assert _TIMELINE[0][1] == {"ensure_floor": False}
+    assert [name for name, _p in _TIMELINE] == ["overview_async", "setRange"]
     controller = _RecordingController.instances[-1]
     assert controller.method is None and controller.params == ()
 
@@ -884,7 +888,7 @@ def test_real_factory_ignores_params_given_without_a_method(app, monkeypatch):
     build_default_stack("/data/slide.ome.tif", "CD8", method=None,
                         params=(15,))
 
-    assert [name for name, _p in _TIMELINE] == ["load_overview", "setRange"]
+    assert [name for name, _p in _TIMELINE] == ["overview_async", "setRange"]
     controller = _RecordingController.instances[-1]
     assert controller.params == ()
 
@@ -1213,3 +1217,74 @@ def test_a_resume_after_the_stack_went_away_is_harmless(app):
 
     assert tab.stack is None and tab.released is False
     tab.teardown()
+
+
+def test_a_background_overview_read_that_fails_is_a_failed_build(app):
+    """§12 (2026-10-20): the first overview is read off the GUI thread; when
+    that read fails for the channel on screen the tab shows the build-failed
+    placeholder and drops the stack, as the synchronous build used to."""
+    from types import SimpleNamespace
+    from PyQt5 import QtCore
+
+    class _Ctl(QtCore.QObject):
+        overview_prepared = QtCore.pyqtSignal(object, object, object, bool)
+        channel = "CD8"
+
+        def _overview_matches_selection(self):
+            return False
+
+    torn = []
+    ctl = _Ctl()
+    stack = SimpleNamespace(controller=ctl, view=QtWidgets.QWidget(),
+                            teardown=lambda **k: torn.append(1))
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=lambda *a, **k: stack)
+    tab.set_dataset("/data/slide.ome.tif")
+    tab.show_source("CD8", None)
+    assert tab._stack is stack
+    ctl.overview_prepared.emit("src", "CD8", 0, False)        # the build's own read fails
+    assert tab._stack is None and torn and tab._build_error is not None
+    assert tab.show_source("CD8", None) is False               # refused like a failed build
+
+
+def test_only_the_builds_own_first_read_can_fail_the_build(app):
+    """After the first overview arrived, a later channel's failed read does
+    not discard a working stack (codex round 2)."""
+    from types import SimpleNamespace
+    from PyQt5 import QtCore
+
+    class _Ctl(QtCore.QObject):
+        overview_prepared = QtCore.pyqtSignal(object, object, object, bool)
+        channel = "CD8"
+
+    ctl = _Ctl()
+    stack = SimpleNamespace(controller=ctl, view=QtWidgets.QWidget(), teardown=lambda **k: None)
+    tab = Step0ExploreTab(FakePage("CD8"), stack_factory=lambda *a, **k: stack)
+    tab.set_dataset("/data/slide.ome.tif")
+    tab.show_source("CD8", None)
+    ctl.overview_prepared.emit("src", "CD8", 0, True)          # the build's read arrived
+    ctl.channel = "CD3"
+    ctl.overview_prepared.emit("src", "CD3", 0, False)         # a later channel fails
+    assert tab._stack is stack and tab._build_error is None
+
+
+def test_moving_on_before_the_first_read_ends_the_builds_watch(app):
+    """Load A, switch to B before A's overview arrives (its waiter is
+    dropped), B arrives; a later failed read of A is not the build's
+    (codex round 3)."""
+    from types import SimpleNamespace
+    from PyQt5 import QtCore
+
+    class _Ctl(QtCore.QObject):
+        overview_prepared = QtCore.pyqtSignal(object, object, object, bool)
+        channel = "A"
+
+    ctl = _Ctl()
+    stack = SimpleNamespace(controller=ctl, view=QtWidgets.QWidget(), teardown=lambda **k: None)
+    tab = Step0ExploreTab(FakePage("A"), stack_factory=lambda *a, **k: stack)
+    tab.set_dataset("/data/slide.ome.tif")
+    tab.show_source("A", None)
+    ctl.channel = "B"
+    ctl.overview_prepared.emit("src", "B", 0, True)
+    ctl.channel = "A"
+    ctl.overview_prepared.emit("src", "A", 0, False)
+    assert tab._stack is stack and tab._build_error is None

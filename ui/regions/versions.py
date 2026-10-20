@@ -80,6 +80,7 @@ class VersionsMixin:
             QMessageBox.warning(self, "Save", str(exc))
             return
         self._remember_saved(rec)
+        self.saved.emit()                          # the Save's cores are drawn elsewhere too
         n = len(rec["open_issues"])
         self.say("Saved." + (f" Still open: {n} (see the line next to Save)." if n else " Complete."))
         self.refresh()

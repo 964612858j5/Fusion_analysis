@@ -84,6 +84,7 @@ class _NoView:
 
 class RegionsPage(QWidget, VersionsMixin, ShapesMixin):
     intensity_requested = pyqtSignal()
+    saved = pyqtSignal()                       # a Regions Save was written
 
     def __init__(self, parent=None, metrics=None, title_bar=None):
         super().__init__(parent)

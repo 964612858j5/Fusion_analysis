@@ -514,6 +514,8 @@ def test_the_display_snapshot_is_the_viewers_copy_of_the_spec():
     class _Stub:
         _domain = _state = None
         _mode = "fusion"
+        _display_filter = None                       # an unfiltered viewer (docs/f5_tma_display_plan.md 3.1)
+        _spec = Step1WholeSlideMount._spec
         _note_gpu_missing_windows = staticmethod(lambda spec, mappings: None)
 
     for spec in (OVERLAY, FUSION):

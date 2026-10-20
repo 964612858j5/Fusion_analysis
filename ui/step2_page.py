@@ -290,6 +290,30 @@ class Step2Page(QWidget):
         self._ov_img = pg.ImageItem()
         self._ov_vb.addItem(self._ov_img)
         ll.addWidget(self._ov_gv, stretch=1)
+        self._ov_layout = ll
+        self._tile_colour_state = {}
+        self.dapi_viewer = None               # the zoomable DAPI picture (set by the main window)
+        self.input_shown = None               # () -> None: another input is on screen
+        # The TMA cores over the overview (docs/f5_tma_display_plan.md part 2):
+        # the switch, and the source of the last Save's cores (set by the
+        # main window: the same as Step1's).
+        from .step1_button_styles import MODE_BUTTON_QSS
+        self.btn_tma_cores = QPushButton("TMA cores")
+        self.btn_tma_cores.setCheckable(True)
+        self.btn_tma_cores.setChecked(True)
+        self.btn_tma_cores.setStyleSheet(MODE_BUTTON_QSS)
+        self.btn_tma_cores.setToolTip("Show the TMA cores: green = analysed by this run, "
+                                      "yellow = not analysed.\nNames (from the map sheet) appear when zoomed in.")
+        self.btn_tma_cores.setVisible(False)
+        self.btn_tma_cores.toggled.connect(lambda _on: self.refresh_core_outlines())
+        self.saved_core_items = None          # () -> overlay items of the last Regions Save
+        self.manual_regions = None            # (method, fused, rois, ask) -> (request, refusal), 9.2
+        self._run_core_snapshot = None        # the snapshot the run on screen froze
+        from .regions.core_outlines import CoreOutlines
+        import types
+        self._core_outlines = CoreOutlines(
+            lambda: types.SimpleNamespace(graphics=self._ov_gv, view_box=self._ov_vb),
+            self._core_items, self.btn_tma_cores.isChecked, to_view=self._ov_map)
 
         self._ov_status = QLabel('No zarr loaded')
         self._ov_status.setStyleSheet('color:#888;font-size:10px;')
@@ -1156,6 +1180,8 @@ class Step2Page(QWidget):
         frame.right_tabs.addTab(self._overview_panel, 'Tile Status')
         row = QHBoxLayout()
         row.addWidget(self._tile_status_label)
+        row.addStretch()
+        row.addWidget(self.btn_tma_cores)
         frame.tool_row(self._overview_panel.layout(), row)
         frame.bottom_layout.addLayout(nav)
         self._main_split = frame.splitter
@@ -1285,7 +1311,10 @@ class Step2Page(QWidget):
             cfg = self.get_seg_config()
         except Exception:                                   # noqa: BLE001
             return None
-        return {"segmentation_config": json.loads(json.dumps(cfg, default=str)),
+        # without the hand-over's frozen Regions (§11/§12.2: not used, and it
+        # made every session write ~75 KB larger)
+        cfg = self._without_handover_regions(json.loads(json.dumps(cfg, default=str)))
+        return {"segmentation_config": cfg,
                 "param_file": self._seg_param_file or "",
                 "parameter_source": self._parameter_source}
 
@@ -1294,6 +1323,7 @@ class Step2Page(QWidget):
         cfg = normalize_segmentation_config((draft or {}).get("segmentation_config") or {})
         if not cfg:
             return False
+        cfg = self._without_handover_regions(dict(cfg))   # an older draft may still carry them
         # The draft IS the configuration that was on screen: it runs as typed
         # (source manual), so no index file is reloaded over it at Run.
         self._set_param_source("manual")
@@ -1577,6 +1607,7 @@ class Step2Page(QWidget):
             self._apply_seg_config_to_ui(cfg)
             self._seg_config = cfg
             self._seg_param_file = os.path.abspath(path)
+            self.refresh_core_outlines()                  # its hand-over's cores, if any
             self._resolved_param_edit.setText(self._seg_param_file)
             print("[Step2] loaded active segmentation params")
             print(f"[Step2] method={cfg.get('method')}")
@@ -1624,6 +1655,8 @@ class Step2Page(QWidget):
 
     def _update_param_source_ui(self):
         is_index = (self._param_source_combo.currentData() or "manual") == "index"
+        if hasattr(self, "_core_outlines"):
+            QtCore.QTimer.singleShot(0, self.refresh_core_outlines)   # the source's cores
         for w in (
             self._index_method_label, self._index_method_combo,
             self._history_label, self._history_combo,
@@ -1704,7 +1737,18 @@ class Step2Page(QWidget):
         self._ov_ds = ds
         self._ov_img.clear()
         self._ov_vb.setRange(QRectF(0, 0, self._ov_w, self._ov_h), padding=0.01)
+        from ..core.tile_tissue import TissueUnavailable, fused_region
+        try:                                     # the input's place on the slide
+            bbox = fused_region(self._zarr_path)[0]
+            self._ov_origin = (int(bbox[0]), int(bbox[2]))
+        except (TissueUnavailable, OSError, ValueError, KeyError):
+            self._ov_origin = (0, 0)
         self._draw_tile_grid()
+        if self._zarr_path != getattr(self, "_run_core_input", None):
+            self._run_core_snapshot = None       # another input: not the run's any more
+        self.refresh_core_outlines()
+        if callable(self.input_shown):
+            self.input_shown()                   # the zoomable picture follows (or steps aside)
         self._ov_status.setText('Loading overview…')
         path, shape = self._zarr_path, tuple(z.shape)
         token = self._ov_token = object()
@@ -1725,10 +1769,12 @@ class Step2Page(QWidget):
 
     def _forget_overview(self):
         """No store any more: a pending overview is dropped and the old
-        picture goes (codex PA-5b)."""
+        picture goes (codex PA-5b) -- the zoomable one too."""
         self._ov_token = None
         self._ov_img.clear()
         self._ov_status.setText('')
+        if callable(self.input_shown):
+            self.input_shown()                   # no input: the zoomable picture closes
 
     def _on_overview_ready(self, result):
         token, arr, exc = result
@@ -1843,6 +1889,55 @@ class Step2Page(QWidget):
         cache.append(value)
         return value
 
+    @staticmethod
+    def _without_handover_regions(seg_config):
+        """Drop the cores a Step1 hand-over froze (user ruling 2026-10-19:
+        the parameters are decoupled from Regions); the rest of the
+        hand-over is kept as it is."""
+        block = seg_config.get(preseg_contract.CONTRACT_KEY)
+        if isinstance(block, dict) and "regions" in block:
+            seg_config[preseg_contract.CONTRACT_KEY] = {k: v for k, v in block.items() if k != "regions"}
+        return seg_config
+
+    def _core_items(self):
+        """The cores this page shows: the run on screen's frozen snapshot, else
+        the last Regions Save (as Step1 shows it) -- what a run started now
+        follows, whatever the parameters' source."""
+        from ..core.regions import display as RD
+        if self._run_core_snapshot is not None:
+            return RD.snapshot_items(self._run_core_snapshot)
+        return list(self.saved_core_items() or []) if callable(self.saved_core_items) else []
+
+    def _ov_map(self, x, y):
+        """Slide pixels to the overview's: minus the shown input's origin, over its stride."""
+        oy, ox = getattr(self, "_ov_origin", (0, 0))
+        ds = float(getattr(self, "_ov_ds", 1) or 1)
+        return (x - ox) / ds, (y - oy) / ds
+
+    def refresh_core_outlines(self):
+        """Draw the TMA cores over the overview now (the input's origin is
+        read from the input itself); the switch shows only while there are
+        cores to draw."""
+        n = 0
+        if getattr(self, "_zarr_path", None) and hasattr(self, "_ov_h"):
+            from ..core.tile_tissue import TissueUnavailable, fused_region
+            try:
+                bbox = fused_region(self._zarr_path)[0]
+                self._ov_origin = (int(bbox[0]), int(bbox[2]))
+                n = self._core_outlines.refresh()
+            except (TissueUnavailable, OSError, ValueError, KeyError) as exc:
+                print(f"[TMA cores] step2: not drawn ({exc})")
+                self._core_outlines.detach()
+            except Exception as exc:                        # noqa: BLE001
+                print(f"[TMA cores] step2: not drawn ({type(exc).__name__}: {exc})")
+                self._core_outlines.detach()
+        else:
+            self._core_outlines.detach()
+        if self.dapi_viewer is not None:
+            n = max(n, self.dapi_viewer.refresh())         # the cores over the zoomable picture too
+        self.btn_tma_cores.setVisible(n > 0)
+        return n
+
     def _draw_tile_grid(self):
         """Overlay tile rectangles on the overview."""
         if not hasattr(self, '_ov_h') or self._full_h == 0:
@@ -1855,6 +1950,7 @@ class Step2Page(QWidget):
             self._ov_vb.removeItem(item)
         self._tile_rects.clear()
         self._tile_status.clear()
+        self._tile_colour_state.clear()
 
         th  = -(-self._full_h // nr)
         tw  = -(-self._full_w // nc)
@@ -1883,6 +1979,8 @@ class Step2Page(QWidget):
             self._apply_run_progress()
         else:
             self._apply_skip_plan()
+        if self.dapi_viewer is not None:
+            self.dapi_viewer.refresh()                     # the new grid over the zoomable picture
 
     def _shows_run_grid(self):
         """True when the drawn grid is the running (or last) run's grid. Its
@@ -2102,21 +2200,65 @@ class Step2Page(QWidget):
             self._set_tile_colour(r, c, state)
             self._tile_status[(r, c)] = state
 
+    TILE_COLOURS = {
+        'idle':    '#808080',
+        'running': '#ffc832',
+        'done':    '#3cc850',
+        'error':   '#dc3c3c',
+        'skipped': '#5a7896',          # block S2T: left out by the plan
+        'plan_skip': '#5a7896',        # the next run will leave it out
+        'plan_forced': '#c678dd',      # ... although it holds tissue (the user's choice)
+    }
+    TILE_DASHED = ('plan_skip', 'plan_forced')
+
     def _set_tile_colour(self, row, col, state):
         rect = self._tile_rects.get((row, col))
         if rect is None:
             return
-        colours = {
-            'idle':    '#808080',
-            'running': '#ffc832',
-            'done':    '#3cc850',
-            'error':   '#dc3c3c',
-            'skipped': '#5a7896',          # block S2T: left out by the plan
-            'plan_skip': '#5a7896',        # the next run will leave it out
-            'plan_forced': '#c678dd',      # ... although it holds tissue (the user's choice)
-        }
-        style = Qt.DashLine if state in ('plan_skip', 'plan_forced') else Qt.SolidLine
-        rect.setPen(pg.mkPen(colours.get(state, '#808080'), width=2, style=style))
+        self._tile_colour_state[(row, col)] = state
+        style = Qt.DashLine if state in self.TILE_DASHED else Qt.SolidLine
+        rect.setPen(pg.mkPen(self.TILE_COLOURS.get(state, '#808080'), width=2, style=style))
+        if self.dapi_viewer is not None:
+            self.dapi_viewer.refresh()                     # the grid over the zoomable picture
+
+    # ── the grid in slide pixels (the zoomable DAPI viewer, plan part 3) ──
+    def overview_layout(self):
+        return self._ov_layout
+
+    def overview_widget(self):
+        return self._ov_gv
+
+    def _tile_geometry(self):
+        """(rows, cols, tile h, tile w, origin y, origin x) of the drawn grid."""
+        nr, nc = self._rows_spin.value(), self._cols_spin.value()
+        oy, ox = getattr(self, "_ov_origin", (0, 0))
+        return nr, nc, -(-self._full_h // nr), -(-self._full_w // nc), oy, ox
+
+    def tile_items(self):
+        """The drawn grid as overlay items in slide pixels, in its colours."""
+        if not self._tile_rects or not self._full_h:
+            return []
+        nr, nc, th, tw, oy, ox = self._tile_geometry()
+        items = []
+        for (r, c) in sorted(self._tile_rects):
+            y0, x0 = oy + r * th, ox + c * tw
+            y1, x1 = oy + min((r + 1) * th, self._full_h), ox + min((c + 1) * tw, self._full_w)
+            state = self._tile_colour_state.get((r, c), 'idle')
+            items.append({"id": f"tile_{r}_{c}", "polygon": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+                          "color": self.TILE_COLOURS.get(state, '#808080'),
+                          "dash": state in self.TILE_DASHED})
+        return items
+
+    def tile_at(self, y, x):
+        """(row, col) of the drawn tile under slide pixel (y, x), or None."""
+        if not self._tile_rects or not self._full_h:
+            return None
+        nr, nc, th, tw, oy, ox = self._tile_geometry()
+        ly, lx = y - oy, x - ox
+        if not (0 <= ly < self._full_h and 0 <= lx < self._full_w):
+            return None
+        rc = (int(ly // th), int(lx // tw))
+        return rc if rc in self._tile_rects else None
 
     # ── Segmentation params loading ───────────────────────────────────
 
@@ -2835,6 +2977,9 @@ class Step2Page(QWidget):
                 f"Grid overlap is {self._overlap_spin.value()} px.\n\n"
                 f"Set the overlap to {halo} px to run it.")
             return False
+        # (The hand-over's own Regions are not used any more -- §11: the cores
+        # are frozen at Run from the last Save, with the fused input's OWN
+        # Fusion settings -- so nothing here ties the input to them.)
         return True
 
     def _confirm_ignored_settings(self, path):
@@ -2989,6 +3134,26 @@ class Step2Page(QWidget):
         if source == "index" and self._applied_param_file:
             param_file = self._applied_param_file
 
+        # docs/f5_tma_display_plan.md 9.2: a TMA project's run follows its cores
+        # whatever the parameters' source -- frozen here, before anything is
+        # created, so a refusal or a No leaves no run behind.
+        # User ruling 2026-10-19 (third round): the parameters are decoupled
+        # from Regions -- whatever their source, the cores are the last Regions
+        # Save's, frozen now; a Step1 hand-over's own frozen cores are not used.
+        self._without_handover_regions(seg_config)
+        regions_request = None
+        if callable(self.manual_regions):
+            def ask(text):
+                return QMessageBox.question(self, "TMA cores", text, QMessageBox.Yes | QMessageBox.No,
+                                            QMessageBox.No) == QMessageBox.Yes
+            regions_request, why = self.manual_regions(seg_config.get("method"), self._zarr_path,
+                                                       self._rois, ask)
+            if why is None:
+                return                                    # the user said No
+            if why:
+                QMessageBox.warning(self, "TMA cores", f"This run cannot follow the TMA cores: {why}.")
+                return
+
         self._begin_run_progress(nr, nc)
         self._total_cells = 0
         self._cells_lbl.setText('Total cells detected: 0')
@@ -3010,7 +3175,13 @@ class Step2Page(QWidget):
             param_file        = param_file,
             parameter_source  = "index" if param_file else "manual",
             identity_confirmation = identity_confirmation,
+            regions_request  = regions_request,
         )
+        # the cores this run follows (its hand-over's frozen snapshot), drawn as frozen
+        reg = regions_request
+        self._run_core_snapshot = reg["snapshot"] if reg and reg.get("snapshot") else None
+        self._run_core_input = self._zarr_path
+        self.refresh_core_outlines()
         seg_cfg = seg_config
         print(f"[Step2] segmentation method={seg_cfg.get('method')}")
         print(f"[Step2] input_type={seg_cfg.get('input_type')}")

@@ -1,0 +1,132 @@
+QStandardPaths: runtime directory '/run/user/1000' is not owned by UID 0, but a directory permissions 0700 owned by UID 1000 GID 1000
+QStandardPaths: runtime directory '/run/user/1000' is not owned by UID 0, but a directory permissions 0700 owned by UID 1000 GID 1000
+[GPU] cupy 13.3.0 ready, GPU morphology smoke test passed
+   550.94 SETUP          group=stall popup=0x738edd10caf0 panel=0x738edd10cdc0 viewport=0x738edd10d000
+   551.02 SETUP          viewRange=[[-588.9949498997996, 1612.9949498997996], [-20.48, 2068.48]] active=True
+   551.06 SETUP          thumbnail array shape=(2048, 1024) dtype=float32
+   551.68 EV/PAINT       obj=QWidget (start)
+  1756.19 EV/MOVE        obj=QWindow btn=0 buttons=0 qt_ts=171745 global=(2479, 454)
+  1756.30 EV/MOVE        obj=QWidget btn=0 buttons=0 qt_ts=171745 global=(2479, 454)
+  2006.10 GUARD          pointer=(2479,454) child=0x600026 our_chain=['0x3400006', '0x600026', '0x203'] ours=True
+  2006.36 STALL          gui thread busy 1.5s (as a step switch / overview read)
+  2106.34 GESTURE        stall/0 start (inside the stall)
+  3507.92 STALL          gui thread free
+  3508.15 LOOP-GAP       gui thread unavailable for 1507.0ms
+  3510.62 EV/MOVE        obj=QWindow btn=0 buttons=0 qt_ts=172096 global=(2726, 683)
+  3510.69 EV/MOVE        obj=QWidget btn=0 buttons=0 qt_ts=172096 global=(2726, 683)
+  3511.44 EV/PRESS       obj=QWindow btn=4 buttons=4 qt_ts=172096 global=(2726, 683)
+  3511.49 EV/PRESS       obj=QWidget btn=4 buttons=4 qt_ts=172096 global=(2726, 683)
+MIDPAN t=173.503487 gid=1 panel=OverviewPanel@0x738edd10cdc0 what=press obj=viewport type=2 button=Middle buttons=Middle app_buttons=Middle grabber=QWidget@0x738edd10d000 scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=set grab=QWidget@0x738edd10d000 confirmed=False blank=0 watch=True sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=0.9ms qt_ts=172096
+  3512.62 EV/MOVE        obj=QWindow btn=0 buttons=4 qt_ts=172290 global=(2575, 502)
+  3512.67 EV/MOVE        obj=QWidget btn=0 buttons=4 qt_ts=172290 global=(2575, 502)
+MIDPAN t=173.503791 gid=1 panel=OverviewPanel@0x738edd10cdc0 what=move obj=viewport type=5 button=NoButton buttons=Middle app_buttons=Middle grabber=QWidget@0x738edd10d000 scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=set grab=QWidget@0x738edd10d000 confirmed=True blank=0 watch=True sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=1.2ms qt_ts=172290 arr_gap=0.3 ts_gap=194.0 late_ms=-193.7
+MIDPAN t=173.504174 gid=1 panel=OverviewPanel@0x738edd10cdc0 what=move-applied obj=viewport type=5 button=NoButton buttons=Middle app_buttons=Middle grabber=QWidget@0x738edd10d000 scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=set grab=QWidget@0x738edd10d000 confirmed=True blank=0 watch=True sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=1.6ms took_ms=0.22 moved=True dx_view=-632.1302 dy_view=-757.7190 range_x=(43.14,2245.13) range_y=(737.24,2826.20)
+  3513.24 MOVE-HANDLER   took=0.53ms moved=True before_x=(-588.99,1612.99) after_x=(43.14,2245.13) ret=True
+MIDPAN t=173.504373 gid=1 panel=OverviewPanel@0x738edd10cdc0 what=app-release obj=QWindow@0x738edd10eb90 type=3 button=Middle buttons=NoButton app_buttons=NoButton grabber=QWidget@0x738edd10d000 scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=set grab=QWidget@0x738edd10d000 confirmed=True blank=0 watch=True sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=1.8ms
+MIDPAN t=173.504466 gid=1 panel=OverviewPanel@0x738edd10cdc0 what=cancel obj=viewport type=n/a button=n/a buttons=n/a app_buttons=NoButton grabber=QWidget@0x738edd10d000 scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=set grab=QWidget@0x738edd10d000 confirmed=True blank=0 watch=True sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=1.9ms closed_by=the release, caught by the application filter
+  3514.15 EV/REL         obj=QWindow btn=4 buttons=0 qt_ts=172290 global=(2575, 502)
+  3514.24 EV/REL         obj=QWidget btn=4 buttons=0 qt_ts=172290 global=(2575, 502)
+MIDPAN t=173.505332 gid=1 panel=OverviewPanel@0x738edd10cdc0 what=release obj=viewport type=3 button=Middle buttons=NoButton app_buttons=NoButton grabber=None scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=None grab=None confirmed=False blank=0 watch=False sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=2.7ms
+  3514.42 EV/MOVE        obj=QWindow btn=0 buttons=0 qt_ts=172391 global=(2201, 423)
+  3514.66 EV/MOVE        obj=TissueNavigatorPopup btn=0 buttons=0 qt_ts=172391 global=(2201, 423)
+  3515.00 EV/PAINT       obj=QWidget (start)
+MIDPAN t=173.506118 gid=1 panel=OverviewPanel@0x738edd10cdc0 what=paint obj=viewport type=n/a button=n/a buttons=n/a app_buttons=NoButton grabber=None scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=None grab=None confirmed=False blank=0 watch=False sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=3.5ms after_step_ms=1.97 gesture_open=False
+  3516.86 EV/PAINT       obj=QWidget (start)
+  3609.83 EV/WIN-DEACT   obj=TissueNavigatorPopup
+  3609.87 EV/WIN-DEACT   obj=QWidget
+  3609.89 EV/WIN-DEACT   obj=QLabel
+  3609.91 EV/WIN-DEACT   obj=OverviewPanel
+  3609.92 EV/WIN-DEACT   obj=QLabel
+  3609.94 EV/WIN-DEACT   obj=GraphicsLayoutWidget
+  3609.96 EV/WIN-DEACT   obj=QWidget
+  3610.00 EV/WIN-DEACT   obj=GraphicsScene
+  3610.03 EV/WIN-DEACT   obj=GraphicsLayout
+  3610.05 EV/WIN-DEACT   obj=_PanViewBox
+  3610.06 EV/WIN-DEACT   obj=ChildGroup
+  3610.08 EV/WIN-DEACT   obj=ImageItem
+  3610.10 EV/WIN-DEACT   obj=QLabel
+  3610.11 EV/WIN-DEACT   obj=QWidget
+  3610.13 EV/WIN-DEACT   obj=QPushButton
+  3611.16 EV/PAINT       obj=QWidget (start)
+  4302.47 GESTURE        stall/0 end panned=True
+  5105.90 EV/MOVE        obj=QWindow btn=0 buttons=0 qt_ts=175094 global=(2479, 454)
+  5106.03 EV/MOVE        obj=QWidget btn=0 buttons=0 qt_ts=175094 global=(2479, 454)
+  5355.70 GUARD          pointer=(2479,454) child=0x600026 our_chain=['0x3400006', '0x600026', '0x203'] ours=True
+  5355.90 STALL          gui thread busy 1.5s (as a step switch / overview read)
+  5455.97 GESTURE        stall/1 start (inside the stall)
+  6857.54 STALL          gui thread free
+  6858.84 EV/PRESS       obj=QWindow btn=4 buttons=4 qt_ts=175446 global=(2479, 454)
+  6859.04 EV/PRESS       obj=QWidget btn=4 buttons=4 qt_ts=175446 global=(2479, 454)
+MIDPAN t=176.850577 gid=2 panel=OverviewPanel@0x738edd10cdc0 what=press obj=viewport type=2 button=Middle buttons=Middle app_buttons=Middle grabber=QWidget@0x738edd10d000 scene_grab=None focus=None active=False last=set grab=QWidget@0x738edd10d000 confirmed=False blank=0 watch=True sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=0.4ms qt_ts=175446
+  6859.76 EV/WIN-ACT     obj=TissueNavigatorPopup
+  6859.79 EV/WIN-ACT     obj=QWidget
+  6859.81 EV/WIN-ACT     obj=QLabel
+  6859.83 EV/WIN-ACT     obj=OverviewPanel
+  6859.85 EV/WIN-ACT     obj=QLabel
+  6859.87 EV/WIN-ACT     obj=GraphicsLayoutWidget
+  6859.89 EV/WIN-ACT     obj=QWidget
+  6859.92 EV/WIN-ACT     obj=GraphicsScene
+  6859.98 EV/WIN-ACT     obj=GraphicsLayout
+  6860.01 EV/WIN-ACT     obj=_PanViewBox
+  6860.04 EV/WIN-ACT     obj=ChildGroup
+  6860.06 EV/WIN-ACT     obj=ImageItem
+  6860.08 EV/WIN-ACT     obj=QLabel
+  6860.10 EV/WIN-ACT     obj=QWidget
+  6860.11 EV/WIN-ACT     obj=QPushButton
+  6860.30 EV/MOVE        obj=QWindow btn=0 buttons=4 qt_ts=175639 global=(2575, 502)
+  6860.35 EV/MOVE        obj=QWidget btn=0 buttons=4 qt_ts=175639 global=(2575, 502)
+MIDPAN t=176.851463 gid=2 panel=OverviewPanel@0x738edd10cdc0 what=move obj=viewport type=5 button=NoButton buttons=Middle app_buttons=Middle grabber=QWidget@0x738edd10d000 scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=set grab=QWidget@0x738edd10d000 confirmed=True blank=0 watch=True sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=1.3ms qt_ts=175639 arr_gap=0.9 ts_gap=193.0 late_ms=-192.1
+MIDPAN t=176.851813 gid=2 panel=OverviewPanel@0x738edd10cdc0 what=move-applied obj=viewport type=5 button=NoButton buttons=Middle app_buttons=Middle grabber=QWidget@0x738edd10d000 scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=set grab=QWidget@0x738edd10d000 confirmed=True blank=0 watch=True sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=1.6ms took_ms=0.19 moved=True dx_view=401.8841 dy_view=200.9420 range_x=(-358.75,1843.24) range_y=(536.30,2625.26)
+  6860.86 MOVE-HANDLER   took=0.47ms moved=True before_x=(43.14,2245.13) after_x=(-358.75,1843.24) ret=True
+MIDPAN t=176.851965 gid=2 panel=OverviewPanel@0x738edd10cdc0 what=app-release obj=QWindow@0x738edd10f1c0 type=3 button=Middle buttons=NoButton app_buttons=NoButton grabber=QWidget@0x738edd10d000 scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=set grab=QWidget@0x738edd10d000 confirmed=True blank=0 watch=True sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=1.8ms
+MIDPAN t=176.852050 gid=2 panel=OverviewPanel@0x738edd10cdc0 what=cancel obj=viewport type=n/a button=n/a buttons=n/a app_buttons=NoButton grabber=QWidget@0x738edd10d000 scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=set grab=QWidget@0x738edd10d000 confirmed=True blank=0 watch=True sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=1.9ms closed_by=the release, caught by the application filter
+  6861.34 EV/REL         obj=QWindow btn=4 buttons=0 qt_ts=175639 global=(2575, 502)
+  6861.40 EV/REL         obj=QWidget btn=4 buttons=0 qt_ts=175639 global=(2575, 502)
+MIDPAN t=176.852495 gid=2 panel=OverviewPanel@0x738edd10cdc0 what=release obj=viewport type=3 button=Middle buttons=NoButton app_buttons=NoButton grabber=None scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=None grab=None confirmed=False blank=0 watch=False sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=2.3ms
+  6861.57 EV/MOVE        obj=QWindow btn=0 buttons=0 qt_ts=175639 global=(2579, 504)
+  6861.61 EV/MOVE        obj=QWidget btn=0 buttons=0 qt_ts=175639 global=(2579, 504)
+  6862.65 EV/PAINT       obj=QWidget (start)
+MIDPAN t=176.853771 gid=2 panel=OverviewPanel@0x738edd10cdc0 what=paint obj=viewport type=n/a button=n/a buttons=n/a app_buttons=NoButton grabber=None scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=None grab=None confirmed=False blank=0 watch=False sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=3.6ms after_step_ms=1.97 gesture_open=False
+  6864.42 LOOP-GAP       gui thread unavailable for 1511.1ms
+  7651.71 GESTURE        stall/1 end panned=True
+  8453.03 EV/MOVE        obj=QWindow btn=0 buttons=0 qt_ts=178442 global=(2479, 454)
+  8453.14 EV/MOVE        obj=QWidget btn=0 buttons=0 qt_ts=178442 global=(2479, 454)
+  8704.42 GUARD          pointer=(2479,454) child=0x600026 our_chain=['0x3400006', '0x600026', '0x203'] ours=True
+  8704.58 STALL          gui thread busy 1.5s (as a step switch / overview read)
+  8804.63 GESTURE        stall/2 start (inside the stall)
+ 10206.18 STALL          gui thread free
+ 10206.32 LOOP-GAP       gui thread unavailable for 1506.4ms
+ 10206.77 EV/PRESS       obj=QWindow btn=4 buttons=4 qt_ts=178794 global=(2479, 454)
+ 10206.83 EV/PRESS       obj=QWidget btn=4 buttons=4 qt_ts=178794 global=(2479, 454)
+MIDPAN t=180.198604 gid=3 panel=OverviewPanel@0x738edd10cdc0 what=press obj=viewport type=2 button=Middle buttons=Middle app_buttons=Middle grabber=QWidget@0x738edd10d000 scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=set grab=QWidget@0x738edd10d000 confirmed=False blank=0 watch=True sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=0.7ms qt_ts=178794
+ 10207.75 EV/MOVE        obj=QWindow btn=0 buttons=4 qt_ts=178988 global=(2575, 502)
+ 10207.79 EV/MOVE        obj=QWidget btn=0 buttons=4 qt_ts=178988 global=(2575, 502)
+MIDPAN t=180.198907 gid=3 panel=OverviewPanel@0x738edd10cdc0 what=move obj=viewport type=5 button=NoButton buttons=Middle app_buttons=Middle grabber=QWidget@0x738edd10d000 scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=set grab=QWidget@0x738edd10d000 confirmed=True blank=0 watch=True sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=1.0ms qt_ts=178988 arr_gap=0.3 ts_gap=194.0 late_ms=-193.7
+MIDPAN t=180.199291 gid=3 panel=OverviewPanel@0x738edd10cdc0 what=move-applied obj=viewport type=5 button=NoButton buttons=Middle app_buttons=Middle grabber=QWidget@0x738edd10d000 scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=set grab=QWidget@0x738edd10d000 confirmed=True blank=0 watch=True sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=1.3ms took_ms=0.20 moved=True dx_view=401.8841 dy_view=200.9420 range_x=(-760.63,1441.36) range_y=(335.35,2424.31)
+ 10208.32 MOVE-HANDLER   took=0.49ms moved=True before_x=(-358.75,1843.24) after_x=(-760.63,1441.36) ret=True
+MIDPAN t=180.199429 gid=3 panel=OverviewPanel@0x738edd10cdc0 what=app-release obj=QWindow@0x738edd10f1c0 type=3 button=Middle buttons=NoButton app_buttons=NoButton grabber=QWidget@0x738edd10d000 scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=set grab=QWidget@0x738edd10d000 confirmed=True blank=0 watch=True sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=1.5ms
+MIDPAN t=180.199491 gid=3 panel=OverviewPanel@0x738edd10cdc0 what=cancel obj=viewport type=n/a button=n/a buttons=n/a app_buttons=NoButton grabber=QWidget@0x738edd10d000 scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=set grab=QWidget@0x738edd10d000 confirmed=True blank=0 watch=True sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=1.5ms closed_by=the release, caught by the application filter
+ 10208.70 EV/REL         obj=QWindow btn=4 buttons=0 qt_ts=178988 global=(2575, 502)
+ 10208.74 EV/REL         obj=QWidget btn=4 buttons=0 qt_ts=178988 global=(2575, 502)
+MIDPAN t=180.199829 gid=3 panel=OverviewPanel@0x738edd10cdc0 what=release obj=viewport type=3 button=Middle buttons=NoButton app_buttons=NoButton grabber=None scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=None grab=None confirmed=False blank=0 watch=False sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=1.9ms
+ 10208.86 EV/MOVE        obj=QWindow btn=0 buttons=0 qt_ts=178988 global=(2579, 504)
+ 10208.89 EV/MOVE        obj=QWidget btn=0 buttons=0 qt_ts=178988 global=(2579, 504)
+ 10209.99 EV/PAINT       obj=QWidget (start)
+MIDPAN t=180.201103 gid=3 panel=OverviewPanel@0x738edd10cdc0 what=paint obj=viewport type=n/a button=n/a buttons=n/a app_buttons=NoButton grabber=None scene_grab=None focus=GraphicsLayoutWidget@0x738edd10cf70 active=True last=None grab=None confirmed=False blank=0 watch=False sel_patch=-1 patch_drag=False drag_start=None swallow=False since_press=3.2ms after_step_ms=1.83 gesture_open=False
+ 11000.54 GESTURE        stall/2 end panned=True
+ 11801.28 DONE           quitting
+ 11807.43 EV/WIN-DEACT   obj=QWidget
+ 11807.50 EV/WIN-DEACT   obj=QWidget
+ 11807.52 EV/WIN-DEACT   obj=QLabel
+ 11807.54 EV/WIN-DEACT   obj=OverviewPanel
+ 11807.56 EV/WIN-DEACT   obj=QLabel
+ 11807.57 EV/WIN-DEACT   obj=GraphicsLayoutWidget
+ 11807.60 EV/WIN-DEACT   obj=QWidget
+ 11807.64 EV/WIN-DEACT   obj=GraphicsScene
+ 11807.67 EV/WIN-DEACT   obj=GraphicsLayout
+ 11807.70 EV/WIN-DEACT   obj=_PanViewBox
+ 11807.72 EV/WIN-DEACT   obj=ChildGroup
+ 11807.73 EV/WIN-DEACT   obj=ImageItem
+ 11807.75 EV/WIN-DEACT   obj=QLabel
+ 11807.77 EV/WIN-DEACT   obj=QWidget
+ 11807.78 EV/WIN-DEACT   obj=QPushButton

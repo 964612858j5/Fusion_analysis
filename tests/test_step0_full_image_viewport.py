@@ -267,8 +267,9 @@ def test_build_default_stack_moves_the_camera_after_load_overview(monkeypatch):
             order.append("set_selection")
             self.calls.append(kw)
 
-        def load_overview(self, ensure_floor=True):
-            order.append("load_overview")
+        def switch_overview_for_current_channel(self):
+            order.append("load_overview")             # §12: now started off the GUI thread
+            return False
 
         def jump_to(self, y0, x0, w, h):
             order.append(("jump_to", y0, x0, w, h))
@@ -341,8 +342,9 @@ def test_build_default_stack_falls_back_to_the_whole_slide(monkeypatch):
         def set_selection(self, **kw):
             order.append("set_selection")
 
-        def load_overview(self, ensure_floor=True):
-            order.append("load_overview")
+        def switch_overview_for_current_channel(self):
+            order.append("load_overview")             # §12: now started off the GUI thread
+            return False
 
         def jump_to(self, *a):
             order.append("jump_to")

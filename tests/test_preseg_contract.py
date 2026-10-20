@@ -364,3 +364,56 @@ def test_a_mesmer_contract_without_its_fixed_rules_is_refused():
         pc.validate({pc.CONTRACT_KEY: block})
     block["params"]["threshold_target"] = "nuclear"
     assert pc.validate({pc.CONTRACT_KEY: block}) == block
+
+
+def test_a_chosen_stardist_result_survives_the_method_widgets(app, tmp_path):
+    """Picking the same StarDist method in the editor (as a session restore
+    does when it puts the draft back on the widgets) must not replace the
+    chosen result's parameters with the widgets' -- Save then refused with
+    "the chosen parameters are not the run's"."""
+    from block01.ui.main_window import MainWindow, PRESEG_SOURCE
+    method = "stardist_nuclei_expansion"
+    step1 = str(tmp_path / "step1")
+    run, rdir = _run_on_disk(step1, method, COMBOS[method])
+    widget_params = {"method": method, "params": dict(COMBOS[method], device_preference="gpu_first",
+                                                      diameter=None, flow_threshold=0.4)}
+    w = types.SimpleNamespace(
+        _preseg_run=run, _preseg_records=preseg_run.load_records(rdir),
+        _preseg_current=lambda: ("px1", "fh1"), _check_save_unlock=lambda: None,
+        _refresh_preseg_results=lambda: None, _preseg_runs_root=lambda: step1,
+        _schedule_step1_session_save=lambda: None, _log_step1_layout=lambda *_: None,
+        config=QtWidgets.QWidget(), result_grid=QtWidgets.QWidget(),
+        btn_save=QtWidgets.QPushButton(), _fusion_bar_widget=QtWidgets.QWidget(),
+        search=types.SimpleNamespace(get_current_params=lambda: dict(widget_params)))
+    assert MainWindow._on_preseg_use(w, run["combos"][0]["combo_id"]) is True
+    MainWindow._on_step1_segmentation_mode_changed(w, method)
+    assert w._params_source == PRESEG_SOURCE
+    MainWindow._preseg_segmentation_config(w)            # no ContractError
+    # another method in the editor still replaces them (and leaves the result)
+    MainWindow._on_step1_segmentation_mode_changed(w, "stardist_nuclei_dapi")
+    assert w._params_source == "direct_method"
+
+
+def test_a_restore_makes_the_chosen_parameters_from_the_run(app, tmp_path):
+    """A draft saved with the widgets' parameters under a chosen result (the
+    state the bug above left on disk) is healed when the result is restored."""
+    from block01.ui.main_window import MainWindow, PRESEG_SOURCE
+    method = "stardist_nuclei_expansion"
+    step1 = str(tmp_path / "step1")
+    run, rdir = _run_on_disk(step1, method, COMBOS[method])
+    cid = run["combos"][0]["combo_id"]
+    noop = lambda *a, **k: None                       # noqa: E731
+    w = types.SimpleNamespace(
+        _params_source=PRESEG_SOURCE,
+        _p2_params={"method": method, "params": dict(COMBOS[method], device_preference="gpu_first")},
+        _preseg_current=lambda: ("px1", "fh1"), _preseg_runs_root=lambda: step1,
+        _preseg_methods=types.SimpleNamespace(set_methods=noop, set_progress=noop),
+        _preseg_patches=types.SimpleNamespace(set_selected_ids=noop),
+        _start_results_for_run=noop, _refresh_preseg_results=noop, _check_save_unlock=noop,
+        _show_montage_patches=noop, _montage_sync_outlines=noop)
+    with pytest.MonkeyPatch.context() as mp:
+        from block01.ui import main_window as mw
+        mp.setattr(mw.run_store, "is_done", lambda d: True)
+        assert MainWindow._rm_restore_preseg(w, {"run_dir": rdir, "used_combo": cid}) is True
+    assert w._preseg_selected["combo_id"] == cid
+    MainWindow._preseg_segmentation_config(w)            # no ContractError

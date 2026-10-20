@@ -2039,3 +2039,46 @@ def test_lateness_is_not_measured_with_the_switch_off(app, monkeypatch):
 
     assert panel._mid_pan_prev_arr is None
     assert panel._mid_pan_prev_ts is None
+
+
+# ── 2026-10-20: measured on the real X server (docs/midpan_real_x_evidence/2026-10-20) ──
+
+def test_a_middle_double_click_opens_the_gesture_like_a_press(app):
+    """A press within the double-click interval of the last one reaches the
+    viewport ONLY as MouseButtonDblClick: it must open the gesture."""
+    panel = _panel(None)
+    p0 = QtCore.QPoint(250, 250)
+    _send(panel, QtCore.QEvent.MouseButtonPress, p0, button=Qt.MiddleButton)       # the quick tap
+    _send(panel, QtCore.QEvent.MouseButtonRelease, p0, button=Qt.MiddleButton, buttons=Qt.NoButton)
+    before = _range(panel)
+    _send(panel, QtCore.QEvent.MouseButtonDblClick, p0, button=Qt.MiddleButton)    # the retry
+    for i in range(1, 5):
+        _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(250 - 15 * i, 250 - 10 * i),
+              button=Qt.NoButton, buttons=Qt.MiddleButton)
+    _send(panel, QtCore.QEvent.MouseButtonRelease, QtCore.QPoint(190, 210),
+          button=Qt.MiddleButton, buttons=Qt.NoButton)
+    after = _range(panel)
+    assert after != before and after[0] > before[0]
+
+
+def test_a_replayed_press_does_not_restart_the_gesture(app):
+    """A second press a few ms after the first at the same place (the X
+    replay) keeps the open gesture and its anchor: the first step is not
+    applied twice."""
+    panel = _panel(None)
+    p0 = QtCore.QPoint(250, 250)
+    _send(panel, QtCore.QEvent.MouseButtonPress, p0, button=Qt.MiddleButton)
+    anchor = panel._mid_pan_press_scene
+    seq = panel._mid_pan_seq
+    _send(panel, QtCore.QEvent.MouseButtonPress, p0, button=Qt.MiddleButton)       # replay
+    assert panel._mid_pan_seq == seq and panel._mid_pan_press_scene == anchor
+    _send(panel, QtCore.QEvent.MouseMove, QtCore.QPoint(230, 250), button=Qt.NoButton,
+          buttons=Qt.MiddleButton)
+    one_step = _range(panel)
+    _send(panel, QtCore.QEvent.MouseButtonRelease, QtCore.QPoint(230, 250),
+          button=Qt.MiddleButton, buttons=Qt.NoButton)
+    # a press later, or elsewhere, is a new gesture as before
+    _send(panel, QtCore.QEvent.MouseButtonPress, QtCore.QPoint(300, 300), button=Qt.MiddleButton)
+    assert panel._mid_pan_seq == seq + 1
+    _send(panel, QtCore.QEvent.MouseButtonRelease, QtCore.QPoint(300, 300),
+          button=Qt.MiddleButton, buttons=Qt.NoButton)

@@ -33,11 +33,12 @@ CLICK_SLOP_PX = 4
 
 
 class RegionsOverlay(QtWidgets.QWidget):
-    def __init__(self, graphics, view_box, controller):
+    def __init__(self, graphics, view_box, controller, label_min_px=LABEL_MIN_PX):
         viewport = graphics.viewport()
         super().__init__(viewport)
         self.setObjectName("regions_overlay")
         self.graphics, self.vb, self.controller = graphics, view_box, controller
+        self.label_min_px = label_min_px          # a shape smaller than this on screen gets no label
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -294,7 +295,7 @@ class RegionsOverlay(QtWidgets.QWidget):
 
     def _label(self, p, it, br, fm):
         text = self.order_labels.get(it["id"]) or it.get("label")
-        if text and max(br.width(), br.height()) >= LABEL_MIN_PX:
+        if text and max(br.width(), br.height()) >= self.label_min_px:
             box = QtCore.QRectF(br.right() - 4, br.top() - fm.height(), fm.width(text) + 8, fm.height() + 2)
             p.setPen(Qt.NoPen)
             p.setBrush(QtGui.QColor(0, 0, 0, 170))

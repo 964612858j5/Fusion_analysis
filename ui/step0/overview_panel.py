@@ -3174,6 +3174,23 @@ class OverviewPanel(QWidget):
     # move pans once, the release ends it" is a property of the code and not
     # of a state machine that has to be read to be believed.
 
+    #: A press this soon after the open gesture's own, at (almost) the same
+    #: place, is its replay, not a new gesture.
+    MID_PAN_REPLAY_S = 0.05
+    MID_PAN_REPLAY_PX = 3.0
+
+    def _mid_pan_is_replay(self, event):
+        t0 = getattr(self, "_mid_pan_t0", None)
+        start = getattr(self, "_mid_pan_press_scene", None)
+        if t0 is None or start is None or time.monotonic() - t0 > self.MID_PAN_REPLAY_S:
+            return False
+        pos = self._mid_pan_scene_pos(event)
+        try:
+            return abs(pos.x() - start.x()) <= self.MID_PAN_REPLAY_PX \
+                and abs(pos.y() - start.y()) <= self.MID_PAN_REPLAY_PX
+        except AttributeError:
+            return False
+
     def _middle_pan_press(self, event):
         """Open the gesture. From here until the release this viewport owns
         the pointer, and no other branch of the filter runs for it.
@@ -3200,6 +3217,17 @@ class OverviewPanel(QWidget):
         is a frozen application. Anything that ends the gesture goes
         through `_middle_pan_cancel`, which releases exactly what it took.
         """
+        # A REPLAYED press of the gesture already open (the button is still
+        # down; the real X logs show one ~6-8 ms after about a fifth of the
+        # presses): kept as it is -- restarting would move the anchor and
+        # re-take the grab, and the first step would be applied twice.
+        if self._mid_pan_last is not None and self._mid_pan_is_replay(event):
+            self._mid_pan_log("dup-press", event)
+            try:
+                event.accept()
+            except (AttributeError, RuntimeError):
+                pass
+            return True
         # Defensive: a press arriving while a previous gesture is somehow
         # still held must not leak that grab.
         self._middle_pan_cancel("a new press arrived on an open gesture")
@@ -3962,8 +3990,15 @@ class OverviewPanel(QWidget):
         # only with the middle button up, so none of them has to know this
         # gesture exists, and `_adjust_swallow` is left alone -- it belongs
         # to the press that ENDS an adjustment, and no middle press is that.
-        if t == QtCore.QEvent.MouseButtonPress \
+        # A middle DOUBLE-CLICK is a press too (measured on the real X server,
+        # docs/midpan_real_x_evidence/2026-10-20): a press within Qt's
+        # double-click interval of the last one is delivered ONLY as
+        # MouseButtonDblClick -- the Press itself is swallowed -- so a quick
+        # retry after a drag that felt dead never opened its gesture.
+        if t in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonDblClick) \
                 and event.button() == Qt.MiddleButton:
+            if t == QtCore.QEvent.MouseButtonDblClick:
+                self._mid_pan_log("dblclick", event)
             return self._middle_pan_press(event)
         if t == QtCore.QEvent.MouseMove and self._middle_pan_holding():
             # A move that reached this viewport with our own press still

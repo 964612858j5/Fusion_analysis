@@ -40,6 +40,7 @@ sentences, one badge, no control: the other channels go on drawing and
 navigation is never blocked.
 """
 
+import dataclasses
 import inspect
 import logging
 import math
@@ -147,9 +148,20 @@ class Step1WholeSlideMount(QtCore.QObject):
     mask_status_changed = QtCore.pyqtSignal()
 
     def __init__(self, window, host=None, parent=None, *, gpu=True,
-                 gpu_layer_factory=None, camera_reason="step1", labels=False):
+                 gpu_layer_factory=None, camera_reason="step1", labels=False,
+                 display_filter=None, navigator=True, raw_texture_bytes=None):
         super().__init__(parent)
         self._window = window
+        #: docs/f5_tma_display_plan.md 3.1 (Step2's small viewer): a function
+        #: that narrows Step1's display spec (DAPI only). Set, this viewer
+        #: never composes on the CPU -- that path reads the plain Step1 spec --
+        #: and closes back to its old picture instead; `navigator=False`: it
+        #: never draws its rectangle on the Tissue preview; and its GPU
+        #: layer has its own raw-texture budget. Unset, nothing changes.
+        self._display_filter = display_filter
+        self._publishes_rect = bool(navigator)
+        self._raw_texture_bytes = int(raw_texture_bytes or DEMO_GPU_RAW_TEXTURE_BYTES)
+        self._open_channel = ""
         #: Block 4b: this viewer draws masks (Step3's; Step1's never does).
         #: Off, nothing of it exists -- the GPU layer is built without its
         #: label targets and no label binding is made.
@@ -275,6 +287,15 @@ class Step1WholeSlideMount(QtCore.QObject):
         self._legacy.setVisible(True)
         return True
 
+    def _budgets(self):
+        """`demo_budgets()`, with this viewer's own raw-texture budget."""
+        return dataclasses.replace(demo_budgets(), max_raw_texture_bytes=self._raw_texture_bytes)
+
+    def _spec(self):
+        """Step1's display spec, narrowed by `display_filter` when set."""
+        spec = draft_spec.build_spec(self._domain, self._state, self._mode, scope=STEP1_SCOPE)
+        return self._display_filter(spec) if self._display_filter is not None else spec
+
     # ── opening ───────────────────────────────────────────────────────
     def open(self, channel=""):
         """Open the slide and start drawing the current draft.
@@ -285,6 +306,7 @@ class Step1WholeSlideMount(QtCore.QObject):
         A GPU that cannot start says so and the existing CPU path opens
         instead; nothing here reports a GPU that is not there.
         """
+        self._open_channel = str(channel or "")
         with perf_trace.span("step1.entry.stack_open"):
             stack = self.viewer.open(channel)
         if stack is None:
@@ -295,6 +317,11 @@ class Step1WholeSlideMount(QtCore.QObject):
             self._connect_view_rect()
             self.activate()
             return stack
+        if self._display_filter is not None:          # no CPU picture of a narrowed spec
+            _log.warning("filtered viewer: no GPU (%s); back to the old picture",
+                         self._gpu_reason or self._rust_refused)
+            self.close()
+            return None
         self._load_overview_for_the_cpu_picture(stack)
         return self._start_cpu_backend(stack)
 
@@ -375,7 +402,7 @@ class Step1WholeSlideMount(QtCore.QObject):
         from . import step1_core_binding
         layer = None
         try:
-            layer, args = step1_core_binding.build(self, stack, demo_budgets())
+            layer, args = step1_core_binding.build(self, stack, self._budgets())
             layer.attach(stack.view)
             if layer.width() <= 0 or layer.height() <= 0:
                 layer.resize(1, 1)
@@ -425,6 +452,9 @@ class Step1WholeSlideMount(QtCore.QObject):
         if stack is None:
             return False
         if not self._start_gpu_backend(stack):
+            if self._display_filter is not None:      # no CPU picture of a narrowed spec
+                self.close()
+                return True
             # the controller's own layers are the picture now: they are
             # supplied again (unless the viewer is paused, which keeps them
             # off until `resume_requests`)
@@ -506,7 +536,7 @@ class Step1WholeSlideMount(QtCore.QObject):
         return {
             "backend": self._backend,
             "reason": self._gpu_reason,
-            "raw_texture_budget_bytes": DEMO_GPU_RAW_TEXTURE_BYTES,
+            "raw_texture_budget_bytes": self._raw_texture_bytes,
             "environment": (layer.environment_report()
                             if layer is not None else {}),
             "cache": layer.cache_stats() if layer is not None else {},
@@ -517,7 +547,7 @@ class Step1WholeSlideMount(QtCore.QObject):
         factory = self._gpu_layer_factory
         if factory is not None:
             return factory(stack)
-        return Step1GpuLayer(max_raw_texture_bytes=DEMO_GPU_RAW_TEXTURE_BYTES,
+        return Step1GpuLayer(max_raw_texture_bytes=self._raw_texture_bytes,
                              require_hardware=True, labels=self._labels_wanted)
 
     def _start_gpu_backend(self, stack):
@@ -564,7 +594,7 @@ class Step1WholeSlideMount(QtCore.QObject):
             controller=stack.controller, layer=layer,
             build_display_snapshot=self._gpu_display_snapshot,
             build_viewport_snapshot=self._gpu_viewport_snapshot,
-            budgets=demo_budgets(), parent=self)
+            budgets=self._budgets(), parent=self)
         # block A9 S2b: the badge follows "resolution limited" as it changes
         self.gpu_binding.on_status_changed = self._refresh_notice
         # The same switch the CPU composed layer uses: a composition is on
@@ -865,8 +895,7 @@ class Step1WholeSlideMount(QtCore.QObject):
 
     def _gpu_composes(self, channel):
         try:
-            spec = draft_spec.build_spec(self._domain, self._state, self._mode,
-                                         scope=STEP1_SCOPE)
+            spec = self._spec()
         except Exception:                                  # noqa: BLE001
             return True                    # unsure: redraw, as before
         return str(channel) in self._gpu_spec_channels(spec)
@@ -905,8 +934,7 @@ class Step1WholeSlideMount(QtCore.QObject):
         place that reads the draft and the shared display state; this copies
         its fields across and changes no number and no rule.
         """
-        spec = draft_spec.build_spec(self._domain, self._state, self._mode,
-                                     scope=STEP1_SCOPE)
+        spec = self._spec()
         mappings = {str(channel): tuple(float(v) for v in value)
                     for channel, value in (spec.get("mappings") or {}).items()}
         self._note_gpu_missing_windows(spec, mappings)
@@ -1189,6 +1217,8 @@ class Step1WholeSlideMount(QtCore.QObject):
             return None
         if self.gpu_binding is not None or self.gpu_layer is not None:
             return self._gpu_source_changed(reason)
+        if self._display_filter is not None:
+            return None                               # closed: never a CPU picture
         stack = self.viewer.open()
         if stack is None:
             return None
@@ -1230,11 +1260,14 @@ class Step1WholeSlideMount(QtCore.QObject):
         # Masks belong to the source they were resolved for: a new source
         # starts without them until its owner (block 4c) sets them again.
         self._mask_sources = None
-        stack = self.viewer.open()
+        stack = self.viewer.open(self._open_channel if self._display_filter is not None else "")
         if stack is None:
             self._backend = BACKEND_LEGACY
             return None
         if not self._start_gpu_backend(stack):
+            if self._display_filter is not None:      # no CPU picture of a narrowed spec
+                self.close()
+                return None
             self._load_overview_for_the_cpu_picture(stack)
             self._start_cpu_backend(stack)
             return stack
@@ -1359,7 +1392,7 @@ class Step1WholeSlideMount(QtCore.QObject):
         a viewer that is not active, or is paused, publishes nothing
         (block 2a) -- a hidden one resizing must not move the rectangle.
         """
-        if not self._active or self._paused:
+        if not self._publishes_rect or not self._active or self._paused:
             return False
         popup = self._navigator()
         overview = getattr(popup, "overview", None)
@@ -1549,7 +1582,7 @@ class Step1WholeSlideMount(QtCore.QObject):
         if budget:
             lines.append(
                 f"Not drawing {', '.join(budget)}: the display budget of "
-                f"{DEMO_GPU_RAW_TEXTURE_BYTES // (1024 * 1024)} MiB has no "
+                f"{self._raw_texture_bytes // (1024 * 1024)} MiB has no "
                 f"room for them. Nothing is shown from partial data.")
         error = str(stats.get("last_error") or "")
         if "budget" in error or "working set" in error:

@@ -14,6 +14,7 @@ import os
 
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from ...core.regions import display as DISPLAY
 from ...core.regions import document as D
 from ...core.regions import geometry as G
 from ...core.regions import numbering as N
@@ -21,7 +22,7 @@ from ..tma.core_table import CoreTable
 from ..tma.numbering_panel import NumberingPanel
 from .cores_actions import CoresActions
 
-COLOR = {"matched": "#43a047", "review": "#fb8c00", "unmatched": "#fdd835", "piece": "#9e9e9e",
+COLOR = {"matched": DISPLAY.GREEN, "review": "#fb8c00", "unmatched": DISPLAY.YELLOW, "piece": "#9e9e9e",
          "dropped": "#e53935", "excluded": "#e53935"}
 
 

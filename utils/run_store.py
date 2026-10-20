@@ -308,8 +308,29 @@ def load_session(roi_dir) -> Dict:
     return data if isinstance(data, dict) else {}
 
 
-def save_session(roi_dir, payload: Dict):
-    write_json_atomic(session_path(roi_dir), payload)
+def save_session(roi_dir, payload: Dict) -> bool:
+    """Write session.json -- compact, and only when its content differs from
+    what is on disk (docs/f5_tma_display_plan.md §12.2: a step change used to
+    write the same 250 KB indented file four times, ~0.5 s on the GUI
+    thread). Atomic as before (temporary file, fsync, one rename). Returns
+    whether it wrote."""
+    path = session_path(roi_dir)
+    text = json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            if f.read() == text:
+                return False
+    except (OSError, ValueError):
+        pass
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    tmp = os.path.join(folder, f".{os.path.basename(path)}.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    return True
 
 
 def put_draft(sess: Dict, step: str, draft: Dict) -> Dict:

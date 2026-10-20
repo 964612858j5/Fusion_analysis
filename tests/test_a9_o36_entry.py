@@ -157,7 +157,9 @@ def test_a_preseg_restore_works_the_pixel_identity_out_once(monkeypatch):
 
     monkeypatch.setattr(mw.run_store, "is_done", lambda d: True)
     monkeypatch.setattr(mw.preseg_run, "read_run",
-                        lambda d: {"combos": [{"combo_id": "c1"}], "tasks": []})
+                        lambda d: {"run_id": "r1", "fusion": {"hash": "fh"}, "source": {"pixel_key": "pk"},
+                                   "combos": [{"combo_id": "c1", "method": "cellpose_nuclei_dapi",
+                                               "params": {}}], "tasks": []})
     monkeypatch.setattr(mw.preseg_run, "load_records", lambda d: {})
     monkeypatch.setattr(mw.preseg_run, "selectable", lambda *a: (True, ""))
     monkeypatch.setattr(mw, "summary_line", lambda *a: "")

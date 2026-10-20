@@ -70,15 +70,26 @@ class AnalysisError(RegionsError):
         self.omitted = list(omitted or [])
 
 
+class NothingTicked(AnalysisError):
+    """No occupied position of the map sheet has its Run tick (Step2 then
+    asks whether to run every eligible core, docs/f5_tma_display_plan.md 9.2)."""
+
+
+#: How the cores of a snapshot were chosen: the Run ticks, or -- confirmed
+#: by the user for one Step2 run with manual parameters -- every eligible core.
+SELECT_TICKED, SELECT_ALL_ELIGIBLE = "ticked", "all_eligible"
+
+
 def _key(slide_id, map_sha, pid):
     from ..tma.cores import position_key
     return position_key(slide_id, map_sha, pid)
 
 
-def select_cores(doc: Dict, study: Dict) -> Tuple[List[Dict], List[Dict]]:
+def select_cores(doc: Dict, study: Dict, select: str = SELECT_TICKED) -> Tuple[List[Dict], List[Dict]]:
     """(selected, omitted) over the map sheet's occupied positions, in
     position order. selected: {uid, position_key, position_id, polygon,
-    bbox, region_id}; omitted: {position_key, position_id, label, reason}."""
+    bbox, region_id}; omitted: {position_key, position_id, label, reason}.
+    `select`: SELECT_ALL_ELIGIBLE leaves out the Run tick, nothing else."""
     from ..project_identity import region_id
     sheet = study["map_sheet"]
     shape = tuple(doc["slide_shape"])
@@ -91,7 +102,7 @@ def select_cores(doc: Dict, study: Dict) -> Tuple[List[Dict], List[Dict]]:
         pos = doc["positions"].get(key, {})
         holders = [u for u, c in doc["cores"].items() if c["position_key"] == key]
         reason = None
-        if not pos.get("run"):
+        if not pos.get("run") and select != SELECT_ALL_ELIGIBLE:
             reason = "not_ticked"
         elif not holders:
             reason = "not_bound"
@@ -156,12 +167,18 @@ def seg_invalid(channels, seg_channels: Sequence[str]) -> bool:
 
 
 def build_snapshot(project_dir, slide_id: str, seg_channels: Sequence[str],
-                   study: Optional[Dict] = None, parent: Optional[Dict] = None) -> Dict:
+                   study: Optional[Dict] = None, parent: Optional[Dict] = None,
+                   select: str = SELECT_TICKED, saved: Optional[Dict] = None) -> Dict:
     """The frozen analysis snapshot of the last Save (see the module text).
     `seg_channels`: the channel names the chosen segmentation reads;
     `parent`: the workspace's region ``{"region_id", "bbox_fullres",
-    "polygon_fullres"}`` (None: the whole slide)."""
-    rec = K.load_saved(project_dir, slide_id)
+    "polygon_fullres"}`` (None: the whole slide); `select`: how the cores
+    are chosen (recorded as ``selection_mode``, not in the identity: the
+    chosen cores are); `saved`: the Save already read (one read for a
+    question asked in between, 9.2)."""
+    if select not in (SELECT_TICKED, SELECT_ALL_ELIGIBLE):
+        raise ValueError(f"select={select!r}")
+    rec = saved if saved is not None else K.load_saved(project_dir, slide_id)
     if rec is None:
         raise AnalysisError("Regions has not been saved for this slide")
     if not K.table_matches(project_dir, rec):
@@ -181,7 +198,7 @@ def build_snapshot(project_dir, slide_id: str, seg_channels: Sequence[str],
             raise AnalysisError("the map sheet is chosen but the cores are not found yet: Find cores in Regions")
         if study is None or study["map_sheet"]["sha256"] != doc["map_sha256"]:
             raise AnalysisError("the TMA map sheet is not the one the Regions Save was made with")
-        selected, omitted = select_cores(doc, study)
+        selected, omitted = select_cores(doc, study, select)
         from .raster import AnalysisRaster
         probe = AnalysisRaster({"mode": "tma", "slide_shape": list(shape), "parent": par,
                                 "cores": selected, "exclusions": []})
@@ -197,10 +214,14 @@ def build_snapshot(project_dir, slide_id: str, seg_channels: Sequence[str],
         if not selected:
             ticked = [o for o in omitted if o["reason"] != "not_ticked"]
             if not ticked:
-                raise AnalysisError("no core is selected: tick Run for the cores to analyse in Regions")
+                if select == SELECT_ALL_ELIGIBLE:
+                    raise AnalysisError("no core can run: none is bound to a confirmed position "
+                                        "inside this region")
+                raise NothingTicked("no core is selected: tick Run for the cores to analyse in Regions")
             listed = "; ".join(f"{o['label']}: {REASONS[o['reason']]}" for o in ticked[:10])
             more = f"; … and {len(ticked) - 10} more" if len(ticked) > 10 else ""
-            raise AnalysisError(f"no ticked core can run ({listed}{more})", omitted=ticked)
+            what = "no core" if select == SELECT_ALL_ELIGIBLE else "no ticked core"
+            raise AnalysisError(f"{what} can run ({listed}{more})", omitted=ticked)
         pairs = overlapping(selected)
         if pairs:
             raise AnalysisError("selected cores overlap: " + ", ".join(f"{a} / {b}" for a, b in pairs))
@@ -232,12 +253,17 @@ def build_snapshot(project_dir, slide_id: str, seg_channels: Sequence[str],
         exclusions.append({"uid": uid, "type": exclusion_type(e["reasons"]), "reasons": sorted(e["reasons"]),
                            "channels": chans, "polygon": [list(q) for q in e["polygon"]],
                            "bbox": g["bbox_fullres"], "seg_invalid": seg_invalid(chans, seg_channels)})
+    from .display import display_cores
+    # what the cores looked like at this freeze, for drawing only (never in `identity`)
+    shown = display_cores(doc, study if mode == "tma" else None, {c["uid"] for c in cores},
+                          {o["position_key"]: o["reason"] for o in omitted})
     snap = {"snapshot_version": SNAPSHOT_VERSION, "mode": mode, "slide_id": slide_id,
             "slide_shape": list(doc["slide_shape"]),
             "regions": {"save_count": rec["save_count"], "content_sha256": rec["content_sha256"],
                         "saved_at": rec["saved_at"]},
             "parent": par, "map_sheet": meta, "cores": cores, "omitted": omitted, "positions": positions,
-            "exclusions": exclusions, "seg_channels": sorted(set(seg_channels)),
+            "exclusions": exclusions, "display_cores": shown, "selection_mode": select,
+            "seg_channels": sorted(set(seg_channels)),
             "policies": copy.deepcopy(POLICIES)}
     snap["identity"] = identity(snap)
     return snap
@@ -289,7 +315,7 @@ def is_current(project_dir, snap: Dict, study: Optional[Dict] = None) -> bool:
     only makes this False; it never changes the frozen run)."""
     try:
         now = build_snapshot(project_dir, snap["slide_id"], snap["seg_channels"], study=study,
-                             parent=snap.get("parent"))
+                             parent=snap.get("parent"), select=snap.get("selection_mode", SELECT_TICKED))
     except RegionsError:
         return False
     return now["identity"] == snap["identity"]

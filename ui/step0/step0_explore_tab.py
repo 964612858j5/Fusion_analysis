@@ -307,7 +307,14 @@ def build_default_stack(path, channel, parent_widget=None, *,
             overlay.set_suppressed(nucleus_channel == channel,
                                    host=controller)
             overlay.set_enabled(bool(nucleus_enabled), host=controller)
-        controller.load_overview(ensure_floor=method is not None)
+        # OFF the GUI thread (docs/f5_tma_display_plan.md §12, user ruling
+        # 2026-10-20): the first read of a slide also builds its tile plan and
+        # took 2-4 s on the GUI thread at Step0 Load, freezing the Tissue
+        # preview's drag. A record already resident installs at once; else
+        # the shared overview worker reads it and `on_overview_delivered`
+        # installs it, starts the floor and issues the viewport's tiles --
+        # until then nothing is drawn or requested (`_blocked_on_overview`).
+        controller.switch_overview_for_current_channel()
         # Open where the caller asked, else on the whole slide. Without an
         # explicit range the ViewBox keeps its default one, no tile is
         # visible, and the view would come up empty even though the stack is
@@ -629,6 +636,17 @@ class Step0ExploreTab(QtWidgets.QWidget):
             traceback.print_exc()
             return
         self._stack = stack
+        # The overview is read OFF the GUI thread now (§12): a read that
+        # fails is the build failure it used to be, reported the same way.
+        # the read the build is waiting on (none when the record was resident
+        # and installed at once)
+        installed = getattr(stack.controller, "_overview_matches_selection", lambda: False)()
+        self._first_overview = None if installed else (stack, str(channel))
+        try:
+            stack.controller.overview_prepared.connect(
+                lambda source, ch, level, ok, st=stack: self._on_first_overview(st, ch, ok))
+        except (AttributeError, TypeError):
+            pass
         self._show_widget(stack.view)
         print(f"[explore] stack ready in "
               f"{(time.perf_counter() - t0) * 1000:.0f} ms", flush=True)
@@ -817,6 +835,27 @@ class Step0ExploreTab(QtWidgets.QWidget):
     def _on_page_destroyed(self, *_args):
         self._page = None
         self.teardown()
+
+    def _on_first_overview(self, stack, channel, ok):
+        """The build's OWN background overview read (its first channel) has
+        finished. Its failure is a failed build: placeholder, message, stack
+        gone, refused until the dataset is bound again (as before §12). Any
+        later channel's failure is the controller's own business, as it
+        always was: a working stack is never discarded for it."""
+        first = self.__dict__.get("_first_overview")
+        if first is None or first[0] is not stack:
+            return
+        # ANY delivery ends the watch: the build's own read (decided now), or
+        # another channel's -- the user moved on before it came, the shared
+        # store dropped that waiter, and it will never be reported
+        self._first_overview = None
+        if str(channel) != first[1] or ok or stack is not self._stack:
+            return
+        exc = RuntimeError(f"the overview of {channel!r} could not be read")
+        self._build_error = exc
+        print(f"[explore] build FAILED: {exc}", flush=True)
+        self._discard_stack()
+        self._show_placeholder(PLACEHOLDER_BUILD_FAILED.format(error=exc))
 
     # ── internals ─────────────────────────────────────────────────────
     def _discard_stack(self, *, wait_for_floor: bool = False):

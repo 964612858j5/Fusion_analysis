@@ -154,7 +154,7 @@ class SegmentMergeWorker(QThread):
     def __init__(self, zarr_path, seg_config=None, n_rows=1, n_cols=1,
                  overlap_px=200, output_dir=None, recovery_npy_dir=None,
                  rois=None, cp_params=None, param_file=None,
-                 parameter_source="manual", identity_confirmation=None):
+                 parameter_source="manual", identity_confirmation=None, regions_request=None):
         super().__init__()
         self.zarr_path        = zarr_path
         self.seg_config       = normalize_segmentation_config(seg_config if seg_config is not None else cp_params)
@@ -192,6 +192,11 @@ class SegmentMergeWorker(QThread):
         # Block A0.5: the differences between the Step1 result's engine and
         # this one that the user accepted before the run (Step2 page), or None.
         self._identity_confirmation = identity_confirmation
+        # docs/f5_tma_display_plan.md 9.2: the Regions snapshot Step2 froze for a
+        # run with manual parameters ({snapshot, identity, input_kind,
+        # selection_mode, fusion_settings_hash}); this run's own copy.
+        import copy
+        self._regions_request = copy.deepcopy(regions_request) if regions_request else None
         self._engine          = None
         self._runner_io       = ""
         self._logger          = None
@@ -704,7 +709,7 @@ class SegmentMergeWorker(QThread):
                    f"combo {contract['combo_id']} ({primary})")
 
     def _seam_begin(self, tiles, full_h, full_w, out_prefix, keeps_nuclei, nuclei_state=None,
-                    zarr_path=None):
+                    zarr_path=None, judge=None):
         """Block N3: the region's seam merger for the engine methods (HQ /
         HQ2 / CDS keep the old paste). Its spill folder is cleaned up with
         the run's partials whatever happens."""
@@ -720,7 +725,7 @@ class SegmentMergeWorker(QThread):
         size = self._size_filter(zarr_path or self.zarr_path)
         merger = seam_merge.SeamMerger((full_h, full_w), stiles, spill, with_nuclei=keeps_nuclei,
                                        table_sink=sink, table_chunk=self.TABLE_CHUNK,
-                                       max_area=size["max_area_px"])
+                                       max_area=size["max_area_px"], judge=judge)
         merger.size_filter = size
         print(f"[Step2] size filter {out_prefix or 'whole image'}: objects above "
               f"{size['max_area_px']:,} px are dropped ({size['rule']}; {size['source']})")
@@ -763,6 +768,187 @@ class SegmentMergeWorker(QThread):
         if self._logger:
             self._logger.info(msg)
         return merger.n_cells, record
+
+    # ── Regions (F4-3, docs/f4_regions_downstream_plan.md E / E.8) ─────────
+    REGIONS_SNAPSHOT_FILE = "regions_snapshot.json"
+    REGIONS_MAX_MEASUREMENT_EXCLUSIONS = 52
+
+    def _regions_begin(self):
+        """The frozen Regions snapshot this run follows -- the Step1
+        hand-over's, or the one Step2 froze for manual parameters (9.2) --
+        checked against this run (its identity, the method's input, slide,
+        one region), copied into the run directory and made a raster; or None
+        (no Regions: the old run, unchanged). A mismatch raises: the run is
+        refused, nothing written."""
+        from ..core import preseg_input
+        from ..core.regions import analysis as RA
+        from ..core.regions.raster import AnalysisRaster
+        reg = (self._contract or {}).get("regions") if getattr(self, "_contract", None) else None
+        source = "contract"
+        request = getattr(self, "_regions_request", None)
+        if request:
+            if (self._contract or {}).get("regions"):
+                # a hand-over's own frozen cores beside Step2's: Step2 drops the
+                # hand-over's (§11), so both here means a second snapshot
+                raise RuntimeError("a Step1 hand-over's Regions and a Step2 Regions snapshot were both given")
+            reg, source = request, "step2"
+        if not reg:
+            return None
+        snap = reg["snapshot"]
+        if RA.identity(snap) != snap.get("identity") or reg.get("identity") != snap.get("identity"):
+            raise RuntimeError("the Regions snapshot does not match its identity")
+        kind = preseg_input.INPUT_KIND.get(self.method)
+        if kind is None:
+            raise RuntimeError(f"the method {self.method} cannot follow TMA cores "
+                               "(no per-cell core rules on its path)")
+        if self._contract is not None and self._contract["method"] != self.method:
+            raise RuntimeError(f"the hand-over is for {self._contract['method']}, "
+                               f"this run is {self.method}")
+        if kind != reg.get("input_kind"):
+            raise RuntimeError(f"the Regions snapshot is for the {reg.get('input_kind')} input, "
+                               f"the method reads {kind}")
+        if len(self.rois or []) > 1:
+            raise RuntimeError("a run with a Regions result covers one region; this run has "
+                               f"{len(self.rois)} ROIs")
+        sid = self._workspace_slide_id()
+        if sid is None:
+            raise RuntimeError("the workspace's slide cannot be read, so the Regions result "
+                               "cannot be checked against it; reconnect the slide")
+        if sid != snap["slide_id"]:
+            raise RuntimeError(f"the Regions snapshot is for slide {snap['slide_id']}, "
+                               f"this workspace's slide is {sid}")
+        meas = [i for i, e in enumerate(snap["exclusions"]) if not e["seg_invalid"]]
+        if len(meas) > self.REGIONS_MAX_MEASUREMENT_EXCLUSIONS:
+            raise RuntimeError(f"{len(meas)} measurement-only exclusions: at most "
+                               f"{self.REGIONS_MAX_MEASUREMENT_EXCLUSIONS} are supported")
+        RA.save_snapshot(os.path.join(self.output_dir, self.REGIONS_SNAPSHOT_FILE), snap)
+        self._regions_skipped = {}
+        return {"snapshot": snap, "identity": reg["identity"], "raster": AnalysisRaster(snap),
+                "bit": {ex: b for b, ex in enumerate(meas)},
+                "measurement_exclusions": [snap["exclusions"][ex]["uid"] for ex in meas],
+                "source": source, "input_kind": kind,
+                "selection_mode": snap.get("selection_mode", "ticked"),
+                "fusion_settings_hash": reg.get("fusion_settings_hash")}
+
+    def _regions_run_meta(self):
+        """What the run's metadata says about the Regions it followed (read
+        by provenance): where, from which Save, chosen how; or None."""
+        R = getattr(self, "_regions", None)
+        if R is None:
+            return None
+        snap = R["snapshot"]
+        return {"source": R.get("source", "contract"), "selection_mode": R.get("selection_mode", "ticked"),
+                "identity": R["identity"], "input_kind": R.get("input_kind"),
+                "content_sha256": (snap.get("regions") or {}).get("content_sha256"),
+                "position_keys": [c.get("position_key") for c in snap.get("cores") or []],
+                "fusion_settings_hash": R.get("fusion_settings_hash"),
+                "snapshot": self._abs(os.path.join(self.output_dir, self.REGIONS_SNAPSHOT_FILE))}
+
+    def _workspace_slide_id(self):
+        """The slide id of this workspace's source slide (computed, never
+        registered), or None when it cannot be told."""
+        try:
+            from ..core.project_identity import describe_slide
+            src = (self.roi_manifest or {}).get("source_ome")
+            if not src or not os.path.exists(src):
+                return None
+            return describe_slide(src)[0]
+        except Exception:                                   # noqa: BLE001
+            return None
+
+    def _regions_for(self, out_prefix, tiles, full_h, full_w, bbox=None, poly=None):
+        """(judge, skip set) of one region: the Regions verdict of each tile's
+        objects (`SeamMerger` judge) and the tiles whose read window holds no
+        selected-core pixel. (None, empty) without Regions. The region must
+        be the snapshot's parent: the whole image (origin 0, 0) or this ROI."""
+        R = getattr(self, "_regions", None)
+        if R is None:
+            return None, frozenset()
+        par = R["snapshot"]["parent"]
+        oy, ox = (int(bbox[0]), int(bbox[2])) if bbox else (0, 0)
+        region = [oy, oy + int(full_h), ox, ox + int(full_w)]
+        if bbox and [int(v) for v in bbox] != region:
+            raise RuntimeError(f"the ROI {out_prefix} box {list(bbox)} does not match its input "
+                               f"({full_h} x {full_w})")
+        want_poly = [list(map(int, q)) for q in par.get("polygon_fullres") or []] or None
+        got_poly = [list(map(int, q)) for q in poly or []] or None
+        if [int(v) for v in par["bbox_fullres"]] != region or want_poly != got_poly:
+            raise RuntimeError(f"the Regions result was frozen for the region {par['bbox_fullres']}, "
+                               f"this run segments {region}: run Step1 on this region again")
+        raster = R["raster"]
+
+        def win(t):
+            ry0, ry1, rx0, rx1 = (int(v) for v in t.read_bbox)
+            return ry0 + oy, ry1 + oy, rx0 + ox, rx1 + ox
+        skip = frozenset(i for i, t in enumerate(tiles) if not raster.has_core(win(t)))
+        self._regions_skipped[out_prefix] = []
+        return self._regions_judge(raster, (oy, ox), region, R["bit"]), skip
+
+    @staticmethod
+    def _regions_judge(raster, origin, region_bbox, bit):
+        """judge(tile, local) -> {label: verdict row}: one tally over the
+        tile's read window (the same verdict `objects.evaluate_object` gives
+        each whole object there), plus the region-edge test per object."""
+        from scipy import ndimage as ndi
+        from ..core import seam_merge
+        from ..core.regions.objects import ObjectTally
+        oy, ox = origin
+        py0, py1, px0, px1 = region_bbox
+        reasons = {r: k for k, r in enumerate(seam_merge.VERDICT_REASONS)}
+
+        def judge(tile, local):
+            ry0, ry1, rx0, rx1 = (int(v) for v in tile.read)
+            w = (ry0 + oy, ry1 + oy, rx0 + ox, rx1 + ox)
+            lab = np.asarray(local)
+            t = ObjectTally(tma=raster.tma)
+            t.add(lab, raster.core_index(w), raster.seg_invalid(w), raster.measurement_exclusions(w))
+            verdicts = t.verdicts()
+            parent = raster.parent.window(w)
+            slices = ndi.find_objects(lab.astype(np.int64, copy=False))
+            rows = {}
+            for i, v in verdicts.items():
+                sl = slices[i - 1]
+                m = lab[sl] == i
+                gy0, gy1 = sl[0].start + w[0], sl[0].stop - 1 + w[0]
+                gx0, gx1 = sl[1].start + w[2], sl[1].stop - 1 + w[2]
+                edge = (gy0 <= py0 or gy1 >= py1 - 1 or gx0 <= px0 or gx1 >= px1 - 1
+                        or bool((m & ~parent[sl]).any()))
+                bits = 0
+                for ex in t.meas.get(i, ()):
+                    bits |= 1 << bit[ex]
+                flags = ((seam_merge.FLAG_TOUCHES_CORE_EDGE if v.touches_core_edge else 0)
+                         | (seam_merge.FLAG_ANALYSIS_INCLUDE if v.analysis_include else 0)
+                         | (seam_merge.FLAG_TOUCHES_REGION_EDGE if edge else 0))
+                rows[i] = np.array([1.0 if v.keep else 0.0, reasons[v.reason],
+                                    -1 if v.core is None else v.core, v.core_fraction, flags, bits],
+                                   np.float64)
+            return rows
+        return judge
+
+    def _regions_write(self, out_prefix, merger):
+        """The written cells' Regions facts (row i = cell i + 1) as
+        ``global_cell_regions[_<prefix>].npz`` -- written to a partial file,
+        renamed when whole -- and the LabelStore entry naming it."""
+        R = getattr(self, "_regions", None)
+        if R is None or merger is None or merger.judge is None:
+            return None
+        facts = merger.facts
+        name = f"global_cell_regions{'_' + out_prefix if out_prefix else ''}.npz"
+        path = os.path.join(self.output_dir, name)
+        partial = path + ".partial"
+        self._nuclei_partials.append(partial)
+        with open(partial, "wb") as f:                  # a file object: NumPy adds no ".npz"
+            np.savez(f, core=facts[:, 2].astype(np.int32), core_fraction=facts[:, 3].astype(np.float32),
+                     flags=facts[:, 4].astype(np.uint8), meas_bits=facts[:, 5].astype(np.uint64),
+                     measurement_exclusions=np.array(R["measurement_exclusions"], dtype=object))
+        os.replace(partial, path)
+        rec = merger.stats
+        return {"snapshot": self._abs(os.path.join(self.output_dir, self.REGIONS_SNAPSHOT_FILE)),
+                "identity": R["identity"], "cells": {"path": self._abs(path), "rows": int(facts.shape[0])},
+                "dropped": {r: int(rec.get(f"regions_dropped_{r}", 0))
+                            for r in ("no_core", "outside_region", "exclusion")},
+                "nuclei_dropped": int(rec.get("nuclei_dropped_regions", 0)),
+                "skipped_tiles": sorted(self._regions_skipped.get(out_prefix, []))}
 
     def _nuclei_begin(self, out_prefix):
         """One region's nucleus bookkeeping: the global nucleus counter, the
@@ -845,7 +1031,7 @@ class SegmentMergeWorker(QThread):
         return nuclei_path, state["table_path"]
 
     def _label_store(self, cell_path, nucleus_path, table_path, n_cells, nuclei_state,
-                     shape, seam=None):
+                     shape, seam=None, regions=None):
         """The region's semantic entry (block N2): which array holds the
         cells, which the nuclei, and how nuclei map to cells. File names stay
         historical; this is the authority. None for HQ / HQ2 / CDS."""
@@ -875,6 +1061,8 @@ class SegmentMergeWorker(QThread):
                     seam["seam_reconciliation"]["nuclei_dropped_seam_conflict"])
                 dropped["oversized_cell"] = int(
                     seam["seam_reconciliation"].get("nuclei_dropped_oversized", 0))
+                if regions is not None:          # F4-3: the nuclei of cells the Regions rules left out
+                    dropped["regions_cell"] = int(regions["nuclei_dropped"])
             predicted = m + sum(dropped.values())
             store["nucleus"] = array(nucleus_path, m)
             store["nucleus_to_cell"] = {"path": self._abs(table_path), "dtype": "uint32",
@@ -888,6 +1076,8 @@ class SegmentMergeWorker(QThread):
                                               "the nuclei cannot be recovered"}
         if seam is not None:
             store.update(seam)                   # block N3: seam_merge + seam_reconciliation
+        if regions is not None:
+            store["regions"] = regions           # F4-3: the snapshot and the cells' facts
         return store
 
     def _log_nuclei(self, out_prefix, store):
@@ -912,7 +1102,10 @@ class SegmentMergeWorker(QThread):
     def _cleanup_nuclei_partials(self):
         """Whatever did not finish -- a Stop, a failure -- leaves nothing."""
         for path in list(getattr(self, "_nuclei_partials", [])):
-            shutil.rmtree(path, ignore_errors=True)
+            if os.path.isfile(path):
+                os.remove(path)                  # a partial file (F4-3's cell facts)
+            else:
+                shutil.rmtree(path, ignore_errors=True)
         self._nuclei_partials = []
 
     def _record_step2_geometry(self, full_h, full_w, nuclei_zarr_path="",
@@ -1106,21 +1299,6 @@ class SegmentMergeWorker(QThread):
                     os.killpg(proc.pid, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     pass
-
-    # ── helpers ───────────────────────────────────────────────────────
-
-    @staticmethod
-    def _drop_caches():
-        """
-        Tell the Linux kernel to drop page cache, dentries and inodes.
-        Falls back silently if not root or not Linux.
-        """
-        try:
-            os.system('sync')
-            with open('/proc/sys/vm/drop_caches', 'w') as f:
-                f.write('3\n')
-        except Exception:
-            pass
 
     # ── logging helpers ──────────────────────────────────────────────
 
@@ -1779,6 +1957,12 @@ class SegmentMergeWorker(QThread):
                                                     plan.get("user_forced") or []}),
                 "skipped_by_user_with_tissue": list(plan.get("user_forced") or []),
             }}
+        R = getattr(self, "_regions", None)
+        if R is not None:                            # F4-3: what the Regions result left out
+            skip["regions"] = {"identity": R["identity"], "source": R.get("source", "contract"),
+                               "selection_mode": R.get("selection_mode", "ticked"),
+                               "skipped_tiles_without_selected_cores":
+                                   {k or "whole_image": sorted(v) for k, v in self._regions_skipped.items()}}
         return {
             **dict(self._tile_strategy_info or {}),
             **skip,
@@ -1869,16 +2053,18 @@ class SegmentMergeWorker(QThread):
         self._skipped_tiles = []
         return self._skip_cache
 
-    def _skip_tile(self, i, n_tiles, profile_tile_id, stage_seconds, tile_shape):
+    def _skip_tile(self, i, n_tiles, profile_tile_id, stage_seconds, tile_shape, regions_prefix=None):
         """A tile of the skip plan: its DAPI is already in the global DAPI;
         no engine, no labels, no paste -- like a tile the engine found empty."""
         self.step2_profiler.record_tile_metadata(profile_tile_id, labels_count=0, skipped=True)
         stage_seconds["_profile_tile_id"] = profile_tile_id
         self._profile_tile_line(i, n_tiles, stage_seconds, 0, tile_shape)
-        self._skipped_tiles.append(int(i))
+        if regions_prefix is not None:           # F4-3: no selected core here (counted apart)
+            self._regions_skipped[regions_prefix].append(int(i))
+        else:
+            self._skipped_tiles.append(int(i))
         self.tile_skipped.emit(i, n_tiles)
         gc.collect()
-        self._drop_caches()
 
     def _prepare_tile_payload(self, zarr_path, z, tile, is_hq, is_mesmer_guided,
                               hq_group, hq_channels, is_mesmer, mesmer_group,
@@ -2172,7 +2358,6 @@ class SegmentMergeWorker(QThread):
         if self._logger:
             self._logger.info("%s → %s", log_label, ome_path or zarr_path)
         del arr_ro
-        self._drop_caches()
 
     def _write_hq2_layer_outputs(self, layer_mmap_paths, shape, out_prefix=""):
         """Write optional HQ2 debug/proposal layers and return metadata path keys."""
@@ -2706,8 +2891,11 @@ class SegmentMergeWorker(QThread):
         keeps_nuclei = self._keeps_secondary_nuclei()
         hq_nuclei = is_hq and not is_mesmer_guided
         nuclei_state = self._nuclei_begin(out_prefix) if keeps_nuclei else None
+        regions_judge, regions_skip = self._regions_for(out_prefix, tiles, full_h, full_w,
+                                                        bbox=bbox, poly=poly_fullres)
         merger = self._seam_begin(tiles, full_h, full_w, out_prefix, keeps_nuclei, nuclei_state,
-                                  zarr_path=zarr_path)
+                                  zarr_path=zarr_path, judge=regions_judge)
+        skip_all = self._tile_skip_set() | regions_skip      # fixed before the prefetcher starts
         seam_record = None
         hq_channels, hq_group = ([], None)
         mesmer_group = None
@@ -2749,7 +2937,7 @@ class SegmentMergeWorker(QThread):
             lambda idx, t, profile_tile_base=None: self._prepare_tile_payload(
                 zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
                 is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=profile_tile_base,
-                skip=idx in self._tile_skip_set(),
+                skip=idx in skip_all,
             ),
             logger=log,
         )
@@ -2815,7 +3003,8 @@ class SegmentMergeWorker(QThread):
             dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
             stage_seconds["read_tile"] = time.perf_counter() - _t
             if payload.get("skipped"):
-                self._skip_tile(i, n_tiles, profile_tile_id, stage_seconds, tile_shape)
+                self._skip_tile(i, n_tiles, profile_tile_id, stage_seconds, tile_shape,
+                                regions_prefix=out_prefix if i not in self._tile_skip_set() else None)
                 continue
 
             if self.recovery_npy_dir is not None:
@@ -2983,7 +3172,6 @@ class SegmentMergeWorker(QThread):
                 self.tile_done.emit(i, n_tiles, 0)
                 del local_mask
                 gc.collect()
-                self._drop_caches()
                 continue
 
             if merger is not None:
@@ -3011,7 +3199,6 @@ class SegmentMergeWorker(QThread):
                 stage_seconds["_profile_tile_id"] = profile_tile_id
                 self._profile_tile_line(i, n_tiles, stage_seconds, n_kept, tile_shape)
                 gc.collect()
-                self._drop_caches()
                 continue
 
             _t = time.perf_counter()
@@ -3063,7 +3250,6 @@ class SegmentMergeWorker(QThread):
                 self.tile_done.emit(i, n_tiles, 0)
                 del local_mask
                 gc.collect()
-                self._drop_caches()
                 continue
             del local_mask
 
@@ -3114,7 +3300,6 @@ class SegmentMergeWorker(QThread):
             stage_seconds["_profile_tile_id"] = profile_tile_id
             self._profile_tile_line(i, n_tiles, stage_seconds, n_kept, tile_shape)
             gc.collect()
-            self._drop_caches()
         if scheduler.prefetcher is not None:
             metrics = scheduler.prefetch_metrics()
             self.step2_profiler.log_tile_stage(None, "tile_prefetch_wait", metrics.get("prefetch_wait_seconds", 0.0), **metrics)
@@ -3142,7 +3327,6 @@ class SegmentMergeWorker(QThread):
         for layer_key in list(hq2_layer_mmaps.keys()):
             del hq2_layer_mmaps[layer_key]
         gc.collect()
-        self._drop_caches()
 
         if self._stop:
             log.info(f"  [{out_prefix}] Stopped by user — skipping TIFF/zarr output.")
@@ -3173,7 +3357,6 @@ class SegmentMergeWorker(QThread):
                     del mmap_ro, dapi_mmap_ro
                     return 0
                 out_z[y:y+CHUNK, :] = mmap_ro[y:y+CHUNK, :]
-        self._drop_caches()
 
         if self._stop:
             del mmap_ro, dapi_mmap_ro
@@ -3183,7 +3366,6 @@ class SegmentMergeWorker(QThread):
         )
         with self.step2_profiler.time_stage("export_mask_ome_tiff", method=self.method, output_path=self._abs(ome_path)):
             write_tiled_ome_tiff(ome_path, mmap_ro, np.float32)
-        self._drop_caches()
 
         if self._stop:
             del mmap_ro, dapi_mmap_ro
@@ -3193,7 +3375,6 @@ class SegmentMergeWorker(QThread):
         )
         with self.step2_profiler.time_stage("export_ome_tiff", method=self.method, output_path=self._abs(global_dapi_path)):
             write_tiled_ome_tiff(global_dapi_path, dapi_mmap_ro)
-        self._drop_caches()
 
         nuclei_ome_path = ""
         nuclei_zarr_path = ""
@@ -3236,7 +3417,7 @@ class SegmentMergeWorker(QThread):
         pyramids = self._write_label_pyramids(out_zarr_path, nuclei_zarr_path, bbox, full_h, full_w)
         label_store = self._label_store(out_zarr_path, nuclei_zarr_path, nuclei_table_path,
                                         total_cells, nuclei_state, (full_h, full_w),
-                                        seam=seam_record)
+                                        seam=seam_record, regions=self._regions_write(out_prefix, merger))
         self._log_nuclei(out_prefix, label_store)
         if keeps_nuclei and nuclei_mmap_path and os.path.exists(nuclei_mmap_path):
             os.remove(nuclei_mmap_path)          # nobody reads it; the zarr is the store
@@ -3379,6 +3560,7 @@ class SegmentMergeWorker(QThread):
                 log.info(f"[Step2] Step1 hand-over: method={self._contract['method']} "
                          f"run={self._contract['preseg_run_id']} combo={self._contract['combo_id']}")
             self._tile_skip_set()        # block S2T: a skip plan for another grid is refused
+            self._regions = self._regions_begin()      # F4-3: None without a Regions hand-over
             config_path = self._write_run_segmentation_config()
             log.info(f"run_segmentation_params.json -> {config_path}")
 
@@ -3488,7 +3670,6 @@ class SegmentMergeWorker(QThread):
                     gc.collect()
                     if use_gpu:
                         self._empty_torch_cache_if_available()
-                    self._drop_caches()
 
                 log.info(
                     f"=== All ROIs done  total_cells={total_cells_all:,} ==="
@@ -3524,6 +3705,7 @@ class SegmentMergeWorker(QThread):
                     "seg_config": self.seg_config,
                     "config_path": self._abs(config_path),
                     "tile_strategy": self._step2_engine_meta(),
+                    **({"regions_run": self._regions_run_meta()} if getattr(self, "_regions", None) else {}),
                 }
                 if self.method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
                     summary_meta.update((csd_metadata_fields if self.method == CELLPOSE_NUCLEI_CSD else hq2_metadata_fields)(self.seg_config, {
@@ -3627,7 +3809,10 @@ class SegmentMergeWorker(QThread):
             keeps_nuclei = self._keeps_secondary_nuclei()
             hq_nuclei = is_hq and not is_mesmer_guided
             nuclei_state = self._nuclei_begin("") if keeps_nuclei else None
-            merger = self._seam_begin(tiles, full_h, full_w, "", keeps_nuclei, nuclei_state)
+            regions_judge, regions_skip = self._regions_for("", tiles, full_h, full_w)
+            merger = self._seam_begin(tiles, full_h, full_w, "", keeps_nuclei, nuclei_state,
+                                      judge=regions_judge)
+            skip_all = self._tile_skip_set() | regions_skip  # fixed before the prefetcher starts
             seam_record = None
             hq_channels, hq_group = ([], None)
             mesmer_group = None
@@ -3665,7 +3850,7 @@ class SegmentMergeWorker(QThread):
                 lambda idx, t, profile_tile_base=None: self._prepare_tile_payload(
                     self.zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
                     is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=profile_tile_base,
-                    skip=idx in self._tile_skip_set(),
+                    skip=idx in skip_all,
                 ),
                 logger=log,
             )
@@ -3729,7 +3914,8 @@ class SegmentMergeWorker(QThread):
                 dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
                 stage_seconds["read_tile"] = time.perf_counter() - _t
                 if payload.get("skipped"):
-                    self._skip_tile(i, n_tiles, profile_tile_id, stage_seconds, tile_shape)
+                    self._skip_tile(i, n_tiles, profile_tile_id, stage_seconds, tile_shape,
+                                    regions_prefix="" if i not in self._tile_skip_set() else None)
                     continue
 
                 if self.recovery_npy_dir is not None:
@@ -3884,7 +4070,6 @@ class SegmentMergeWorker(QThread):
                     self.tile_done.emit(i, n_tiles, 0)
                     del local_mask
                     gc.collect()
-                    self._drop_caches()
                     continue
 
                 if merger is not None:
@@ -3913,7 +4098,6 @@ class SegmentMergeWorker(QThread):
                     stage_seconds["_profile_tile_id"] = profile_tile_id
                     self._profile_tile_line(i, n_tiles, stage_seconds, n_kept, tile_shape)
                     gc.collect()
-                    self._drop_caches()
                     continue
 
                 _t = time.perf_counter()
@@ -3929,7 +4113,6 @@ class SegmentMergeWorker(QThread):
                     self.tile_done.emit(i, n_tiles, 0)
                     del local_mask
                     gc.collect()
-                    self._drop_caches()
                     continue
 
                 _t = time.perf_counter()
@@ -4021,8 +4204,7 @@ class SegmentMergeWorker(QThread):
                 gc.collect()
                 if self.recovery_npy_dir is None and use_gpu:
                     self._empty_torch_cache_if_available()
-                self._drop_caches()
-                log.debug("  [MEM after drop_caches] " + self._mem_snapshot())
+                log.debug("  [MEM after tile] " + self._mem_snapshot())
 
             if scheduler.prefetcher is not None:
                 metrics = scheduler.prefetch_metrics()
@@ -4039,10 +4221,14 @@ class SegmentMergeWorker(QThread):
                 del model
                 gc.collect()
                 self._empty_torch_cache_if_available()
-                self._drop_caches()
                 log.info(f"All inference done. {self._mem_snapshot()}")
 
-            if merger is not None and not self._stop:
+            if self._stop:
+                # a Stop after the last tile: the seams are not decided, so
+                # nothing is published (as a Stop during the tiles)
+                self.error.emit('Stopped by user.')
+                return
+            if merger is not None:
                 with self.step2_profiler.time_stage("seam_merge", method=self.method):
                     global_id_offset, seam_record = self._seam_finish(
                         merger, mmap, nuclei_mmap, nuclei_state, log, "")
@@ -4065,7 +4251,6 @@ class SegmentMergeWorker(QThread):
             for layer_key in list(hq2_layer_mmaps.keys()):
                 del hq2_layer_mmaps[layer_key]
             gc.collect()
-            self._drop_caches()
 
             mmap_ro      = np.memmap(mmap_path,      dtype='uint32', mode='r',
                                      shape=(full_h, full_w))
@@ -4094,7 +4279,6 @@ class SegmentMergeWorker(QThread):
                                        f'Writing mask zarr… chunk {ci+1}/{n_chunks}')
             self.progress.emit(n_tiles, n_tiles, '✓ mask zarr written')
             log.info(f"zarr → {out_zarr_path}  {self._mem_snapshot()}")
-            self._drop_caches()
 
             ome_path = os.path.join(self.output_dir, 'global_mask.ome.tiff')
             self.progress.emit(n_tiles, n_tiles, 'Writing global mask OME-TIFF…')
@@ -4102,7 +4286,6 @@ class SegmentMergeWorker(QThread):
                 write_tiled_ome_tiff(ome_path, mmap_ro, np.float32)
             self.progress.emit(n_tiles, n_tiles, '✓ global mask OME-TIFF written')
             log.info(f"mask OME-TIFF → {ome_path}  {self._mem_snapshot()}")
-            self._drop_caches()
 
             global_dapi_path = os.path.join(self.output_dir, 'global_dapi.ome.tiff')
             self.progress.emit(n_tiles, n_tiles, 'Writing global DAPI OME-TIFF…')
@@ -4153,7 +4336,7 @@ class SegmentMergeWorker(QThread):
                                                   full_h, full_w)
             label_store = self._label_store(out_zarr_path, nuclei_zarr_path, nuclei_table_path,
                                             total_cells, nuclei_state, (full_h, full_w),
-                                            seam=seam_record)
+                                            seam=seam_record, regions=self._regions_write("", merger))
             self._log_nuclei("", label_store)
             if keeps_nuclei and nuclei_mmap_path and os.path.exists(nuclei_mmap_path):
                 os.remove(nuclei_mmap_path)
@@ -4166,8 +4349,7 @@ class SegmentMergeWorker(QThread):
 
             del mmap_ro, dapi_mmap_ro
             gc.collect()
-            self._drop_caches()
-            log.debug(f"[MEM final drop_caches] {self._mem_snapshot()}")
+            log.debug(f"[MEM final] {self._mem_snapshot()}")
 
             meta = {
                 'mode':           'full_wsi',
@@ -4245,6 +4427,8 @@ class SegmentMergeWorker(QThread):
             runtime_meta = self._finish_runtime_monitor()
             meta["runtime"] = runtime_meta
             meta["seg_engine"] = self._engine_meta
+            if getattr(self, "_regions", None) is not None:
+                meta["regions_run"] = self._regions_run_meta()
             meta_path = os.path.join(self.output_dir, 'segmentation_meta.json')
             with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(meta_path)):
                 write_json_atomic(meta_path, meta)              # block A6 G2

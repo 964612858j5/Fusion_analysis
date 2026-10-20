@@ -50,6 +50,18 @@ class _ChunkPlan:
             setattr(self, name, value)
 
 
+def _decode(plan, raw):
+    """One stored tile, decoded. LZW is decoded into the tile's own size and
+    stops there, as tifffile and the Rust reader do: a stream with a few
+    stray bytes after the tile's data (found in a real PhenoCycler QPTIFF,
+    2026-10-19) decodes whole instead of failing."""
+    import imagecodecs
+    if plan.decode is imagecodecs.lzw_decode:
+        th, tw = plan.tile
+        return plan.decode(raw, out=th * tw * plan.dtype.itemsize)
+    return plan.decode(raw)
+
+
 class RawTileProvider:
     """Reads float32 tiles/regions from an OME-TIFF pyramid on demand."""
 
@@ -317,7 +329,7 @@ class RawTileProvider:
                     raw = os.pread(self._chunk_fd, count, int(plan.offsets[c][index]))
                     t1 = time.perf_counter()
                     if plan.decode is not None:
-                        raw = plan.decode(raw)
+                        raw = _decode(plan, raw)
                     tile = np.frombuffer(raw, plan.dtype, count=th * tw).reshape(th, tw)
                     if plan.predictor == 2:
                         tile = imagecodecs.delta_decode(tile, axis=-1)
@@ -328,7 +340,7 @@ class RawTileProvider:
                 else:
                     raw = os.pread(self._chunk_fd, count, int(plan.offsets[c][index]))
                     if plan.decode is not None:
-                        raw = plan.decode(raw)
+                        raw = _decode(plan, raw)
                     tile = np.frombuffer(raw, plan.dtype, count=th * tw).reshape(th, tw)
                     if plan.predictor == 2:
                         tile = imagecodecs.delta_decode(tile, axis=-1)

@@ -462,14 +462,48 @@ def register_segmentation_run(run_dir, meta):
                   f"{same_id[0]['workspace_id']}: registered with a collision flag")
         engine = meta.get("seg_engine") or {}
         seg_config = meta.get("seg_config") or {}
+        contract = seg_config.get("preseg_contract") if isinstance(seg_config, dict) else None
+        regions_params = None
+        reg = (contract or {}).get("regions") if isinstance(contract, dict) else None
+        if reg:
+            # F4-3: the Regions Save the run followed -- by the Save's place and
+            # its content checksum, frozen in the snapshot (a later Save does
+            # not change which one); the snapshot itself is in the run directory
+            snap = reg.get("snapshot") or {}
+            from .regions import lock as RK
+            token = (snap.get("regions") or {}).get("content_sha256")
+            aid = lookup(project_dir, "regions_layout", location(project_dir, RK.saved_path(project_dir)),
+                         token) if token else None
+            if aid:
+                deps.append(aid)
+            else:
+                unresolved.append({"role": "regions_layout", "content_sha256": token})
+            regions_params = {"identity": reg.get("identity"), "input_kind": reg.get("input_kind"),
+                              "position_keys": [c.get("position_key") for c in snap.get("cores") or []],
+                              "source": "contract", "selection_mode": snap.get("selection_mode", "ticked")}
+            contract = dict(contract, regions={k: v for k, v in reg.items() if k != "snapshot"})
+        elif isinstance(meta.get("regions_run"), dict):
+            # docs/f5_tma_display_plan.md 9.2: the snapshot Step2 froze for a run
+            # with manual parameters, as the run recorded it
+            run_reg = meta["regions_run"]
+            from .regions import lock as RK
+            token = run_reg.get("content_sha256")
+            aid = lookup(project_dir, "regions_layout", location(project_dir, RK.saved_path(project_dir)),
+                         token) if token else None
+            if aid:
+                deps.append(aid)
+            else:
+                unresolved.append({"role": "regions_layout", "content_sha256": token})
+            regions_params = {k: run_reg.get(k) for k in ("identity", "input_kind", "position_keys", "source",
+                                                         "selection_mode", "fusion_settings_hash")}
         return safe_register(
             project_dir, "segmentation_run", loc, run_id, depends_on=deps,
             operates_on=scope, flags=flags, unresolved_inputs=unresolved,
             workspace_id=os.path.basename(ws), slide_id=sid,
             parameters={"segmentation_run_id": run_id, "method": meta.get("method"),
                         "engine": engine.get("engine"), "engine_identity": engine.get("identity"),
-                        "preseg_contract": seg_config.get("preseg_contract")
-                        if isinstance(seg_config, dict) else None,
+                        "preseg_contract": contract,
+                        **({"regions": regions_params} if regions_params else {}),
                         "files": {"segmentation_meta": "segmentation_meta.json",
                                   "label_store": meta.get("label_store")}},
             software={"git_commit": git_commit(), "engine_provenance": engine.get("provenance")})

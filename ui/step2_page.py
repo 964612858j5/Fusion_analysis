@@ -295,6 +295,10 @@ class Step2Page(QWidget):
         ll.addWidget(self._ov_gv, stretch=1)
         self._ov_layout = ll
         self._tile_colour_state = {}
+        # Tiles picked with Shift+click (user 2026-10-25): changed together,
+        # with one question, when Shift is released.
+        self._tile_pick = []
+        self._pick_filter_on = False
         self.dapi_viewer = None               # the zoomable DAPI picture (set by the main window)
         self.input_shown = None               # () -> None: another input is on screen
         # The TMA cores over the overview (docs/f5_tma_display_plan.md part 2):
@@ -2249,6 +2253,9 @@ class Step2Page(QWidget):
             if (r, c) in self._tile_rects:
                 self._set_tile_colour(r, c, state)
                 self._tile_status[(r, c)] = state
+        for idx in self._tile_pick:
+            if divmod(int(idx), nc) in self._tile_rects:
+                self._set_tile_colour(*divmod(int(idx), nc), 'picked')
 
     def _skip_hint(self):
         plan = self._skip_plan
@@ -2259,7 +2266,7 @@ class Step2Page(QWidget):
         text = (f'{len(self._plan_skips())} of {n} tiles skipped '
                 f'({len(set(plan["auto"]) - plan["user_kept"])} without tissue'
                 + (f', {forced} with tissue, chosen by you' if forced else '')
-                + ') — click a tile to change it')
+                + ') — click a tile to change it, or hold Shift and click several')
         if plan.get("reset_note"):
             text = plan["reset_note"] + ' ' + text
         self._skip_hint_lbl.setText(text)
@@ -2277,8 +2284,8 @@ class Step2Page(QWidget):
             self._skip_hint_lbl.setVisible(False)
             return
         from ..core import tile_tissue
-        had_choices = bool(self._skip_plan and (self._skip_plan["user_kept"]
-                                                or self._skip_plan["user_forced"]))
+        had_choices = bool(self._tile_pick or (self._skip_plan and (
+            self._skip_plan["user_kept"] or self._skip_plan["user_forced"])))
         try:
             bbox, slide, channel = tile_tissue.fused_region(self._zarr_path)
             key = (slide, channel)
@@ -2294,6 +2301,8 @@ class Step2Page(QWidget):
             return
         plan["user_kept"] = set()
         plan["user_forced"] = {}
+        self._tile_pick = []
+        self._watch_shift(False)
         if reset_note and had_choices:
             plan["reset_note"] = 'The grid changed: your tile choices were reset.'
         self._skip_plan = plan
@@ -2301,28 +2310,105 @@ class Step2Page(QWidget):
 
     def _on_tile_clicked(self, r, c):
         """Toggle one tile of the plan. Skipping a tile that holds tissue is
-        asked first (the user's own decision, recorded as such)."""
+        asked first (the user's own decision, recorded as such). With Shift
+        held the tile is only picked; the picked tiles change together when
+        Shift is released."""
         plan = self._skip_plan
         if plan is None or self._run_active or not self._plan_matches_drawn_grid():
             return
         idx = int(r) * plan["grid"][1] + int(c)
         if idx >= len(plan["fractions"]):
             return
-        if idx in self._plan_skips():                   # back to segmenting: no question
-            plan["user_forced"].pop(idx, None)
-            if idx in plan["auto"]:
-                plan["user_kept"].add(idx)
-        else:
-            fraction = float(plan["fractions"][idx])
-            if fraction == 0.0:
-                plan["user_kept"].discard(idx)
-            elif self._confirm_forced_skip(idx, fraction):
-                plan["user_forced"][idx] = fraction
+        if self._shift_held():
+            if idx in self._tile_pick:
+                self._tile_pick.remove(idx)
             else:
-                return
+                self._tile_pick.append(idx)
+            self._watch_shift(bool(self._tile_pick))
+            if idx in self._tile_pick:
+                self._set_tile_colour(int(r), int(c), 'picked')
+            else:
+                self._draw_tile_grid()                   # back to its plan colour
+            return
+        self._apply_tile_pick()                          # Shift's release was missed
+        self._toggle_tiles([idx])
+
+    def _toggle_tiles(self, tiles):
+        """Toggle these tiles of the plan; one question for all of those that
+        would be skipped although they hold tissue."""
+        plan = self._skip_plan
+        skips = self._plan_skips()
+        tissue = {}
+        for idx in tiles:
+            if idx in skips:                             # back to segmenting: no question
+                plan["user_forced"].pop(idx, None)
+                if idx in plan["auto"]:
+                    plan["user_kept"].add(idx)
+            elif float(plan["fractions"][idx]) == 0.0:
+                plan["user_kept"].discard(idx)
+            else:
+                tissue[idx] = float(plan["fractions"][idx])
+        if len(tissue) == 1:
+            (idx, fraction), = tissue.items()
+            if self._confirm_forced_skip(idx, fraction):
+                plan["user_forced"][idx] = fraction
+        elif tissue and self._confirm_forced_skips(tissue):
+            plan["user_forced"].update(tissue)
         plan.pop("reset_note", None)
         self._draw_tile_grid()
         self._skip_hint()
+
+    def _shift_held(self):
+        """A seam: offscreen tests press Shift by replacing it."""
+        return bool(QtWidgets.QApplication.keyboardModifiers() & Qt.ShiftModifier)
+
+    def _watch_shift(self, on):
+        """Listen (application-wide) for Shift's release while tiles are picked."""
+        app = QtWidgets.QApplication.instance()
+        if app is None or on == self._pick_filter_on:
+            return
+        if on:
+            app.installEventFilter(self)
+        else:
+            app.removeEventFilter(self)
+        self._pick_filter_on = on
+
+    def eventFilter(self, obj, event):
+        if (self._pick_filter_on and event.type() == QtCore.QEvent.KeyRelease
+                and event.key() == Qt.Key_Shift and not event.isAutoRepeat()):
+            QtCore.QTimer.singleShot(0, self._apply_tile_pick)
+        elif (self._pick_filter_on and event.type() == QtCore.QEvent.ApplicationActivate
+              and not self._shift_held()):
+            # Shift was released in another application: apply on return
+            QtCore.QTimer.singleShot(0, self._apply_tile_pick)
+        return super().eventFilter(obj, event)
+
+    def _apply_tile_pick(self):
+        """Shift was released (or a run starts): change the picked tiles."""
+        picked, self._tile_pick = self._tile_pick, []
+        self._watch_shift(False)
+        plan = self._skip_plan
+        if not picked:
+            return
+        if plan is None or self._run_active or not self._plan_matches_drawn_grid():
+            self._draw_tile_grid()
+            return
+        self._toggle_tiles([i for i in picked if i < len(plan["fractions"])])
+
+    def _confirm_forced_skips(self, tissue):
+        """One question for several tiles with tissue (a seam like
+        `_confirm_forced_skip`)."""
+        nc = self._skip_plan["grid"][1]
+        names = [f'row {i // nc + 1}, column {i % nc + 1} ({f:.1%})'
+                 for i, f in sorted(tissue.items())]
+        shown = '\n'.join(names[:12]) + (f'\n... and {len(names) - 12} more' if len(names) > 12 else '')
+        answer = QMessageBox.question(
+            self, 'Skip tiles with tissue',
+            f'{len(tissue)} of the chosen tiles hold tissue (share of each window on '
+            f'the slide):\n\n{shown}\n\nA skipped tile is not segmented: it will have '
+            f'no cells. Skip them anyway?',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return answer == QMessageBox.Yes
 
     def _confirm_forced_skip(self, idx, fraction):
         """The dialog (a seam: offscreen tests answer it)."""
@@ -2380,6 +2466,7 @@ class Step2Page(QWidget):
         'skipped': '#5a7896',          # block S2T: left out by the plan
         'plan_skip': '#5a7896',        # the next run will leave it out
         'plan_forced': '#c678dd',      # ... although it holds tissue (the user's choice)
+        'picked': '#56b6c2',           # picked with Shift+click, changed on Shift's release
     }
     TILE_DASHED = ('plan_skip', 'plan_forced')
 
@@ -3224,6 +3311,7 @@ class Step2Page(QWidget):
                                     (region_fused_paths or {}).items() if v}
 
     def _run(self):
+        self._apply_tile_pick()                 # tiles still picked with Shift count
         if not self._zarr_path or not os.path.exists(self._zarr_path):
             QMessageBox.warning(self, 'No data',
                                 'Please load a fused.zarr first.')

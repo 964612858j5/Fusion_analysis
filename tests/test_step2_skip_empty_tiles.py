@@ -408,3 +408,76 @@ def test_a_run_with_skipped_tiles_opens_in_step3_and_quantifies(app, tmp_path):
     assert res["n_cells"] > 0
     job = qs.resolve_quant_job(w.output_dir)
     assert job.run_id == os.path.basename(w.output_dir)
+
+
+# ── Shift+click picks several tiles: one question (user 2026-10-25) ───────
+
+def _shift_release(page):
+    from PyQt5 import QtCore, QtGui, QtWidgets
+    ev = QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, QtCore.Qt.Key_Shift, QtCore.Qt.NoModifier)
+    QtWidgets.QApplication.sendEvent(page, ev)
+    QtWidgets.QApplication.processEvents()
+
+
+def test_shift_picks_several_tissue_tiles_with_one_question(page, monkeypatch):
+    page._skip_empty_cb.setChecked(True)
+    auto = page.skip_tiles_config()["auto"]
+    tissue = [k for k in range(12) if k not in auto]
+    assert len(tissue) >= 2
+    asked = []
+    monkeypatch.setattr(page, "_confirm_forced_skip", lambda i, f: asked.append(("one", i)) or True)
+    monkeypatch.setattr(page, "_confirm_forced_skips", lambda t: asked.append(("many", sorted(t))) or True)
+    monkeypatch.setattr(page, "_shift_held", lambda: True)
+    for k in tissue[:2] + [auto[0]]:
+        page._on_tile_clicked(*divmod(k, 6))
+    assert asked == [] and page.skip_tiles_config()["user_forced"] == []   # only picked so far
+    assert _pen(page, tissue[0]) == "#56b6c2"
+    monkeypatch.setattr(page, "_shift_held", lambda: False)
+    _shift_release(page)
+    assert asked == [("many", sorted(tissue[:2]))]
+    cfg = page.skip_tiles_config()
+    assert sorted(e["tile"] for e in cfg["user_forced"]) == sorted(tissue[:2])
+    assert auto[0] in cfg["user_kept"]                                      # toggled back, no question
+    assert page._tile_pick == [] and not page._pick_filter_on
+    assert _pen(page, tissue[0]) == "#c678dd"
+
+
+def test_refusing_the_one_question_keeps_the_tissue_tiles(page, monkeypatch):
+    page._skip_empty_cb.setChecked(True)
+    auto = page.skip_tiles_config()["auto"]
+    tissue = [k for k in range(12) if k not in auto]
+    monkeypatch.setattr(page, "_confirm_forced_skips", lambda t: False)
+    monkeypatch.setattr(page, "_shift_held", lambda: True)
+    for k in tissue[:2] + [auto[0]]:
+        page._on_tile_clicked(*divmod(k, 6))
+    page._on_tile_clicked(*divmod(tissue[1], 6))                            # picked again: unpicked
+    page._on_tile_clicked(*divmod(tissue[1], 6))
+    monkeypatch.setattr(page, "_shift_held", lambda: False)
+    page._apply_tile_pick()
+    cfg = page.skip_tiles_config()
+    assert cfg["user_forced"] == [] and auto[0] in cfg["user_kept"]
+
+
+def test_a_new_grid_drops_the_picked_tiles(page, monkeypatch):
+    page._skip_empty_cb.setChecked(True)
+    monkeypatch.setattr(page, "_shift_held", lambda: True)
+    page._on_tile_clicked(0, 0)
+    page._cols_spin.setValue(5)
+    assert page._tile_pick == [] and not page._pick_filter_on
+    assert "reset" in page._skip_hint_lbl.text()
+    monkeypatch.setattr(page, "_confirm_forced_skips", lambda t: pytest.fail("asked"))
+    monkeypatch.setattr(page, "_confirm_forced_skip", lambda i, f: pytest.fail("asked"))
+    page._apply_tile_pick()
+    assert page.skip_tiles_config()["user_forced"] == []
+
+
+def test_returning_to_the_app_without_shift_applies_the_pick(page, monkeypatch):
+    from PyQt5 import QtCore, QtWidgets
+    page._skip_empty_cb.setChecked(True)
+    auto = page.skip_tiles_config()["auto"]
+    monkeypatch.setattr(page, "_shift_held", lambda: True)
+    page._on_tile_clicked(*divmod(auto[0], 6))
+    monkeypatch.setattr(page, "_shift_held", lambda: False)     # released elsewhere
+    QtWidgets.QApplication.sendEvent(page, QtCore.QEvent(QtCore.QEvent.ApplicationActivate))
+    QtWidgets.QApplication.processEvents()
+    assert page._tile_pick == [] and auto[0] in page.skip_tiles_config()["user_kept"]

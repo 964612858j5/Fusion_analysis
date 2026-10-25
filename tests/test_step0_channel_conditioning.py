@@ -732,7 +732,7 @@ def test_preload_build_config_unchanged(app):
     assert set(cfg["channels"]) == {"DAPI", "CD68", "CK19"}
 
 
-# ── step0-conditioning-patch-local-viewport-state (#4) ───────────────────────
+# ── the workbench across patch switches ─────────────────────────────────────
 def _page_two_patches(app, bbox0=(0, 50, 0, 50), bbox1=(0, 80, 0, 90)):
     from block01.ui.step0.step0_page import Step0Page
     import numpy as np
@@ -772,7 +772,7 @@ def test_remap_params_stay_channel_global_across_patches(app):
     wb._on_minmax_changed()
     p._select_patch(1)
     p._select_patch(0)
-    # viewport is patch-local but Min/Max are channel-global -> persist
+    # Min/Max are channel-global -> they persist across patch switches
     assert wb._params["DAPI"]["min"] == 33.0
     assert wb._params["DAPI"]["max"] == 222.0
 

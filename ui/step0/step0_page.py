@@ -327,9 +327,6 @@ class Step0Page(QWidget):
         # restart-everything worker -- an added patch must not invalidate the
         # arrays already read for the others.
         self._preload = None
-        # (#4) Patch-LOCAL conditioning viewport (zoom/pan), keyed by patch bbox.
-        # Remap params stay channel-global; only the viewer view is per patch.
-        self._conditioning_patch_viewports = {}
         # v14.2b: single authoritative ROI/context model. Both the Step0 overview
         # and the TissueNavigatorPopup overview are views/editors over this one
         # model; panel _rois/_patches are render caches derived from it.
@@ -10142,9 +10139,8 @@ class Step0Page(QWidget):
         unreachable.
 
         A Preview Patch is a NAVIGATION SHORTCUT. Picking one updates the
-        selection state -- index, list row, buttons, cached preview,
-        patch-local conditioning viewport, the navigator's view rectangle
-        -- and takes THE VIEW THAT IS ON SCREEN to that patch, whichever it
+        selection state -- index, list row, buttons, cached preview, the
+        navigator's view rectangle -- and takes THE VIEW THAT IS ON SCREEN to that patch, whichever it
         is (`_navigate_active_view_to_patch`): the three compare panels
         together, or the full image on its own. P1/P2/P3 are the way to a
         place on the slide, and which viewer happens to be showing it is
@@ -10166,10 +10162,6 @@ class Step0Page(QWidget):
             self._patch_entry_guard = False
 
     def _select_patch_locked(self, idx, *, navigate=True):
-        # (#4 patch-local viewport) Save the LEAVING patch's conditioning zoom/pan
-        # before switching, so returning restores it. Must read it while that
-        # patch is still displayed (before current_patch_idx changes).
-        self._save_conditioning_viewport(self.current_patch_idx)
         self.current_patch_idx = idx
         self._patch_selected_idx = idx
         if self._patch_list.count() > idx:
@@ -10183,12 +10175,8 @@ class Step0Page(QWidget):
         if self.current_channel and self._has_any_cache(self.current_channel):
             self._show_channel_from_cache(self.current_channel)
         # NO conditioning re-sync on a patch switch either: the workbench reads
-        # the whole slide, which the selected patch does not change. Only the
-        # patch-LOCAL viewport below follows the selection.
-        # (#4) Viewport is patch-LOCAL: restore the entered patch's saved zoom/pan,
-        # or fit-to-view if it was never visited (never inherit the prior patch's
-        # zoom). Remap params (Min/Max/Gamma) stay channel-global, untouched here.
-        self._restore_or_fit_conditioning_viewport()
+        # the whole slide, which the selected patch does not change, and Step0
+        # never shows its canvas, so there is no per-patch view to keep.
         # v14.2c: current patch changed → remap the Tissue Navigator view rect.
         self._update_tissue_view_rect()
         # ...and the view that is on screen goes to the patch. Last,
@@ -10399,41 +10387,6 @@ class Step0Page(QWidget):
             f"Comparing patch P{idx+1} around ({int(round(cx))}, "
             f"{int(round(cy))}) — right-click or Esc to go back.")
         return True
-
-    # ── conditioning patch-local viewport (zoom/pan) ─────────────────────────
-    def _conditioning_patch_key(self, idx):
-        """Stable per-patch key (the patch bbox) for the viewport cache; None if
-        the index is out of range."""
-        if idx is None or not (0 <= idx < len(self.patches)):
-            return None
-        return tuple(int(v) for v in self.patches[idx])
-
-    def _save_conditioning_viewport(self, idx):
-        """Remember the conditioning viewer's current zoom/pan for patch `idx`."""
-        if not getattr(self, "_conditioning_in_use", False):
-            return
-        wb = getattr(self, "_cond_workbench", None)
-        key = self._conditioning_patch_key(idx)
-        if wb is None or key is None or not wb.has_channel_data():
-            return
-        rect = wb.viewer.get_viewport_rect()
-        if rect is not None:
-            self._conditioning_patch_viewports[key] = rect
-
-    def _restore_or_fit_conditioning_viewport(self):
-        """Restore the current patch's saved zoom/pan, or fit-to-view if it has
-        none (a never-visited patch must not inherit the previous patch's zoom)."""
-        if not getattr(self, "_conditioning_in_use", False):
-            return
-        wb = getattr(self, "_cond_workbench", None)
-        if wb is None or not wb.has_channel_data():
-            return
-        rect = self._conditioning_patch_viewports.get(
-            self._conditioning_patch_key(self.current_patch_idx))
-        if rect is not None:
-            wb.viewer.set_view_region(rect)
-        else:
-            wb.fit_view()
 
     # ══ Params dirty tracking ════════════════════════════════════════
 
@@ -10929,10 +10882,6 @@ class Step0Page(QWidget):
         # Step1 in preference to re-resolving. It points inside A's output
         # tree, so it must not survive into B.
         self._last_saved_remap_path = ""
-        # Conditioning viewer zoom/pan, keyed by patch BBOX. A patch of B with
-        # the same bbox as one of A is not the same patch and must not inherit
-        # its viewport.
-        self._conditioning_patch_viewports = {}
         # NOT cleared here: `_channel_colors` is a per-channel-name display
         # preference -- not pixels, not source identity, not an output path.
         # The slide-wide display seed IS per-dataset: a new slide must re-seed.

@@ -774,23 +774,6 @@ def test_the_last_saved_remap_path_does_not_survive_into_the_next_dataset(
     assert page._last_saved_remap_path == ""
 
 
-def test_patch_viewports_do_not_survive_into_the_next_dataset(app, tmp_path,
-                                                              monkeypatch):
-    """Keyed by patch bbox: B's patch at A's bbox is a different patch and
-    must fit-to-view rather than restore A's zoom."""
-    page = _fresh_page(tmp_path, monkeypatch)
-    page._conditioning_patch_viewports = {(0, 32, 0, 32): (1.0, 2.0, 3.0, 4.0)}
-
-    _switch_to_b(page, tmp_path, monkeypatch)
-
-    assert page._conditioning_patch_viewports == {}
-    # And the restore lookup now misses, which is what makes it fit-to-view.
-    page.patches = [(0, 32, 0, 32)]
-    page.current_patch_idx = 0
-    assert page._conditioning_patch_viewports.get(
-        page._conditioning_patch_key(0)) is None
-
-
 def test_a_committed_switch_lands_on_the_new_slides_dapi(app, tmp_path,
                                                          monkeypatch):
     """The landing is the same whether the slide is the first one or the

@@ -5224,6 +5224,39 @@ class MainWindow(QMainWindow):
         finally:
             self._step1_restore_active = False
 
+    def _step2_workspace_params(self, s0, s1):
+        """Step2's saved-parameter index follows the OPEN workspace (user
+        2026-10-25): entered after a restart before Step1 was restored, or
+        after a Step0 "Save as" (when `step1_output` still describes the
+        previous workspace), the page gets this workspace's index -- or none,
+        when this workspace saved no parameters. An index already on the page
+        is kept only when it is this workspace's. While a segmentation runs
+        the page stays on the run's workspace, so this waits until the page
+        switches (A6 §12.12)."""
+        if getattr(self._step2, "_run_active", False):
+            if getattr(self._step2, "_pending_context", None) is not None:
+                self._step2._after_pending_context = lambda: self._step2_workspace_params(
+                    self.step0_output or {}, self.step1_output or {})
+            return False
+        roi = self._rm_roi_dir()
+        s1_elsewhere = bool(s1 and s0.get("roi_id") and s1.get("roi_id")
+                            and s1.get("roi_id") != s0.get("roi_id"))
+        if not ((not s1 or s1_elsewhere) and roi and hasattr(self._step2, "load_step1_active_params")):
+            return False
+        try:
+            settings = run_store.settings_dir(roi)
+            held = self._step2._seg_params_edit.text().strip()
+            mine = bool(held) and os.path.realpath(held).startswith(os.path.realpath(roi) + os.sep)
+            if mine:
+                return False
+            if self._step2._resolve_seg_params_index_path(settings):
+                return bool(self._step2.load_step1_active_params(settings))
+            if held:
+                self._step2.clear_params_index()
+        except Exception:
+            print(f"[Step2] failed to load the workspace's segmentation params:\n{traceback.format_exc()}")
+        return False
+
     @_perf("switch.go_step2")
     def _go_to_step2(self):
         if self._current_step == 1:
@@ -5279,6 +5312,7 @@ class MainWindow(QMainWindow):
                     roi_dir=self.step1_output.get("roi_dir") or (self.step0_output or {}).get("roi_dir", ""),
                     step2_dir=step2_dir or "",
                 )
+        self._step2_workspace_params(s0, s1)
         self._rm_bind_step2()
         self._rm_restore_page_draft("step2", self.__dict__.get("_step2"))
         self._stack.setCurrentIndex(2)

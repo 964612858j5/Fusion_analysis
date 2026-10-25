@@ -103,7 +103,9 @@ def test_only_cells_in_selected_cores_are_kept_with_dense_ids_and_their_facts(tm
     assert skipped and all(i in worker._regions_skipped["t" if loop == "segment_one_zarr" else ""]
                            for i in skipped)                                # counted as Regions skips
     prefix = "_t" if loop == "segment_one_zarr" else ""
-    facts = np.load(os.path.join(worker.output_dir, f"global_cell_regions{prefix}.npz"), allow_pickle=True)
+    facts = np.load(os.path.join(worker.output_dir, f"global_cell_regions{prefix}.npz"),
+                    allow_pickle=False)                     # F4-4: no object arrays
+    assert int(facts["facts_version"]) == 2
     assert facts["core"].shape == (n,) and (facts["core"] == 0).all()
     assert os.path.exists(os.path.join(worker.output_dir, "regions_snapshot.json"))
     assert not [f for f in os.listdir(worker.output_dir) if f.endswith(".partial")]

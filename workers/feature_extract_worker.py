@@ -34,6 +34,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from ..core import quant_engine as qe
 from ..core import quant_sources as qs
 from ..core.provenance import register_step4
+from ..core.regions import quant_apply as qa
 from ..utils import run_store
 
 INTEGER_COLUMNS = qe.INTEGER_COLUMNS
@@ -89,19 +90,64 @@ def _peak_rss_bytes():
         return None
 
 
-def _write_csv(path, result):
-    """The table, a row block at a time from the sink."""
+def _csv_text(values):
+    """One text column as CSV fields: quoted when it holds a comma, a quote
+    or a line break (RFC 4180)."""
+    out = []
+    for v in values:
+        t = str(v)
+        if any(ch in t for ch in ',"\n\r'):
+            t = '"' + t.replace('"', '""') + '"'
+        out.append(t)
+    return np.asarray(out, dtype=object)
+
+
+def _region_csv_columns(frame):
+    """(names, per-column formatter) of the Regions obs columns, in order."""
+    out = []
+    for name in frame.columns:
+        col = frame[name]
+        kind = col.dtype.kind
+        if kind == "b":
+            fmt = lambda v: np.where(np.asarray(v, bool), "True", "False").astype(object)   # noqa: E731
+        elif kind in "iu":
+            fmt = lambda v: np.asarray([f"{int(x)}" for x in v], dtype=object)              # noqa: E731
+        elif kind == "f":                      # lossless: the shortest text that reads back the same
+            fmt = lambda v: np.asarray([repr(float(x)) for x in v], dtype=object)           # noqa: E731
+        else:
+            fmt = _csv_text
+        out.append((name, fmt))
+    return out
+
+
+def _write_csv(path, result, regions_frame=None):
+    """The table, a row block at a time from the sink. With Regions (F4-4)
+    every obs column of the h5ad is written too, text as text, right after
+    the id."""
     names = result.columns
     fmt = ["%d" if c in INTEGER_COLUMNS else "%.6g" for c in names]
     n = int(result.ids.size)
+    extra = _region_csv_columns(regions_frame) if regions_frame is not None else []
     with open(path, "w", encoding="utf-8") as f:
-        f.write(",".join(names) + "\n")
+        f.write(",".join([names[0]] + [e[0] for e in extra] + names[1:]) + "\n")
         for r0 in range(0, n, CSV_BLOCK_ROWS):
-            np.savetxt(f, result.block(r0, min(n, r0 + CSV_BLOCK_ROWS)), delimiter=",",
-                       fmt=fmt)
+            r1 = min(n, r0 + CSV_BLOCK_ROWS)
+            block = result.block(r0, r1)
+            if not extra:
+                np.savetxt(f, block, delimiter=",", fmt=fmt)
+                continue
+            import io
+            buf = io.StringIO()
+            np.savetxt(buf, block, delimiter=",", fmt=fmt)
+            lines = buf.getvalue().splitlines()
+            texts = [fn(regions_frame[name].to_numpy()[r0:r1]) for name, fn in extra]
+            for i, line in enumerate(lines):
+                head, _, rest = line.partition(",")
+                cells = [head] + [t[i] for t in texts] + ([rest] if rest else [])
+                f.write(",".join(cells) + "\n")
 
 
-def _write_h5ad(path, job, result, prov):
+def _write_h5ad(path, job, result, prov, regions=None):
     """ONE AnnData: a skeleton (X, obs, var, uns) written by anndata, then
     every layer appended with h5py a row block at a time from the sink (the
     on-disk layout anndata reads: encoding-type array, version 0.2.0) -- no
@@ -116,6 +162,10 @@ def _write_h5ad(path, job, result, prov):
             obs[name] = values.astype(np.int64)
         else:
             obs[name] = np.asarray(values, np.float64)
+    if regions is not None:                    # F4-4: typed Regions columns right after the id
+        rin, frame = regions
+        obs = pd.concat([obs[[result.id_column]], frame, obs.drop(columns=[result.id_column])],
+                        axis=1)
     var = pd.DataFrame(index=pd.Index([c.name for c in job.channels]))
     var["slide_index"] = [int(c.index) for c in job.channels]
     var["decision"] = [c.decision for c in job.channels]
@@ -138,19 +188,30 @@ def _write_h5ad(path, job, result, prov):
     if result.dist_markers:
         adata.uns["distribution_markers"] = list(result.dist_markers)
         adata.uns["distribution_statistics"] = list(result.dist_stats)
+    if regions is not None:
+        rin, _frame = regions
+        adata.uns["regions"] = qa.uns_regions(rin)
+        adata.uns["regions_dropped"] = qa.regions_dropped(rin)
+        adata.uns["measurement_qc_codes"] = dict(qa.QC_CODES)
+        if rin.tma:
+            adata.uns["tma_cores"] = qa.tma_cores_frame(result, rin)
     adata.write_h5ad(path)
     del adata
     n, c = int(result.ids.size), len(job.channels)
     with h5py.File(path, "a") as f:
         group = f.require_group("layers")
-        for name in result.layers:
-            ds = group.create_dataset(name, shape=(n, c), dtype="f4",
-                                      chunks=(max(1, min(n, H5AD_BLOCK_ROWS)), max(1, c)))
+        written = [(name, "f4") for name in result.layers]
+        if regions is not None:
+            written.append((qa.QC_LAYER, "u1"))          # F4-4: uint8 codes, uns measurement_qc_codes
+        for name, dtype in written:
+            # a zero-object result has no rows to chunk (F4-4)
+            ds = group.create_dataset(name, shape=(n, c), dtype=dtype,
+                                      chunks=(max(1, min(n, H5AD_BLOCK_ROWS)), max(1, c)) if n else None)
             ds.attrs["encoding-type"] = "array"
             ds.attrs["encoding-version"] = "0.2.0"
             for r0 in range(0, n, H5AD_BLOCK_ROWS):
                 r1 = min(n, r0 + H5AD_BLOCK_ROWS)
-                ds[r0:r1] = result.sink.read(name, r0, r1).astype(np.float32)
+                ds[r0:r1] = result.sink.read(name, r0, r1).astype(dtype)
         # block S4-3: distribution statistics of the chosen markers, one
         # DataFrame per region x statistic (columns = the markers), written
         # one at a time
@@ -240,6 +301,10 @@ def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions
     features = set(features or ())
     job = qs.resolve_quant_job(run_path, roi_name, open_slide)
     qe.normalize_regions(regions or [], job)                     # refuse before any output
+    try:                                       # F4-4: the run's Regions facts, checked now
+        rin = qa.load_regions(job)
+    except qa.RegionsInputError as exc:
+        raise qs.QuantSourceError(str(exc)) from exc
     if qe.normalize_distribution(distribution) and not markers:
         raise ValueError("distribution statistics need at least one marker")
     unknown = [m for m in (markers or []) if m not in [c.name for c in job.channels]]
@@ -284,21 +349,32 @@ def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions
             reader.close()
         if should_stop is not None and should_stop():
             raise qe.QuantStopped()
+        regions_out, qc_stats = None, None
+        if rin is not None:                    # F4-4: measurement exclusions -> NaN, typed obs
+            qc_stats = qa.apply_measurement_qc(result, rin, should_stop=should_stop)
+            regions_out = (rin, qa.obs_frame(result, rin, job.run_id))
         outputs = {"h5ad": os.path.basename(h5_path),
                    "csv": os.path.basename(csv_path) if csv_path else None}
         t0 = time.perf_counter()
+        if should_stop is not None and should_stop():
+            raise qe.QuantStopped()
         if csv_path:
-            _write_csv(csv_path + ".partial", result)
+            _write_csv(csv_path + ".partial", result,
+                       regions_out[1] if regions_out is not None else None)
         timing["write_csv"] = time.perf_counter() - t0
         prov = _provenance(job, result, stats, reader, settings, timing, outputs,
                            time.perf_counter() - t_start, features)
+        if rin is not None:
+            prov["regions"] = qa.provenance_summary(rin, qc_stats)
         t0 = time.perf_counter()
-        _write_h5ad(h5_path + ".partial", job, result, prov)
+        _write_h5ad(h5_path + ".partial", job, result, prov, regions_out)
         prov["timing_seconds"]["write_h5ad"] = round(time.perf_counter() - t0, 3)
         prov["total_seconds"] = round(time.perf_counter() - t_start, 3)
         prov["process_peak_rss_bytes"] = _peak_rss_bytes()
         with open(prov_path + ".partial", "w", encoding="utf-8") as f:
             json.dump(prov, f, indent=2)
+        if should_stop is not None and should_stop():
+            raise qe.QuantStopped()                # the last moment: nothing is published yet
         for final, part in zip(finals, partials):
             os.replace(part, final)
             renamed.append(final)

@@ -772,6 +772,8 @@ class SegmentMergeWorker(QThread):
     # ── Regions (F4-3, docs/f4_regions_downstream_plan.md E / E.8) ─────────
     REGIONS_SNAPSHOT_FILE = "regions_snapshot.json"
     REGIONS_MAX_MEASUREMENT_EXCLUSIONS = 52
+    #: the facts npz format Step4 reads (F4-4: 2 = no object arrays)
+    REGIONS_FACTS_VERSION = 2
 
     def _regions_begin(self):
         """The frozen Regions snapshot this run follows -- the Step1
@@ -938,13 +940,17 @@ class SegmentMergeWorker(QThread):
         partial = path + ".partial"
         self._nuclei_partials.append(partial)
         with open(partial, "wb") as f:                  # a file object: NumPy adds no ".npz"
+            # no object arrays (F4-4: Step4 reads it with allow_pickle=False)
+            uids = [str(u) for u in R["measurement_exclusions"]]
             np.savez(f, core=facts[:, 2].astype(np.int32), core_fraction=facts[:, 3].astype(np.float32),
                      flags=facts[:, 4].astype(np.uint8), meas_bits=facts[:, 5].astype(np.uint64),
-                     measurement_exclusions=np.array(R["measurement_exclusions"], dtype=object))
+                     measurement_exclusions=np.array(uids, dtype=str) if uids else np.zeros(0, dtype="<U1"),
+                     facts_version=np.int32(self.REGIONS_FACTS_VERSION))
         os.replace(partial, path)
         rec = merger.stats
         return {"snapshot": self._abs(os.path.join(self.output_dir, self.REGIONS_SNAPSHOT_FILE)),
-                "identity": R["identity"], "cells": {"path": self._abs(path), "rows": int(facts.shape[0])},
+                "identity": R["identity"], "facts_version": self.REGIONS_FACTS_VERSION,
+                "cells": {"path": self._abs(path), "rows": int(facts.shape[0])},
                 "dropped": {r: int(rec.get(f"regions_dropped_{r}", 0))
                             for r in ("no_core", "outside_region", "exclusion")},
                 "nuclei_dropped": int(rec.get("nuclei_dropped_regions", 0)),

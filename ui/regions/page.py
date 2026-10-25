@@ -172,6 +172,10 @@ class RegionsPage(QWidget, VersionsMixin, ShapesMixin):
                 act.setData(key)
                 act.triggered.connect(lambda _c=False, k=key: self._set_tool(k))
             menu.setToolTipsVisible(True)
+            if fam == "Annotate":
+                # user 2026-10-25: numbering with nothing found to number was a
+                # silent "Selected 0" -- say what to do first, instead
+                menu.aboutToShow.connect(lambda m=menu: self._annotate_menu_opening(m))
             b.setMenu(menu)
             b.setProperty("family", fam)
             self.family_buttons[fam] = b
@@ -396,8 +400,33 @@ class RegionsPage(QWidget, VersionsMixin, ShapesMixin):
     def piece_menu(self, pid):
         self.shape_menu(pid)
 
+    def annotate_blocker(self):
+        """Why numbering cannot start yet (no map sheet / no core found), or ""."""
+        if getattr(self.cores, "study", None) is None:
+            return ("No TMA map sheet is loaded yet.\n\nChoose the map sheet, click Find cores, "
+                    "then number the cores with Annotate.")
+        if not self.numbering_objects():
+            return ("No TMA cores have been found yet.\n\nClick Find cores (Cores tab) first, "
+                    "then number the cores with Annotate.")
+        return ""
+
+    def _annotate_menu_opening(self, menu):
+        why = self.annotate_blocker()
+        if why:
+            # AFTER aboutToShow returns: close the menu, then say why (a modal
+            # opened in here ran the queued close too early and the menu came
+            # back once the message was dismissed -- codex 2026-10-25)
+            def refuse():
+                menu.close()
+                QtWidgets.QMessageBox.information(self, "Annotate", why)
+            QTimer.singleShot(0, refuse)
+
     def _set_tool(self, tool):
         self.commit_transform()
+        if tool in CORE_TOOLS and self.annotate_blocker():
+            QtWidgets.QMessageBox.information(self, "Annotate", self.annotate_blocker())
+            self._show_tool()
+            return
         if tool in CORE_TOOLS and not self.cores_editable():
             self.say("TMA numbering is done in a whole-slide workspace.")
         if tool in CORE_TOOLS and self.exclusions_tab_open():

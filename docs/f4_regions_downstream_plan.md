@@ -221,3 +221,99 @@
    - 表里另存编号到排除区 uid 的对照。
 5. `touches_region_edge` 完全按 `evaluate_object` 的条件：碰到父区域外框边界，或有像素落在父多边形之外。
 6. 被拒绝的细胞只统计最终被选中的那个版本，它的细胞核按不同编号计入 `regions_cell`，进入 `label_store` 的丢弃汇总。没有 Regions 时，元数据不新增任何字段。
+
+## F. 第四段（Step4 h5ad）方案草稿 v1（2026-10-21，交 codex astra high 商量）
+
+### F.0 现状（代码事实）
+- Step4：`workers/feature_extract_worker.py` `run_extraction` → `core/quant_sources.py` `resolve_quant_job`（只认运行目录的 LabelStore，`_label_store`）→ `core/quant_engine.py` `quantify`（按块累加，结果在磁盘 sink）→ `_write_h5ad`（obs = 细胞编号 + 形态列；X 和各层从 sink 逐块写；uns 记统计、区域、来源 JSON；可选 CSV、分布统计 obsm）。
+- Step2（第三段，已提交）在 LabelStore 里多写了 `regions`：快照路径（运行目录的 `regions_snapshot.json`）、身份、`cells: {path: global_cell_regions[_<prefix>].npz, rows}`、各原因删掉的数目、跳过的小块。npz：第 i 行 = 细胞 i+1，`core`（快照 `cores` 下标，-1 = 无）、`core_fraction`、`flags`（1 碰核心边、2 完全在核心内 = analysis_include、4 碰父区域边）、`meas_bits`（第 k 位 = 第 k 个"只影响测量"排除区）、`measurement_exclusions`（这些排除区的 uid，按位序）。
+- 之后的裁定（第五部分 §9/§11）：快照在 Step2 点开始时冻结（不管参数来源），带 `selection_mode`、`display_cores`（只用于显示，不在身份里）。
+
+### F.1 输入与拒绝
+- 运行没有 `regions` 记录：输出与现在**逐字节一致**（不加任何列）。
+- 有记录：读快照（`load_snapshot` 校验身份，且等于记录的身份）、读 npz（行数 = 标签数 = `n_objects`）；任一不符就拒绝，不写任何输出。
+- h5ad 的细胞编号就是标签编号 1..N（第三段保证连续），第 i 个细胞取 npz 第 i-1 行；若定量结果的编号不是 1..N 的子集就拒绝。
+
+### F.2 obs 新列（字符串列用 categorical，索引不变）
+- 运行级：`slide_id`、`segmentation_run_id`。
+- 核心（TMA 模式；`core` = -1 不会出现，因为不归属的细胞第三段已删）：`core_position_key`、`core_region_id`、`core_position_id`、`core_label`（X1-Y06）、`donor_block_id`、`tma_unique_sample_id`、`tma_annotation_name`（用户裁定 1：打孔时记录的 TMA 编号）、`tma_block_id`、`tma_block_name`、`tma_project_name`、`core_height`、`core_qc`。
+- 细胞：`cell_core_fraction`、`cell_touches_core_edge`、`analysis_include`、`touches_region_edge`。
+- 普通 ROI / 整片（没有对应表，`mode == "roi"`）：没有核心列，只有细胞列里有意义的 `touches_region_edge` 和下面的测量标记。
+
+### F.3 只影响测量的排除区 → NaN（用户裁定 5）
+- 细胞与某个"只影响测量"的排除区有一个像素重叠（`meas_bits` 第 k 位），它在该排除区的通道上**所有测量**设为 NaN：X、每个统计层、分布统计 obsm、CSV 同一处理；形态不受影响。
+- 另写 `layers["measurement_qc"]`（细胞 × 通道，uint8：0 正常，1 被排除区置空），代码含义写在 `uns["measurement_qc_codes"]`；每个排除区的 uid、原因、通道写在 uns。
+- 位置：定量完成后、写 h5ad/CSV 之前，在 sink 上按行块改写（新模块，例如 `core/regions/quant_apply.py`，纯函数 + 行块），不改定量核心算法。
+
+### F.4 uns
+- `regions`：快照（去掉只用于显示的 `display_cores`，以免文件变大）+ 规则 + 身份 + `selection_mode`。
+- `tma_cores`：对应表每个位置一行：位置、样本字段、是否参与和原因、细胞数（参与的核心按 obs 统计）、核心面积。
+- `regions_dropped`：第三段删掉的细胞数（按原因）。
+
+### F.5 来源
+- `register_step4`：`depends_on` 加 `regions_layout`（按快照里 Save 的 `content_sha256` 查，查不到列为 unresolved，和第三段一样）；参数里记快照身份、`selection_mode`、参与核心的 position_key。
+
+### F.6 白名单（草案）
+`core/quant_sources.py`（读 regions 记录）、新 `core/regions/quant_apply.py`、`workers/feature_extract_worker.py`（obs/uns/层/CSV）、`core/provenance.py`（`register_step4`）、新 `tests/test_f4_step4.py`、本文件。
+
+### F.7 请 codex 重点商量
+1. NaN 放在哪一步（sink 行块改写 vs 定量时直接跳过）？分布统计、CSV、`nuclear_summary` 等是否全部覆盖？
+2. 细胞编号与 npz 行的对应在所有定量路径（细胞 / 只有细胞核 / 多区域）是否成立。
+3. 旧运行（第三段之前、或没有 `display_cores`/`selection_mode` 的快照）怎么处理。
+4. categorical 列与现有下游读法（Step4 之后有谁读 h5ad？）是否兼容。
+5. 测试与真机验收方案（Slice1 跑完 Step4，核对每颗核心的细胞数、样本字段、NaN 位置）。
+
+### F.8 第 1 轮商量（`codex_f4_step4_plan_1.out`）后的用户裁定（2026-10-21）
+1. 同意新增模块（`core/regions/quant_apply.py` 一类），但**暂不开工**。
+2. **CSV 必须带 h5ad obs 的全部信息**：样本、核心、细胞标记等文字列也写进 CSV（文字原样写出，不写 categorical 的内部代码）。
+3. 普通 ROI / 整片：**不出现任何核心相关内容**（只有运行级字段、区域边界标记、测量排除表）。
+4. 验收标准改为"没有 Regions 的旧路径：字段和科学结果不变"，不比较整文件字节。
+5. 核心面积：待用户在知道用途后决定（见下）。
+6. **核心面积要输出**（用户 2026-10-21）：每颗核心的面积（像素与 µm²/mm²，用切片像素大小换算），用于细胞密度、组织完整度、按面积加权汇总。
+7. **开发期，允许不兼容升级**（用户 2026-10-21：还没有任何正式分析的数据）：旧格式的运行（缺新字段的快照、旧 npz 格式）直接要求重跑 Step2，不做兼容分支；可以顺带把 Step2 的 npz 改成不用 pickle 的格式、快照里补齐所需字段（如每颗核心的面积）。
+8. 思路已对齐，**授权开工**；完成后交 codex astra high 审核。
+
+### F.9 第四段定稿设计（用户 2026-10-21 授权开工；开发期允许不兼容升级）
+
+**1. 输入格式升级（不兼容，旧运行要求重跑 Step2）**
+- Step2 的事实表 npz 去掉 pickle：`measurement_exclusions` 改为普通 unicode 数组；LabelStore 的 `regions` 记录加 `facts_version: 2`。Step4 只认 `facts_version == 2` 且快照带 `display_cores`；否则拒绝："this run's Regions facts are in an older format — re-run Step2"。npz 一律 `allow_pickle=False` 读取。
+- 快照身份规则不变（`display_cores`、`selection_mode` 仍不进身份）。
+
+**2. 读取与核对（`core/regions/quant_apply.py: load_regions(job)`，在创建任何输出目录之前）**
+- 来源：所选 ROI 的 LabelStore `regions` 记录（`quant_sources.resolve_quant_job` 把它原样带进 `QuantJob.regions`，不在页面解析时加载 npz）。
+- 核对：快照 `load_snapshot`（版本、身份）且身份 = 记录身份；快照父区域外框 = 该 ROI 外框；npz 四个数组一维、长度 = 记录 `rows` = `job.n_objects`、类型正确；TMA 的 `core` ∈ [0, len(cores))，ROI 模式全为 -1；`meas_bits` 只在 `len(uids)` 位以内置位；UID 一一对应快照里 `seg_invalid == False` 的排除区。任一不符拒绝。
+- 位序以 npz 的 UID 列表为准；`flags` 直接解码，不由 `core_fraction` 重算。
+
+**3. 对齐**：输出第 r 行标签 ID = `result.ids[r]`，事实行 = ID − 1。细胞、细胞+核、只有核（主对象 = 核）同此；多 ROI 带 Regions 本来就拒绝。
+
+**4. 测量置空（定量完成后、写 CSV/h5ad 之前，在 sink 上逐行块改写）**
+- 第 k 位排除区 → 它的通道集合（名字 → `job.channels` 下标）。
+- 置 NaN：`result.layers` 每个表达层（X 由 `x_layer` 读取，自动同步）；`result.dist_layers` 按 `result.dist_markers` 的名字映射列。形态、`nuclear_summary` 不动。
+- 新 sink 数组 `measurement_qc`（n × C，uint8，填 0）：被本机制置空的格 = 1；h5ad 写成 `layers["measurement_qc"]`（uint8）；`uns["measurement_qc_codes"] = {"0": ..., "1": ...}`。0 不代表值一定有限（无核、空胞质等原有 NaN 不受影响）。
+
+**5. obs（字符串用 categorical，索引和 ID 列不变）**
+- 运行级（两种模式）：`slide_id`、`segmentation_run_id`；细胞：`touches_region_edge`（bool）。
+- 只有 TMA 模式再加：`core_position_key`、`core_region_id`、`core_label`、`donor_block_id`、`tma_unique_sample_id`、`tma_annotation_name`、`tma_block_id`、`tma_block_name`、`tma_project_name`、`core_height`、`core_qc`（categorical）；`core_position_id`（int64）；`core_area_px`（int64）、`core_area_um2`、`core_area_mm2`（float64）；`cell_core_fraction`（float32）；`cell_touches_core_edge`、`analysis_include`（bool）。
+- 普通 ROI / 整片：不出现任何核心相关列（用户裁定 3）。
+
+**6. 核心面积**：核心各块按分析的填充方式（`geometry.fill`）逐块填充后**按像素合并**的像素数（不含分析轮廓里连接各块的细桥线；实施中发现桥线会多算像素）；µm² = 像素数 × 像素宽 × 像素高（切片的物理像素大小，取项目记录的切片描述；没有则 µm²/mm² 为空）。参与的核心取快照 `cores`；没参与但已绑定位置的核心取 `display_cores` 各块合并；空位、未绑定为空。
+
+**7. uns**
+- `regions`：`format_version`、`identity`、`save_content_sha256`、`map_sha256`、`selection_mode`、`source`、`measurement_exclusion_bits`（按位序的 UID）、`snapshot_json`（去掉 `display_cores` 的快照 JSON 文本）。
+- `tma_cores`（只 TMA）：DataFrame，快照 `positions` 每个位置一行：位置字段、样本字段、`occupied`、`selected`、`reason`、`n_obs`（按输出行计数，零细胞为 0）、`area_px`/`area_um2`/`area_mm2`。
+- `regions_dropped`：Step2 按原因删掉的细胞数和细胞核数。
+
+**8. CSV**：带 obs 的全部信息（用户裁定 2）：ID、区域列（文字原样，含逗号/引号时按 CSV 规则加引号；bool 写 True/False）、形态、各通道统计，逐行块写。没有 Regions 的运行 CSV 不变。
+
+**9. 来源**：同一份 Regions 摘要（身份、Save/对应表哈希、选择方式、来源、参与 position_key、事实表路径、置空规则、置空格数与细胞数、删除计数）写进 h5ad 的 `provenance_json` 和旁边的 `_provenance.json`；`register_step4` 按 Save 位置 + 冻结 `content_sha256` 查 `regions_layout`，找到入 `depends_on`，否则 `unresolved_inputs`；参数加 `regions: {identity, selection_mode, position_keys}`。
+
+**10. 零对象**：结果没有对象时照样写出（h5ad 层不分块写；CSV 只有表头；`tma_cores` 的 n_obs 全为 0）。
+
+**11. 没有 Regions 的旧路径**：不读任何 Regions 文件，字段和科学结果不变（裁定 4）。
+
+**12. 白名单（封闭）**：`core/quant_sources.py`（`QuantJob.regions` 带记录 + 格式版本拒绝）、新 `core/regions/quant_apply.py`、`workers/feature_extract_worker.py`、`core/provenance.py`（`register_step4`）、`workers/segment_merge_worker.py`（只改 npz 写法与 `facts_version`）、`tests/test_f4_step4.py`（新）、`tests/test_f4_step2.py`（npz 格式）、本文件。新增机制：模块 `quant_apply`、`register_step4` 的 Regions 依赖（用户已批准）。
+
+**13. 测试**：合成项目走 `run_extraction`：细胞 / 细胞+核 / 只有核；TMA 与普通 ROI；多核心同 donor、QC 未复核、未参与位置、选中但零细胞核心、零对象；单像素命中、多个排除区与通道、第 51 位、UID 位序；所有层 + X + 分布统计 + CSV 的 NaN 一致，形态与核摘要不变，原有 NaN 不被标成 1；AnnData 读回的类型和 uns；旧格式拒绝；Stop/失败不留半成品；至少一个从真实 Step2 运行（`test_f4_step2` 的夹具）到 Step4 的贯通测试。
+
+**14. 真机验收**（`codex_f4_step4_plan_2.out` P2 修订）：在 Slice1 项目的**副本**中，用升级后的 Step2 生成新运行（旧运行按 F.9.1 会被拒绝），再经正常 Step4 路径输出到副本内的新 quant run；核对逐核心细胞数与总数、位置的 selected/reason、样本字段、面积、有命中时的 NaN 位置。真实项目不写入。
+**13 补充断言**（同上 P3）：所有已绑定但未参与的核心面积；多块核心、非等距像素换算、缺物理尺寸；CSV 与全部 obs 字段逐值对应（含前导零、中文、逗号／引号／换行和 bool）；之后再保存 Regions 不改变旧运行的导出内容。面积按完整轮廓栅格，不扣排除区。

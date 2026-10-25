@@ -109,6 +109,7 @@ def test_the_tissue_navigator_lands_the_regions_viewer_whatever_tool_is_in_use(a
         _enter_regions(rig)
         assert rig.w._btn_regions_tissue_nav.text() == "Tissue Navigator"
         page = rig.w._regions
+        monkeypatch.setattr(page, "annotate_blocker", lambda: "")     # cores exist (2026-10-25 guard)
         page._set_tool("line")
         page.ctl.press(10.0, 10.0)                                     # a line being dragged
         shown = []

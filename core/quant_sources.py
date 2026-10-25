@@ -44,6 +44,8 @@ from .project_identity import ProjectSchemaError, project_dir_of_workspace, read
 
 CORRECTED_METHODS = ("tophat", "cucim")
 CELL, NUCLEUS = "cell", "nucleus"
+#: the Step2 Regions facts format Step4 reads (F4-4; Step2's REGIONS_FACTS_VERSION)
+REGIONS_FACTS_VERSION = 2
 
 
 class QuantSourceError(Exception):
@@ -85,6 +87,9 @@ class QuantJob:
     table_path: Optional[str] = None
     n_nuclei: int = 0
     seam_merge: Optional[Dict[str, Any]] = None
+    # F4-4: the Regions record Step2 kept for this region (snapshot, facts),
+    # or None (a run without Regions: the old output, unchanged)
+    regions: Optional[Dict[str, Any]] = None
 
     @property
     def has_nuclei(self):
@@ -259,6 +264,14 @@ def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):
     if n_objects < 0:
         raise QuantSourceError("the label store records no object count")
     nucleus_path, table_path, n_nuclei = _nuclei_of(store, compartment, shape, run.run_dir)
+    regions = store.get("regions")
+    if regions is not None:
+        if not isinstance(regions, dict) or regions.get("facts_version") != REGIONS_FACTS_VERSION:
+            raise QuantSourceError("this run's Regions facts are in an older format — re-run Step2")
+        regions = dict(regions)
+        # where the run's cores were frozen (Step2's run record, §F.9.7/9)
+        run_rec = run.meta.get("regions_run") if isinstance(run.meta.get("regions_run"), dict) else {}
+        regions.setdefault("source", str(run_rec.get("source") or ""))
 
     # -- the slide: the run's, its workspace's, the open one
     ws = run.workspace
@@ -342,7 +355,7 @@ def resolve_quant_job(run_or_path, roi_name=None, open_slide=None):
                     n_objects=n_objects, slide=os.path.realpath(slide), channels=tuple(channels),
                     nucleus_path=nucleus_path, table_path=table_path, n_nuclei=n_nuclei,
                     seam_merge=store.get("seam_merge") if isinstance(store.get("seam_merge"), dict)
-                    else None,
+                    else None, regions=regions,
                     step0={"correct_run": os.path.realpath(correct),
                            "correction_config": os.path.realpath(cfg_path),
                            "corrected_product": os.path.realpath(zpath) if zpath else None,

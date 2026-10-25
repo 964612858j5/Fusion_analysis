@@ -206,6 +206,9 @@ class Step2Page(QWidget):
         # User ruling 2026-10-03: a workspace handed over while a run is
         # going (Step0 Save as) waits here; Step2 switches when the run ends.
         self._pending_context = None
+        # Called once that waiting workspace is switched to (MainWindow then
+        # gives the page that workspace's saved parameters).
+        self._after_pending_context = None
         # Block RM: each region's fused product in the chosen fuse run.
         self._region_fused_paths = {}
         self._last_remap_status = ""     # v14.5d: last Step0-remap applied/not-applied msg
@@ -515,6 +518,9 @@ class Step2Page(QWidget):
 
         self._rows_spin.valueChanged.connect(self._update_tile_info)
         self._cols_spin.valueChanged.connect(self._update_tile_info)
+        # a grid typed by hand is checked when the typing is done, not per digit
+        self._rows_spin.editingFinished.connect(self._keep_stardist_tiles_safe)
+        self._cols_spin.editingFinished.connect(self._keep_stardist_tiles_safe)
         self._overlap_spin.valueChanged.connect(self._update_tile_info)
         rl.addWidget(tile_box)
 
@@ -1283,10 +1289,12 @@ class Step2Page(QWidget):
         # §7: the regions this fuse run froze, not the ones edited now (none:
         # the whole image)
         self.set_rois(item.get("rois") or [])
+        # this input's regions FIRST: loading it sizes the grid (Auto, the
+        # StarDist cap) over every region of the run (codex 2026-10-25)
+        self.set_region_inputs(item.get("regions") or {})
         if os.path.abspath(self._zarr_edit.text().strip() or '.') != os.path.abspath(item["zarr"]):
             self._zarr_edit.setText(item["zarr"])
             self._load_zarr_info()
-        self.set_region_inputs(item.get("regions") or {})
 
     def selected_fuse_run(self):
         return str(self._fuse_combo.currentData() or '')
@@ -1324,6 +1332,17 @@ class Step2Page(QWidget):
         if not cfg:
             return False
         cfg = self._without_handover_regions(dict(cfg))   # an older draft may still carry them
+        # A draft that ran a saved parameter file (source index) comes back as
+        # that file, chosen again (user 2026-10-25); it falls back to the
+        # manual copy below when the file or its index is gone.
+        pfile = str((draft or {}).get("param_file") or "")
+        if (draft or {}).get("parameter_source") == "index" and pfile and os.path.isfile(pfile) \
+                and self._restore_index_file(pfile, cfg.get("method")):
+            if self._same_effective_settings(cfg, self.get_seg_config()):
+                print(f"[Step2] Step2 draft restored as its parameter file ({os.path.basename(pfile)})")
+                return True
+            # edited after the file was chosen: the edits win, as typed (codex 2026-10-25)
+            print("[Step2] the Step2 draft differs from its parameter file: restored as edited")
         # The draft IS the configuration that was on screen: it runs as typed
         # (source manual), so no index file is reloaded over it at Run.
         self._set_param_source("manual")
@@ -1340,6 +1359,52 @@ class Step2Page(QWidget):
         self._resolved_param_edit.setText(str((draft or {}).get("param_file") or ""))
         print(f"[Step2] unsaved Step2 draft restored (method={cfg.get('method')})")
         return True
+
+    @staticmethod
+    def _same_effective_settings(a, b):
+        """Do two Step2 configurations run the same: method and parameters
+        (normalised), whatever their bookkeeping fields?"""
+        na, nb = normalize_segmentation_config(dict(a or {})), normalize_segmentation_config(dict(b or {}))
+        return na.get("method") == nb.get("method") and \
+            dict(na.get("params") or {}) == dict(nb.get("params") or {})
+
+    def clear_params_index(self):
+        """Forget a parameter index (e.g. another workspace's): manual source."""
+        self._seg_params_index = {}
+        self._seg_params_dir = ""
+        self._seg_params_edit.setText("")
+        self._seg_param_file = ""
+        self._applied_param_file = ""
+        self._loading_index_selection = True
+        try:
+            self._index_method_combo.clear()
+            self._history_combo.clear()
+        finally:
+            self._loading_index_selection = False
+        self._resolved_param_edit.setText("")
+        self._set_param_source("manual")
+
+    def _restore_index_file(self, path, method):
+        """Choose saved parameter file `path` (method `method`) through its
+        folder's index, as a user would; False when it cannot be."""
+        if not method or not self._load_seg_params_index(os.path.dirname(path), silent=True,
+                                                         apply_active=False):
+            return False
+        idx = self._index_method_combo.findData(method)
+        if idx < 0:
+            return False
+        old = self._loading_index_selection
+        self._loading_index_selection = True
+        try:
+            self._index_method_combo.setCurrentIndex(idx)
+        finally:
+            self._loading_index_selection = old
+        if not self._apply_index_method(method, os.path.basename(path), silent=True):
+            return False
+        self._set_param_source("index")
+        self._applied_param_file = self._seg_param_file
+        self._update_resolved_param_path()
+        return os.path.abspath(self._seg_param_file or "") == os.path.abspath(path)
 
     def _browse_zarr(self):
         path = QFileDialog.getExistingDirectory(self, 'Select fused.zarr directory')
@@ -1717,6 +1782,9 @@ class Step2Page(QWidget):
                 f'ch1={attrs.get("channel_1","?")}'
             )
             self._update_tile_info()
+            if self._auto_tile_strategy.isChecked():
+                self._refresh_tile_suggestion(apply=True)   # Auto follows the new input's size
+            self._keep_stardist_tiles_safe()             # a new input: StarDist's tiles must fit
             self._load_overview_from_zarr(z)
         except Exception as e:
             self._zarr_info.setText(f'⚠ Failed to open zarr: {e}')
@@ -1809,6 +1877,110 @@ class Step2Page(QWidget):
         if self._skip_empty_cb.isChecked() and not self._run_active:
             self._refresh_skip_plan()
         self._draw_tile_grid()
+
+    #: StarDist runs a whole tile through its network and NMS at once (32 ray
+    #: distances per pixel); a 19640 x 7600 tile (~150 MP read) crashed the
+    #: engine with std::bad_alloc on 2026-10-25 while ~65 MP tiles ran. Safe
+    #: cap on one tile's READ area (own + overlap), below 2^31 / 32 elements.
+    STARDIST_MAX_TILE_PX = 60_000_000
+
+    def _is_stardist(self):
+        method = self._method_combo.currentData() if hasattr(self, "_method_combo") else None
+        return method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
+
+    def _run_input_shapes(self):
+        """(h, w) of every input the run will segment with this ONE grid: each
+        region's fused product (multi-ROI), else the shown input."""
+        shapes = []
+        for path in (getattr(self, "_region_fused_paths", None) or {}).values():
+            try:
+                shapes.append(tuple(int(v) for v in zarr.open(path, mode="r").shape[:2]))
+            except Exception:                               # noqa: BLE001 -- the worker reports it
+                continue
+        return shapes or [(int(self._full_h), int(self._full_w))]
+
+    def _largest_tile_px(self, n_rows, n_cols):
+        """The largest read window (own + overlap) of that grid over every
+        input of the run, in pixels."""
+        from ..utils.tile_scheduler import TileScheduler
+        best = 0
+        for h, w in self._run_input_shapes():
+            for t in TileScheduler(h, w, int(n_rows), int(n_cols), int(self._overlap_spin.value())).tiles:
+                best = max(best, (t.read_bbox[1] - t.read_bbox[0]) * (t.read_bbox[3] - t.read_bbox[2]))
+        return best
+
+    def _stardist_safe_grid(self, n_rows, n_cols):
+        """(rows, cols): the given grid, split further (the longer tile side of
+        the largest input first) until no tile's read window exceeds
+        STARDIST_MAX_TILE_PX."""
+        nr, nc = max(1, int(n_rows)), max(1, int(n_cols))
+        h, w = max(self._run_input_shapes(), key=lambda s: s[0] * s[1])
+        while self._largest_tile_px(nr, nc) > self.STARDIST_MAX_TILE_PX:
+            if h / nr >= w / nc:
+                nr += 1
+            else:
+                nc += 1
+        return nr, nc
+
+    def _set_grid(self, n_rows, n_cols):
+        """Put the grid on the boxes (their maximum raised when it is needed)."""
+        self._rows_spin.blockSignals(True)
+        self._cols_spin.blockSignals(True)
+        try:
+            self._rows_spin.setMaximum(max(self._rows_spin.maximum(), int(n_rows)))
+            self._cols_spin.setMaximum(max(self._cols_spin.maximum(), int(n_cols)))
+            self._rows_spin.setValue(int(n_rows))
+            self._cols_spin.setValue(int(n_cols))
+        finally:
+            self._rows_spin.blockSignals(False)
+            self._cols_spin.blockSignals(False)
+        self._update_tile_info()
+
+    def _stardist_grid_ok_for_run(self):
+        """The last grid check before the run's configuration is taken (so the
+        skip plan follows a changed grid) and before anything is created:
+        StarDist's tiles must fit (2026-10-25). Asks; False = do not run."""
+        if not self._is_stardist():
+            return True
+        # (no Auto re-application here: it would reset the skip choices even
+        # when nothing changes; the grid on screen is the one checked)
+        nr0, nc0 = self._rows_spin.value(), self._cols_spin.value()
+        safe = self._stardist_safe_grid(nr0, nc0)
+        if safe != (nr0, nc0):
+            big = self._largest_tile_px(nr0, nc0) / 1e6
+            answer = QMessageBox.question(
+                self, "Tile grid",
+                f"The tile grid {nr0}×{nc0} makes tiles of up to {big:.0f} MP. StarDist runs a whole "
+                f"tile at once and crashes on tiles this big.\n\nUse {safe[0]}×{safe[1]} instead "
+                f"(tiles ≤ {self.STARDIST_MAX_TILE_PX // 1_000_000} MP)?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if answer != QMessageBox.Yes:
+                return False
+            self._set_grid(*safe)
+        applied = (self._rows_spin.value(), self._cols_spin.value())
+        if self._largest_tile_px(*applied) > self.STARDIST_MAX_TILE_PX:   # never run it anyway
+            QMessageBox.warning(self, "Tile grid",
+                                f"The tile grid {applied[0]}×{applied[1]} still makes tiles too big for "
+                                "StarDist; the run is not started.")
+            return False
+        return True
+
+    def _keep_stardist_tiles_safe(self):
+        """With StarDist, a grid whose tiles are too big is split further at
+        once (user ruling 2026-10-25); the suggestion line says so."""
+        if not self._is_stardist() or self._full_h <= 0 or self._full_w <= 0:
+            return False
+        nr, nc = self._rows_spin.value(), self._cols_spin.value()
+        safe = self._stardist_safe_grid(nr, nc)
+        if safe == (nr, nc):
+            return False
+        self._set_grid(*safe)
+        self._tile_suggestion_lbl.setText(
+            self._tile_suggestion_lbl.text() + f"  ·  StarDist: grid {nr}×{nc} → {safe[0]}×{safe[1]} "
+            f"(tiles ≤ {self.STARDIST_MAX_TILE_PX // 1_000_000} MP)")
+        print(f"[Step2] StarDist tile grid {nr}x{nc} -> {safe[0]}x{safe[1]} (tile read area cap "
+              f"{self.STARDIST_MAX_TILE_PX:,} px)")
+        return True
 
     def _on_auto_tile_strategy_changed(self):
         self._refresh_tile_suggestion(apply=self._auto_tile_strategy.isChecked())
@@ -2826,6 +2998,7 @@ class Step2Page(QWidget):
         print("[HQ2-UI] patch preview enabled=", preview_btn.isEnabled() if preview_btn is not None else None)
         if getattr(self, "_full_h", 0):
             self._refresh_tile_suggestion(apply=getattr(self, "_auto_tile_strategy", None) is not None and self._auto_tile_strategy.isChecked())
+            self._keep_stardist_tiles_safe()             # StarDist chosen: its tiles must fit (2026-10-25)
 
     def _available_hq_channels(self):
         candidates = []
@@ -3088,6 +3261,8 @@ class Step2Page(QWidget):
             ):
                 if not self._apply_selected_index_params():
                     return
+        if not self._stardist_grid_ok_for_run():
+            return
         seg_config = self.get_seg_config()
         if self._region_fused_paths:                # block RM: the chosen fuse run's
             seg_config["region_fused_paths"] = dict(self._region_fused_paths)
@@ -3123,7 +3298,10 @@ class Step2Page(QWidget):
         if self._rec_box.isChecked():
             recovery_dir = self._rec_edit.text().strip() or None
 
-        if self._auto_tile_strategy.isChecked():
+        if self._auto_tile_strategy.isChecked() and not self._is_stardist():
+            # (StarDist: the grid checked by `_stardist_grid_ok_for_run` -- over
+            # every region -- is the one that runs; Auto would re-size it from
+            # the shown input alone)
             self._refresh_tile_suggestion(apply=True)
 
         nr  = self._rows_spin.value()
@@ -3379,9 +3557,12 @@ class Step2Page(QWidget):
     def _apply_pending_context(self):
         """The run ended: switch to the workspace handed over meanwhile."""
         pending, self._pending_context = self._pending_context, None
+        follow, self._after_pending_context = self._after_pending_context, None
         if pending is not None:
             print(f"[Step2] switching to workspace {pending[0] or '(none)'}")
             self.set_roi_context(*pending)
+            if follow is not None:
+                follow()
 
     def _on_finished(self, output_dir, total_cells):
         self._run_grid_lbl.setVisible(False)

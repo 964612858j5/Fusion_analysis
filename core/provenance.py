@@ -540,6 +540,21 @@ def register_step4(h5ad_path, job, provenance_record):
             else:
                 unresolved.append({"role": "corrected_channel", "channel": ch.name,
                                    "path": ch.path})
+        regions_params = None
+        reg = provenance_record.get("regions")
+        if isinstance(reg, dict):
+            # F4-4: the Regions Save the run's snapshot froze -- by its place
+            # and frozen content checksum, as the segmentation run records it
+            from .regions import lock as RK
+            token = reg.get("save_content_sha256")
+            aid = lookup(project_dir, "regions_layout", location(project_dir, RK.saved_path(project_dir)),
+                         token) if token else None
+            if aid:
+                deps.append(aid)
+            else:
+                unresolved.append({"role": "regions_layout", "content_sha256": token})
+            regions_params = {"identity": reg.get("identity"), "selection_mode": reg.get("selection_mode"),
+                              "position_keys": list(reg.get("position_keys") or [])}
         outputs = provenance_record.get("outputs") or {}
         return safe_register(
             project_dir, "step4_h5ad", location(project_dir, h5ad_path),
@@ -550,6 +565,7 @@ def register_step4(h5ad_path, job, provenance_record):
                         "statistics": provenance_record.get("statistics"),
                         "schema": provenance_record.get("schema"),
                         "schema_version": provenance_record.get("schema_version"),
+                        **({"regions": regions_params} if regions_params else {}),
                         "files": {"h5ad": outputs.get("h5ad"), "csv": outputs.get("csv"),
                                   "provenance": os.path.basename(h5ad_path)[:-5]
                                   + "_provenance.json"}},

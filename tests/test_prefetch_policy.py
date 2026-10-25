@@ -16,7 +16,7 @@ test_multichannel_prefetch.py.
 
 import pytest
 
-from viewer.prefetch_policy import (
+from block01.viewer.prefetch_policy import (
     ChannelCorrectionSpec,
     coverage_order,
     hot_order,

@@ -10,6 +10,16 @@ from block01.core import bg_correction as bg
 pytestmark = pytest.mark.skipif(bg._cv2 is None, reason="OpenCV not installed")
 
 
+@pytest.fixture(autouse=True)
+def _cpu_backend(monkeypatch):
+    """These tests are about the CPU backend: run them as on a machine
+    without GPU morphology, so `compute_path` and the per-tile functions
+    choose the CPU here too. A test about the GPU backend patches
+    `compute_path` itself."""
+    from block01.core import bg_correction as bg
+    monkeypatch.setattr(bg, "GPU_MORPH_AVAILABLE", False)
+
+
 def _scipy(a, s):
     a = np.asarray(a, np.float32)
     return np.clip(a - sk_gaussian(a, sigma=s, preserve_range=True,

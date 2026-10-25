@@ -133,7 +133,12 @@ def test_stop_still_stops(page):
 
 def test_save_still_builds_its_config_from_the_ticked_rows(page):
     page._channel_rows["CD3"]["checkbox"].setChecked(True)
-    page._channel_rows["CD3"]["method_cb"].setCurrentText("TopHat")
+    # 8d28849: the row's Method combo is the PREVIEW method; what Save
+    # publishes is the Per-Channel Decision, made with its radios + Apply
+    page.current_channel = "CD3"
+    page._update_decision_ui()
+    page._dec_top.setChecked(True)
+    page._apply_current_channel_decision()
 
     config = page._build_config()
 

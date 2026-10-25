@@ -94,6 +94,13 @@ def test_mapping_slide_local_to_full(app):
     s.current_patch_idx = 0
     s._sync_step0_to_workbench()
     s._cond_workbench.set_active_channel("CD3")
+    # bf33911: the workbench reads a channel in the background; its pixels
+    # land through the event loop
+    import time
+    deadline = time.monotonic() + 5.0
+    while s._cond_workbench._raw.get("CD3") is None and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.005)
 
     full = s._map_viewport_to_full(_img_local(10, 60, 20, 70))
 

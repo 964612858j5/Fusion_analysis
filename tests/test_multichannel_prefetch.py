@@ -9,18 +9,18 @@ pytest.importorskip("PyQt5")
 
 from PyQt5 import QtCore, QtTest, QtWidgets  # noqa: E402
 
-from viewer.multichannel_prefetch import (  # noqa: E402
+from block01.viewer.multichannel_prefetch import (  # noqa: E402
     HOT_PRIORITY_BASE,
     HOT_INFLIGHT,
     SETTLE_CONFIRM_MS,
     MultiChannelPrefetchController,
 )
-from viewer import prefetch_policy as prefetch_rules  # noqa: E402
-from viewer.prefetch_policy import (  # noqa: E402
+from block01.viewer import prefetch_policy as prefetch_rules  # noqa: E402
+from block01.viewer.prefetch_policy import (  # noqa: E402
     ChannelCorrectionSpec,
     hot_order,
 )
-from viewer.tile_types import (  # noqa: E402
+from block01.viewer.tile_types import (  # noqa: E402
     CorrectionKey,
     QualityLevel,
     SourceIdentity,

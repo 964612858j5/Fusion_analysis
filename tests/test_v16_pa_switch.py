@@ -68,6 +68,8 @@ def test_a_window_on_a_channel_not_composed_redraws_nothing(monkeypatch):
     monkeypatch.setattr(vm.Step1WholeSlideMount, "_domain", property(lambda self: None))
     monkeypatch.setattr(vm.Step1WholeSlideMount, "_state", property(lambda self: None))
     mount._mode = "overlay"
+    # what __init__ sets for a plain Step1 mount (Step3/Regions pass their own)
+    mount._display_scope, mount._display_only, mount._display_filter = vm.STEP1_SCOPE, False, None
     spec = {"mode": "overlay", "weights": {"DAPI": 1.0, "CD3": 0.7, "TOX": 0.0}}
     monkeypatch.setattr(vm.draft_spec, "build_spec", lambda *a, **k: dict(spec))
     redraws = []

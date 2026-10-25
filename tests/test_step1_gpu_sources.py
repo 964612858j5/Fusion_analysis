@@ -851,12 +851,13 @@ def test_hardware_fbo_partial_coarse_never_shows_a_centre_first_channel(app):
         last = by_address[order[-1]]
         scheduler.deliver(last.key, array=coarse_values("B"))
         _events(app)
-        # G3.2b: the complete coarse is in, but B has never been drawn, so
-        # it waits for its viewport fine too and the picture is STILL the
-        # A-only baseline -- no blurry B, not even for one frame.
-        held = layer.readback_rgba_for_test()
-        assert np.array_equal(held, baseline), \
-            "B appeared before its viewport fine was ready"
+        # A9-O3-5 (user ruling 2026-10-07, Odon's design; G3.2b's hold-back
+        # is void): the complete coarse is in, so B appears now, at once,
+        # over the whole valid area -- coarse first, then sharper.
+        first = layer.readback_rgba_for_test()
+        valid = first[..., 3] == 255
+        assert np.all(first[..., 1][valid] > 0), "B appears over every valid pixel at once"
+        assert np.array_equal(first[..., 0], baseline[..., 0]), "A's own signal is untouched"
         b_fine = [request for request in scheduler.requests[before_b:]
                   if request.key.channel == "B"
                   and request.priority != PRIORITY_COARSE]

@@ -1363,10 +1363,13 @@ def test_the_step0_panel_keeps_its_place_among_the_page_sections(app):
 # `Ready.` status line that stood between the header rule and the list is
 # gone (user ruling, 2026-09-23). The frame is 2px taller again since the
 # panels under the picture left for the single Save row. Width unchanged.
+# Step0 moved onto the shared page frame (v16 A1b S2, 9a82a32): its channel
+# column is the one pixel width Step0/Step1/Step3 share (Step0's 4/3 rule) and
+# the dock takes the frame's margins, so the panel is re-measured there.
 STEP0_PANEL_BASELINE = {
-    "container": (0, 0, 349, 762),
-    "dock": (10, 63, 329, 689),
-    "list": (4, 30, 321, 655),
+    "container": (0, 0, 411, 762),
+    "dock": (5, 54, 401, 703),
+    "list": (4, 30, 393, 669),
 }
 
 

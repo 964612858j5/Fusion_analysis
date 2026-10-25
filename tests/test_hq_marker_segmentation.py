@@ -10,6 +10,7 @@ from block01.workers.hq_marker_segmentation import (
     validate_hq_channels,
 )
 from block01.workers.segment_merge_worker import SegmentMergeWorker
+from block01.workers.hq_source_resolver import SOURCE_MODE_CORRECTED_THEN_RAW
 
 
 def _synthetic_inputs():
@@ -123,6 +124,10 @@ class TestHqMarkerSegmentation(unittest.TestCase):
             worker.roi_id = ""
             worker.roi_display_name = "ROI_right"
             worker._logger = None
+            worker.method = ""                   # what __init__ sets and the HQ path reads
+            worker.zarr_path = ""
+            worker._hq_source_mode = SOURCE_MODE_CORRECTED_THEN_RAW
+            worker._hq_resolved_source_path = ""
 
             channels, group = worker._validate_hq_config("ROI_right")
             selected_channels = set(worker._channel_array_names(group))
@@ -156,6 +161,10 @@ class TestHqMarkerSegmentation(unittest.TestCase):
             worker.roi_id = ""
             worker.roi_display_name = "ROI_missing"
             worker._logger = None
+            worker.method = ""                   # what __init__ sets and the HQ path reads
+            worker.zarr_path = ""
+            worker._hq_source_mode = SOURCE_MODE_CORRECTED_THEN_RAW
+            worker._hq_resolved_source_path = ""
 
             with self.assertRaisesRegex(ValueError, "Could not match ROI group"):
                 worker._validate_hq_config("ROI_missing")

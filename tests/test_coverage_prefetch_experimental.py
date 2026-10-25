@@ -20,13 +20,13 @@ pytest.importorskip("PyQt5")
 
 from PyQt5 import QtTest  # noqa: E402
 
-from viewer.experimental.coverage_prefetch import (  # noqa: E402
+from block01.viewer.experimental.coverage_prefetch import (  # noqa: E402
     COVERAGE_BATCH_CHANNELS,
     COVERAGE_INFLIGHT,
     COVERAGE_PRIORITY_BASE,
     CoverageMultiChannelPrefetchController,
 )
-from viewer.prefetch_policy import coverage_order, hot_order  # noqa: E402
+from block01.viewer.prefetch_policy import coverage_order, hot_order  # noqa: E402
 
 from test_multichannel_prefetch import (  # noqa: E402
     HOT_PRIORITY_BASE,

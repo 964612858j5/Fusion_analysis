@@ -202,16 +202,26 @@ def test_clear_all_corrections_reverts_everything(app):
 
 
 def test_save_invalidation_repulls_into_workbench(app):
-    """End-to-end: Save lands -> provider announces -> remap view re-pulls
-    the saved corrected pixels."""
+    """End-to-end: Save lands -> provider announces -> the remap view drops
+    the channel's stale pixels and asks for them again.
+
+    Since f34b497 / bf33911 the view's pixels are the whole slide's overview,
+    read in the background, so the re-pull is a request to the pixel
+    provider (answered later through the loop), not patch pixels copied in."""
     page = _page(app)
     wb = page._cond_workbench
     wb.set_channel_images(
         {"CD3": page._preload.resident(page._patch_bbox(0), "CD3")})
     assert float(wb._raw["CD3"][0, 0]) == 2.0
+    asked = []
+    wb.set_pixel_provider(lambda name: asked.append(name) or None)
     corrected = np.full((32, 32), 9.0, np.float32)
     _mark_saved(page, "CD3", "tophat", corrected)
     page._preview_provider.invalidate("CD3")           # what Save emits
+    assert wb._raw["CD3"] is None                       # the old pixels are gone
+    assert asked == ["CD3"]                             # and asked for again
+    wb.deliver_pixels("CD3", corrected)                 # the read lands
+    app.processEvents()
     assert float(wb._raw["CD3"][0, 0]) == 9.0
 
 

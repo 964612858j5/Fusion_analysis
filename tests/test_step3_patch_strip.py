@@ -42,7 +42,8 @@ def _no_modal_dialogs(monkeypatch):
 
 
 def _row_widgets(page):
-    lay = page.viewer_layout().itemAt(0).layout()
+    # the row is the frame's fixed-height tool row (A1b S1, `StepFrame.tool_row`)
+    lay = page.viewer_layout().itemAt(0).widget().layout()
     out = []
     for i in range(lay.count()):
         item = lay.itemAt(i)
@@ -58,6 +59,7 @@ def test_one_row_and_the_run_list_beside_the_tab(app, tmp_path, monkeypatch):
         bar, strip = w._step3_mask_bar, w._step3_patch_strip
         row = _row_widgets(w._step3)
         assert row == [strip.holder(), bar.buttons["cell"], bar.buttons["nucleus"], bar.hint,
+                       w._btn_tma_cores_step3,                         # F4-3: hidden without cores
                        w._btn_step3_mode_overlay, w._btn_step3_mode_fusion]
         tabs = w._step3._right_tabs
         corner = tabs.cornerWidget()

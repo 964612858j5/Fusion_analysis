@@ -2296,9 +2296,11 @@ class _ThreadProbe:
         self.threads = []
         binding._apply_result = self._wrapped
 
-    def _wrapped(self, payload, *, publish):
+    def _wrapped(self, payload, **kw):
+        # A9-O2: results arrive with `deferred=True` (published on the frame
+        # slot); the probe forwards whatever the binding passes
         self.threads.append(QtCore.QThread.currentThread())
-        return self._original(payload, publish=publish)
+        return self._original(payload, **kw)
 
     def release(self):
         self._binding._apply_result = self._original

@@ -142,7 +142,7 @@ def _recompute(page, channel, method="both"):
 
 
 def _up_to_date(page, channel, method=None):
-    method = method or page._channel_row_method(channel)
+    method = method or page._channel_preview_method(channel)   # 8d28849: what it is computed with
     return page._channel_is_up_to_date(
         channel, page._channel_signature(channel, method))
 

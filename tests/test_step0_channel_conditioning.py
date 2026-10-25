@@ -208,6 +208,21 @@ class _CountingLoader(_FakeLoader):
         return np.random.rand(y1 - y0, x1 - x0).astype(np.float32)
 
 
+def _pump(app, done, timeout=5.0, settle=0.05):
+    """bf33911: the workbench's pixel provider reads in the background and the
+    pixels land through the event loop -- run it until `done()` (then a
+    little longer, so a second read would have shown up too)."""
+    import time
+    deadline = time.monotonic() + timeout
+    while not done() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.005)
+    end = time.monotonic() + settle
+    while time.monotonic() < end:
+        app.processEvents()
+        time.sleep(0.005)
+
+
 def _fresh_page_with_counting_loader(app):
     from block01.ui.step0.step0_page import Step0Page
     p = Step0Page()
@@ -221,16 +236,18 @@ def _fresh_page_with_counting_loader(app):
     return p, ld
 
 
-def test_patch_switch_reads_only_active_channel(app):
+def test_patch_switch_reads_nothing(app):
+    """f34b497: the workbench's pixels are the whole slide, so selecting
+    another patch re-reads nothing (it used to re-read the active channel's
+    patch crop)."""
     p, ld = _fresh_page_with_counting_loader(app)
     p._sync_step0_to_workbench()          # workbench now "in use"
+    _pump(app, lambda: ld.calls)          # the active channel's eager read
     ld.calls.clear()
-    # simulate a patch switch's conditioning refresh
-    p.current_patch_idx = 1
-    p._maybe_refresh_conditioning()
-    # ONLY the active channel is read (#6: DAPI is a normal lazy channel now, no
-    # separate reference read) — NOT all 28. Single read, not the whole panel.
-    assert len(ld.calls) == 1, ld.calls
+    p._rebuild_patch_buttons()
+    p._select_patch(1)
+    _pump(app, lambda: ld.calls)
+    assert ld.calls == []
 
 
 def test_unloaded_channel_lazy_loads_on_switch(app):
@@ -240,6 +257,7 @@ def test_unloaded_channel_lazy_loads_on_switch(app):
     target = next(n for n in wb._names if wb._raw.get(n) is None)
     ld.calls.clear()
     wb._on_active_changed(target)         # user selects a not-yet-loaded channel
+    _pump(app, lambda: wb._raw.get(target) is not None)
     assert ld.calls == [target]           # one lazy read fired
     assert wb._raw.get(target) is not None  # data now available
 
@@ -250,6 +268,7 @@ def test_loaded_channel_switch_is_cache_hit(app):
     wb = p._cond_workbench
     target = next(n for n in wb._names if wb._raw.get(n) is None)
     wb._on_active_changed(target)         # load it once
+    _pump(app, lambda: wb._raw.get(target) is not None)
     ld.calls.clear()
     wb._on_active_changed(target)         # re-select -> no new read
     assert ld.calls == []
@@ -388,10 +407,13 @@ def test_dapi_lazy_loads_like_a_marker(app):
     p, ld = _fresh_page_with_counting_loader(app)   # nucleus=DAPI, 27 M + DAPI
     p._sync_step0_to_workbench()
     wb = p._cond_workbench
+    active = wb.active_channel()
+    _pump(app, lambda: wb._raw.get(active) is not None)   # the eager read lands
     assert "DAPI" in wb._names                        # normal channel in the list
     if wb._raw.get("DAPI") is None:                   # DAPI not the eager active
         ld.calls.clear()
         wb._on_active_changed("DAPI")
+        _pump(app, lambda: wb._raw.get("DAPI") is not None)
         assert ld.calls == ["DAPI"]                   # lazy-loaded on demand
         assert wb._raw.get("DAPI") is not None
 
@@ -652,6 +674,7 @@ def test_sync_passes_the_active_channel_eagerly_and_the_rest_lazily(app):
     wb = p._cond_workbench
     active = wb.active_channel()
     assert active is not None
+    _pump(app, lambda: wb._raw.get(active) is not None)
     assert wb._raw.get(active) is not None, "the inspector opened empty"
     assert [n for n in wb._names if wb._raw.get(n) is not None] == [active]
 
@@ -720,7 +743,7 @@ def _page_two_patches(app, bbox0=(0, 50, 0, 50), bbox1=(0, 80, 0, 90)):
         ch_map = {"DAPI": 0, "CD68": 1}
         def channel_names(self):
             return ["DAPI", "CD68"]
-        def read_region(self, ch, y0, y1, x0, x1, normalize=False):
+        def read_region(self, ch, y0, y1, x0, x1, normalize=False, **_kw):
             return np.random.rand(y1 - y0, x1 - x0).astype(np.float32)
 
     p = Step0Page()
@@ -731,47 +754,13 @@ def _page_two_patches(app, bbox0=(0, 50, 0, 50), bbox1=(0, 80, 0, 90)):
     p.current_patch_idx = 0
     p._rebuild_patch_buttons()
     p._sync_step0_to_workbench()          # engage conditioning, paint P0 (fit)
+    _pump(app, p._cond_workbench.has_channel_data)
     return p
 
 
-def _rng(p):
-    return p._cond_workbench.viewer._vb.viewRange()
-
-
-def test_unvisited_patch_does_not_inherit_zoom(app):
-    p = _page_two_patches(app)
-    vb = p._cond_workbench.viewer._vb
-    vb.setRange(xRange=(5, 15), yRange=(6, 16), padding=0)      # zoom P0
-    p0_zoom = vb.viewRange()
-    p._select_patch(1)                                         # P1 never visited
-    p1 = vb.viewRange()
-    # P1 must NOT inherit P0's zoom (it fits to its own image instead)
-    assert not (np.allclose(p0_zoom[0], p1[0]) and np.allclose(p0_zoom[1], p1[1]))
-
-
-def test_revisited_patch_restores_its_viewport(app):
-    p = _page_two_patches(app)
-    vb = p._cond_workbench.viewer._vb
-    vb.setRange(xRange=(5, 15), yRange=(6, 16), padding=0)
-    p0_zoom = vb.viewRange()
-    p._select_patch(1)
-    p._select_patch(0)                                        # return to P0
-    p0_restored = vb.viewRange()
-    assert np.allclose(p0_zoom[0], p0_restored[0]) and np.allclose(p0_zoom[1], p0_restored[1])
-
-
-def test_patches_keep_independent_viewports(app):
-    p = _page_two_patches(app)
-    vb = p._cond_workbench.viewer._vb
-    vb.setRange(xRange=(5, 15), yRange=(6, 16), padding=0)
-    p0z = vb.viewRange()
-    p._select_patch(1)
-    vb.setRange(xRange=(20, 30), yRange=(21, 31), padding=0)   # zoom P1
-    p1z = vb.viewRange()
-    p._select_patch(0)
-    assert np.allclose(_rng(p)[0], p0z[0]) and np.allclose(_rng(p)[1], p0z[1])
-    p._select_patch(1)
-    assert np.allclose(_rng(p)[0], p1z[0]) and np.allclose(_rng(p)[1], p1z[1])
+# (The per-patch zoom tests of this canvas are gone: since f34b497 it shows
+# the whole slide, and since b5cfbea Step0 never puts it on screen, so it
+# has no view of a patch to remember.)
 
 
 def test_remap_params_stay_channel_global_across_patches(app):

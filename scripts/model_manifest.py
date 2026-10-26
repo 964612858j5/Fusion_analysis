@@ -5,6 +5,12 @@ so the repository records where each engine expects them and the size and
 SHA-256 of every file. A deployment copies the files into place and runs
 this with --verify; a missing file or a checksum mismatch is an error.
 
+A `generated` entry (the Mesmer torch weights) is made on each machine from
+another entry, so its bytes may differ: it records the CONTENT digest of its
+file instead (`content_sha256`, seg_runner/mesmer_torch/weights.py), which
+--write keeps and --verify compares. Only
+`scripts/convert_mesmer_to_torch.py --update-manifest` sets a new one.
+
     python scripts/model_manifest.py --write
     python scripts/model_manifest.py --verify
 """
@@ -36,14 +42,15 @@ MODELS = {
                                       "root": "/sda1/Fusion/benchmark/spacec/models/Mesmer_model/MultiplexSegmentation",
                                       "env_override": "DEEPCELL_MESMER_MODEL_PATH",
                                       "files": None},
-    # The torch conversion the Mesmer engine loads (docs/mesmer_torch_plan.md):
-    # made locally by scripts/convert_mesmer_to_torch.py from the entry above,
+    # The torch conversion the Mesmer engine loads (docs/mesmer_torch_plan.md
+    # §10): made from the entry above at its first use on each machine,
     # never committed (non-commercial weights licence).
     "mesmer_multiplex_segmentation_torch": {"engine": "mesmer",
                                             "root": "/sda1/Fusion/benchmark/spacec/models/Mesmer_model/MultiplexSegmentation_torch",
                                             "env_override": "BLOCK01_MESMER_TORCH_PATH",
                                             "derived_from": "mesmer_multiplex_segmentation",
-                                            "files": ["mesmer_multiplex_segmentation.pt", "SOURCE.txt"]},
+                                            "generated": True,
+                                            "files": ["mesmer_multiplex_segmentation.pt"]},
 }
 
 
@@ -62,9 +69,33 @@ def _files(root, names):
     return base, sorted(str(p.relative_to(base)) for p in base.rglob("*") if p.is_file())
 
 
+def _content_digest(path):
+    from seg_runner.mesmer_torch import weights
+    return weights.content_digest(weights.read(path))
+
+
+def _recorded():
+    try:
+        return json.loads(MANIFEST.read_text(encoding="utf-8")).get("models", {})
+    except (OSError, ValueError):
+        return {}
+
+
 def write():
     out = {"schema": 1, "models": {}}
+    recorded = _recorded()
     for key, spec in MODELS.items():
+        if spec.get("generated"):
+            digest = recorded.get(key, {}).get("content_sha256")
+            if not digest:
+                print(f"cannot write the manifest: {key} has no recorded content_sha256 "
+                      "(set one with scripts/convert_mesmer_to_torch.py --update-manifest)")
+                return 1
+            entry = {k: v for k, v in spec.items() if k != "files"}
+            entry["content_sha256"] = digest
+            entry["files"] = [{"path": n} for n in spec["files"]]
+            out["models"][key] = entry
+            continue
         base, names = _files(model_root(spec), spec["files"])
         missing = [n for n in names if not (base / n).is_file()]
         if not names or missing:
@@ -77,9 +108,18 @@ def write():
         out["models"][key] = entry
     MANIFEST.parent.mkdir(parents=True, exist_ok=True)
     MANIFEST.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
-    total = sum(f["size"] for m in out["models"].values() for f in m["files"])
+    total = sum(f.get("size", 0) for m in out["models"].values() for f in m["files"])
     print(f"wrote {MANIFEST} ({sum(len(m['files']) for m in out['models'].values())} files, {total} bytes)")
     return 0
+
+
+def set_content_digest(key, digest):
+    """Record `digest` as entry `key`'s content (a new baseline); only this
+    entry changes."""
+    data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    data["models"][key]["content_sha256"] = digest
+    MANIFEST.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    print(f"recorded {key} content_sha256 {digest} in {MANIFEST}")
 
 
 def verify():
@@ -92,6 +132,15 @@ def verify():
             if not p.is_file():
                 print(f"MISSING {key}: {p}")
                 bad += 1
+            elif entry.get("generated"):
+                try:
+                    same = _content_digest(p) == entry.get("content_sha256")
+                except Exception as exc:  # noqa: BLE001 -- an unreadable file is a mismatch
+                    print(f"UNREADABLE {key}: {p} ({exc})")
+                    same = False
+                if not same:
+                    print(f"MISMATCH {key}: {p} (content)")
+                    bad += 1
             elif p.stat().st_size != f["size"] or _sha256(p) != f["sha256"]:
                 print(f"MISMATCH {key}: {p}")
                 bad += 1

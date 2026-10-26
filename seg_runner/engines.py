@@ -49,7 +49,8 @@ MODELS_MANIFEST = pathlib.Path(__file__).resolve().parent.parent / "envs" / "fus
 # result it was handed. Deliberately small: environment hashes, library
 # versions and code hashes are PROVENANCE (recorded, never compared) -- see
 # `seg_runner.runner.engine_provenance`. Model file integrity is checked at
-# deployment by `scripts/model_manifest.py --verify`, not at every start.
+# deployment by `scripts/model_manifest.py --verify`, not at every start
+# (the Mesmer torch weights are also checked by content at every load).
 IDENTITY_VERSION = 2
 #: Bump an engine's number ONLY for a change that can alter its segmentation
 #: output: normalisation, threshold semantics, the expansion algorithm, the
@@ -106,13 +107,19 @@ def model_root(entry):
     return os.path.expanduser(os.environ.get(entry.get("env_override") or "") or entry["root"])
 
 
-def model_path(key, manifest=MODELS_MANIFEST):
-    """The directory of manifest entry `key`, checked against the manifest's
-    file list and sizes; anything missing is an error."""
+def manifest_entry(key, manifest=MODELS_MANIFEST):
+    """Entry `key` of the model manifest; a missing one is an error."""
     try:
-        entry = json.loads(pathlib.Path(manifest).read_text())["models"][key]
+        return json.loads(pathlib.Path(manifest).read_text())["models"][key]
     except (OSError, ValueError, KeyError) as exc:
         raise ModelMissingError(f"no {key} entry in the model manifest {manifest}") from exc
+
+
+def model_path(key, manifest=MODELS_MANIFEST):
+    """The directory of manifest entry `key`, checked against the manifest's
+    file list and sizes (a `generated` entry lists no sizes: its file is
+    checked by content when loaded); anything missing is an error."""
+    entry = manifest_entry(key, manifest)
     root = model_root(entry)
     for f in entry.get("files") or []:
         path = os.path.join(root, f["path"])
@@ -238,13 +245,20 @@ class MesmerEngine:
     name = "mesmer"
 
     def __init__(self):
+        import sys
         import torch
-        from .mesmer_torch import app, weights
+        from .mesmer_torch import app, prepare, weights
         cuda = torch.cuda.is_available()
+        entry = manifest_entry(MESMER_TORCH_ENTRY)
+        root = model_root(entry)
+        # first use on this machine: made from the Keras model (plan §10)
+        prepare.ensure(root, model_root(manifest_entry(entry["derived_from"])),
+                       entry.get("content_sha256"), lambda m: print(m, file=sys.stderr, flush=True))
         path = os.path.join(model_path(MESMER_TORCH_ENTRY), weights.WEIGHTS_FILE)
         self.model_path = path
-        params = weights.load(path, "cuda" if cuda else "cpu")
+        params = weights.load(path, "cuda" if cuda else "cpu", entry.get("content_sha256"))
         self._artifact = {"entry": MESMER_TORCH_ENTRY, "sha256": _file_sha256(path),
+                          "content_sha256": params["content_sha256"],
                           "source": params.get("source") or {}}
         self._app = app.MesmerTorch(params, "cuda" if cuda else "cpu")
         self._numerics = app.NUMERICS
@@ -263,8 +277,9 @@ class MesmerEngine:
 
     def model_artifact(self):
         """The weights file this process runs and where it came from: its
-        sha256 and the conversion source (model key, the Keras files' hashes,
-        deepcell/TF versions). Provenance -- recorded, never compared."""
+        content digest (checked against the manifest at load), its file
+        sha256 (may differ between machines: recorded, never compared) and
+        the conversion source (model key, the Keras files' hashes, versions)."""
         return dict(self._artifact)
 
     def predict(self, image, params, compartments, kwargs=None):

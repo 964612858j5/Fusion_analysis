@@ -31,13 +31,16 @@ Regenerate all four from the live environment with
 - `KERAS_BACKEND=tensorflow` (the application and `seg_runner` set it).
 
 On the build machine, TensorFlow 2.8.4 sees no GPU: StarDist runs on the CPU.
-Cellpose and Mesmer use the GPU through PyTorch. Mesmer runs the converted
-weights (`seg_runner/mesmer_torch`, docs/mesmer_torch_plan.md); make them once
-per machine with `python scripts/convert_mesmer_to_torch.py` (needs the Keras
-model, see the manifest entry `mesmer_multiplex_segmentation`; the output goes
-to the entry `mesmer_multiplex_segmentation_torch`, or BLOCK01_MESMER_TORCH_PATH).
-The converted weights keep the original's non-commercial academic licence:
-never commit or redistribute them.
+Cellpose and Mesmer use the GPU through PyTorch. Mesmer runs a PyTorch copy of
+the Keras model's weights (`seg_runner/mesmer_torch`, docs/mesmer_torch_plan.md
+§10). Nothing has to be done for it: at its first use on a machine (the
+selftest below, or the first Mesmer run) the engine converts the Keras model
+once, on the CPU (about 20 s), into the directory of the manifest entry
+`mesmer_multiplex_segmentation_torch` (or BLOCK01_MESMER_TORCH_PATH), and
+checks the result against the content digest in `models.json`. Later starts
+load it directly. `python scripts/convert_mesmer_to_torch.py` does the same by
+hand. The converted weights keep the original's non-commercial academic
+licence: never commit or redistribute them.
 
 ## Install
 
@@ -53,18 +56,16 @@ a temporary prefix, checks the result against the lock and deletes it.
 
 The weights are not in the repository (cpsam alone is 1.2 GB). Copy them to the
 locations in `models.json` (`~` is the running user's home; the Mesmer path can
-be overridden with `DEEPCELL_MESMER_MODEL_PATH`), then:
-
-```bash
-<prefix>/bin/python scripts/model_manifest.py --verify
-```
+be overridden with `DEEPCELL_MESMER_MODEL_PATH`). The Mesmer PyTorch weights
+are not copied: the selftest makes them (above).
 
 ## Verify
 
 ```bash
 cd /tmp   # not the repository: CUDA libraries write cufile.log into the working dir
-PYTHONPATH=<repo> <prefix>/bin/python -m seg_runner.selftest            # all three engines
+PYTHONPATH=<repo> <prefix>/bin/python -m seg_runner.selftest            # all three engines; makes the Mesmer PyTorch weights the first time
 PYTHONPATH=<repo> unshare -n <prefix>/bin/python -m seg_runner.selftest # the same without network (root)
+<prefix>/bin/python <repo>/scripts/model_manifest.py --verify          # every model file, after the selftest
 ```
 
 Each engine must report `"state": "ok"` and `"exit_code": 0`.

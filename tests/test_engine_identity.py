@@ -128,13 +128,16 @@ def test_a_legacy_identity_is_compared_on_the_engine_kind_only():
 
 
 def test_mesmer_provenance_names_the_converted_weights_and_their_source():
-    """docs/mesmer_torch_plan.md §5: the .pt's sha256 and the conversion
-    source travel with every result (recorded, never compared)."""
+    """docs/mesmer_torch_plan.md §5, §10: the .pt's file sha256, its content
+    digest and the conversion source travel with every result (recorded,
+    never compared)."""
     class _Torch(_FakeEngine):
         def model_artifact(self):
             return {"entry": "mesmer_multiplex_segmentation_torch", "sha256": "ab" * 32,
+                    "content_sha256": "ef" * 32,
                     "source": {"model_key": "mesmer_multiplex_segmentation", "files": {"saved_model.pb": "cd" * 32}}}
     prov = runner.engine_provenance("mesmer", _Torch(path="/m/w.pt"))
     assert prov["model_artifact"]["sha256"] == "ab" * 32
+    assert prov["model_artifact"]["content_sha256"] == "ef" * 32
     assert prov["model_artifact"]["source"]["model_key"] == "mesmer_multiplex_segmentation"
     assert "model_artifact" not in runner.engine_identity("mesmer")

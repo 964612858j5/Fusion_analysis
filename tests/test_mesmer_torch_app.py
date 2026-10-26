@@ -31,7 +31,8 @@ def pair():
     except engines.ModelMissingError as exc:
         pytest.skip(str(exc))
     from deepcell.applications import Mesmer
-    params = weights.load(os.path.join(torch_dir, weights.WEIGHTS_FILE))
+    params = weights.load(os.path.join(torch_dir, weights.WEIGHTS_FILE), "cpu",
+                          engines.manifest_entry(engines.MESMER_TORCH_ENTRY)["content_sha256"])
 
     class _Adapter:                       # DeepCell's model slot, our network
         input_shape = (None, 256, 256, 2)

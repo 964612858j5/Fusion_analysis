@@ -169,7 +169,8 @@ def test_mesmer_with_cpu_only_runs_on_the_cpu_and_equals_the_cpu_call(tmp_path):
         path = os.path.join(engines.model_path(engines.MESMER_TORCH_ENTRY), weights.WEIGHTS_FILE)
     except engines.ModelMissingError as exc:
         pytest.skip(str(exc))
-    cpu = app.MesmerTorch(weights.load(path, "cpu"), "cpu")
+    cpu = app.MesmerTorch(weights.load(path, "cpu", engines.manifest_entry(engines.MESMER_TORCH_ENTRY)["content_sha256"]),
+                          "cpu")
     img = synthetic.mesmer_pair()
     direct = cpu.predict(img[None], image_mpp=0.5, compartments=("nuclear",))["nuclear"]
     sizes = np.bincount(np.squeeze(direct).ravel())[1:]

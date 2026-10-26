@@ -3,7 +3,9 @@
 For each engine: start it in its own subprocess through the real client, run
 one synthetic task, report versions, device, timings and peak memory. Used
 as-is for the offline check (`unshare -n python -m seg_runner.selftest`).
-Writes only into a temporary directory.
+Writes into a temporary directory, except at the first Mesmer start on a
+machine: the engine then makes its PyTorch weights in the model directory
+(docs/mesmer_torch_plan.md §10).
 """
 import json
 import sys

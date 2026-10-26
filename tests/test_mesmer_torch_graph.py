@@ -53,7 +53,7 @@ def test_weights_round_trip_and_load_strictly(tmp_path):
     data = _random_params()
     path = tmp_path / weights.WEIGHTS_FILE
     torch.save(dict(data, source={"note": "synthetic"}), path)
-    params = weights.load(str(path))
+    params = weights.load(str(path), "cpu", weights.content_digest(weights.read(str(path))))
     assert set(params["tensors"]) == set(graph.expected_shapes())
     assert params["source"] == {"note": "synthetic"}
 
@@ -63,7 +63,7 @@ def test_weights_round_trip_and_load_strictly(tmp_path):
         p = tmp_path / "broken.pt"
         torch.save(d, p)
         with pytest.raises(weights.WeightsError):
-            weights.load(str(p))
+            weights.load(str(p), "cpu", "any")
 
     broken(lambda d: d["tensors"].pop("P3.bias"))                           # missing
     broken(lambda d: d["tensors"].update({"extra.weight": torch.zeros(1)}))  # unexpected

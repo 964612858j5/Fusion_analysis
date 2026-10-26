@@ -197,3 +197,109 @@ v1 → v2 的改动（codex astra high 第 1 轮，P1×3、P2×4、P3；门槛�
 5. 验收 D 和 E，GPU/CPU 对 TF 的差异报告，用户真机跑一次完整 Step2（1–1.5 天）。
 
 每步做完都送 codex 审核；完成后跑完整回归；用户验收后再提交。
+
+## 10. 补充：第一次使用时自动准备 PyTorch 权重（2026-10-26，第三版，codex 批准，用户已授权）
+
+### 10.1 问题（已核对）
+
+1. 别的机器现在要手动跑一次 `scripts/convert_mesmer_to_torch.py`。
+2. 现在的转换脚本会先重写仓库里的 `models.json`，再做 verify。
+   - 后果：仓库基准被部署机器改掉，代码目录变脏；仓库不可写或其他模型缺失时，脚本整体失败。
+   - 根源：manifest 固定的是本机这份文件的大小和 sha256。但文件字节并不固定：
+     - `SOURCE.txt` 里有转换时间和源路径；
+     - `.pt` 的 `source` 字典里有源路径（没有时间）。
+   - 不同机器转出来的字节可以不同，大小也可能不同。
+3. 权重**内容**是确定的（实验记录，codex 未复现）：在本机重新转换一次，384 个张量和 57 个 epsilon 与现有文件逐位相同（指纹 `e75cbc70…`）。转换约 10 秒（读 Keras 7.9 秒，转换 0.2 秒），另加头部自检。
+
+### 10.2 方案
+
+1. **内容指纹**：`weights.content_digest(data)`，由引擎、转换器和 manifest 工具共用这一个函数。
+   - 输入是 `torch.load(path, map_location="cpu", weights_only=True)` 读出的**原始**数据，在任何 dtype 或设备转换之前。
+   - 先做现有的结构检查 `check()`，再求指纹。
+   - 编码固定：
+     - 先写 `FORMAT`；
+     - 再按键名排序，逐个写入 `名字\0 dtype\0 形状\0 字节长度\0 字节`；
+     - 再按层名排序，写入 epsilon 的 `repr(float)`。
+   - 排除 `source`，也就是路径和版本信息。
+   - `weights.load(path, device, expected_digest)` 的顺序：读入 → `check()` → 比指纹 → 转成 float32 并放到设备上。
+     - `expected_digest` 为空就报错，不退化为只检查文件是否存在。
+     - 指纹不符时只拒绝加载，**不删除**用户已有的文件。
+2. **manifest 条目**
+   - torch 条目改为 `"generated": true`，加 `"content_sha256"`；`files` 只列 `.pt`，不记 size 和 sha256。
+   - `model_path()` 对 generated 条目只检查文件是否存在。
+   - `model_manifest.py`：
+     - `verify()` 对 generated 条目比内容指纹；
+     - `write()` 跳过它，保留原有的 `content_sha256`；汇总逻辑不再依赖每个文件都有 `size`。
+3. **引擎冷启动顺序**：`MesmerEngine.__init__` 依次执行：
+   1. 读 manifest 条目；
+   2. `model_root()` 解析目录；
+   3. `prepare.ensure(root, keras_entry, expected_digest, log)`；
+   4. `weights.load(..., expected_digest)`。
+   - 全部在发送 `hello` 之前完成。
+   - 600 秒的启动上限包括锁等待、转换和加载。本机实测约 20 秒；更慢的机器如果超时，报错里写明可以手动转换。
+4. **`prepare.ensure()`**：手动入口和自动准备共用这一段。
+   - `.pt` 已存在：直接返回。之后照常比指纹，不需要 TensorFlow。
+   - 不存在时：
+     1. 先建好输出目录（全新部署时它还不存在），再由**父进程**（引擎进程，或手动脚本）在输出目录拿 `fcntl` 文件锁 `.convert.lock`。锁覆盖复查、转换、检查和发布的全过程；子进程不再抢锁。
+     2. 拿到锁后再查一次 `.pt` 是否已在：两个运行同时开时，后到的一方直接使用。
+     3. 转换子进程用 `[sys.executable, "-m", "seg_runner.mesmer_torch.prepare", "--convert-to", <临时目录>]` 启动。
+        - 环境复制后**强制**设置 `CUDA_VISIBLE_DEVICES=""`，不用 `setdefault`。
+        - 子进程留在 runner 的进程组内，所以现有的停止和清理机制同样会结束它。
+        - 子进程的 stdout 和 stderr 进入引擎日志。
+     4. 临时目录建在目标目录内，名字随机，形如 `.convert-<pid>-<随机>`。子进程在里面写 `.pt`，并做头部自检（误差 ≤1e-4）。
+     5. 父进程核对指纹等于 manifest 的 `content_sha256`。通过后**一次**原子改名，把 `.pt` 放到最终位置。
+        - **`.pt` 是唯一的提交点。**
+        - `--force` 替换时也是这一次 `os.replace`：成功前旧 `.pt` 一直原样保留，失败或中断后仍是旧文件。
+     6. **`SOURCE.txt` 只是说明，由 `.pt` 生成，不参与成败判断。**
+        - 它的内容来自 `.pt` 里的 `source` 字典和内容指纹，第一行写明指纹。
+        - `ensure()` 每次（拿锁后，或 `.pt` 已存在时）都检查 `SOURCE.txt`：缺失，或内容与按 `.pt` 生成的文字不同（不只比第一行的指纹，也比来源信息），就从 `.pt` 重新生成（写临时文件后原子改名）。生成的文字只取自 `.pt`，不含当前时间，所以内容稳定。
+        - 因此任何中断后，最多短暂缺少或带着过时的说明，下一次启动会自动改正，永远不会描述错的权重。
+        - 目录不可写时只记一条警告，不影响运行。
+     7. **失败后的文件状态**
+        - 首次生成失败（没有 TF、转换出错、自检或指纹不符）：删掉自己的临时目录，报错，没有最终 `.pt`。
+        - 替换失败：旧 `.pt` 不变，报错。
+        - 进程被强行杀掉：只会留下临时目录，它永远不会被当成成功产物；下次拿到锁时，清掉不属于活进程的旧临时目录。
+   - 进度写入引擎日志，例如：`[Mesmer] first use on this machine: preparing the GPU weights from the Keras model (one time)`。
+   - 适用范围：这套环境本来只支持 Linux x86_64 部署（README 已写明），这里的 `fcntl` 文件锁和进程组也只在这个范围内使用和测试。
+5. **失败时都报错，不偷偷退回**（沿用计划 7.10.3）
+   - 没有 Keras 模型：提示先拷贝它，并给出 `DEEPCELL_MESMER_MODEL_PATH`。
+   - 输出目录不可写：提示用 `BLOCK01_MESMER_TORCH_PATH`。
+   - 没有 TensorFlow：提示安装 fusion_mesmer 环境。
+   - 不退回 TF 版 Mesmer，也不换用别的路径。
+6. **转换脚本** `scripts/convert_mesmer_to_torch.py`
+   - 默认：拿锁 → `ensure`（加 `--force` 时替换已有文件，替换同样走临时目录和原子改名）→ 核对指纹。**不改仓库的 manifest。**
+   - `--update-manifest`：只在构建机上、建立新基准时用，例如权重格式升级。
+     - 转换后把新指纹写进 manifest，不与旧指纹比较；
+     - 这是唯一会写 `models.json` 的路径，测试里只写临时 manifest。
+7. **部署说明**（README）改为：
+   1. 设置路径，拷贝 Keras 模型；
+   2. 跑 `seg_runner.selftest`：第一次会自动生成 GPU 权重；
+   3. 跑 `model_manifest.py --verify`。
+   - selftest 里"只写临时目录"的说明相应改为"第一次会在模型目录生成 GPU 权重"。
+8. **身份和溯源**
+   - 身份（版本 2）不变。
+   - `model_artifact` 记录：
+     - 文件 sha256：各机器可能不同，只记录不比较；
+     - `content_sha256`：实际校验过的内容指纹；
+     - `source`。
+   - 内容相同、文件字节不同，不算身份差异。
+9. **测试**：全部在 tmp 目录里，用 env 覆盖路径和临时 manifest，不碰真实模型目录和仓库 `models.json`。
+   - 指纹：改 `source` 里的路径或时间，指纹不变；改张量、dtype 或 epsilon，加载被拒绝；预期指纹缺失时报错。
+   - `ensure`（用假的转换子进程）：
+     - 缺文件时转换，已存在时不转换也不需要 TF；
+     - 两个进程同时启动，只转换一次；
+     - 转换失败、自检失败、指纹不符：不出现最终 `.pt`，临时目录被清掉；
+     - 被杀后的残留临时目录，下次被清掉；
+     - `--force` 替换：成功时换成新文件；在改名之前失败或中断，旧 `.pt` 原样保留；
+     - `SOURCE.txt` 缺失、或第一行指纹与 `.pt` 不符：下次 `ensure` 从 `.pt` 重新生成；目录不可写时只给警告；
+     - 已有 `.pt` 指纹不符：拒绝加载，但不删除；
+     - 没有 Keras 模型、目录不可写、没有 TF：报错清楚。
+   - 经真实 `EngineProcess.start()`：冷启动（自动转换）后再启动一次（直接使用）。
+   - 转换脚本：默认不改 manifest 字节；`--update-manifest` 只写临时 manifest，而且旧指纹不同时也照样写入新指纹，不会被旧指纹挡住。
+   - 真实转换：在本机必须实际运行，不能用 skip 充数。转换到 tmp，指纹等于 manifest，引擎能读入并分割；随后用合成项目走一遍 Step2 产品流程。
+
+### 10.3 需要用户授权
+
+这是新机制，按 AGENTS.md 需要授权，内容有两项：
+1. 引擎第一次使用时，自动在模型目录生成权重文件；
+2. torch 权重改为按内容指纹校验。

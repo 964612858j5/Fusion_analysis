@@ -204,22 +204,9 @@ class Step2Profiler:
                 best = {"gpu_mem_mb": mem, "gpu_peak_mb": peak, "source": "cupy"}
             except Exception:
                 pass
-        if best is None:
-            try:
-                import tensorflow as tf
-
-                infos = []
-                for gpu in tf.config.list_physical_devices("GPU"):
-                    try:
-                        infos.append(tf.config.experimental.get_memory_info(gpu.name))
-                    except Exception:
-                        pass
-                if infos:
-                    mem = sum(float(info.get("current", 0)) for info in infos) / (1024.0 * 1024.0)
-                    peak = sum(float(info.get("peak", 0)) for info in infos) / (1024.0 * 1024.0)
-                    best = {"gpu_mem_mb": mem, "gpu_peak_mb": peak, "source": "tensorflow"}
-            except Exception:
-                pass
+        # No TensorFlow probe: every engine runs in its own process, so this
+        # process's TensorFlow would not see their memory, and importing it
+        # only to ask printed CUDA library errors (Mesmer is PyTorch now).
         try:
             if best is not None:
                 peak_value = best.get("gpu_peak_mb") or best.get("gpu_mem_mb")

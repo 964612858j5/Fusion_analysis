@@ -92,15 +92,35 @@ class RuntimeResourceMonitor:
         likely_io_bottleneck = bool(read_or_pre and self._stage_hot(read_or_pre) and gpu_peak_util < 20.0)
         likely_merge_bottleneck = bool(merge_or_write and self._stage_hot(merge_or_write) and gpu_peak_util < 20.0)
 
-        device = self.detect_backend_runtime_device()
-        if likely_cpu_fallback and device == "gpu":
-            device = "cpu_fallback"
-        elif likely_gpu_inference:
-            device = "gpu"
+        reported = self._engine_reported_device()
+        if self._is_recovery():
+            # masks read back from .npy files: nothing is segmented, so there
+            # is neither GPU inference nor a fall back to the CPU
+            device, likely_gpu_inference, likely_cpu_fallback = "none", False, False
+        elif self._is_engine_pending():
+            # the engine process has not reported yet: claim nothing
+            device, likely_gpu_inference, likely_cpu_fallback = "unknown", False, False
+        elif reported is not None:
+            # The engine process said which device it runs on: that is the
+            # fact. GPU utilisation is the whole card's (other programs
+            # count too), so it never overrides the report.
+            device = reported
+            likely_gpu_inference = reported == "gpu"
+            likely_cpu_fallback = reported == "cpu" and self._gpu_requested()
+        else:
+            device = self.detect_backend_runtime_device()
+            if likely_cpu_fallback and device == "gpu":
+                device = "cpu_fallback"
+            elif likely_gpu_inference:
+                device = "gpu"
 
         cellpose_requested_gpu = str(self.seg_config.get("use_gpu", True)).strip().lower() not in {"0", "false", "no", "off", "cpu"}
         cellpose_actual_device = self._cellpose_model_device() if "cellpose" in self.backend.lower() else "unknown"
-        actual_cuda_execution = bool(likely_gpu_inference or ("cuda" in str(cellpose_actual_device).lower() and gpu_peak_util > 0.0))
+        if reported is not None or self._is_recovery() or self._is_engine_pending():
+            # the report names the device; execution means a task really ran
+            actual_cuda_execution = bool(likely_gpu_inference and inference)
+        else:
+            actual_cuda_execution = bool(likely_gpu_inference or ("cuda" in str(cellpose_actual_device).lower() and gpu_peak_util > 0.0))
         gpu_morph_available = None
         cupy_smoke_test = "unknown"
         cucim_smoke_test = "unknown"
@@ -157,7 +177,45 @@ class RuntimeResourceMonitor:
             return True
         return False
 
+    def _engine_device_text(self):
+        """The engine process's own device text from its start
+        (`{"runner": ..., "device": ...}`, e.g. "cuda:0", "gpu", "cpu"), or ""."""
+        obj = self.backend_obj
+        if not (isinstance(obj, dict) and "runner" in obj):
+            return ""
+        return str(obj.get("device") or "")
+
+    def _is_recovery(self):
+        obj = self.backend_obj
+        return isinstance(obj, dict) and bool(obj.get("recovery"))
+
+    def _is_engine_pending(self):
+        obj = self.backend_obj
+        return isinstance(obj, dict) and bool(obj.get("engine_pending"))
+
+    def _engine_reported_device(self):
+        """"gpu" / "cpu" as reported by the engine process at its start, or
+        None when there is no such report (before the start, or an
+        in-process method)."""
+        device = self._engine_device_text().lower()
+        if "gpu" in device or "cuda" in device:
+            return "gpu"
+        if "cpu" in device:
+            return "cpu"
+        return None
+
+    def _gpu_requested(self):
+        return str(self.seg_config.get("use_gpu", True)).strip().lower() not in {
+            "0", "false", "no", "off", "cpu"}
+
     def detect_backend_runtime_device(self):
+        if self._is_recovery():
+            return "none"
+        if self._is_engine_pending():
+            return "unknown"
+        reported = self._engine_reported_device()
+        if reported is not None:
+            return reported
         backend = self.backend.lower()
         if "cellpose" in backend:
             return self._detect_cellpose_device()
@@ -288,6 +346,8 @@ class RuntimeResourceMonitor:
         return "cpu"
 
     def _cellpose_model_device(self):
+        if self._engine_device_text():
+            return self._engine_device_text()      # Cellpose's model.device, from its process
         try:
             model = (self.backend_obj or {}).get("cellpose") if isinstance(self.backend_obj, dict) else self.backend_obj
             return str(getattr(model, "device", "unknown") or "unknown")
@@ -306,12 +366,10 @@ class RuntimeResourceMonitor:
                 return "cpu"
         except Exception:
             pass
-        try:
-            import tensorflow as tf
-
-            return "gpu" if tf.config.list_physical_devices("GPU") else "cpu"
-        except Exception:
-            return "unknown"
+        # Mesmer runs on PyTorch in its own process, which reports its device
+        # (`_engine_reported_device`): importing TensorFlow here only to ask
+        # would load it into the app.
+        return "unknown"
 
     def _detect_hq_device(self):
         try:
@@ -345,6 +403,10 @@ class RuntimeResourceMonitor:
         except Exception:
             pass
         reasons = []
+        if self._engine_reported_device() == "cpu":
+            # this process's torch says nothing about the engine's environment
+            return ["the engine process reports the CPU although Use GPU is on "
+                    "(no CUDA device in the engine's environment)"]
         try:
             import torch
 

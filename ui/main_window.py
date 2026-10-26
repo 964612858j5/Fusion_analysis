@@ -11128,7 +11128,8 @@ class MainWindow(QMainWindow):
         return json.loads(json.dumps({
             "kind": "fuse",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "summary": f"{kind} · {method}" + (f" · {shown}" if shown else ""),
+            # no segmentation method: the pixels do not depend on it
+            "summary": kind + (f" · {shown}" if shown else ""),
             "artifact_kind": key.get("artifact_kind"),
             "method": method,
             "reuse_key": key,

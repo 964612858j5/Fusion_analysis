@@ -1619,9 +1619,18 @@ class SegmentMergeWorker(QThread):
         self._runtime_summary = {}
         self._runtime_monitor = None
         self._runtime_stage = "startup"
+        # Known before the first sample: a recovery run segments nothing; an
+        # engine run's device is unknown until its process reports it.
+        if self.recovery_npy_dir is not None:
+            context = {"recovery": True}
+        elif self._runs_on_engine():
+            context = {"engine_pending": True}
+        else:
+            context = None
         self._runtime_monitor = RuntimeResourceMonitor(
             backend=self.method,
             logger=self._logger,
+            backend_obj=context,
             seg_config=self.seg_config,
         )
         self._runtime_monitor.set_stage(self._runtime_stage)
@@ -2622,7 +2631,7 @@ class SegmentMergeWorker(QThread):
                              "identity_comparison": comparison}
         if self._logger:
             self._logger.info(f"[Step2] {engine} engine process started, device={hello.get('device')}")
-        return {"runner": ep}
+        return {"runner": ep, "device": hello.get("device")}
 
     def _segment_tile_contract(self, tile_data, backend, profile_tile_id):
         """One read tile through the engine process: the input built as Step1

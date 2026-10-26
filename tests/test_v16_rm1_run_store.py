@@ -118,6 +118,18 @@ def test_display_name_and_session(ws):
                     "editing": {"correct_run": "a", "geometry_revision": 2}}
 
 
+def test_a_fuse_is_not_named_after_a_segmentation_method(ws):
+    # a fuse made while StarDist was selected, reused by a Mesmer run: Step3
+    # tagged the Mesmer result "stardist_nuclei_expansion"
+    _, roi = ws
+    f = rs.new_run(roi, "fuse", now=T0)
+    rs.write_params(f, {"kind": "fuse", "method": "stardist_nuclei_expansion",
+                        "summary": "DAPI input · stardist_nuclei_expansion · CD3 1, CD8 0.5"})
+    rs.write_inputs(f, None, slide_id="s1")
+    rs.publish(f)
+    assert rs.display_name(f) == "10-03 12:00 · DAPI input · CD3 1, CD8 0.5"
+
+
 def test_records_round_trip(ws, tmp_path):
     project, roi = ws
     rec = {"corrected_zarr_path": os.path.join(roi, "runs", "c", "x.zarr"),
@@ -579,6 +591,10 @@ def test_the_fuse_params_name_the_preseg_run_they_used(app, tmp_path):
                                    "/p/m_1.json")
         assert params["preseg_run"] == "rois/ws1/runs/" + os.path.basename(pre)
         assert params["segmentation_params"] == {"file": "m_1.json", "content": {"a": 1}}
+        assert params["method"] == "m" and params["summary"] == "fused"     # no method in what is shown
+        dapi = w._rm_fuse_params({"artifact_kind": "x"}, "stardist_nuclei_expansion", False, {}, {}, {},
+                                 "/p/m_1.json")
+        assert dapi["summary"] == "DAPI input"
     finally:
         w.close()
 

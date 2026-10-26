@@ -65,6 +65,26 @@ class Step2ProfilerTests(unittest.TestCase):
         finally:
             builtins.__import__ = real_import
 
+    def test_gpu_snapshot_never_asks_tensorflow(self):
+        # Mesmer is PyTorch in its own process; this process's TensorFlow
+        # sees no engine memory and only printed CUDA library errors.
+        profiler = Step2Profiler(enabled=True)
+        real_import = builtins.__import__
+        asked = []
+
+        def fake_import(name, *args, **kwargs):
+            if name in {"torch", "cupy", "tensorflow"}:
+                asked.append(name)
+                raise ImportError("not here")
+            return real_import(name, *args, **kwargs)
+
+        try:
+            builtins.__import__ = fake_import
+            self.assertIsNone(profiler.snapshot_gpu())
+        finally:
+            builtins.__import__ = real_import
+        self.assertNotIn("tensorflow", asked)
+
     def test_disabled_profiler_has_no_outputs(self):
         with tempfile.TemporaryDirectory() as td:
             profiler = Step2Profiler(enabled=False, output_dir=td)

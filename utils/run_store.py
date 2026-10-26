@@ -298,6 +298,12 @@ def display_name(run_dir) -> str:
         d, t = parts[1], parts[2]
         when = f"{d[4:6]}-{d[6:8]} {t[0:2]}:{t[2:4]}"
     summary = str(params.get("summary") or "")
+    if params.get("kind") == "fuse" and params.get("method"):
+        # A fuse's pixels do not depend on the segmentation method (any
+        # method may reuse it), so naming the one selected when it was made
+        # misleads -- e.g. a Mesmer result tagged "stardist". Older fuse runs
+        # still carry it in their summary.
+        summary = " · ".join(p for p in summary.split(" · ") if p != params["method"])
     return " · ".join(p for p in (when, summary) if p) or name
 
 

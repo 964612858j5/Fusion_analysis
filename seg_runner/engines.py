@@ -3,7 +3,8 @@
 Each engine applies exactly its one standard preprocessing (plan 7.11.5):
     cellpose  eval(normalize=True), the library default
     stardist  csbdeep normalize(img, 1, 99.8) -- the library itself has none
-    mesmer    DeepCell's default preprocessing (no preprocess_kwargs)
+    mesmer    DeepCell's default preprocessing, run by `mesmer_torch` (the
+              Mesmer network on PyTorch; docs/mesmer_torch_plan.md)
 The input array arrives already built by the application side (plan 7.11.4);
 nothing here stretches it again.
 
@@ -54,10 +55,16 @@ IDENTITY_VERSION = 2
 #: output: normalisation, threshold semantics, the expansion algorithm, the
 #: input-channel arrangement, post-processing, another default model. Adding
 #: a package, logging, the protocol or the UI never bumps it.
-BEHAVIOR_VERSION = {"cellpose": 1, "stardist": 1, "mesmer": 1}
-#: The `models.json` key of the model each engine loads.
+#: mesmer 2 (user ruling 2026-10-25): the network runs on PyTorch (GPU first,
+#: CPU otherwise) instead of TensorFlow; results differ from version 1 at the
+#: level of floating-point rounding, so they are another behaviour.
+BEHAVIOR_VERSION = {"cellpose": 1, "stardist": 1, "mesmer": 2}
+#: The LOGICAL model of each engine (its `models.json` key). Mesmer's is the
+#: Keras model; the file it loads is that model's torch conversion, stored as
+#: `MESMER_TORCH_ENTRY` -- the same weights, so the same model identity.
 MODEL_ID = {"cellpose": "cellpose_cpsam", "stardist": "stardist_2D_versatile_fluo",
             "mesmer": "mesmer_multiplex_segmentation"}
+MESMER_TORCH_ENTRY = "mesmer_multiplex_segmentation_torch"
 #: Compared between a Step1 result and the engine Step2 runs.
 COMPARED_FIELDS = ("behavior_version", "model_id")
 
@@ -91,24 +98,36 @@ class ModelMissingError(RuntimeError):
     silent fall back to some other path)."""
 
 
-def mesmer_model_path(manifest=MODELS_MANIFEST):
-    """The Mesmer model directory: the manifest's root, or the directory in
-    the manifest's `env_override` variable when that is set. Checked against
-    the manifest's file list and sizes; anything missing is an error."""
+def model_root(entry):
+    """The directory a manifest entry's files are in: the directory named by
+    its `env_override` variable when that is set, else its `root`. THE one
+    path rule -- the converter, `scripts/model_manifest.py --write/--verify`
+    and the engines all resolve a model directory through it."""
+    return os.path.expanduser(os.environ.get(entry.get("env_override") or "") or entry["root"])
+
+
+def model_path(key, manifest=MODELS_MANIFEST):
+    """The directory of manifest entry `key`, checked against the manifest's
+    file list and sizes; anything missing is an error."""
     try:
-        entry = json.loads(pathlib.Path(manifest).read_text())["models"]["mesmer_multiplex_segmentation"]
+        entry = json.loads(pathlib.Path(manifest).read_text())["models"][key]
     except (OSError, ValueError, KeyError) as exc:
-        raise ModelMissingError(f"no Mesmer entry in the model manifest {manifest}") from exc
-    root = os.environ.get(entry.get("env_override") or "") or entry["root"]
-    root = os.path.expanduser(root)
+        raise ModelMissingError(f"no {key} entry in the model manifest {manifest}") from exc
+    root = model_root(entry)
     for f in entry.get("files") or []:
         path = os.path.join(root, f["path"])
         if not os.path.isfile(path):
-            raise ModelMissingError(f"Mesmer model file missing: {path} (model manifest {manifest})")
+            raise ModelMissingError(f"model file missing: {path} ({key}, model manifest {manifest})")
         if f.get("size") is not None and os.path.getsize(path) != int(f["size"]):
-            raise ModelMissingError(f"Mesmer model file has the wrong size: {path} "
+            raise ModelMissingError(f"model file has the wrong size: {path} "
                                     f"({os.path.getsize(path)} B, the manifest says {f['size']} B)")
     return root
+
+
+def mesmer_model_path(manifest=MODELS_MANIFEST):
+    """The Keras Mesmer model directory (the converter's source and the TF
+    reference of the tests; the engine runs the torch conversion)."""
+    return model_path("mesmer_multiplex_segmentation", manifest)
 
 
 def postprocess_mask(mask, min_size=0):
@@ -212,36 +231,61 @@ class StardistEngine:
 
 
 class MesmerEngine:
+    """Mesmer on PyTorch: the converted MultiplexSegmentation weights through
+    `mesmer_torch.app` -- GPU when CUDA is there, else CPU; batch 1, float32,
+    deterministic cuDNN and no TF32 during the network pass
+    (`app.NUMERICS`), so a rerun on the same device gives the same masks."""
     name = "mesmer"
 
     def __init__(self):
-        n = _tf_gpu_count()
-        import tensorflow as tf
-        from deepcell.applications import Mesmer
-        path = mesmer_model_path()
+        import torch
+        from .mesmer_torch import app, weights
+        cuda = torch.cuda.is_available()
+        path = os.path.join(model_path(MESMER_TORCH_ENTRY), weights.WEIGHTS_FILE)
         self.model_path = path
-        self._app = Mesmer(model=tf.keras.models.load_model(path))
-        self.device = "gpu" if n else "cpu"
+        params = weights.load(path, "cuda" if cuda else "cpu")
+        self._artifact = {"entry": MESMER_TORCH_ENTRY, "sha256": _file_sha256(path),
+                          "source": params.get("source") or {}}
+        self._app = app.MesmerTorch(params, "cuda" if cuda else "cpu")
+        self._numerics = app.NUMERICS
+        self.device = "gpu" if cuda else "cpu"
 
     def lib_versions(self):
-        import tensorflow as tf
-        return {"deepcell": _dist_version("deepcell"), "tensorflow": tf.__version__,
+        import torch
+        return {"torch": torch.__version__, "cuda": torch.version.cuda or "",
+                "cudnn": str(torch.backends.cudnn.version() or ""),
+                "deepcell_toolbox": _dist_version("deepcell-toolbox"),
+                "mesmer_backend": "torch", "mesmer_numerics": dict(self._numerics),
                 **_common_lib_versions()}
 
     def model_resolved_path(self):
         return str(self.model_path) if self.model_path else None
 
-    def predict(self, image, params, compartment, thresholds=None):
-        """`thresholds` go to the post-processing of `compartment` (DeepCell
-        fills in its defaults for the rest); no preprocess_kwargs, so its
-        default preprocessing runs once (plan 7.11.5)."""
+    def model_artifact(self):
+        """The weights file this process runs and where it came from: its
+        sha256 and the conversion source (model key, the Keras files' hashes,
+        deepcell/TF versions). Provenance -- recorded, never compared."""
+        return dict(self._artifact)
+
+    def predict(self, image, params, compartments, kwargs=None):
+        """{compartment: mask} for `image` (H, W, 2); `kwargs` maps a
+        compartment to the post-processing values that replace DeepCell's
+        defaults (no preprocess arguments: its default preprocessing runs
+        once, plan 7.11.5). One network pass serves every compartment."""
         import numpy as np
         batch = image[None] if image.ndim == 3 else image
-        post = {"postprocess_kwargs_whole_cell" if compartment == "whole-cell"
-                else "postprocess_kwargs_nuclear": dict(thresholds or {})}
-        pred = self._app.predict(batch, image_mpp=float(params.get("image_mpp", 0.5)),
-                                 compartment=compartment, batch_size=1, **post)
-        return np.squeeze(pred)
+        out = self._app.predict(batch, image_mpp=float(params.get("image_mpp", 0.5)),
+                                compartments=tuple(compartments), kwargs=dict(kwargs or {}))
+        return {c: np.squeeze(m) for c, m in out.items()}
+
+
+def _file_sha256(path, chunk=1 << 20):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def _common_lib_versions():
@@ -268,14 +312,15 @@ def run(engine_obj, method, image, params):
     result = {"cell": None, "nucleus": None}
     if engine_obj.name == "mesmer":
         listed = {k: float(params[k]) for k in MESMER_THRESHOLDS if params.get(k) is not None}
-        target = MESMER_THRESHOLD_TARGET[method]
+        target = "whole-cell" if MESMER_THRESHOLD_TARGET[method] == "whole_cell" else "nuclear"
         min_size = int(params.get("postprocess_min_size", params.get("min_size", 0)) or 0)
+        wanted = [c for c, kind in (("whole-cell", "cell"), ("nuclear", "nucleus")) if kind in outputs]
+        # the listed thresholds reach the primary output's post-processing only
+        masks = engine_obj.predict(image, params, wanted, {target: listed})
         if "cell" in outputs:
-            result["cell"] = postprocess_mask(
-                engine_obj.predict(image, params, "whole-cell", listed), min_size)
+            result["cell"] = postprocess_mask(masks["whole-cell"], min_size)
         if "nucleus" in outputs:
-            nuc = engine_obj.predict(image, params, "nuclear",
-                                     listed if target == "nuclear" else None)
+            nuc = masks["nuclear"]
             # nuclear-guided: the second output, library defaults, not post-processed
             result["nucleus"] = postprocess_mask(nuc, min_size) if "cell" not in outputs else nuc
     elif method in EXPANSION_METHODS:

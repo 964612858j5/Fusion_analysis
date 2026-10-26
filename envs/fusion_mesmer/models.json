@@ -64,6 +64,24 @@
           "sha256": "a69941a894b867639472ae9b48bca287a6973e03224e58fef2bafa004a03ebfd"
         }
       ]
+    },
+    "mesmer_multiplex_segmentation_torch": {
+      "engine": "mesmer",
+      "root": "/sda1/Fusion/benchmark/spacec/models/Mesmer_model/MultiplexSegmentation_torch",
+      "env_override": "BLOCK01_MESMER_TORCH_PATH",
+      "derived_from": "mesmer_multiplex_segmentation",
+      "files": [
+        {
+          "path": "SOURCE.txt",
+          "size": 1271,
+          "sha256": "9901e7c53ae20d33a1fcbfa9819f4cf22bba4731f38e16c9e73b91818c0303e7"
+        },
+        {
+          "path": "mesmer_multiplex_segmentation.pt",
+          "size": 104199766,
+          "sha256": "0a02a8e227f0cb6a3befac0b71d2885e8314d75edecade92e317cf390f44a8d4"
+        }
+      ]
     }
   }
 }

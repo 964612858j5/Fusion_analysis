@@ -1,0 +1,34 @@
+Block01 -- Mesmer run by PyTorch (seg_runner/mesmer_torch)
+
+This directory contains code ADAPTED from deepcell-tf 0.12.10
+(https://github.com/vanvalenlab/deepcell-tf), Copyright 2016-2024 The Van
+Valen Lab at the California Institute of Technology (Caltech), with support
+from the Paul Allen Family Foundation, Google, & National Institutes of
+Health (NIH) under Grant U24CA224309-01. All rights reserved.
+
+That code is licensed under a modified Apache License, Version 2.0, a copy of
+which is in LICENSE-deepcell (copied verbatim from the installed deepcell
+0.12.10). The Work may be used for NON-COMMERCIAL ACADEMIC PURPOSES ONLY; for
+any other use, including commercial use, contact vanvalenlab@gmail.com.
+
+Adapted files (each carries the original copyright lines and a notice of
+what was changed):
+  graph.py        the Mesmer network (PanopticNet: Location2D, ResNet50
+                  backbone, FPN level P3, four semantic heads) as a
+                  functional PyTorch forward pass
+  resize.py       Application._resize_input / _resize_output
+  preprocess.py   mesmer_preprocess with its defaults
+  tiling.py       Application._tile_input / _untile_output
+  postprocess.py  format_output_mesmer, Mesmer.predict's post-processing
+                  defaults, mesmer_postprocess per compartment
+  app.py          the prediction flow of Application._predict_segmentation /
+                  _run_model / _batch_predict and Mesmer.predict
+
+The numerical operations themselves (resize, percentile threshold,
+histogram normalisation, tile/untile, deep_watershed) are CALLED from the
+installed deepcell_toolbox 0.12.1 (same licence), not copied.
+
+The converted weights (mesmer_multiplex_segmentation.pt, made locally by
+scripts/convert_mesmer_to_torch.py) remain under the deepcell-auth
+ASSET_LICENSE (non-commercial academic use only). They are not part of this
+repository and must not be redistributed.

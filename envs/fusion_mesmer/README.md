@@ -30,8 +30,14 @@ Regenerate all four from the live environment with
   headers must be re-verified (step 4 below).
 - `KERAS_BACKEND=tensorflow` (the application and `seg_runner` set it).
 
-On the build machine, TensorFlow 2.8.4 sees no GPU: StarDist and Mesmer run on
-the CPU. Cellpose uses the GPU through PyTorch.
+On the build machine, TensorFlow 2.8.4 sees no GPU: StarDist runs on the CPU.
+Cellpose and Mesmer use the GPU through PyTorch. Mesmer runs the converted
+weights (`seg_runner/mesmer_torch`, docs/mesmer_torch_plan.md); make them once
+per machine with `python scripts/convert_mesmer_to_torch.py` (needs the Keras
+model, see the manifest entry `mesmer_multiplex_segmentation`; the output goes
+to the entry `mesmer_multiplex_segmentation_torch`, or BLOCK01_MESMER_TORCH_PATH).
+The converted weights keep the original's non-commercial academic licence:
+never commit or redistribute them.
 
 ## Install
 
@@ -74,10 +80,14 @@ Each engine must report `"state": "ok"` and `"exit_code": 0`.
   |---|---|---|---|---|---|
   | cellpose | cuda:0 | 6.1 s | 1.3 s | 1.8 GiB | 3.2 GiB |
   | stardist | cpu | 2.5 s | 1.3 s | 0.7 GiB | 0 |
-  | mesmer | cpu | 9.4 s | 3.1 s | 1.4 GiB | 0 |
+  | mesmer | gpu (torch, 2026-10-25) | 1.7 s | 1.0 s (first task, cuDNN warm-up) | 0.8 GiB | 0.7 GiB |
+
+  Before 2026-10-25 Mesmer ran on TensorFlow, on the CPU: 9.4 s load, 3.1 s
+  per task, 1.4 GiB.
 
 - Each engine's result in its subprocess equals the direct library call on the
-  same input, pixel for pixel (`tests/test_seg_runner.py`).
+  same input, pixel for pixel (`tests/test_seg_runner.py`); for Mesmer the
+  direct call is the torch implementation on the same device.
 - Cellpose 4.1.1 rewrites a multi-channel input array in place during `eval`
   (up to 0.04 on [0, 1] data). `seg_runner` hands it a copy; any other caller
   must not reuse an array it passed to Cellpose.

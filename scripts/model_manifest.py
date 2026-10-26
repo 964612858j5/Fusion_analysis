@@ -15,7 +15,10 @@ import os
 import pathlib
 import sys
 
-MANIFEST = pathlib.Path(__file__).resolve().parent.parent / "envs" / "fusion_mesmer" / "models.json"
+_REPO = pathlib.Path(__file__).resolve().parent.parent
+MANIFEST = _REPO / "envs" / "fusion_mesmer" / "models.json"
+sys.path.insert(0, str(_REPO))
+from seg_runner.engines import model_root  # noqa: E402  (the one path rule)
 
 # Where each engine loads its weights from today. `~` is the running user's
 # home. The Mesmer path is the one hard-coded in
@@ -24,12 +27,23 @@ MANIFEST = pathlib.Path(__file__).resolve().parent.parent / "envs" / "fusion_mes
 MODELS = {
     "cellpose_cpsam": {"engine": "cellpose", "root": "~/.cellpose/models",
                        "files": ["cpsam"]},
+    # Listed, not globbed: StarDist unpacks its zip into a `_extracted`
+    # folder beside it at first use, which is not part of the deployment.
     "stardist_2D_versatile_fluo": {"engine": "stardist", "root": "~/.keras/models/StarDist2D/2D_versatile_fluo",
-                                   "files": None},
+                                   "files": ["2D_versatile_fluo.zip", "config.json", "thresholds.json",
+                                             "weights_best.h5"]},
     "mesmer_multiplex_segmentation": {"engine": "mesmer",
                                       "root": "/sda1/Fusion/benchmark/spacec/models/Mesmer_model/MultiplexSegmentation",
                                       "env_override": "DEEPCELL_MESMER_MODEL_PATH",
                                       "files": None},
+    # The torch conversion the Mesmer engine loads (docs/mesmer_torch_plan.md):
+    # made locally by scripts/convert_mesmer_to_torch.py from the entry above,
+    # never committed (non-commercial weights licence).
+    "mesmer_multiplex_segmentation_torch": {"engine": "mesmer",
+                                            "root": "/sda1/Fusion/benchmark/spacec/models/Mesmer_model/MultiplexSegmentation_torch",
+                                            "env_override": "BLOCK01_MESMER_TORCH_PATH",
+                                            "derived_from": "mesmer_multiplex_segmentation",
+                                            "files": ["mesmer_multiplex_segmentation.pt", "SOURCE.txt"]},
 }
 
 
@@ -51,7 +65,12 @@ def _files(root, names):
 def write():
     out = {"schema": 1, "models": {}}
     for key, spec in MODELS.items():
-        base, names = _files(spec["root"], spec["files"])
+        base, names = _files(model_root(spec), spec["files"])
+        missing = [n for n in names if not (base / n).is_file()]
+        if not names or missing:
+            print(f"cannot write the manifest: {key} has "
+                  + (f"missing files {missing} in {base}" if missing else f"no files in {base}"))
+            return 1
         entry = {k: v for k, v in spec.items() if k != "files"}
         entry["files"] = [{"path": n, "size": (base / n).stat().st_size, "sha256": _sha256(base / n)}
                           for n in names]
@@ -60,14 +79,14 @@ def write():
     MANIFEST.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
     total = sum(f["size"] for m in out["models"].values() for f in m["files"])
     print(f"wrote {MANIFEST} ({sum(len(m['files']) for m in out['models'].values())} files, {total} bytes)")
+    return 0
 
 
 def verify():
     data = json.loads(MANIFEST.read_text(encoding="utf-8"))
     bad = 0
     for key, entry in data["models"].items():
-        root = os.environ.get(entry.get("env_override", ""), "") or entry["root"]
-        base = pathlib.Path(os.path.expanduser(root))
+        base = pathlib.Path(model_root(entry))
         for f in entry["files"]:
             p = base / f["path"]
             if not p.is_file():

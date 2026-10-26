@@ -125,3 +125,16 @@ def test_a_legacy_identity_is_compared_on_the_engine_kind_only():
     got = engines.compare_identity(legacy, _v2())
     assert got == {"engine_differs": False, "legacy_identity": True, "differences": []}
     assert engines.compare_identity(dict(legacy, engine="cellpose"), _v2())["engine_differs"]
+
+
+def test_mesmer_provenance_names_the_converted_weights_and_their_source():
+    """docs/mesmer_torch_plan.md §5: the .pt's sha256 and the conversion
+    source travel with every result (recorded, never compared)."""
+    class _Torch(_FakeEngine):
+        def model_artifact(self):
+            return {"entry": "mesmer_multiplex_segmentation_torch", "sha256": "ab" * 32,
+                    "source": {"model_key": "mesmer_multiplex_segmentation", "files": {"saved_model.pb": "cd" * 32}}}
+    prov = runner.engine_provenance("mesmer", _Torch(path="/m/w.pt"))
+    assert prov["model_artifact"]["sha256"] == "ab" * 32
+    assert prov["model_artifact"]["source"]["model_key"] == "mesmer_multiplex_segmentation"
+    assert "model_artifact" not in runner.engine_identity("mesmer")

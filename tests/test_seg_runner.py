@@ -134,14 +134,17 @@ def test_cellpose_in_subprocess_equals_direct_call(tmp_path):
 
 
 def test_mesmer_in_subprocess_equals_direct_call(tmp_path):
-    pytest.importorskip("deepcell")
-    import tensorflow as tf
-    from deepcell.applications import Mesmer
-    from block01.seg_runner.engines import mesmer_model_path
+    """The engine process against the torch Mesmer called here, on the same
+    device: equal pixel for pixel (TF is no longer the reference -- user
+    ruling 2026-10-25; the port check is tests/test_mesmer_torch_*.py)."""
+    pytest.importorskip("deepcell_toolbox")
+    from block01.seg_runner import engines
+    try:
+        eng = engines.MesmerEngine()
+    except engines.ModelMissingError as exc:
+        pytest.skip(str(exc))
     img = synthetic.mesmer_pair()
-    app = Mesmer(model=tf.keras.models.load_model(mesmer_model_path()))
-    cell = np.squeeze(app.predict(img[None], image_mpp=0.5, compartment="whole-cell"))
-    nuc = np.squeeze(app.predict(img[None], image_mpp=0.5, compartment="nuclear"))
+    direct = eng.predict(img, {"image_mpp": 0.5}, ["whole-cell", "nuclear"])
     ep = EngineProcess("mesmer", log_path=str(tmp_path / "e.log"))
     ep.start()
     states = ep.run([_task(tmp_path, "m1", img, "mesmer_nuclear_guided", image_mpp=0.5)])
@@ -149,8 +152,41 @@ def test_mesmer_in_subprocess_equals_direct_call(tmp_path):
     assert states == {"m1": "ok"}
     got_cell, _ = _mask(ep.states["m1"]["detail"], "cell")
     got_nuc, _ = _mask(ep.states["m1"]["detail"], "nucleus")
-    assert np.array_equal(got_cell, cell.astype(np.uint32))
-    assert np.array_equal(got_nuc, nuc.astype(np.uint32))
+    assert np.array_equal(got_cell, direct["whole-cell"].astype(np.uint32))
+    assert np.array_equal(got_nuc, direct["nuclear"].astype(np.uint32))
+
+
+def test_mesmer_with_cpu_only_runs_on_the_cpu_and_equals_the_cpu_call(tmp_path):
+    """Step2's CPU choice hides the GPU from the engine process: Mesmer then
+    runs its torch network on the CPU and says so, with masks equal to the
+    CPU implementation called here; min size 0 and non-zero both pass
+    through."""
+    pytest.importorskip("deepcell_toolbox")
+    import os
+    from block01.seg_runner import engines
+    from block01.seg_runner.mesmer_torch import app, weights
+    try:
+        path = os.path.join(engines.model_path(engines.MESMER_TORCH_ENTRY), weights.WEIGHTS_FILE)
+    except engines.ModelMissingError as exc:
+        pytest.skip(str(exc))
+    cpu = app.MesmerTorch(weights.load(path, "cpu"), "cpu")
+    img = synthetic.mesmer_pair()
+    direct = cpu.predict(img[None], image_mpp=0.5, compartments=("nuclear",))["nuclear"]
+    sizes = np.bincount(np.squeeze(direct).ravel())[1:]
+    min_size = int(np.median(sizes[sizes > 0]))               # drops about half the nuclei
+    ep = EngineProcess("mesmer", log_path=str(tmp_path / "e.log"), cpu_only=True)
+    ep.start()
+    assert ep.hello["device"] == "cpu"
+    states = ep.run([_task(tmp_path, "n0", img, "mesmer_nuclei", image_mpp=0.5),
+                     _task(tmp_path, "n9", img, "mesmer_nuclei", image_mpp=0.5,
+                           postprocess_min_size=min_size)])
+    ep.close()
+    assert states == {"n0": "ok", "n9": "ok"}
+    got0, _ = _mask(ep.states["n0"]["detail"], "nucleus")
+    got9, _ = _mask(ep.states["n9"]["detail"], "nucleus")
+    assert np.array_equal(got0, np.squeeze(direct).astype(np.uint32))
+    assert np.array_equal(got9, engines.postprocess_mask(np.squeeze(direct), min_size))
+    assert len(np.unique(got9)) < len(np.unique(got0))
 
 
 def test_a_failing_task_is_failed_and_the_next_one_still_runs(tmp_path, stardist_ok):

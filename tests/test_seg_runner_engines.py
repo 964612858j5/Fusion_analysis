@@ -88,17 +88,21 @@ def test_cellpose_expansion_returns_the_nuclei_from_before_expanding(tmp_path):
     assert np.array_equal(m["cell"], expand_labels(direct, distance=5.0).astype(np.uint32))
 
 
-# ── Mesmer, without DeepCell: what reaches app.predict ──────────────────────
+# ── Mesmer, without the network: what reaches app.predict ───────────────────
 class _App:
+    """`mesmer_torch.app.MesmerTorch`'s interface: ONE call per task, every
+    compartment the method needs from it."""
+
     def __init__(self):
         self.calls = []
 
-    def predict(self, batch, **kw):
-        self.calls.append(kw)
+    def predict(self, batch, image_mpp=None, compartments=(), kwargs=None):
+        self.calls.append({"image_mpp": image_mpp, "compartments": tuple(compartments),
+                           "kwargs": dict(kwargs or {})})
         out = np.zeros(batch.shape[:3] + (1,), np.int64)
         out[0, 0:2, 0:2, 0] = 1                  # 4 px
         out[0, 5:9, 5:9, 0] = 2                  # 16 px
-        return out
+        return {c: out.copy() for c in compartments}
 
 
 def _fake_mesmer():
@@ -117,13 +121,16 @@ def test_the_listed_thresholds_reach_the_primary_outputs_postprocessing(method, 
     img = np.zeros((12, 12, 2), np.float32)
     out = engines.run(eng, method, img, {"maxima_threshold": 0.3, "interior_threshold": 0.5,
                                          "image_mpp": 0.65, "postprocess_min_size": 5})
-    calls = {c["compartment"]: c for c in eng._app.calls}
+    assert len(eng._app.calls) == 1                          # one network pass per task
+    call = eng._app.calls[0]
+    assert call["image_mpp"] == 0.65
+    want = tuple(c for c, kw in (("whole-cell", cell_kw), ("nuclear", nuc_kw)) if kw is not None)
+    assert call["compartments"] == want
+    # the listed thresholds reach the primary output only; the other keeps the defaults
     if cell_kw is not None:
-        assert calls["whole-cell"]["postprocess_kwargs_whole_cell"] == cell_kw
-        assert "postprocess_kwargs_nuclear" not in calls["whole-cell"]
+        assert call["kwargs"].get("whole-cell", {}) == cell_kw
     if nuc_kw is not None:
-        assert calls["nuclear"]["postprocess_kwargs_nuclear"] == nuc_kw
-    assert all(c["image_mpp"] == 0.65 and "preprocess_kwargs" not in c for c in eng._app.calls)
+        assert call["kwargs"].get("nuclear", {}) == nuc_kw
     # min size 5 drops the 4-px object from the primary output only
     primary = "nucleus" if method == "mesmer_nuclei" else "cell"
     assert set(np.unique(out[primary])) == {0, 2}
@@ -168,7 +175,7 @@ def test_the_mesmer_model_path_is_the_manifests_and_checked(tmp_path, monkeypatc
     monkeypatch.setenv("MY_MESMER", str(other))
     with pytest.raises(engines.ModelMissingError, match="elsewhere"):       # no fallback
         engines.mesmer_model_path(_manifest(tmp_path, root, files, env="MY_MESMER"))
-    with pytest.raises(engines.ModelMissingError, match="no Mesmer entry"):
+    with pytest.raises(engines.ModelMissingError, match="no mesmer_multiplex_segmentation entry"):
         engines.mesmer_model_path(tmp_path / "absent.json")
 
 
@@ -178,16 +185,26 @@ def test_the_repo_manifest_names_the_installed_mesmer_model():
 
 
 # ── Mesmer, for real ────────────────────────────────────────────────────────
+def _direct_mesmer():
+    """The torch Mesmer called in this interpreter, on the device the engine
+    process picks (GPU when there is one): the reference the subprocess must
+    equal pixel for pixel. Comparing with TensorFlow is the port check of
+    tests/test_mesmer_torch_*.py, which only reports mask differences (user
+    ruling 2026-10-25)."""
+    try:
+        return engines.MesmerEngine()
+    except engines.ModelMissingError as exc:
+        pytest.skip(str(exc))
+
+
 def test_mesmer_thresholds_change_the_result_and_match_a_direct_call(tmp_path):
-    pytest.importorskip("deepcell")
-    import tensorflow as tf
-    from deepcell.applications import Mesmer
+    pytest.importorskip("deepcell_toolbox")
     img = synthetic.mesmer_pair()
-    app = Mesmer(model=tf.keras.models.load_model(engines.mesmer_model_path()))
+    eng = _direct_mesmer()
     kw = {"maxima_threshold": 0.3, "interior_threshold": 0.5}
-    default = np.squeeze(app.predict(img[None], image_mpp=0.5, compartment="whole-cell"))
-    tuned = np.squeeze(app.predict(img[None], image_mpp=0.5, compartment="whole-cell",
-                                   postprocess_kwargs_whole_cell=kw)).astype(np.uint32)
+    default = eng.predict(img, {"image_mpp": 0.5}, ["whole-cell"])["whole-cell"]
+    tuned = eng.predict(img, {"image_mpp": 0.5}, ["whole-cell"], {"whole-cell": kw})["whole-cell"]
+    tuned = tuned.astype(np.uint32)
     assert len(np.unique(tuned)) != len(np.unique(default))
     ep = EngineProcess("mesmer", log_path=str(tmp_path / "e.log"))
     ep.start()

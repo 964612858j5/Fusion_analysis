@@ -64,15 +64,23 @@ def engine_provenance(engine, engine_obj):
         resolved = resolved() if callable(resolved) else None
     except Exception:  # noqa: BLE001 -- provenance must never stop an engine
         resolved = None
-    return {
+    artifact = getattr(engine_obj, "model_artifact", None)        # Mesmer: the converted weights
+    try:
+        artifact = artifact() if callable(artifact) else None
+    except Exception:  # noqa: BLE001
+        artifact = None
+    out = {
         "git_commit": _git_commit(),
-        "runner_version": _sha256_files(sorted(_PKG.glob("*.py"))),
+        "runner_version": _sha256_files(sorted(_PKG.glob("*.py")) + sorted(_PKG.glob("mesmer_torch/*.py"))),
         "lib_versions": engine_obj.lib_versions(),
         "env_lock_hash": _sha256_files([env / "conda-linux-64.lock", env / "requirements-pip.txt"]),
         "device": engine_obj.device,
         "model_manifest_entry_hash": hashlib.sha256(json.dumps(models, sort_keys=True).encode()).hexdigest()[:16],
         "model_resolved_path": resolved,
     }
+    if artifact:
+        out["model_artifact"] = artifact
+    return out
 
 
 def _run_task(engine_obj, msg):

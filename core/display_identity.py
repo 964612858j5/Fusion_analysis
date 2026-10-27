@@ -131,6 +131,32 @@ class DisplayBinding:
         return f"{self.identity}#{self.generation}"
 
 
+#: The two WINDOW TABLES (user ruling 2026-10-27, docs/v17_step0_own_ranges_plan.md).
+#: Step0 keeps its own Min/Max/Gamma; Step1, Step2, Step3 and Regions share
+#: one set. Named by OWNER, not by scope string: every reader and writer names
+#: its table, and the default is the shared one.
+SHARED_TABLE = "shared"
+STEP0_TABLE = "step0"
+WINDOW_TABLES = (SHARED_TABLE, STEP0_TABLE)
+
+
+def table_for_scope(scope):
+    """The window table a display scope draws with."""
+    return STEP0_TABLE if str(scope or "") == STEP0_TABLE else SHARED_TABLE
+
+
+def empty_window_record():
+    """One table's full remap records: what the Intensity window edits.
+
+    `params` holds the whole remap dict per channel (min/max/gamma and the
+    rest a Save writes) for every channel with a REAL window -- seeded from
+    pixels or typed; a channel whose pixels never arrived has no entry, which
+    is what keeps the 0..1 placeholder out of it. `user_adjusted` names the
+    channels somebody typed, which no seed may move.
+    """
+    return {"params": {}, "user_adjusted": set()}
+
+
 @dataclass
 class DisplayNamespace:
     """Everything display-scoped that belongs to ONE dataset identity.
@@ -166,7 +192,24 @@ class DisplayNamespace:
     #   {scope name: {"selection": str, "visibility": {channel: bool}}}
     scopes: dict = field(default_factory=dict)
     mappings: dict = field(default_factory=dict)       # (channel, nucleus) -> (lo, hi, gamma)
+    # STEP0's own windows (user ruling 2026-10-27); `mappings` above is the
+    # SHARED table. Same keys and values.
+    step0_mappings: dict = field(default_factory=dict)
+    # The full remap records behind each table's windows, kept HERE so they
+    # follow the dataset identity like the windows do: a new slide starts
+    # empty, A -> B -> A finds A's again, eviction drops them.
+    window_records: dict = field(default_factory=lambda: {
+        name: empty_window_record() for name in WINDOW_TABLES})
     revisions: dict = field(default_factory=dict)      # field key -> int
+
+    def table(self, name):
+        """The `(channel, nucleus) -> window` dict of a window table."""
+        return self.step0_mappings if name == STEP0_TABLE else self.mappings
+
+    def records(self, name):
+        """The full remap records of a window table."""
+        return self.window_records[STEP0_TABLE if name == STEP0_TABLE
+                                   else SHARED_TABLE]
 
     def bump(self, key):
         self.revisions[key] = self.revisions.get(key, 0) + 1

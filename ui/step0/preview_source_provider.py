@@ -34,6 +34,8 @@ from PyQt5.QtCore import QObject, pyqtSignal
 import numpy as np
 
 from ...core.channel_remap import apply_channel_remap
+from ...core.display_identity import STEP0_TABLE
+from . import window_tables
 
 STAGE_CORRECTED = "corrected"
 STAGE_REMAPPED = "remapped"
@@ -106,11 +108,16 @@ class Step0PreviewSourceProvider(QObject):
             return f"corrected ({self.saved_method(channel)}, saved)"
         return "raw — background correction not saved"
 
+    def _remap_records(self):
+        """Step0's OWN window records (user ruling 2026-10-27): this provider
+        describes Step0's correction side, whatever the Intensity window is
+        showing."""
+        records = getattr(self._page, "_records", None)
+        return None if records is None else records(STEP0_TABLE)
+
     def _remap_params(self, channel):
-        wb = getattr(self._page, "_cond_workbench", None)
-        if wb is None:
-            return None
-        return wb._params.get(channel)
+        records = self._remap_records()
+        return None if records is None else window_tables.get(records, channel)
 
     def describe(self, channel):
         """One dict both sides can read: what correction AND remap currently
@@ -167,9 +174,8 @@ class Step0PreviewSourceProvider(QObject):
                 "min": remap.get("min"),
                 "max": remap.get("max"),
                 "gamma": remap.get("gamma"),
-                "user_adjusted": bool(
-                    getattr(getattr(page, "_cond_workbench", None),
-                            "_user_adjusted", {}).get(channel)),
+                "user_adjusted": window_tables.is_user(
+                    self._remap_records(), channel),
             },
             "served_corrected_stage": ("corrected_saved" if saved
                                        else "raw_unsaved"),

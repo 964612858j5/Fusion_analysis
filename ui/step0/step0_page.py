@@ -64,8 +64,10 @@ from .step0_explore_tab import Step0ExploreTab
 from .compare_strip import COMPARE_SOURCES, CompareStrip
 from ...core.display_mapping import build_display_lut, seed_display_range
 from ...core import display_identity, tissue_compose
+from ...core.display_identity import SHARED_TABLE, STEP0_TABLE, table_for_scope
 from .config_panel import ConfigPanel
 from .result_grid import ResultGridPanel
+from . import window_tables
 from .search_ctrl import (
     SearchCtrlPanel, BatchProcessWorker,
     WsiCorrectionWorker, BackgroundPreviewWorker,
@@ -365,10 +367,21 @@ class Step0Page(QWidget):
         # fields here: both belong to Block01's display services, and this
         # page reads them through the properties below. A page that could
         # assign them could also replace the one window every step shares.
-        # Display mapping bookkeeping. `_display_mapping_for` may be asked for
-        # a channel before the Channels box is built, so both live here.
-        self._display_fallback = {}      # channel -> (lo, hi, gamma) when the workbench has no entry
-        self._display_seeded = set()     # channels whose slide-wide seed was applied
+        # Which window table the ONE Intensity window edits: Step0's own while
+        # Step0 is on screen, the shared one otherwise (user ruling
+        # 2026-10-27). The windows and their full records live in Block01's
+        # display state, per dataset; see `_records`.
+        self._projected_table = STEP0_TABLE
+        # An opened workspace's saved windows, waiting for a bound slide:
+        # Step0's (`_workspace_intensity`) and the shared table's, with where
+        # the shared ones came from ("record": the session's own copy,
+        # "handoff": Step0's last Save) and the binding Step1's committed
+        # windows were last adopted for.
+        self._shared_pending = None
+        self._shared_origin = ""
+        self._q2a_done_for = None
+        self._last_handoff_run = ""
+        self._workspace_replace = False      # the next restore replaces both tables
         # ONE whole-slide low-resolution array per channel, shared by the
         # display seed and the Intensity histogram (`_slide_lowres_array`).
         self._slide_lowres = {}
@@ -994,8 +1007,6 @@ class Step0Page(QWidget):
         # compare panels, the full image and its DAPI overlay to follow. The
         # model's display fields are only a mirror, so nothing is connected
         # to `display_changed` -- one source, one signal.
-        self._display_fallback = {}      # channel -> (lo, hi, gamma) when the workbench has no entry
-        self._display_seeded = set()     # channels whose slide-wide seed was applied
         # THE PUBLIC DOCK MOUNTS HERE, in Step0's own `Channels` box, under
         # the All row and the separator -- where this page's channel list has
         # always been. The host owns the frame, the title and the geometry;
@@ -1598,6 +1609,8 @@ class Step0Page(QWidget):
         # signal is the one fan-out.
         self._cond_workbench.params_changed.connect(
             self._adopt_workbench_window)
+        # A lazy load seeds only the editor's copy; the tables follow here.
+        self._cond_workbench.pixels_installed.connect(self._on_editor_pixels)
         layout.addWidget(self._cond_workbench)
         return host
 
@@ -4315,6 +4328,8 @@ class Step0Page(QWidget):
             # switch is a different channel set (or a clear), which reseeds.
             preserve_params=True)
         self._apply_workspace_intensity()
+        # A rebuild replaces the editor's stores: put it back on its table.
+        self._project_table(self._projected_table)
         # No separate DAPI reference read: DAPI is a normal channel in `images`
         # above and is lazy-loaded on demand like any other (#2-new).
         print(f"[Step0] conditioning workbench synced: {len(images)} channels "
@@ -4508,7 +4523,7 @@ class Step0Page(QWidget):
                     self, "Nothing to save",
                     "Open Intensity and adjust a channel before saving a remap.")
             return True
-        cfg = wb.build_config()
+        cfg = wb.build_config(params=self._step0_save_params())
         # Stamp source-aware identity only after the corrected store has been
         # reconciled. This makes the saved provenance describe the pixels Step1
         # will actually receive, not the pre-Save raw preview.
@@ -4566,7 +4581,8 @@ class Step0Page(QWidget):
         wb = getattr(self, "_cond_workbench", None)
         if wb is None or not wb.has_channel_data():
             return False
-        current = self._intensity_state_from_config(wb.build_config())
+        current = self._intensity_state_from_config(
+            wb.build_config(params=self._step0_save_params()))
         path = self._step0_conditioning_config_path()
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -4574,6 +4590,19 @@ class Step0Page(QWidget):
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return True
         return current != saved
+
+    def _step0_save_params(self):
+        """What Step0's Save writes per channel: STEP0's records, whatever the
+        Intensity window is showing; a channel with no real window keeps the
+        provisional placeholder the file has always carried."""
+        wb = getattr(self, "_cond_workbench", None)
+        names = list(getattr(wb, "_names", ()) or ())
+        records = self._records(STEP0_TABLE)
+        out = {}
+        for n in names:
+            p = window_tables.get(records, n)
+            out[n] = dict(p) if p is not None else window_tables.window_params(0.0, 1.0)
+        return out
 
     def _correction_settings_changed(self, config, config_path):
         """Whether the current correction controls differ from the saved file."""
@@ -4859,16 +4888,9 @@ class Step0Page(QWidget):
         are still the provisional placeholder are left out: reading that back as
         a display window saturates the whole image.
         """
-        wb = getattr(self, "_cond_workbench", None)
-        params = getattr(wb, "_params", None) if wb is not None else None
-        if not params:
-            return {}
-        out = {}
-        for name, p in params.items():
-            if not wb.channel_params_seeded(name):
-                continue
-            out[str(name)] = dict(p)
-        return out
+        # STEP1'S table (user ruling 2026-10-27): the shared records, real
+        # windows only -- never Step0's own, whatever the window is showing.
+        return window_tables.export(self._records(SHARED_TABLE))
 
     def display_mapping_for_preview(self, channels=None, blocking=True,
                                     resident_only=False,
@@ -5829,8 +5851,6 @@ class Step0Page(QWidget):
         self.adopt_tissue_lowres(channel)
         if channel not in (self.current_channel, self.nucleus_channel):
             return
-        # Drop the provisional window so the seed is taken again.
-        self._display_fallback.pop(channel, None)
         if self._compare_mode():
             self._refresh_preview_display(keep_zoom=True)
         else:
@@ -7352,23 +7372,17 @@ class Step0Page(QWidget):
         # and a provisional window is not published, so the panels kept the
         # range they had.
         state = getattr(getattr(self, "display", None), "state", None)
-        if state is not None and state.mapping(ch, nucleus=nucleus) is not None:
+        if state is not None and state.mapping(
+                ch, nucleus=nucleus, table=STEP0_TABLE) is not None:
             return True
         if nucleus:
             # Publishing the 0..1 placeholder as a NUCLEUS window is exactly
             # the over-exposed overlay this gate exists to prevent, and the
-            # workbench below knows only the marker role.
+            # records below know only the marker role.
             return False
-        wb = getattr(self, "_cond_workbench", None)
-        if wb is not None:
-            try:
-                if wb._user_adjusted.get(ch):
-                    return True
-                if wb.channel_params_seeded(ch):
-                    return True
-            except (AttributeError, TypeError):
-                pass
-        return ch in getattr(self, "_display_fallback", {})
+        # STEP0's records hold only real windows -- seeded from pixels or
+        # typed -- never the placeholder.
+        return window_tables.get(self._records(STEP0_TABLE), ch) is not None
 
     def _refresh_preview_display(self, keep_zoom=False):
         """Push the page's display state onto the three compare viewers.
@@ -8275,7 +8289,10 @@ class Step0Page(QWidget):
         # ...and the same for the display windows: a Min/Max/Gamma settled
         # anywhere -- this page, the Intensity window, a step downstream --
         # redraws this page's compare panels and full image once.
-        display.state.mapping_changed.connect(self._on_display_mapping_changed)
+        display.state.step0_mapping_changed.connect(
+            self._on_display_mapping_changed)
+        # The ONE Intensity window edits the table of the step on screen.
+        display.state.scope_changed.connect(self._on_scope_for_intensity)
         if self._owns_display_services:
             # A page standing on its own IS its Block01: nothing else will
             # make it the active context, and a Tissue Preview that renders
@@ -8296,8 +8313,10 @@ class Step0Page(QWidget):
             return
         try:
             display.state.color_changed.disconnect(self._on_shared_color_changed)
-            display.state.mapping_changed.disconnect(
+            display.state.step0_mapping_changed.disconnect(
                 self._on_display_mapping_changed)
+            display.state.scope_changed.disconnect(
+                self._on_scope_for_intensity)
         except (TypeError, RuntimeError):
             pass
         display.coordinator.unregister_context(_CTX_STEP0)
@@ -8346,6 +8365,158 @@ class Step0Page(QWidget):
 
     # ── display mapping: one per channel, shared by every view ─────────
 
+    # ── the two window tables (user ruling 2026-10-27) ────────────────
+    #
+    # Step0 keeps its own Min/Max/Gamma (STEP0); Step1, Step2, Step3 and
+    # Regions share one set (SHARED). Block01's display state holds each
+    # table's windows and, in the dataset's namespace, the full remap records
+    # behind them (`window_tables`). The Intensity window is ONE editor: it
+    # shows the table of the step on screen (`_projected_table`) and writes
+    # back into that table only. docs/v17_step0_own_ranges_plan.md.
+
+    def _records(self, table=STEP0_TABLE):
+        """The current slide's full remap records of `table` (live)."""
+        state = getattr(getattr(self, "display", None), "state", None)
+        records = None if state is None else state.window_records(table)
+        return (records if records is not None
+                else display_identity.empty_window_record())
+
+    def _file_seed(self, ch, lo, hi):
+        """File an automatic window in every table's records that has none.
+
+        Silent, like the workbench write it replaces. A table whose state
+        already holds a window for the channel records THAT number, so the
+        two halves of a table cannot disagree.
+        """
+        state = getattr(getattr(self, "display", None), "state", None)
+        for table in display_identity.WINDOW_TABLES:
+            held = (None if state is None
+                    else state.mapping(ch, table=table))
+            window = held or (lo, hi, 1.0)
+            if window_tables.put_seed(self._records(table), ch, *window):
+                self._sync_editor(table, ch)
+
+    def _sync_editor(self, table, channel):
+        """Show `table`'s record of `channel` in the Intensity window, when
+        that is the table it edits. Silent: loading the controls emits no
+        `params_changed`."""
+        if table != self._projected_table:
+            return
+        wb = getattr(self, "_cond_workbench", None)
+        params = getattr(wb, "_params", None) if wb is not None else None
+        if params is None or channel not in params:
+            return
+        records = self._records(table)
+        p = window_tables.get(records, channel)
+        if p is None:
+            return
+        params[channel] = dict(p)
+        wb.note_params_seeded(channel)
+        wb._user_adjusted[channel] = window_tables.is_user(records, channel)
+        if wb.active_channel() == channel:
+            wb._load_params_into_controls(channel)
+            wb._refresh_preview()
+
+    def _project_table(self, table):
+        """Make the Intensity window edit `table`.
+
+        Every channel the editor holds is loaded from the table's records. A
+        channel the table has no real window for gets the canonical seed when
+        the editor already holds its pixels -- a lazy load would not come
+        again for it -- else the provisional placeholder, which is never
+        written into a record; its first load seeds it (`_on_editor_pixels`).
+        Nothing is read here: a step switch must not start whole-slide reads
+        for every channel of the panel.
+        """
+        self._projected_table = table
+        wb = getattr(self, "_cond_workbench", None)
+        if wb is None or not wb.has_channel_data():
+            return
+        records = self._records(table)
+        for ch in list(wb._params):
+            p = window_tables.get(records, ch)
+            if p is None and wb._raw.get(ch) is not None:
+                lo, hi, real = self._seed_display_mapping(ch, strict=True,
+                                                          fetch=False)
+                if real:
+                    self._file_seed(ch, lo, hi)
+                    p = window_tables.get(records, ch)
+            if p is None:
+                if wb.channel_params_seeded(ch) or wb._user_adjusted.get(ch):
+                    # The OTHER table's numbers: not this table's answer.
+                    wb._params[ch] = window_tables.window_params(0.0, 1.0)
+                    wb._seeded.discard(ch)
+                    wb._user_adjusted[ch] = False
+                continue
+            wb._params[ch] = dict(p)
+            wb.note_params_seeded(ch)
+            wb._user_adjusted[ch] = window_tables.is_user(records, ch)
+        active = wb.active_channel()
+        if active in wb._params:
+            wb._load_params_into_controls(active)
+            wb._refresh_preview()
+
+    def _on_scope_for_intensity(self, scope):
+        """The step on screen changed: the Intensity window edits its table."""
+        table = table_for_scope(scope)
+        if table != self._projected_table:
+            self._project_table(table)
+
+    def _on_editor_pixels(self, name):
+        """A channel's pixels reached the Intensity window.
+
+        The editor may have seeded its own copy (its `_seed_range` widens a
+        window to at least 1.0); the CANONICAL seed is this page's, so it is
+        filed in every table that has none and the editor is put back on its
+        table's record.
+        """
+        if not name:
+            return
+        if window_tables.get(self._records(self._projected_table), name) is None:
+            lo, hi, real = self._seed_display_mapping(name, strict=True)
+            if not real:
+                return
+            self._file_seed(name, lo, hi)
+        self._sync_editor(self._projected_table, name)
+
+    def _install_windows(self, table, params_by_channel, user, replace=False):
+        """Put a set of saved remap dicts into `table`: its records (`user`
+        is a bool or the set of typed channels) and its windows, as one
+        transaction. DAPI's record is its nucleus window too.
+
+        `replace=True` makes the table hold exactly these: a workspace is a
+        boundary, and another workspace's windows and typed flags on the
+        same slide must not survive into this one."""
+        state = getattr(getattr(self, "display", None), "state", None)
+        records = self._records(table)
+        if replace:
+            records["params"].clear()
+            records["user_adjusted"].clear()
+        windows = {}
+        for ch, entry in (params_by_channel or {}).items():
+            if not ch or not isinstance(entry, dict):
+                continue
+            ch = str(ch)
+            base = window_tables.get(records, ch)
+            merged = dict(base) if base else default_channel_remap_params()
+            merged.update({k: entry[k] for k in self._INTENSITY_KEYS if k in entry})
+            typed = (ch in user) if isinstance(user, (set, frozenset, list, tuple)) \
+                else bool(user)
+            window_tables.put(records, ch, merged, user=typed)
+            window = window_tables.window_of(records["params"][ch])
+            windows[(ch, False)] = window
+            if ch == self.nucleus_channel:
+                windows[(ch, True)] = window
+            self._sync_editor(table, ch)
+        if state is not None and replace:
+            state.replace_mappings(windows, origin="restore", table=table)
+            if table == self._projected_table:
+                self._project_table(table)
+        elif windows and state is not None:
+            state.adopt_mappings(windows, origin="restore", persist=False,
+                                 table=table)
+        return windows
+
     def _workbench_params(self, ch):
         """The Channel Remap workbench's params dict for `ch`, or None when
         the workbench does not (yet) know that channel."""
@@ -8358,66 +8529,55 @@ class Step0Page(QWidget):
     def seed_display_window(self, channel, nucleus=False):
         """The display-window SEED port: a first window, from pixels.
 
-        Block01's shared state owns the answer; this is only consulted when
-        it has none for a channel, and its result is then stored there. The
-        computation is a QuPath-style percentile over the whole slide's
-        tissue at the overview level, and it belongs here because the pixels
-        and the remap params do.
+        Block01's shared state owns the answer; this is only consulted when a
+        table has none for a channel, and the state then files the result in
+        EVERY table that has none (never over an answer). The computation is
+        a QuPath-style percentile over the whole slide's tissue at the
+        overview level, and it belongs here because the pixels do.
 
-        RETURNS NONE WHEN THERE IS NO REAL ANSWER. The 0..1 placeholder a
-        channel carries before its pixels arrive is not a window -- published
-        over 8/16-bit data it saturates every pixel -- so it must never be
-        stored as the canonical one. `_display_mapping_for` writes the
-        workbench params or the page fallback ONLY for a window derived from
-        real pixels, so asking afterwards whether the mapping is real is the
-        same test this page has always applied, reused rather than repeated.
+        PURE: pixels only, never a number somebody typed into either table --
+        what a table already holds is the state's to keep. RETURNS NONE WHEN
+        THERE IS NO REAL ANSWER: the 0..1 placeholder a channel carries
+        before its pixels arrive is not a window, and published over
+        8/16-bit data it saturates every pixel.
         """
         if not channel:
             return None
-        if nucleus:
-            # A NUMBER THE USER TYPED WINS IN BOTH ROLES. The remap params
-            # are per channel, not per role, so a Max set on DAPI in the
-            # Intensity window is DAPI's window wherever DAPI is drawn --
-            # including as the nucleus overlay. Only when nobody has answered
-            # does the role get its own automatic seed, and its realness
-            # comes from that seed rather than from a marker-role entry.
-            params = self._workbench_params(channel)
-            if params is not None:
-                wb = self._cond_workbench
-                try:
-                    answered = bool(wb._user_adjusted.get(channel)
-                                    or wb.channel_params_seeded(channel))
-                except (AttributeError, TypeError):
-                    answered = False
-                if answered:
-                    return (float(params["min"]), float(params["max"]),
-                            float(params.get("gamma", 1.0)))
-            lo, hi, real = self._seed_display_mapping(channel, nucleus=True,
-                                                      strict=True)
-            return (float(lo), float(hi), 1.0) if real else None
-        window = self._display_mapping_for(channel)
-        if window is None:
-            return None
-        if not self._display_mapping_is_real(channel):
-            return None
-        return window
+        lo, hi, real = self._seed_display_mapping(channel, nucleus=nucleus,
+                                                  strict=True)
+        return (float(lo), float(hi), 1.0) if real else None
 
-    def write_display_window(self, channel, lo, hi, gamma, nucleus=False):
-        """The display-window PERSISTENCE port: the shared state moved.
+    def write_display_window(self, channel, lo, hi, gamma, nucleus=False,
+                             table=SHARED_TABLE, origin=""):
+        """The display-window PERSISTENCE port: a table's window moved.
 
-        The remap params ARE what the Step0 handoff hashes, so they follow
-        the shared state rather than competing with it. Silent: the fan-out
-        belongs to the state's own signal, and re-announcing from here would
-        be the second answer this whole arrangement exists to remove.
+        The records ARE what a Save writes and Step1 fuses with, so they
+        follow the state rather than competing with it. Silent: the fan-out
+        belongs to the state's own signal. A role window (DAPI as the nucleus
+        overlay) is the state's alone -- the records are per channel, and a
+        role seed must not replace the channel's record. An automatic seed
+        fills only a record that does not exist and never marks it typed.
         """
-        self._write_display_window(channel, lo, hi, gamma, nucleus=nucleus)
+        if not channel or nucleus:
+            return
+        records = self._records(table)
+        if origin == "seed":
+            if window_tables.put_seed(records, channel, lo, hi, gamma):
+                self._sync_editor(table, channel)
+            return
+        window_tables.put(records, channel, window_tables.window_params(
+            lo, hi, gamma, base=window_tables.get(records, channel)),
+            user=True)
+        self._sync_editor(table, channel)
 
     def display_window(self, ch, nucleus=False, computed_only=False):
-        """`(min, max, gamma)` for `ch` -- Block01's answer.
+        """`(min, max, gamma)` for `ch` -- STEP0's answer.
 
-        THE read, for this page and for everything it hands numbers to. Goes
-        to the shared state, so Step0, Step1, Step2, Step3, the Intensity
-        window and both previews cannot be looking at different numbers.
+        THE read, for this page and for everything it hands numbers to: the
+        full image, the compare panels, the Tissue Preview's Step0 frame and
+        the Intensity window while Step0 is shown all read Step0's own table
+        (user ruling 2026-10-27), so they cannot disagree with each other and
+        nothing Step1 does moves them.
 
         `computed_only=True` is for the FRAME path, and the distinction is
         the whole of P1-3: working out a first window is a percentile over a
@@ -8428,9 +8588,10 @@ class Step0Page(QWidget):
         opening on a channel -- the numbers are wanted NOW and the seed is
         taken here.
         """
+        state = self.display.state
         if computed_only:
-            return self.display.state.mapping(ch, nucleus=nucleus)
-        window = self.display.state.mapping_or_seed(ch, nucleus=nucleus)
+            return state.mapping(ch, nucleus=nucleus, table=STEP0_TABLE)
+        window = state.mapping_or_seed(ch, nucleus=nucleus, table=STEP0_TABLE)
         if window is not None:
             return window
         # PROVISIONAL, and only here. The shared state refused to store this
@@ -8440,95 +8601,35 @@ class Step0Page(QWidget):
         # these. The read thread's array turns them into a real window.
         return self._display_mapping_for(ch, nucleus=nucleus)
 
-    def _display_mapping_for(self, ch, payload=None, nucleus=False):
-        """`(min, max, gamma)` for `ch` -- the Channel Remap params.
+    def _display_mapping_for(self, ch, payload=None, nucleus=False,
+                             table=STEP0_TABLE):
+        """`(min, max, gamma)` for `ch` from `table`'s RECORDS.
 
-        ONE source of truth: the workbench's per-channel remap params ARE
-        this page's display mapping, so the floating Intensity window, the
-        compare panels, the full image and the Intensity inspector can never
-        disagree. Brightness/contrast have no Step0 UI and are pinned to the
-        neutral 0.0 / 1.0 where remap semantics equal a display window.
-
-        A channel the workbench has never seen (no dataset, fake loaders)
-        falls back to a per-page entry seeded the same way.
-
-        Seeding: the FIRST time a channel is shown its min/max come from the
-        whole slide's tissue (`_seed_display_mapping`) -- a slide-wide window
-        that stays valid as the user pans, over the very array the workbench
-        holds for that channel (`_workbench_pixels`), so the sliders and this
-        mapping open on the same numbers. The inspector's own "Auto" button
-        is unchanged and still QuPath auto-contrast over the workbench's
-        pixels; those pixels being the slide now, the two rules agree to
-        their zero handling rather than describing two different regions.
+        A channel the table holds a real window for answers that. One it
+        does not is seeded HERE from the whole slide's tissue
+        (`_seed_display_mapping`) and the seed is filed in every table that
+        has none -- silently, as the workbench params used to be -- so the
+        sliders and every view open on the same numbers. Without pixels the
+        answer is the provisional 0..1, which is never stored: it saturates
+        an 8/16-bit channel, and `_display_mapping_is_real` keeps it from
+        being published.
         """
         if not ch:
             return (0.0, 1.0, 1.0)
-        p = self._workbench_params(ch)
+        p = window_tables.get(self._records(table), ch)
         if p is not None:
-            wb = self._cond_workbench
-            # The workbench has taken this channel over: drop any entry the
-            # pre-engagement fallback left behind, so no stale second copy of
-            # the numbers shadows the source of truth.
-            self._display_fallback.pop(ch, None)
-            # The key existing is NOT enough: a lazy channel the workbench has
-            # never loaded carries a provisional 0..1 placeholder, and reading
-            # that back as a display window saturates every pixel of an
-            # 8/16-bit channel (the severe bug: a re-sync turned the compare
-            # panels and the Tissue Preview solid). Seed such a channel HERE,
-            # from the same whole-slide seed, and write it into the single
-            # source so the workbench stops calling it provisional.
-            seeded = wb.channel_params_seeded(ch)
-            if ch not in self._display_seeded or not seeded:
-                self._display_seeded.add(ch)
-                if wb._user_adjusted.get(ch):
-                    # The user typed these numbers: they are real data, and
-                    # nothing may re-seed over them.
-                    wb.note_params_seeded(ch)
-                else:
-                    lo, hi, real = self._seed_display_mapping(
-                        ch, payload=payload, nucleus=nucleus, strict=True)
-                    if not real:
-                        # No pixels to seed from HERE. Never write the 0..1
-                        # last resort into the source of truth: it saturates
-                        # an 8/16-bit channel. If the workbench seeded this
-                        # channel from its own real pixels, those numbers
-                        # stand; otherwise the params stay provisional and
-                        # the `not seeded` half of the test above brings us
-                        # back here on the next read, when the slide array
-                        # may have arrived.
-                        p["brightness"], p["contrast"] = 0.0, 1.0
-                        return (float(p["min"]), float(p["max"]),
-                                float(p["gamma"]))
-                    p.update({"min": float(lo), "max": float(hi), "gamma": 1.0,
-                              "brightness": 0.0, "contrast": 1.0, "auto": True})
-                    wb._params[ch] = normalize_channel_remap_params(p)
-                    wb.note_params_seeded(ch)
-                    p = wb._params[ch]
-                    if wb.active_channel() == ch:
-                        # Numbers only: this wrote a new window over the same
-                        # pixels, so the density curve does not have to be
-                        # rebuilt from the whole patch a second time.
-                        wb._load_params_into_controls(
-                            ch, rebuild_histogram=False)
-            p["brightness"], p["contrast"] = 0.0, 1.0
-            return (float(p["min"]), float(p["max"]), float(p["gamma"]))
-        entry = self._display_fallback.get(ch)
-        if entry is None:
-            lo, hi, real = self._seed_display_mapping(
-                ch, payload=payload, nucleus=nucleus, strict=True)
-            entry = (lo, hi, 1.0)
-            if real:
-                # Only a window derived from real pixels is remembered.
-                # `(0.0, 1.0)` is the "no pixels yet" placeholder and
-                # caching it would freeze a saturated 8/16-bit channel in
-                # place; leaving it out brings us back here on the next
-                # read, which is what `_on_channel_overview_ready` triggers
-                # the moment the record lands.
-                self._display_fallback[ch] = entry
-        return entry
+            return window_tables.window_of(p)
+        lo, hi, real = self._seed_display_mapping(
+            ch, payload=payload, nucleus=nucleus, strict=True)
+        if real and not nucleus:
+            self._file_seed(ch, lo, hi)
+            p = window_tables.get(self._records(table), ch)
+            if p is not None:
+                return window_tables.window_of(p)
+        return (float(lo), float(hi), 1.0)
 
     def _seed_display_mapping(self, ch, payload=None, nucleus=False,
-                              strict=False):
+                              strict=False, fetch=True):
         """QuPath-style automatic window over the whole slide's tissue
         pixels (the viewer's overview level, zeros excluded) -- the same
         rule and level the full image seeds with. Falls back to the
@@ -8538,6 +8639,9 @@ class Step0Page(QWidget):
         there were no pixels anywhere and `(0.0, 1.0)` is a placeholder
         rather than a window. Callers that write the result into the single
         source of truth MUST use it: 0..1 saturates an 8/16-bit channel.
+
+        `fetch=False` does not even ASK for the slide's array when it is not
+        resident -- for a caller that walks every channel at once.
         """
         # RESIDENT ONLY. This runs on the GUI thread, and a whole-slide read
         # here costs 170-230 ms, measured -- which is what made a run of
@@ -8548,11 +8652,18 @@ class Step0Page(QWidget):
         # works the window out and writes it to the shared state.
         arr = self._slide_lowres_array(ch, blocking=False, resident_only=True)
         if arr is None:
-            self.display.ensure_lowres([ch])
+            if fetch:
+                self.display.ensure_lowres([ch])
             payload = payload if payload is not None else self._last_payload
             if payload is not None:
                 arr = self._payload_array(
                     payload, "nucleus" if nucleus else "original")
+        if arr is None:
+            # The Intensity window's own pixels -- the whole slide's overview
+            # read, already in memory. Same rule over the same picture, so a
+            # channel the window has loaded is never left provisional.
+            wb = getattr(self, "_cond_workbench", None)
+            arr = (getattr(wb, "_raw", None) or {}).get(ch) if wb is not None else None
         if arr is not None:
             lo, hi = seed_display_range(arr)
             return (lo, hi, True) if strict else (lo, hi)
@@ -8591,43 +8702,20 @@ class Step0Page(QWidget):
         cur = self.display_window(ch)
         gamma = cur[2] if gamma is None else gamma
         if not self.display.state.set_mapping(ch, lo, hi, gamma,
-                                              origin="step0"):
+                                              origin="step0",
+                                              table=STEP0_TABLE):
             # The numbers did not move. A view rebuilt since the last write
             # still needs them, so the fan-out runs; the state stays quiet.
             self._on_display_mapping_changed(ch)
 
-    def _write_display_window(self, ch, lo, hi, gamma, nucleus=False):
-        """The persistence half: put the shared state's numbers where the
-        handoff can hash them.
-
-        The workbench's remap params when the workbench knows the channel,
-        this page's own fallback entry otherwise -- which is every page until
-        the Intensity window has been opened once. No signal is emitted from
-        here: the shared state has already announced the change, and a second
-        announcement is a second answer.
-        """
-        if not ch:
-            return
-        wb = getattr(self, "_cond_workbench", None)
-        if self._workbench_params(ch) is not None:
-            p = dict(wb._params[ch])
-            p.update({"min": float(lo), "max": float(hi), "gamma": float(gamma),
-                      "brightness": 0.0, "contrast": 1.0, "auto": False})
-            wb._params[ch] = normalize_channel_remap_params(p)
-            wb._user_adjusted[ch] = True     # explicit numbers survive a patch switch
-            self._display_seeded.add(ch)     # and are never re-seeded over
-            if wb.active_channel() == ch:
-                wb._load_params_into_controls(ch)
-                wb._refresh_preview()
-            return
-        self._display_fallback[ch] = (float(lo), float(hi), float(gamma))
-
     def _adopt_workbench_window(self, cid):
-        """The remap inspector's controls moved: the shared state takes them.
+        """The Intensity window's controls moved: the table it is editing
+        takes them -- its records (the full remap dict, now typed) and its
+        windows in the shared state.
 
-        The one direction a store cannot see on its own. `persist=False`
-        because the params ARE the persistence and they already hold these
-        numbers -- writing them back would be an echo.
+        `persist=False` because the records ARE the persistence and already
+        hold these numbers. Only the PROJECTED table is written: editing in
+        Step1 never reaches Step0's numbers, and the reverse.
         """
         if not cid:
             return
@@ -8635,20 +8723,21 @@ class Step0Page(QWidget):
         if params is None:
             self._on_display_mapping_changed(cid)
             return
-        lo = float(params.get("min", 0.0))
-        hi = float(params.get("max", 1.0))
-        gamma = float(params.get("gamma", 1.0))
-        changed = self.display.state.set_mapping(
-            cid, lo, hi, gamma, origin="workbench", persist=False)
+        table = self._projected_table
+        window_tables.put(self._records(table), cid, params, user=True)
+        lo, hi, gamma = window_tables.window_of(params)
+        state = self.display.state
+        changed = state.set_mapping(cid, lo, hi, gamma, origin="workbench",
+                                    persist=False, table=table)
         if cid == self.nucleus_channel:
             # The params are per channel, not per role: a number typed for
             # DAPI is DAPI's window as the nucleus overlay too, and leaving
             # the nucleus role on its older automatic seed is how the
             # Intensity window and the overlay came to disagree.
-            changed = self.display.state.set_mapping(
+            changed = state.set_mapping(
                 cid, lo, hi, gamma, nucleus=True, origin="workbench",
-                persist=False) or changed
-        if not changed:
+                persist=False, table=table) or changed
+        if not changed and table == STEP0_TABLE:
             self._on_display_mapping_changed(cid)
 
     def _on_display_mapping_changed(self, cid):
@@ -10860,10 +10949,13 @@ class Step0Page(QWidget):
         self._last_saved_remap_path = ""
         # NOT cleared here: `_channel_colors` is a per-channel-name display
         # preference -- not pixels, not source identity, not an output path.
-        # The slide-wide display seed IS per-dataset: a new slide must re-seed.
-        self._display_fallback = {}
-        self._display_seeded = set()
+        # The slide-wide display seed IS per-dataset: a new slide must re-seed
+        # -- which it does, its windows and records being its own namespace's.
         self._slide_lowres = {}
+        self._shared_pending = None
+        self._shared_origin = ""
+        self._q2a_done_for = None
+        self._last_handoff_run = ""
         # The workbench's per-channel params ARE the display mapping and its
         # pixels are the OLD slide's. Two slides of the same panel share every
         # channel NAME, so the workbench cannot tell them apart on its own
@@ -11182,21 +11274,7 @@ class Step0Page(QWidget):
         if corrected and os.path.isdir(zarr_path):
             self._apply_corrected_store(zarr_path, corrected)
 
-        # Intensity: applied when the workbench is (lazily) engaged.
-        try:
-            from ...utils.channel_remap_config import load_channel_remap_config
-            remap = load_channel_remap_config(self._step0_conditioning_config_path())
-            self._workspace_intensity = dict(remap.get("channels") or {})
-        except (FileNotFoundError, ValueError) as exc:
-            print(f"[Workspace] no saved Intensity restored ({exc})")
-            self._workspace_intensity = None
-        if (draft or {}).get("intensity"):
-            merged = dict(self._workspace_intensity or {})
-            merged.update(draft["intensity"])
-            self._workspace_intensity = merged
-        wb = getattr(self, "_cond_workbench", None)
-        if wb is not None and wb.has_channel_data():
-            self._apply_workspace_intensity()
+        self._restore_workspace_windows(ws, draft)
         self._rm_after_restore(ws, config, manifest, saved_rois, _manifest_path,
                                zarr_path, corrected)
 
@@ -11247,50 +11325,196 @@ class Step0Page(QWidget):
                        "gamma", "opacity", "weight", "auto")
 
     def adopt_intensity(self, params_by_channel, origin=""):
-        """Make `params_by_channel` ({channel: remap params}) the current
-        Intensity -- the ONE shared state (user ruling 2026-10-02, Q2a).
+        """Step1's committed windows into the SHARED table (ruling Q2a,
+        2026-10-02, narrowed 2026-10-27): Step1 comes back with the windows
+        it was saved with, and Step0's own table is not touched.
 
-        Used when Step1's committed fusion settings are adopted on reopen, so
-        Step1 shows the windows it was saved with. Nothing is written to disk:
-        Step0's file changes only with Step0's own Save. Applied now when the
-        workbench holds the channels, else when it is engaged."""
+        FILL-ONLY AND ONCE PER BINDING. Nothing is adopted when the shared
+        table came back from the session's own record (that record is the
+        newer answer), nor over a channel somebody typed in this session,
+        nor a second time for the same slide and correct run -- so a delayed
+        adoption on entering Step1 cannot undo what the user did in Regions
+        or Step1 before it. Nothing is written to disk.
+        """
         params = {str(ch): dict(p) for ch, p in (params_by_channel or {}).items()
                   if isinstance(p, dict)}
         if not params:
             return False
-        pending = dict(getattr(self, "_workspace_intensity", None) or {})
-        pending.update(params)
-        self._workspace_intensity = pending
-        self._engage_conditioning_workbench()
         self._apply_workspace_intensity()
-        print(f"[Step0] Intensity adopted from {origin or 'a saved record'} "
-              f"({len(params)} channel(s))")
+        key = self._q2a_binding_key()
+        if self._shared_origin == "record" or self._q2a_done_for == key:
+            return False
+        records = self._records(SHARED_TABLE)
+        fill = {ch: p for ch, p in params.items()
+                if not window_tables.is_user(records, ch)}
+        self._q2a_done_for = key
+        self._install_windows(SHARED_TABLE, fill, user=False)
+        print(f"[Step0] Step1's saved Intensity adopted from {origin or 'a saved record'} "
+              f"({len(fill)} of {len(params)} channel(s))")
         return True
 
+    def _q2a_binding_key(self):
+        state = getattr(getattr(self, "display", None), "state", None)
+        identity = None if state is None else state.identity()
+        return (str(identity), self._current_correct_run())
+
+    def _current_correct_run(self):
+        """The correct run the workspace is editing, as session.json names
+        it; the corrected store's path outside a workspace."""
+        ws = (getattr(self, "_roi_context", None) or {}).get("roi_dir")
+        if ws:
+            try:
+                run = (run_store.load_session(ws).get("editing") or {}).get(
+                    "correct_run")
+                if run:
+                    return str(run)
+            except (OSError, ValueError):
+                pass
+        try:
+            return str(self._corrected_zarr_path() or "")
+        except Exception:                                   # noqa: BLE001
+            return ""
+
     def _apply_workspace_intensity(self):
-        """Put the opened workspace's saved Intensity into the workbench
-        (once): its numbers are kept as the user's, so neither a re-sync nor
-        a lazy load re-seeds over them."""
-        saved = getattr(self, "_workspace_intensity", None)
-        wb = getattr(self, "_cond_workbench", None)
-        if not saved or wb is None or not wb.has_channel_data():
+        """Put an opened workspace's saved windows into the two tables, once:
+        Step0's saved Intensity (and its draft) into STEP0, the shared
+        record -- or Step0's last Save, which is the handoff -- into SHARED.
+
+        Waits for the slide's display binding: the records live in its
+        namespace, and a write before it would land in no slide's.
+        """
+        step0 = getattr(self, "_workspace_intensity", None)
+        shared = getattr(self, "_shared_pending", None)
+        replace = bool(getattr(self, "_workspace_replace", False))
+        if not step0 and not shared and not replace:
             return
-        from ...utils.channel_remap_config import normalize_channel_remap_params
-        params = getattr(wb, "_params", {})
-        for ch, entry in saved.items():
-            if ch not in params or not isinstance(entry, dict):
-                continue
-            merged = dict(params[ch])
-            merged.update({k: entry[k] for k in self._INTENSITY_KEYS if k in entry})
-            params[ch] = normalize_channel_remap_params(merged)
-            wb._user_adjusted[ch] = True
-            wb.note_params_seeded(ch)
-            self._display_seeded.add(ch)
-            self._adopt_workbench_window(ch)
-        active = wb.active_channel()
-        if active in saved and hasattr(wb, "_load_params_into_controls"):
-            wb._load_params_into_controls(active)
+        state = getattr(getattr(self, "display", None), "state", None)
+        if state is None:
+            return
+        if state.binding() is None:
+            ensure = getattr(self.display, "_ensure_binding", None)
+            if ensure is not None:
+                ensure()
+            if state.binding() is None:
+                return
         self._workspace_intensity = None
+        self._shared_pending = None
+        self._workspace_replace = False
+        if step0 or replace:
+            self._install_windows(STEP0_TABLE, step0 or {}, user=True,
+                                  replace=replace)
+        if shared or replace:
+            params, typed = shared or ({}, set())
+            self._install_windows(SHARED_TABLE, params, user=typed,
+                                  replace=replace)
+
+    def _restore_workspace_windows(self, ws, draft=None):
+        """An opened workspace's Intensity, two tables from two sources (user
+        ruling 2026-10-27): STEP0 <- Step0's saved Intensity, then its draft;
+        SHARED <- the session's own shared record when it was edited against
+        this correct run, else Step0's saved Intensity -- the handoff of this
+        run. Applied as soon as the slide is bound."""
+        try:
+            from ...utils.channel_remap_config import load_channel_remap_config
+            remap = load_channel_remap_config(self._step0_conditioning_config_path())
+            saved = dict(remap.get("channels") or {})
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"[Workspace] no saved Intensity restored ({exc})")
+            saved = {}
+        step0_windows = dict(saved)
+        if (draft or {}).get("intensity"):
+            step0_windows.update(draft["intensity"])
+        self._workspace_intensity = step0_windows or None
+        record = self._rm_shared_windows(ws)
+        if record is not None:
+            self._shared_pending = record
+            self._shared_origin = "record"
+        else:
+            self._shared_pending = (dict(saved), set()) if saved else None
+            self._shared_origin = "handoff"
+        self._q2a_done_for = None
+        self._last_handoff_run = self._current_correct_run()
+        # A WORKSPACE IS A BOUNDARY: both tables become exactly this
+        # workspace's, even when the slide (and so its namespace) is the one
+        # another workspace was just showing.
+        self._workspace_replace = True
+        self._apply_workspace_intensity()
+
+    def _rm_shared_windows(self, ws):
+        """`drafts.shared_windows`: the shared table as the session left it,
+        when it was edited against the correct run being edited now. `ws`
+        is the opened workspace (or its folder)."""
+        try:
+            sess = run_store.load_session(getattr(ws, "workspace_dir", ws))
+        except (OSError, ValueError):
+            return None
+        record = (sess.get("drafts") or {}).get("shared_windows")
+        if not isinstance(record, dict):
+            return None
+        run = (sess.get("editing") or {}).get("correct_run")
+        if (record.get("edited_against") or {}).get("correct_run") != run:
+            print("[Workspace] the shared Intensity record belongs to another "
+                  "Step0 result; Step1 starts from Step0's saved Intensity")
+            return None
+        params = {str(ch): dict(p) for ch, p in (record.get("params") or {}).items()
+                  if isinstance(p, dict)}
+        return params, set(str(c) for c in (record.get("user_adjusted") or ()))
+
+    def rm_save_shared_windows(self):
+        """Write the SHARED table -- every window, automatic or typed -- as
+        the session's `drafts.shared_windows`, bound to the correct run.
+
+        Called on every step change and on close, whatever Step1's own draft
+        is doing: Step1/Regions windows nobody committed must survive a
+        restart (user ruling 2026-10-27). Not a commit; the committed fusion
+        settings file is never touched.
+        """
+        ws = (self._roi_context or {}).get("roi_dir")
+        if not ws or not os.path.isfile(os.path.join(ws, "roi_manifest.json")):
+            return False
+        if self._shared_pending is not None:
+            return False        # not applied yet: the session still holds it
+        records = self._records(SHARED_TABLE)
+        if not records["params"]:
+            return False
+        try:
+            sess = run_store.load_session(ws)
+            run = (sess.get("editing") or {}).get("correct_run")
+            sess = run_store.put_draft(sess, "shared_windows", {
+                "edited_against": {"correct_run": run},
+                "params": window_tables.export(records),
+                "user_adjusted": sorted(records["user_adjusted"])})
+            run_store.save_session(ws, sess)
+        except (OSError, ValueError) as exc:
+            print(f"[Step0] shared Intensity not saved ({exc})")
+            return False
+        return True
+
+    def _handoff_windows_to_shared(self):
+        """A Save that published a NEW correct run (or the first handoff)
+        starts Step1 from Step0's windows: the SHARED table becomes a copy
+        of STEP0's -- records and windows, nothing typed -- and any pending
+        or once-only adoption for the old run is retired so it cannot
+        overwrite the copy. An Intensity-only Save never comes here."""
+        state = getattr(getattr(self, "display", None), "state", None)
+        src = self._records(STEP0_TABLE)
+        dst = self._records(SHARED_TABLE)
+        dst["params"].clear()
+        dst["user_adjusted"].clear()
+        windows = {}
+        for ch, p in src["params"].items():
+            window_tables.put(dst, ch, p, user=False)
+            windows[(ch, False)] = window_tables.window_of(p)
+        if state is not None:
+            for key, window in state.mappings(table=STEP0_TABLE).items():
+                if key[1]:
+                    windows[key] = window
+            state.replace_mappings(windows, origin="handoff", table=SHARED_TABLE)
+        self._shared_pending = None
+        self._shared_origin = "handoff"
+        self._q2a_done_for = self._q2a_binding_key()
+        if self._projected_table == SHARED_TABLE:
+            self._project_table(SHARED_TABLE)
 
     # ── workspaces: Save / Save as (block A6 W2, W3) ──────────────────
 
@@ -11611,12 +11835,9 @@ class Step0Page(QWidget):
         except Exception as exc:                            # noqa: BLE001
             print(f"[Step0] draft not saved ({exc})")
             return False
-        intensity = None
-        wb = getattr(self, "_cond_workbench", None)
-        if wb is not None and wb.has_channel_data():
-            intensity = {str(ch): {k: p[k] for k in self._INTENSITY_KEYS if k in p}
-                         for ch, p in (getattr(wb, "_params", {}) or {}).items()
-                         if isinstance(p, dict)}
+        # STEP0's own windows, whatever the Intensity window is showing.
+        intensity = window_tables.export(self._records(STEP0_TABLE),
+                                         keys=self._INTENSITY_KEYS) or None
         sess = run_store.load_session(ws)
         sess = run_store.put_draft(sess, "step0", {
             "correction_config": config, "intensity": intensity,
@@ -11633,14 +11854,18 @@ class Step0Page(QWidget):
         project = run_store.project_dir_of(ws) if ws else None
         if (not project or run_store.kind_of(run_dir) != "correct"
                 or not run_store.is_done(run_dir)):
-            return
+            return None
+        changed = False          # a session we cannot read names no new run
         try:
             sess = run_store.load_session(ws)
             drafts = dict(sess.get("drafts") or {})
             drafts.pop("step0", None)           # what Step0 shows is now saved
             sess["drafts"] = drafts
             new_run = run_store.rel(project, os.path.dirname(corrected))
-            if (sess.get("editing") or {}).get("correct_run") != new_run:
+            # Compared BEFORE the binding is replaced: a new correct run is
+            # the handoff that starts Step1 from Step0's windows.
+            changed = (sess.get("editing") or {}).get("correct_run") != new_run
+            if changed:
                 sess["viewing"] = new_run       # §3: a new Step0 result is a new chain
             sess["editing"] = {
                 "correct_run": new_run,
@@ -11648,6 +11873,8 @@ class Step0Page(QWidget):
             run_store.save_session(ws, sess)
         except (OSError, ValueError) as exc:
             print(f"[Step0] session.json not updated ({exc})")
+        self._last_handoff_run = self._current_correct_run()
+        return changed
 
     def _confirm_raw_channels(self):
         """Name the channels Save will write as RAW, once, and ask.
@@ -12298,7 +12525,15 @@ class Step0Page(QWidget):
                 "Step0 outputs could not be committed, so Step1 was not notified.\n\n"
                 f"Details: {e}")
             return False
-        self._rm_note_editing(manifest)
+        new_run = self._rm_note_editing(manifest)
+        if new_run is None:
+            # Outside a workspace there is no session to compare against: the
+            # published corrected store says whether these are new pixels.
+            run = str(manifest.get("corrected_zarr_path", zarr_path) or "")
+            new_run = run != self._last_handoff_run
+            self._last_handoff_run = run
+        if new_run:
+            self._handoff_windows_to_shared()
         self.step0_complete.emit(
             self._handoff_payload(config, rois, decisions, manifest, zarr_path))
         return True

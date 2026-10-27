@@ -119,7 +119,8 @@ class ChannelDisplayState(QObject):
     """
 
     color_changed = pyqtSignal(str, str)        # channel, "#rrggbb"
-    mapping_changed = pyqtSignal(str)           # channel
+    mapping_changed = pyqtSignal(str)           # channel (SHARED table)
+    step0_mapping_changed = pyqtSignal(str)     # channel (STEP0 table)
     dataset_changed = pyqtSignal(object)        # DatasetIdentity
     selection_changed = pyqtSignal(str)         # channel, "" = nothing
     visibility_changed = pyqtSignal(str, bool)  # channel, visible
@@ -245,7 +246,7 @@ class ChannelDisplayState(QObject):
         self._announce_install(installed_colors, installed_mappings)
         return self._binding
 
-    def _bind_into(self, identity, install=None):
+    def _bind_into(self, identity, install=None, scope=_UNSET):
         """Do a bind's WRITES. No signals; the caller announces.
 
         Split out so a session restore can take the binding and the payload
@@ -269,7 +270,7 @@ class ChannelDisplayState(QObject):
         installed_colors, installed_mappings = [], []
         if install:
             _changed, installed_colors, installed_mappings = \
-                self._install_into(ns, install)
+                self._install_into(ns, install, scope)
         self._mapping_rev += 1
         return installed_colors, installed_mappings
 
@@ -307,7 +308,7 @@ class ChannelDisplayState(QObject):
                                  "mappings": [], "changed": False}
         try:
             if moved:
-                colors, mappings = self._bind_into(identity, payload)
+                colors, mappings = self._bind_into(identity, payload, scope)
                 changed = True
             elif self._binding is None:
                 # Nothing bound and no identity to bind: there is no display
@@ -420,7 +421,7 @@ class ChannelDisplayState(QObject):
         """Write `payload` into `ns`. No signals; the caller announces.
 
         Returns `(changed, colors, mappings)`: whether anything moved, and
-        WHICH colours and display windows did. The caller needs the lists
+        WHICH colours and display windows did (`(table, channel, nucleus)`). The caller needs the lists
         because a completion notice on its own reaches nobody -- see
         `_announce_install`.
         """
@@ -463,8 +464,13 @@ class ChannelDisplayState(QObject):
                     store["visibility"] = new_vis
                 ns.bump("visibility")
                 changed = True
-        mappings = payload.get("mappings")
-        if mappings is not None:
+        # `mappings` is the SHARED table's, `step0_mappings` STEP0's.
+        for field_name, table in (("mappings", _identity.SHARED_TABLE),
+                                  ("step0_mappings", _identity.STEP0_TABLE)):
+            mappings = payload.get(field_name)
+            if mappings is None:
+                continue
+            store = ns.table(table)
             for key, value in mappings.items():
                 ch, nucleus = (key if isinstance(key, tuple) else (key, False))
                 if value is None:
@@ -472,10 +478,10 @@ class ChannelDisplayState(QObject):
                 lo, hi, gamma = value
                 new = (float(lo), float(hi), float(gamma))
                 mkey = (str(ch), bool(nucleus))
-                if ns.mappings.get(mkey) != new:
-                    ns.mappings[mkey] = new
-                    ns.bump(("mapping", mkey))
-                    changed_mappings.append(mkey)
+                if store.get(mkey) != new:
+                    store[mkey] = new
+                    ns.bump(self._mapping_key(table, mkey))
+                    changed_mappings.append((table,) + mkey)
                     changed = True
         colors = payload.get("colors")
         if colors:
@@ -531,11 +537,12 @@ class ChannelDisplayState(QObject):
         self.state_installed.emit(self._binding)
         for channel in colors:
             self.color_changed.emit(channel, self._colors[channel])
-        # One `mapping_changed` per CHANNEL: the signal names a channel, and
+        # One notice per CHANNEL and table: the signal names a channel, and
         # a channel whose marker and nucleus windows both moved has not
         # changed twice as far as a view is concerned.
-        for channel in dict.fromkeys(ch for ch, _nucleus in mappings):
-            self.mapping_changed.emit(channel)
+        for table, channel in dict.fromkeys(
+                (table, ch) for table, ch, _nucleus in mappings):
+            self._emit_mapping(table, channel)
 
     def _evict_over_limit(self):
         """Drop the oldest namespaces past the limit. Never the current one."""
@@ -705,7 +712,25 @@ class ChannelDisplayState(QObject):
         return self._color_rev
 
     # ── mappings ──────────────────────────────────────────────────────
-    def mapping(self, channel, nucleus=False):
+    #
+    # TWO WINDOW TABLES (user ruling 2026-10-27): STEP0 keeps its own
+    # Min/Max/Gamma, SHARED is Step1/Step2/Step3/Regions'. Every reader and
+    # writer names its table and the default is SHARED, so a Step1 read made
+    # while Step0 is on screen still reads Step1's numbers: nothing here
+    # depends on the scope being drawn.
+    @staticmethod
+    def _mapping_key(table, key):
+        """The revision key of one window in one table."""
+        return (("step0_mapping", key) if table == _identity.STEP0_TABLE
+                else ("mapping", key))
+
+    def _emit_mapping(self, table, channel):
+        if table == _identity.STEP0_TABLE:
+            self.step0_mapping_changed.emit(channel)
+        else:
+            self.mapping_changed.emit(channel)
+
+    def mapping(self, channel, nucleus=False, table=_identity.SHARED_TABLE):
         """`(min, max, gamma)` for `channel` ON THIS SLIDE, or None.
 
         Reads the CURRENT namespace. No port is consulted, so this answers
@@ -715,9 +740,10 @@ class ChannelDisplayState(QObject):
         """
         if not channel:
             return None
-        return self._ns.mappings.get((channel, bool(nucleus)))
+        return self._ns.table(table).get((channel, bool(nucleus)))
 
-    def mapping_in(self, identity, channel, nucleus=False):
+    def mapping_in(self, identity, channel, nucleus=False,
+                   table=_identity.SHARED_TABLE):
         """`channel`'s window in a NAMED namespace, or None.
 
         For a late task checking its own precondition against the slide it
@@ -726,17 +752,29 @@ class ChannelDisplayState(QObject):
         ns = self._namespace_for(identity)
         if ns is None or not channel:
             return None
-        return ns.mappings.get((channel, bool(nucleus)))
+        return ns.table(table).get((channel, bool(nucleus)))
 
-    def mapping_or_seed(self, channel, nucleus=False):
+    def missing_tables(self, channel, nucleus=False, identity=_UNSET):
+        """The window tables that hold NO window for `channel` (seed gates)."""
+        ns = self._namespace_for(identity)
+        if ns is None or not channel:
+            return ()
+        key = (channel, bool(nucleus))
+        return tuple(name for name in _identity.WINDOW_TABLES
+                     if key not in ns.table(name))
+
+    def mapping_or_seed(self, channel, nucleus=False,
+                        table=_identity.SHARED_TABLE):
         """`mapping()`, and if nothing is stored, seed one and store it.
 
         The seed is pixel work (a percentile over the whole slide), so it is
         a port; its RESULT is this state's from the moment it lands. A
         channel is therefore seeded once, not once per reader, and the two
-        steps looking at it cannot seed it differently.
+        steps looking at it cannot seed it differently -- the seed is the
+        same pixel answer for both tables and fills every table that has
+        none.
         """
-        got = self.mapping(channel, nucleus=nucleus)
+        got = self.mapping(channel, nucleus=nucleus, table=table)
         if got is not None or not channel or self._seed_port is None:
             return got
         try:
@@ -747,20 +785,72 @@ class ChannelDisplayState(QObject):
         if seeded is None:
             return None
         lo, hi, gamma = seeded
-        # Stored WITHOUT going back to the persistence port: a seed is what
-        # that port just told us, and writing it back would be an echo.
-        value = (float(lo), float(hi), float(gamma))
-        self._ns.mappings[(channel, bool(nucleus))] = value
-        self._ns.bump(("mapping", (channel, bool(nucleus))))
+        self.fill_seed(channel, lo, hi, gamma, nucleus=nucleus)
+        return self.mapping(channel, nucleus=nucleus, table=table)
+
+    def fill_seed(self, channel, lo, hi, gamma=1.0, nucleus=False,
+                  token=_UNSET):
+        """File an AUTOMATIC window in every table that has none.
+
+        Never over an answer: a table that already holds a window for this
+        key -- typed, restored or seeded earlier -- keeps it. The persistence
+        port is told with `origin="seed"`, so the full records are marked
+        seeded and never user-adjusted. Returns the tables written.
+        """
+        ns = self._namespace_for(token)
+        if ns is None or not channel:
+            return ()
+        key = (channel, bool(nucleus))
+        seed = (float(lo), float(hi), float(gamma))
+        written = {}
+        for name in _identity.WINDOW_TABLES:
+            store = ns.table(name)
+            if key in store:
+                continue
+            value = seed
+            records = ns.records(name)
+            if nucleus and channel in records["user_adjusted"]:
+                # A NUMBER THE USER TYPED WINS IN BOTH ROLES: the records are
+                # per channel, so a Max set on DAPI is DAPI's nucleus window
+                # in that table too. Only an unanswered role is seeded.
+                p = records["params"].get(channel)
+                if p is not None:
+                    value = (float(p["min"]), float(p["max"]),
+                             float(p.get("gamma", 1.0)))
+            store[key] = value
+            ns.bump(self._mapping_key(name, key))
+            written[name] = value
+        if not written or ns is not self._ns:
+            return tuple(written)
         self._mapping_rev += 1
-        return value
+        for name, value in written.items():
+            self._tell_persist(name, channel, value, nucleus, "seed")
+        for name in written:
+            self._emit_mapping(name, channel)
+        return tuple(written)
+
+    def _tell_persist(self, table, channel, value, nucleus, origin):
+        """The persistence port follows a write of `table`."""
+        if self._persist_port is None or self._persisting:
+            return
+        self._persisting = True
+        try:
+            self._persist_port.write_display_window(
+                channel, value[0], value[1], value[2], nucleus=nucleus,
+                table=table, origin=origin)
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Block01] could not persist the display window of "
+                  f"{channel}: {exc}")
+        finally:
+            self._persisting = False
 
     def set_mapping(self, channel, lo, hi, gamma=None, nucleus=False,
-                    origin="", persist=True, token=_UNSET):
-        """Set `channel`'s display window. THE write, from any step.
+                    origin="", persist=True, token=_UNSET,
+                    table=_identity.SHARED_TABLE):
+        """Set `channel`'s display window in `table`. THE write.
 
         True when it changed anything. The persistence port is told, so the
-        remap params on disk follow; a write that came FROM that port passes
+        remap records follow; a write that came FROM that port passes
         `persist=False`, which is what stops the two from echoing.
 
         `token` is the dataset the numbers are ABOUT -- a `DatasetIdentity`
@@ -782,14 +872,15 @@ class ChannelDisplayState(QObject):
                             identity=str(token))
             return False
         key = (channel, bool(nucleus))
-        current = space_ns.mappings.get(key)
+        store = space_ns.table(table)
+        current = store.get(key)
         if gamma is None:
             gamma = current[2] if current else 1.0
         value = (float(lo), float(hi), float(gamma))
         if current == value:
             return False
-        space_ns.mappings[key] = value
-        space_ns.bump(("mapping", key))
+        store[key] = value
+        space_ns.bump(self._mapping_key(table, key))
         if space_ns is not self._ns:
             # A late answer about a slide nobody is looking at. Recorded, so
             # coming back to it is instant; announced to nobody, because
@@ -798,25 +889,19 @@ class ChannelDisplayState(QObject):
                             origin=origin)
             return True
         self._mapping_rev += 1
-        if persist and self._persist_port is not None and not self._persisting:
-            self._persisting = True
-            try:
-                self._persist_port.write_display_window(
-                    channel, value[0], value[1], value[2], nucleus=nucleus)
-            except Exception as exc:                        # noqa: BLE001
-                print(f"[Block01] could not persist the display window of "
-                      f"{channel}: {exc}")
-            finally:
-                self._persisting = False
-        self.mapping_changed.emit(channel)
+        if persist:
+            self._tell_persist(table, channel, value, nucleus, origin)
+        self._emit_mapping(table, channel)
         return True
 
-    def adopt_mappings(self, mappings, origin="", persist=False):
+    def adopt_mappings(self, mappings, origin="", persist=False,
+                       table=_identity.SHARED_TABLE):
         """Install a whole set of display windows as ONE transaction.
 
         For a session restore, a handoff or a dataset load: the views redraw
         once at the end rather than once per channel.
         """
+        store = self._ns.table(table)
         changed = []
         for key, value in (mappings or {}).items():
             channel, nucleus = (key if isinstance(key, tuple)
@@ -825,46 +910,82 @@ class ChannelDisplayState(QObject):
                 continue
             lo, hi, gamma = value
             new = (float(lo), float(hi), float(gamma))
-            if self._ns.mappings.get((channel, bool(nucleus))) == new:
+            if store.get((channel, bool(nucleus))) == new:
                 continue
-            self._ns.mappings[(channel, bool(nucleus))] = new
-            self._ns.bump(("mapping", (channel, bool(nucleus))))
+            store[(channel, bool(nucleus))] = new
+            self._ns.bump(self._mapping_key(table, (channel, bool(nucleus))))
             changed.append((channel, bool(nucleus)))
         if not changed:
             return []
         self._mapping_rev += 1
         for channel, nucleus in changed:
-            if persist and self._persist_port is not None:
-                value = self._ns.mappings[(channel, nucleus)]
-                try:
-                    self._persist_port.write_display_window(
-                        channel, *value, nucleus=nucleus)
-                except Exception:                           # noqa: BLE001
-                    pass
-        for channel, _nucleus in changed:
-            self.mapping_changed.emit(channel)
+            if persist:
+                self._tell_persist(table, channel, store[(channel, nucleus)],
+                                   nucleus, origin)
+        for channel in dict.fromkeys(ch for ch, _nucleus in changed):
+            self._emit_mapping(table, channel)
         return changed
 
-    def mappings(self):
-        """Every stored window, for a caller that is writing them out."""
-        return dict(self._ns.mappings)
+    def replace_mappings(self, mappings, origin="",
+                         table=_identity.SHARED_TABLE):
+        """Make `table` hold EXACTLY `mappings`, as one transaction.
+
+        For a handoff that starts a table over from another's answers: a key
+        the new set does not name is dropped rather than left over from the
+        previous pixels. Not persisted -- the caller owns the records.
+        """
+        store = self._ns.table(table)
+        new = {}
+        for key, value in (mappings or {}).items():
+            channel, nucleus = (key if isinstance(key, tuple)
+                                else (key, False))
+            if channel and value is not None:
+                lo, hi, gamma = value
+                new[(str(channel), bool(nucleus))] = (float(lo), float(hi),
+                                                      float(gamma))
+        changed = [key for key in dict.fromkeys(list(store) + list(new))
+                   if store.get(key) != new.get(key)]
+        if not changed:
+            return []
+        store.clear()
+        store.update(new)
+        for key in changed:
+            self._ns.bump(self._mapping_key(table, key))
+        self._mapping_rev += 1
+        perf_trace.mark("display.table_replaced", table=table, origin=origin,
+                        changed=len(changed))
+        for channel in dict.fromkeys(ch for ch, _nucleus in changed):
+            self._emit_mapping(table, channel)
+        return changed
+
+    def mappings(self, table=_identity.SHARED_TABLE):
+        """Every stored window of `table`, for a caller writing them out."""
+        return dict(self._ns.table(table))
+
+    def window_records(self, table=_identity.SHARED_TABLE, identity=_UNSET):
+        """The full remap records behind `table` (live, not a copy), or None
+        when the namespace is not resident."""
+        ns = self._namespace_for(identity)
+        return None if ns is None else ns.records(table)
 
     def forget_mappings(self, token=_UNSET):
         """Drop a slide's windows, so it is seeded again from its own pixels.
 
         For a RELOAD of the same slide, where the pixels may have changed
         under the same identity. An ordinary A -> B switch does not need it:
-        B has its own namespace and A's is simply not read.
+        B has its own namespace and A's is simply not read. Both tables.
         """
         ns = self._namespace_for(token)
         if ns is None:
             return
-        ns.mappings.clear()
+        for name in _identity.WINDOW_TABLES:
+            ns.table(name).clear()
+            ns.window_records[name] = _identity.empty_window_record()
         ns.bump("mappings")
         if ns is self._ns:
             self._mapping_rev += 1
 
-    def note_mapping_changed(self, channel):
+    def note_mapping_changed(self, channel, table=_identity.SHARED_TABLE):
         """The numbers for `channel` moved underneath us.
 
         For the one case a store cannot see: the remap workbench's own
@@ -874,7 +995,7 @@ class ChannelDisplayState(QObject):
         """
         self._mapping_rev += 1
         if channel:
-            self.mapping_changed.emit(channel)
+            self._emit_mapping(table, channel)
 
     def mapping_revision(self):
         return self._mapping_rev
@@ -1172,6 +1293,7 @@ class TissuePreviewCoordinator(QObject):
         # Tissue Preview stops following -- which is the reported bug.
         state.color_changed.connect(self._on_shared_color_changed)
         state.mapping_changed.connect(self._on_shared_mapping_changed)
+        state.step0_mapping_changed.connect(self._on_step0_mapping_changed)
         # ...and ONE request for a whole-state install. Its fields are
         # announced too, but a transaction is one event: reacting to each of
         # its colours and windows asked for the same picture several times
@@ -1288,7 +1410,17 @@ class TissuePreviewCoordinator(QObject):
         if self._touches(channel):
             self.request_frame(kind="color", channel=channel)
 
+    def _on_step0_mapping_changed(self, channel):
+        """Step0's own window table moved: only Step0's picture uses it."""
+        if self._active == STEP0:
+            self._on_window_moved(channel)
+
     def _on_shared_mapping_changed(self, channel):
+        """The SHARED table moved: every picture but Step0's uses it."""
+        if self._active != STEP0:
+            self._on_window_moved(channel)
+
+    def _on_window_moved(self, channel):
         if self.state.install_fanout_active():
             return
         if self._touches(channel):
@@ -2101,7 +2233,11 @@ class Block01DisplayServices(QObject):
         """
         if self._closing or not channel:
             return False
-        if self.state.mapping(channel, nucleus=nucleus) is not None:
+        # EVERY TABLE: the seed is one pixel answer for both, so it is asked
+        # for while ANY table lacks it -- a populated SHARED must not starve
+        # Step0's own table, and the reverse.
+        if self.state.binding() is not None and not self.state.missing_tables(
+                channel, nucleus=nucleus):
             return False
         binding = self._ensure_binding()
         if binding is None:
@@ -2204,7 +2340,10 @@ class Block01DisplayServices(QObject):
                             reason="binding", seed=str(binding),
                             current=str(current))
             return
-        if self.state.mapping_in(identity, channel, nucleus=nucleus) is not None:
+        # PER TABLE: the seed fills each table that is still empty and no
+        # other. A table somebody answered while we measured keeps its answer.
+        if not self.state.missing_tables(channel, nucleus=nucleus,
+                                         identity=identity):
             # The precondition is gone: somebody answered while we measured.
             perf_trace.mark("display.seed_refused", why="answered",
                             channel=channel, seed=str(binding))
@@ -2212,9 +2351,9 @@ class Block01DisplayServices(QObject):
             return
         tissue_log.note("seed.accepted", channel=channel, nucleus=nucleus,
                         window="%s,%s" % (result["min"], result["max"]))
-        self.state.set_mapping(channel, result["min"], result["max"],
-                               result.get("gamma", 1.0), nucleus=nucleus,
-                               origin="seed", token=identity)
+        self.state.fill_seed(channel, result["min"], result["max"],
+                             result.get("gamma", 1.0), nucleus=nucleus,
+                             token=identity)
         if not is_current:
             return          # filed against the slide it is about, and no more
         # A SEED ALWAYS ASKS FOR A FRAME, unconditionally. The relevance test

@@ -126,14 +126,32 @@ def _window(app, tmp_path):
 
 
 def _seed_workbench(page, values):
-    """Put channels into the workbench the way the Intensity window does."""
+    """Put channels into the Intensity window and type Step1's windows into
+    it, as a user standing in Step1 does: Step1's windows are the SHARED
+    table, which the one Intensity window edits while Step1 is on screen
+    (user ruling 2026-10-27)."""
+    page.display.state.set_scope("step1")
     wb = page._cond_workbench
     wb.set_channel_images({c: np.linspace(0, 1000, 32 * 32, dtype=np.float32)
                            .reshape(32, 32) for c in values})
     for ch, params in values.items():
-        wb.set_active_channel(ch)
-        wb._params[ch].update(params)
+        _type(wb, ch, **params)
     return wb
+
+
+def _type(wb, ch, **params):
+    """Type into the Intensity window's spin boxes (each emits the user's
+    `params_changed`). The bound that moves AWAY from the other goes first,
+    so neither is clamped by the other's old value."""
+    wb.set_active_channel(ch)
+    order = ("min", "max")
+    if "min" in params and params["min"] > wb._params[ch]["max"]:
+        order = ("max", "min")
+    spins = {"min": wb._sp_min, "max": wb._sp_max}
+    for key in order:
+        if key in params:
+            spins[key].setValue(float(params[key]))
+    QtWidgets.QApplication.processEvents()
 
 
 def test_a_draft_edit_changes_what_step1_draws_without_touching_disk(app, tmp_path):
@@ -144,7 +162,7 @@ def test_a_draft_edit_changes_what_step1_draws_without_touching_disk(app, tmp_pa
         before = os.path.exists(json_path) and open(json_path).read()
 
         assert w._display_mapping()["CD3"]["max"] == 1000.0
-        wb._params["CD3"]["max"] = 250.0
+        _type(wb, "CD3", max=250.0)
 
         assert w._display_mapping()["CD3"]["max"] == 250.0     # seen at once
         after = os.path.exists(json_path) and open(json_path).read()
@@ -162,7 +180,7 @@ def test_an_uncommitted_draft_makes_an_existing_result_unreusable(app, tmp_path)
                "channel_remap_params": {}}
         before = w._expected_fused_zarr_meta(cfg, "cellpose_wholecell_fusion")
 
-        wb._params["CD3"]["max"] = 250.0
+        _type(wb, "CD3", max=250.0)
         after = w._expected_fused_zarr_meta(cfg, "cellpose_wholecell_fusion")
 
         assert before["config_hash"] != after["config_hash"]
@@ -228,8 +246,7 @@ def test_a_draft_change_writes_nothing_into_step0(app, tmp_path):
         before = {n: open(os.path.join(step0_dir, n), "rb").read() for n in os.listdir(step0_dir)
                   if os.path.isfile(os.path.join(step0_dir, n))}
         wb = _seed_workbench(w._step0, {"CD3": {"min": 0.0, "max": 1000.0}})
-        wb._params["CD3"]["max"] = 400.0
-        wb.params_changed.emit("CD3")
+        _type(wb, "CD3", max=400.0)
         QtWidgets.QApplication.processEvents()
         after = {n: open(os.path.join(step0_dir, n), "rb").read() for n in os.listdir(step0_dir)
                  if os.path.isfile(os.path.join(step0_dir, n))}

@@ -32,6 +32,7 @@ pytest.importorskip("PyQt5")
 from PyQt5 import QtWidgets  # noqa: E402
 
 from block01.core import tissue_compose  # noqa: E402
+from block01.core.display_identity import STEP0_TABLE, table_for_scope  # noqa: E402
 from block01.ui import block01_display as bd  # noqa: E402
 from block01.ui.main_window import STEP1_PREVIEW_FUSION  # noqa: E402
 
@@ -436,17 +437,20 @@ def test_a_mapping_drag_moves_the_thumbnail_too(app):
         frames = []
         w._display.coordinator.frame_published.connect(
             lambda r: frames.append(np.array(r["rgb"], copy=True)))
-        lo, hi, _g = w._step0._display_mapping_for("CD3")
+        # STEP1'S window: the shared table (user ruling 2026-10-27; Step0's
+        # own window is not Step1's and does not move this picture).
+        state = w._display.state
+        lo, hi, _g = state.mapping_or_seed("CD3")
 
         for i in range(1, 7):
-            w._step0.set_display_mapping("CD3", lo, hi - (hi - lo) * 0.1 * i)
+            last = (lo, hi - (hi - lo) * 0.1 * i, 1.0)
+            state.set_mapping("CD3", *last, origin="test")
             _pump(w, 120)
 
         assert len(frames) >= 4, f"only {len(frames)} frame(s)"
         assert len({f.tobytes() for f in frames}) >= 3, "the same picture"
         # The picture ends on the numbers the control ended on.
-        assert w._display.state.mapping("CD3") == pytest.approx(
-            w._step0._display_mapping_for("CD3"))
+        assert state.mapping("CD3") == pytest.approx(last)
     finally:
         w.close()
 
@@ -625,10 +629,9 @@ def test_a_mapping_drag_in_step2_and_step3_publishes_intermediate_frames(app):
             frames = []
             handle = w._display.coordinator.frame_published.connect(
                 lambda r: frames.append(np.array(r["rgb"], copy=True)))
-            lo, hi, _g = w._display.state.mapping_or_seed("CD3")
+            lo, hi, _g = _window_of(w, "CD3")
             for i in range(1, 8):
-                w._step0.set_display_mapping(
-                    "CD3", lo, hi - (hi - lo) * 0.09 * i)
+                _set_window(w, "CD3", lo, hi - (hi - lo) * 0.09 * i)
                 _pump(w, 120)
             w._display.coordinator.frame_published.disconnect(handle)
 
@@ -762,9 +765,9 @@ def test_a_drag_dispatches_on_the_clock_not_once_per_input(app):
         w._tissue_frames.auto = False
         co.reset_stats()
 
-        lo, hi, _g = w._step0._display_mapping_for("CD3")
+        lo, hi, _g = _window_of(w, "CD3")
         for i in range(1, 201):
-            w._step0.set_display_mapping("CD3", lo, hi - (hi - lo) * 0.002 * i)
+            _set_window(w, "CD3", lo, hi - (hi - lo) * 0.002 * i)
             assert co.frame_stats()["pending"] <= 1
 
         stats = co.frame_stats()
@@ -777,17 +780,22 @@ def test_a_drag_dispatches_on_the_clock_not_once_per_input(app):
 
 
 def test_the_mapping_is_one_set_of_numbers_across_the_walk(app):
+    """Step1, Step2 and Step3 draw ONE set of numbers; Step0 keeps its own
+    (user ruling 2026-10-27) and nothing downstream moves it."""
     w = _window(app)
     try:
         state = w._display.state
         lo, hi, _g = w._step0._display_mapping_for("CD3")
         w._step0.set_display_mapping("CD3", lo, hi / 2.0)
+        state.set_mapping("CD3", lo, hi / 4.0, origin="test")
         answers = []
-        for step in (0, 1, 2, 3):
+        for step in (0, 1, 2, 3, 0):
             _goto(w, step)
-            answers.append(state.mapping("CD3"))
-        assert len(set(answers)) == 1, answers
+            answers.append(state.mapping("CD3", table=_shown_table(w)))
+        assert answers[0] == answers[-1], answers
         assert answers[0][1] == pytest.approx(hi / 2.0)
+        assert len(set(answers[1:4])) == 1, answers
+        assert answers[1][1] == pytest.approx(hi / 4.0)
     finally:
         w.close()
 
@@ -833,9 +841,9 @@ def test_the_gui_thread_composes_nothing_during_a_drag(app):
         _goto(w, 1)
         co.reset_stats()
 
-        lo, hi, _g = w._step0._display_mapping_for("CD3")
+        lo, hi, _g = _window_of(w, "CD3")
         for i in range(1, 41):
-            w._step0.set_display_mapping("CD3", lo, hi - (hi - lo) * 0.01 * i)
+            _set_window(w, "CD3", lo, hi - (hi - lo) * 0.01 * i)
             _pump(w, 60)
 
         stats = co.frame_stats()
@@ -861,17 +869,20 @@ def test_the_intensity_window_is_editable_in_every_step(app):
         # the inspector's pixels arrive from a worker now, and the seed is
         # computed from them
         _pump(w, 1500)
-        lo, hi, _g = w._display.state.mapping_or_seed("CD3")
-        w._step0.set_display_mapping("CD3", lo, hi / 3.0)
+        state = w._display.state
+        lo, hi, _g = state.mapping_or_seed("CD3")
+        state.set_mapping("CD3", lo, hi / 3.0, origin="test")
+        state.set_mapping("CD3", lo, hi / 5.0, origin="test", table=STEP0_TABLE)
 
         for step in (0, 1, 2, 3, 1, 0):
             _goto(w, step)
             assert w._display.intensity_policy()["editable"] is True, step
             if panel is not None:
                 assert panel.isEnabled() is True, step
-            # The numbers are the same ones in every step: one store, never
-            # copied per step.
-            assert w._display.state.mapping("CD3")[1] == pytest.approx(hi / 3.0)
+            # The numbers are the same ones in Step1/2/3 -- one store, never
+            # copied per step -- and Step0 keeps its own (ruling 2026-10-27).
+            assert state.mapping("CD3", table=_shown_table(w))[1] == \
+                pytest.approx(hi / 5.0 if step == 0 else hi / 3.0), step
 
         # ...and the one thing that DOES disable it is a running job.
         w._lock_ui()
@@ -883,6 +894,23 @@ def test_the_intensity_window_is_editable_in_every_step(app):
         assert w._display.intensity_policy()["editable"] is True
     finally:
         w.close()
+
+
+def _shown_table(w):
+    """The window table the step on screen draws with (user ruling
+    2026-10-27: Step0 its own, Step1/2/3 one shared set)."""
+    return table_for_scope(w._display.state.scope())
+
+
+def _set_window(w, channel, lo, hi, gamma=None):
+    """Move a window as the ONE Intensity window does: in the table of the
+    step on screen."""
+    w._display.state.set_mapping(channel, lo, hi, gamma, origin="test",
+                                 table=_shown_table(w))
+
+
+def _window_of(w, channel):
+    return w._display.state.mapping_or_seed(channel, table=_shown_table(w))
 
 
 def _drag_frames(w, moves, settle=120):
@@ -922,17 +950,17 @@ def test_every_step_publishes_intermediate_frames_for_min_max_and_gamma(app):
             w._display.state.set_display_visible("CD3", True,
                                                  origin="contract-test")
             _pump(w)
-            lo, hi, gamma = w._display.state.mapping_or_seed("CD3")
+            lo, hi, gamma = _window_of(w, "CD3")
             counts = {}
             for name, moves in (
-                ("min", [(lambda v=v: w._step0.set_display_mapping(
-                    "CD3", lo + (hi - lo) * 0.05 * v, hi))
+                ("min", [(lambda v=v: _set_window(
+                    w, "CD3", lo + (hi - lo) * 0.05 * v, hi))
                     for v in range(1, 7)]),
-                ("max", [(lambda v=v: w._step0.set_display_mapping(
-                    "CD3", lo, hi - (hi - lo) * 0.07 * v))
+                ("max", [(lambda v=v: _set_window(
+                    w, "CD3", lo, hi - (hi - lo) * 0.07 * v))
                     for v in range(1, 7)]),
-                ("gamma", [(lambda v=v: w._step0.set_display_mapping(
-                    "CD3", lo, hi, 1.0 + 0.12 * v))
+                ("gamma", [(lambda v=v: _set_window(
+                    w, "CD3", lo, hi, 1.0 + 0.12 * v))
                     for v in range(1, 7)]),
             ):
                 frames = _drag_frames(w, moves)
@@ -942,7 +970,7 @@ def test_every_step_publishes_intermediate_frames_for_min_max_and_gamma(app):
                 assert distinct >= 3, (step, name, distinct)
                 # Back to where this control started, so the next one moves
                 # only itself.
-                w._step0.set_display_mapping("CD3", lo, hi, gamma)
+                _set_window(w, "CD3", lo, hi, gamma)
                 _pump(w)
             report[step] = counts
         print(f"[evidence] visible intermediate frames per step: {report}")
@@ -1007,8 +1035,10 @@ def test_the_window_and_mapping_owners_are_not_the_step0_page(app):
         assert services.mapping_owner() is services.state
         assert not isinstance(services.mapping_owner(), Step0Page)
         # A write settles in the STORE, and the store is what everyone reads.
-        services.state.set_mapping("CD3", 7.0, 77.0, 1.5, origin="test")
-        assert services.state.mapping("CD3") == (7.0, 77.0, 1.5)
+        # (Step0's own table: `display_window` is Step0's read.)
+        services.state.set_mapping("CD3", 7.0, 77.0, 1.5, origin="test",
+                                   table=STEP0_TABLE)
+        assert services.state.mapping("CD3", table=STEP0_TABLE) == (7.0, 77.0, 1.5)
         assert w._step0.display_window("CD3") == (7.0, 77.0, 1.5)
 
         # THE ONE THAT SETTLES OWNERSHIP. With persistence disconnected, a
@@ -1018,15 +1048,16 @@ def test_the_window_and_mapping_owners_are_not_the_step0_page(app):
         # previous cut did, through a lambda) gives Step0's number here, not
         # this one.
         services.state._persist_port = None
-        services.state.set_mapping("CD8", 3.0, 33.0, 1.25, origin="test")
-        assert services.state.mapping("CD8") == (3.0, 33.0, 1.25)
+        services.state.set_mapping("CD8", 3.0, 33.0, 1.25, origin="test",
+                                   table=STEP0_TABLE)
+        assert services.state.mapping("CD8", table=STEP0_TABLE) == (3.0, 33.0, 1.25)
         assert w._step0.display_window("CD8") == (3.0, 33.0, 1.25)
         assert w._step0._display_mapping_for("CD8") != (3.0, 33.0, 1.25), (
             "the test is not proving anything: Step0's own answer already "
             "matches, so a state delegating to it would look correct")
         # ...and it keeps answering with the seed port gone too.
         services.state._seed_port = None
-        assert services.state.mapping("CD8") == (3.0, 33.0, 1.25)
+        assert services.state.mapping("CD8", table=STEP0_TABLE) == (3.0, 33.0, 1.25)
     finally:
         w.close()
 
@@ -1152,9 +1183,9 @@ def test_the_real_panel_publish_cost_is_measured_not_assumed(app):
                 costs.append((time.perf_counter() - t0) * 1000.0)
 
         panel.set_channel_image = timed
-        lo, hi, _g = w._display.state.mapping_or_seed("CD3")
+        lo, hi, _g = _window_of(w, "CD3")
         for i in range(1, 13):
-            w._step0.set_display_mapping("CD3", lo, hi - (hi - lo) * 0.05 * i)
+            _set_window(w, "CD3", lo, hi - (hi - lo) * 0.05 * i)
             _pump(w, 120)
         panel.set_channel_image = real_setter
 
@@ -1209,9 +1240,10 @@ def test_a_display_window_does_not_follow_a_channel_name_across_slides(app):
     try:
         _goto(w, 0)
         a_token = w._display.state.dataset_token()
+        state = w._display.state
         w._step0.set_display_mapping("CD3", 11.0, 99.0, 1.4)
         w._step0._apply_channel_color("CD3", (1.0, 0.0, 0.0))
-        assert w._display.state.mapping("CD3") == (11.0, 99.0, 1.4)
+        assert state.mapping("CD3", table=STEP0_TABLE) == (11.0, 99.0, 1.4)
 
         # B: the same channel names, pixels an order of magnitude apart.
         _switch_dataset(w, "/tmp/B.ome.tiff", scale=17.0)
@@ -1219,9 +1251,9 @@ def test_a_display_window_does_not_follow_a_channel_name_across_slides(app):
         assert b_token != a_token
 
         # Nothing of A's is readable as B's.
-        assert w._display.state.mapping("CD3") != (11.0, 99.0, 1.4)
+        assert state.mapping("CD3", table=STEP0_TABLE) != (11.0, 99.0, 1.4)
         _pump(w)
-        seeded = w._display.state.mapping("CD3")
+        seeded = state.mapping("CD3", table=STEP0_TABLE)
         assert seeded is not None, "B was never seeded"
         assert seeded[1] > 99.0, seeded      # B's own, brighter pixels
         # ...and the colour, which IS a per-name preference, did follow.
@@ -1231,8 +1263,8 @@ def test_a_display_window_does_not_follow_a_channel_name_across_slides(app):
         _switch_back = w._step0
         _switch_back._dataset_gen -= 1
         _switch_back.ome_path = "/tmp/A.ome.tiff"
-        w._display.state.bind_dataset(_switch_back._dataset_token())
-        assert w._display.state.mapping("CD3") == (11.0, 99.0, 1.4)
+        state.bind_dataset(_switch_back._dataset_token())
+        assert state.mapping("CD3", table=STEP0_TABLE) == (11.0, 99.0, 1.4)
     finally:
         w.close()
 
@@ -1625,10 +1657,9 @@ def test_no_read_or_percentile_runs_inside_a_tissue_frame_callback(app):
 
             for step in (0, 1, 2, 3):
                 _goto(w, step)
-                lo, hi, _g = w._display.state.mapping_or_seed("CD3")
+                lo, hi, _g = _window_of(w, "CD3")
                 for i in range(1, 6):
-                    w._step0.set_display_mapping(
-                        "CD3", lo, hi - (hi - lo) * 0.08 * i)
+                    _set_window(w, "CD3", lo, hi - (hi - lo) * 0.08 * i)
                     _pump(w, 120)
 
             assert offenders == [], offenders

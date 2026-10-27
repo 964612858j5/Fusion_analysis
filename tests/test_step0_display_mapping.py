@@ -22,6 +22,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt5")
 
 from block01.core.display_mapping import build_display_lut, seed_display_range  # noqa: E402
+from block01.core.display_identity import STEP0_TABLE  # noqa: E402
 from block01.ui.step0 import step0_page as sp  # noqa: E402
 
 from test_step0_background_correction_tab import _GpuPathLoader, app  # noqa: E402,F401
@@ -160,9 +161,11 @@ def test_the_mapping_lives_in_the_workbench_params(app):
     assert (p["min"], p["max"], p["gamma"]) == (3.0, 30.0, 1.1)
     assert (p["brightness"], p["contrast"]) == (0.0, 1.0)
     assert page._display_mapping_for("CD3") == (3.0, 30.0, 1.1)
-    # ...and the SHARED state carries the same window. The dock's own
-    # writable mirror of it is gone with Step0's private dock.
-    assert page.display.state.mapping("CD3") == (3.0, 30.0, 1.1)
+    # ...and the state carries the same window in STEP0'S OWN table, not in
+    # the one Step1/2/3 share (user ruling 2026-10-27).
+    state = page.display.state
+    assert state.mapping("CD3", table=STEP0_TABLE) == (3.0, 30.0, 1.1)
+    assert state.mapping("CD3") != (3.0, 30.0, 1.1)
 
 
 def test_moving_the_inspector_reaches_the_full_image(app):
@@ -188,7 +191,6 @@ def test_the_seed_lands_once_and_never_over_a_user_value(app):
     page._sync_step0_to_workbench()
     wb = page._cond_workbench
     page._display_mapping_for("CD3")                  # first show -> seeded
-    assert "CD3" in page._display_seeded
     seeded = tuple(page._display_mapping_for("CD3"))
 
     page.set_display_mapping("CD3", 11.0, 22.0, 1.0)  # a deliberate edit

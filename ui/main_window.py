@@ -898,9 +898,11 @@ class MainWindow(QMainWindow):
         # replacement could be published: fail closed rather than let Step1 keep
         # using results computed for geometry that is gone.
         self._step0.handoff_invalidated.connect(self._on_step0_handoff_invalidated)
-        # Min/Max/Gamma live in Step0's Intensity window; when they move, the
-        # overlay's remapped pixels for that ONE channel are stale.
-        self._step0.display_mapping_changed.connect(
+        # Step1's Min/Max/Gamma are the SHARED window table (user ruling
+        # 2026-10-27: Step0 keeps its own); when one moves, the overlay's
+        # remapped pixels for that ONE channel are stale. Step0's own windows
+        # moving says nothing about Step1's pixels.
+        self._display.state.mapping_changed.connect(
             self._on_display_mapping_changed)
         self._stack.addWidget(self._step0)
 
@@ -3639,6 +3641,7 @@ class MainWindow(QMainWindow):
         if accepted is True and self.step0_output.get("opened_workspace"):
             self._rm_step2_draft_pending = True        # §6: restored on first entry
             self._rm_step4_draft_pending = True
+            self._adopt_committed_windows_at_reopen()
         if accepted is True:
             self._a8_follow_workspace(bool(self.step0_output.get("opened_workspace")))
         # SAVE-ONLY: stay in Step0; the user enters Step1 explicitly.
@@ -8025,6 +8028,11 @@ class MainWindow(QMainWindow):
         try:
             if page is not None and hasattr(page, "rm_save_draft"):
                 page.rm_save_draft()
+            # The SHARED window table, whatever Step1's own draft is doing
+            # (its restore may still be pending): windows set in Regions or
+            # Step1 and never committed survive a restart (ruling 2026-10-27).
+            if page is not None and hasattr(page, "rm_save_shared_windows"):
+                page.rm_save_shared_windows()
             # Step1's draft too, at once: its autosave timer does not outlive
             # a close (acceptance 2026-10-03 #6)
             if self.loader is not None and self._rm_roi_dir():
@@ -9812,35 +9820,25 @@ class MainWindow(QMainWindow):
         return True
 
     @_perf("restore.fusion_settings")
-    def _restore_fusion_settings(self):
-        """Adopt the saved snapshot, but only if it is THIS handoff's.
-
-        A snapshot names the manifest and the raw file it was frozen against.
-        One from another dataset, or from a handoff that has since been
-        republished, describes settings this session cannot reproduce, so it is
-        left on disk and the draft simply counts as unsaved.
-        """
-        self._display.fusion.install_committed_snapshot(None)
+    def _valid_committed_fusion_settings(self):
+        """`(snapshot, "")` when the saved fusion settings are THIS handoff's,
+        else `(None, why)` -- `why` is "" when there is no file. No side
+        effects: the restore installs, a reopen only reads the windows."""
         path = self._fusion_settings_path()
         if not os.path.exists(path):
-            self._update_fusion_settings_state()
-            return None
+            return None, ""
         try:
             with open(path, "r", encoding="utf-8") as f:
                 snapshot = run_store.from_records(json.load(f) or {},
                                                   run_store.project_dir_of(path))
         except Exception as exc:                            # noqa: BLE001
-            print(f"[Step1] saved fusion settings unreadable: {exc}")
-            self._update_fusion_settings_state()
-            return None
+            return None, f"unreadable: {exc}"
         # Fail closed. A missing field is not a wildcard: a snapshot that does
         # not say which handoff, which slide and which source it was frozen
         # against cannot be shown to be this session's, and adopting it would
         # let a search run on settings nobody can trace.
         def _refuse(why):
-            print(f"[Step1] saved fusion settings not adopted: {why}")
-            self._update_fusion_settings_state()
-            return None
+            return None, why
 
         if snapshot.get("version") != FUSION_SETTINGS_VERSION:
             return _refuse(f"version {snapshot.get('version')!r}, not "
@@ -9873,11 +9871,59 @@ class MainWindow(QMainWindow):
             })
         if not stored or stored != actual:
             return _refuse("its contents do not match its hash")
+        return snapshot, ""
+
+    def _adopt_committed_windows_at_reopen(self):
+        """An opened workspace takes Step1's committed windows NOW, into the
+        shared table, rather than on entering Step1.
+
+        The shared table is written to the session on every step change and
+        close; were the committed windows only adopted on Step1 entry, a
+        workspace closed before that (or left from Regions) would save the
+        handoff's windows as its record, and the record would then keep the
+        committed ones out for good. Same validation as the restore; the
+        fusion half of the snapshot is still installed on Step1 entry.
+        """
+        step0 = self.__dict__.get("_step0")
+        adopt = getattr(step0, "adopt_intensity", None)
+        if adopt is None:
+            return False
+        try:
+            snapshot, _why = self._valid_committed_fusion_settings()
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Step1] saved windows not read on reopen: {exc}")
+            return False
+        if not snapshot or not snapshot.get("display_mapping"):
+            return False
+        try:
+            return bool(adopt(snapshot["display_mapping"],
+                              origin="Step1's saved fusion settings"))
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Step1] saved windows not adopted: {exc}")
+            return False
+
+    def _restore_fusion_settings(self):
+        """Adopt the saved snapshot, but only if it is THIS handoff's.
+
+        A snapshot names the manifest and the raw file it was frozen against.
+        One from another dataset, or from a handoff that has since been
+        republished, describes settings this session cannot reproduce, so it is
+        left on disk and the draft simply counts as unsaved.
+        """
+        self._display.fusion.install_committed_snapshot(None)
+        snapshot, why = self._valid_committed_fusion_settings()
+        if snapshot is None:
+            if why:
+                print(f"[Step1] saved fusion settings not adopted: {why}")
+            self._update_fusion_settings_state()
+            return None
         self._display.fusion.install_committed_snapshot(snapshot)
         print(f"[Step1] fusion settings restored: {snapshot['hash'][:12]}")
-        # Q2a (user ruling 2026-10-02): Step1 comes back with the windows it
-        # was saved with -- they become the one current Intensity. Step0's
-        # file is not touched.
+        # Q2a (user ruling 2026-10-02, narrowed 2026-10-27): Step1 comes back
+        # with the windows it was saved with -- in the SHARED table only, and
+        # fill-only (an opened workspace has already adopted them on reopen,
+        # see `_adopt_committed_windows_at_reopen`). Step0's own windows and
+        # file are not touched.
         step0 = self.__dict__.get("_step0")
         adopt = getattr(step0, "adopt_intensity", None)
         if adopt is not None and snapshot.get("display_mapping"):

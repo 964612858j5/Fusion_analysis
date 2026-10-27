@@ -82,6 +82,10 @@ class ChannelWorkbench(QtWidgets.QWidget):
     # v15: a channel's remap params changed via the controls (live mutual
     # visibility with the background-correction side).
     params_changed = pyqtSignal(str)
+    # A channel's pixels were filed (`_install_loaded`), whether or not that
+    # seeded its params -- `params_changed` is the USER's signal and a lazy
+    # load emits none. A host that keeps the params elsewhere listens here.
+    pixels_installed = pyqtSignal(str)
 
     def __init__(self, parent=None, *, show_reference_bar=True,
                  show_enabled_checkbox=True, multichannel_overlay=False,
@@ -1146,18 +1150,23 @@ class ChannelWorkbench(QtWidgets.QWidget):
         self._info_lbl.setText(
             f"{len(self._names)} channels — {shape[0]}×{shape[1]}")
 
-    def build_config(self):
+    def build_config(self, params=None):
         """Build (and normalize) the current segmentation_preprocess_config.
 
         Records intensity-space provenance (source_policy) and, per channel,
         the source metadata and the observed value range so saved Min/Max are
         never ambiguous about their intensity space.
+
+        `params` ({channel: remap dict}) replaces the editor's own params for
+        the channels it names: a host that keeps its params elsewhere exports
+        THOSE, whatever the editor happens to be showing.
         """
         cfg = default_channel_remap_config()
         cfg["auto_saturation"] = self._auto_saturation
         cfg["source_policy"] = normalize_source_policy(self._source_policy)
+        override = params or {}
         for n in self._names:
-            params = dict(self._params[n])
+            entry = dict(override[n] if n in override else self._params[n])
             meta = dict(self._channel_meta.get(n, {}))
             arr = self._raw.get(n)
             if arr is not None and arr.size:
@@ -1170,8 +1179,8 @@ class ChannelWorkbench(QtWidgets.QWidget):
             meta.setdefault("intensity_space", self._source_policy.get(
                 "intensity_space", "unknown"))
             meta.setdefault("source", self._source_policy.get("source", "unknown"))
-            params.update(meta)
-            cfg["channels"][n] = params
+            entry.update(meta)
+            cfg["channels"][n] = entry
         return cfg
 
     # ── layer list / active channel ───────────────────────────────────
@@ -1268,6 +1277,12 @@ class ChannelWorkbench(QtWidgets.QWidget):
         """
         self._raw[name] = arr
         self._raw_dmax.pop(name, None)
+        try:
+            self._seed_installed(name, arr)
+        finally:
+            self.pixels_installed.emit(name)
+
+    def _seed_installed(self, name, arr):
         if self._user_adjusted.get(name):
             self._seeded.add(name)
             return                              # (#2) keep user params; no re-seed

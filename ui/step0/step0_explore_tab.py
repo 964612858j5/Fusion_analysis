@@ -369,6 +369,9 @@ class Step0ExploreTab(QtWidgets.QWidget):
         # or by anything that discards the stack: the live stack is
         # SUSPENDED for a production run and must be resumed afterwards.
         self._released = False
+        # The Rust viewer core on this stack (docs/v17_step0_engine_plan.md
+        # §10), or None: the Python picture alone.
+        self._engine = None
 
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -406,6 +409,27 @@ class Step0ExploreTab(QtWidgets.QWidget):
     @property
     def build_attempts(self):
         return self._build_attempts
+
+    @property
+    def engine(self):
+        """The engine mount on the live stack, or None."""
+        return self._engine
+
+    @property
+    def backend(self):
+        """`rust` while the engine serves this stack (it may still leave a
+        live preview to the Python picture), else `python`."""
+        engine = self._engine
+        return "rust" if engine is not None and not engine.refused else "python"
+
+    def _engine_should_run(self):
+        """The engine works only while this view is on screen and not
+        given up to a production run (§10.7)."""
+        return self._stack is not None and self.isVisible() and not self._released
+
+    def _engine_follow(self):
+        if self._engine is not None:
+            self._engine.set_running(self._engine_should_run())
 
     @property
     def released(self):
@@ -530,10 +554,12 @@ class Step0ExploreTab(QtWidgets.QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self.start_hot()
+        self._engine_follow()
 
     def hideEvent(self, event):
         super().hideEvent(event)
         self.stop_hot()
+        self._engine_follow()
 
     # ── lifecycle ─────────────────────────────────────────────────────
     def set_dataset(self, path):
@@ -648,11 +674,32 @@ class Step0ExploreTab(QtWidgets.QWidget):
         except (AttributeError, TypeError):
             pass
         self._show_widget(stack.view)
+        self._start_engine(stack)
         print(f"[explore] stack ready in "
               f"{(time.perf_counter() - t0) * 1000:.0f} ms", flush=True)
         # A fresh stack has a fresh scheduler and a fresh corrected cache,
         # so the preparation is mounted on THIS one or not at all.
         self.start_hot()
+
+    def _start_engine(self, stack):
+        """The Rust core on a stack this tab built with its real factory,
+        when the shared backend switch asks for it (§3.2, §10.2). A stack
+        from an injected factory stays on the Python picture."""
+        from .engine_mount import Step0EngineMount, engine_refusal
+        if self._stack_factory is not build_default_stack:
+            return
+        why = engine_refusal()
+        if why:
+            if why != "python":
+                print(f"[explore] engine not used: {why}", flush=True)
+            return
+        mount = Step0EngineMount(stack, parent=self)
+        if not mount.start(stack.view):
+            mount.close()
+            mount.deleteLater()
+            return
+        self._engine = mount
+        self._engine_follow()
 
     def show_source(self, channel, method, params=(), *, viewport_l0=None,
                     tint=None, nucleus=None):
@@ -717,6 +764,10 @@ class Step0ExploreTab(QtWidgets.QWidget):
         if current != wanted:
             print(f"[explore] switching source: {current} -> {wanted}",
                   flush=True)
+            if self._engine is not None:
+                # before the selection: a switch to the Python picture
+                # turns its supply on first (§10.5.4)
+                self._engine.before_selection(channel, method, params)
             controller.set_selection(channel=channel, method=method,
                                      params=params)
         # Colour BEFORE the camera move: a channel switch changes the tint
@@ -734,6 +785,8 @@ class Step0ExploreTab(QtWidgets.QWidget):
                                    host=controller)
         if viewport_l0 is not None:
             controller.jump_to(*(int(v) for v in viewport_l0))
+        if self._engine is not None:
+            self._engine.sync()
         # The channel or the parameters may just have moved, and the specs
         # are the page's live answer. `set_specs` is a no-op when nothing it
         # cares about changed, so this costs nothing on a repeat click.
@@ -758,7 +811,11 @@ class Step0ExploreTab(QtWidgets.QWidget):
             return
         print(f"[explore] following the page's channel: "
               f"{controller.channel!r} -> {channel!r}", flush=True)
+        if self._engine is not None:
+            self._engine.before_selection(channel, controller.method, tuple(controller.params))
         controller.set_selection(channel=channel)
+        if self._engine is not None:
+            self._engine.sync()
 
     def release_for_production(self, reason):
         """Give the GPU up to a production correction run -- by SUSPENDING
@@ -781,6 +838,8 @@ class Step0ExploreTab(QtWidgets.QWidget):
         # BEFORE the suspend: its queued work is cancelled with its own
         # generation rather than being waited out by the scheduler drain.
         self.stop_hot()
+        if self._engine is not None:
+            self._engine.release_for_production()
         t0 = time.perf_counter()
         timings = self._stack.controller.suspend_for_production(reason) or {}
         self._released = True
@@ -802,6 +861,8 @@ class Step0ExploreTab(QtWidgets.QWidget):
             return done, {}
         # (already released: the controller still waits for the work to end)
         self.stop_hot()
+        if self._engine is not None:
+            self._engine.release_for_production()
         done, timings = self._stack.controller.begin_suspend_for_production(
             reason, cancelled=cancelled)
         self._released = True
@@ -817,6 +878,7 @@ class Step0ExploreTab(QtWidgets.QWidget):
         self._released = False
         self._stack.controller.resume_from_production()
         self.start_hot()
+        self._engine_follow()
         print("[explore] resumed after production run", flush=True)
 
     def teardown(self, *, wait_for_floor: bool = False):
@@ -864,6 +926,11 @@ class Step0ExploreTab(QtWidgets.QWidget):
         # controller and the scheduler that are about to be shut down.
         self.stop_hot()
         self._released = False
+        # the engine first: its cores read the slide the stack is closing
+        engine, self._engine = self._engine, None
+        if engine is not None:
+            engine.close()
+            engine.deleteLater()
         stack, self._stack = self._stack, None
         if stack is None:
             return

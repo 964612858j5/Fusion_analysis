@@ -133,6 +133,13 @@ impl ViewerCore {
         Ok(d)
     }
 
+    /// S0-A (docs/v17_step0_engine_plan.md §10.5.2): is `view` (x0, x1,
+    /// y0, y1) wholly covered, for every display channel, by the tiles the
+    /// last composition would use? Read-only; asked right after a paint.
+    fn view_covered(&self, view: [f64; 4]) -> bool {
+        crate::frame::view_covered(&mut self.inner.borrow_mut(), view)
+    }
+
     /// The GUI side drained the notice socket (order: drain, ack, work).
     fn ack(&self) {
         if let Some(n) = &self.inner.borrow().notifier {

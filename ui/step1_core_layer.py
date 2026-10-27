@@ -13,9 +13,7 @@ keep the GIL (R0: re-taking it behind busy Python threads cost up to
 seconds). Redraw notices arrive on a socket pair: drain, ack, then update.
 """
 
-import os
 import socket
-import time
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -24,11 +22,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from ..utils import perf_trace
 from ..utils import tile_trace
 from ..viewer import coverage_probe
-from ..viewer import read_ledger
+from .core_gl_session import FRAME_MS, CoreGlSession  # noqa: F401 -- FRAME_MS kept importable here
 from .step1_core_labels import CoreLabelSurface
-
-#: Block A9-O2: a frame slot (~60 Hz) for work the last paint left over
-FRAME_MS = 16
 
 
 class Step1CoreLayerError(RuntimeError):
@@ -70,17 +65,11 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
         #: set by the binding: the number of channels the frame should draw
         self.expected_channels = lambda: 0
         self.last_report: Dict[str, Any] = {}
-        self._reads_seen = 0
-        self._pressure_pending = False
-        self._a9_frame = 0
         self._a9_pending = None
-        self._sockets = notice_socket          # (read end, write end), owned here
-        self._notifier = None
-        if notice_socket is not None:
-            notice_socket[0].setblocking(False)
-            self._notifier = QtCore.QSocketNotifier(notice_socket[0].fileno(),
-                                                    QtCore.QSocketNotifier.Read, self)
-            self._notifier.activated.connect(self._on_notice)
+        # the core's notices, GL calls, paint reports and drawing records
+        # (docs/v17_step0_engine_plan.md §10.2); the socket pair is its own
+        self._session = CoreGlSession(core, notice_socket, owner=self, on_notice=self._on_notice,
+                                      tag=self.a9_tag, channel_name=self._channel_name, parent=self)
         self._again = QtCore.QTimer(self)
         self._again.setSingleShot(True)
         self._again.timeout.connect(self.update)
@@ -204,12 +193,7 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
             return
         try:
             context.aboutToBeDestroyed.connect(self._context_going)
-
-            def get_proc(name):
-                pointer = context.getProcAddress(QtCore.QByteArray(name))
-                return int(pointer) if pointer else 0
-
-            self.core.attach_gl(get_proc)
+            self._session.attach_gl(context)
             self._ever_initialized = True
             fmt = context.format()
             self._capabilities = {"backend": "rust", "gl_version": f"{fmt.majorVersion()}.{fmt.minorVersion()}",
@@ -227,7 +211,7 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
             return
         self.makeCurrent()
         try:
-            self.core.release_gl()
+            self._session.release_gl()
         finally:
             self.doneCurrent()
         self._initialized = False
@@ -255,24 +239,21 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
         width = int(round(self.width() * ratio))
         height = int(round(self.height() * ratio))
         self._labels_follow_ratio()
-        report = self.core.paint(self.defaultFramebufferObject(), max(1, width),
-                                 max(1, height), view)
+        session = self._session
+        report = session.paint(self.defaultFramebufferObject(), width, height, view)
         self.last_report = report
-        if report.get("error"):
-            perf_trace.mark("gpu.core_error", error=str(report["error"])[:160].replace(" ", "_"))
-            self._fail(f"paint failed: {report['error']}")   # this frame was not shown
-            return
-        if report.get("read_failure"):
-            self._fail(f"reads failed: {report['read_failure']}")
+        failure = session.failure_of(report)
+        if failure:
+            self._fail(failure)                          # this frame was not shown
             return
         if report.get("capacity_exceeded") and self.on_capacity is not None:
             QtCore.QTimer.singleShot(0, self.on_capacity)
-        if (report.get("deferred", 0) or report.get("reserving")) and not self._again.isActive():
-            self._again.start(FRAME_MS)                 # the rest (or the next reserved block) next slot
-        elif report.get("retry_ms") and not self._again.isActive():
-            self._again.start(max(1, int(report["retry_ms"]) + 1))   # a failed read is due again
-        self._note_reads()
-        self._a9_note_frame(report)
+        again = session.again_ms(report)
+        if again is not None and not self._again.isActive():
+            self._again.start(again)
+        session.note_reads()
+        self._a9_pending = session.note_frame(report, int(self.expected_channels() or 0),
+                                              getattr(self, "_a9_input_seq", None))
 
     def _fail(self, why: str) -> None:
         """Stop drawing now (the last complete picture stays on screen);
@@ -291,80 +272,15 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
     def failed(self) -> str:
         return self._failed
 
-    # ── notices from the core ─────────────────────────────────────────
-    def _on_notice(self, *_args) -> None:
-        sockets = self._sockets
-        if sockets is None:
-            return
-        try:                                             # drain -> ack -> work
-            while sockets[0].recv(4096):
-                pass
-        except (BlockingIOError, InterruptedError):
-            pass
-        except OSError:
-            return
-        self.core.ack()
+    # ── notices from the core (drained and acknowledged by the session) ──
+    def _on_notice(self) -> None:
         if not self.hidden:
             self.update()
 
     # ── measurement (A9 tools read these; default off) ────────────────
-    def _note_reads(self) -> None:
-        """The core's reads into `read_ledger`, which the A9 driver watches."""
-        reads = int(self.core.stats().get("reads", 0))
-        for _ in range(max(0, reads - self._reads_seen)):
-            read_ledger.note("raw", -1, 0)
-        self._reads_seen = reads
-
-    def _a9_note_frame(self, report) -> None:
-        self._a9_frame += 1
-        expected = int(self.expected_channels() or 0)
-        complete = (int(report.get("channels", 0)) >= expected
-                    and int(report.get("shown", 0)) >= int(report.get("wanted", 0)))
-        wanted = int(report.get("wanted", 0))
-        fraction = (int(report.get("shown", 0)) / wanted) if wanted else (1.0 if complete else 0.0)
-        result = {"gap_cells": 0 if complete else 1, "exact_fraction": round(fraction, 4),
-                  "target_fraction": round(fraction, 4), "channels": int(report.get("channels", 0)),
-                  "expected": expected, "level": int(report.get("level", -1))}
-        self._a9_pending = (self._a9_frame, result, getattr(self, "_a9_input_seq", None), report)
-        # the coverage record at composition time, as the Python binding
-        # stamps it at publication (its "shown" is then the next present)
-        state = (result["level"], int(report.get("wanted", 0)), int(report.get("shown", 0)),
-                 int(report.get("view_id", 0)))
-        if tile_trace.ON and state != getattr(self, "_traced_coverage", None):
-            self._traced_coverage = state
-            tile_trace.stamp("cov", level=None if state[0] < 0 else state[0], wanted=state[1],
-                             shown=state[2], vp=state[3], viewer=self.a9_tag())
-        growths = self.core.drain_growths()
-        if growths and not self._pressure_pending:
-            # A9 §36 / R3 plan §2.2: the viewers grew -- hidden ones give
-            # back if over target. Not here: releasing another viewer makes
-            # ITS context current, so after this paint.
-            self._pressure_pending = True
-            QtCore.QTimer.singleShot(0, self._pressure_check)
-        if perf_trace.enabled():
-            for at, layers, alloc_ms, warm_ms, status, error in growths:   # §48: block creation
-                perf_trace.mark("gpu.grow", frame=self._a9_frame, viewer=self.a9_tag(),
-                                at=round(at, 6), layers=layers,
-                                alloc_ms=round(alloc_ms, 3), warm_ms=round(warm_ms, 3),
-                                fb_status=hex(status), gl_error=hex(error))
-            perf_trace.mark("gpu.frame", frame=self._a9_frame, rust_frame=int(report.get("frame", 0)),
-                            viewer=self.a9_tag(),
-                            level=int(report.get("level", -1)),
-                            ideal=int(report.get("ideal", -1)), channels=int(report.get("channels", 0)),
-                            planes=int(report.get("planes", 0)), uploads=int(report.get("uploads", 0)),
-                            deferred=int(report.get("deferred", 0)),
-                            deferred_growth=int(report.get("deferred_growth", 0)),
-                            capacity_exceeded=int(bool(report.get("capacity_exceeded"))),
-                            paint_ms=round(float(report.get("total_ms", 0.0)), 3),
-                            upload_ms=round(float(report.get("upload_ms", 0.0)), 3),
-                            draw_ms=round(float(report.get("draw_ms", 0.0)), 3), backend="rust")
-
-    def _pressure_check(self) -> None:
-        self._pressure_pending = False
-        if self._disposed:
-            return
-        from . import gpu_memory
-        gpu_memory.on_layer_active(self)
+    @property
+    def _a9_frame(self) -> int:
+        return self._session.frame
 
     def _presented(self) -> None:
         if tile_trace.ON:
@@ -381,21 +297,7 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
         """The core's stage records into `tile_trace`, with their own times."""
         if self._disposed:
             return
-        for t, stage, key, extra in self.core.drain_trace():
-            if len(tile_trace._records) >= tile_trace.LIMIT:
-                break
-            name = key and self._channel_name(key[0])
-            k = None if key is None else (name, int(key[1]), int(key[2]), int(key[3]))
-            # R6 §12.4: which viewer (Step1 / Step3 are two layers)
-            fields = {"viewer": self.a9_tag()}
-            for n, v in extra.items():                 # the fields a9_tiletl reads
-                if n == "fine":
-                    fields["tier"] = "fine" if v else "coarse"
-                elif n == "err":
-                    fields["err"] = bool(v)
-                else:
-                    fields[n] = int(v) if float(v).is_integer() and n == "ok" else round(float(v), 3)
-            tile_trace._records.append((t, stage, k, fields))
+        self._session.merge_trace()
 
     def a9_tag(self) -> str:
         """Measurement only: this layer's name in exported records."""
@@ -426,9 +328,7 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
                     "transient_targets_remaining": 0, "cache_bytes": 0, "threads_created": 0}
         if tile_trace.ON:
             self._merge_trace()
-        self.core.close()                                # no notice, no read after this
-        if self._notifier is not None:
-            self._notifier.setEnabled(False)
+        self._session.close()                            # no notice, no read after this
         self._again.stop()
         if self._attached_view is not None:
             for signal, slot in ((self._attached_view.view_box.sigRangeChanged, self._range_changed),
@@ -440,11 +340,11 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
         if self._initialized and self.context() is not None and self.context().isValid():
             self.makeCurrent()
             try:
-                self.core.release_gl()
+                self._session.release_gl()
             finally:
                 self.doneCurrent()
         else:
-            self.core.forget_gl()
+            self._session.forget_gl()
         self._initialized = False
         if tile_trace.ON:
             self._merge_trace()       # R7a: what the GL release itself recorded (lost GPU timers)
@@ -454,13 +354,7 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
                      "transient_targets_remaining": int(self.core.gpu_bytes() > 0),
                      "cache_bytes": int(self.core.gpu_bytes())}
         self._disposed = True
-        if self._sockets is not None:
-            for end in self._sockets:
-                try:
-                    end.close()
-                except OSError:
-                    pass
-            self._sockets = None
+        self._session.close_sockets()
         return {"already_disposed": False, "threads_created": 0, **remaining}
 
 

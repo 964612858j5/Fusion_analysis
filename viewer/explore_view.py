@@ -1784,6 +1784,10 @@ class RawOverlayLayer(QtCore.QObject):
 
     _delivered = QtCore.pyqtSignal(object)
     _calibrated = QtCore.pyqtSignal(object)
+    #: Public (docs/v17_step0_engine_plan.md §10.2): what this layer shows
+    #: may have changed -- switch, suppression, colour, mapping, or a failed
+    #: calibration. A notice only: the reader asks for the state itself.
+    display_changed = QtCore.pyqtSignal()
 
     def __init__(self, provider, scheduler, grid, view, channel, *,
                  item_budget: int = DEFAULT_ITEM_BUDGET,
@@ -1890,6 +1894,7 @@ class RawOverlayLayer(QtCore.QObject):
         """
         self._enabled = bool(enabled)
         self._apply_enabled_state(host=host)
+        self._announce_display()
 
     def set_suppressed(self, suppressed: bool, *, host=None):
         """Set when the marker layer is ALREADY showing this channel.
@@ -1901,6 +1906,7 @@ class RawOverlayLayer(QtCore.QObject):
         """
         self._suppressed = bool(suppressed)
         self._apply_enabled_state(host=host)
+        self._announce_display()
 
     def _apply_enabled_state(self, *, host=None):
         on = self.effective_enabled
@@ -1920,6 +1926,7 @@ class RawOverlayLayer(QtCore.QObject):
         re-read, no re-quantisation, no request."""
         self._tint = rgb
         self._pool.set_lookup_table(build_display_lut(rgb, self._gamma))
+        self._announce_display()
 
     def set_display_mapping(self, lo, hi, gamma=None):
         """This layer's mapping `(display_min, display_max, gamma)`, see
@@ -1931,10 +1938,19 @@ class RawOverlayLayer(QtCore.QObject):
             self._gamma = max(float(gamma), 1e-3)
         self._pool.set_levels((self._display_lo, self._display_hi))
         self._pool.set_lookup_table(build_display_lut(self._tint, self._gamma))
+        self._announce_display()
 
     @property
     def display_mapping(self):
         return (self._display_lo, self._display_hi, self._gamma)
+
+    def _announce_display(self):
+        """`display_changed`, from a setter that may run on an object built
+        without `__init__` (tests drive the setters on bare objects)."""
+        try:
+            self.display_changed.emit()
+        except (AttributeError, RuntimeError, TypeError):
+            pass
 
     # ── calibration ───────────────────────────────────────────────────
     def start_calibration(self, host):
@@ -1975,6 +1991,7 @@ class RawOverlayLayer(QtCore.QObject):
         if isinstance(rec_or_exc, Exception):
             self._calibration_failed = True
             self.stats["calibration_failures"] += 1
+            self._announce_display()
             return
         rec = rec_or_exc
         if (rec.channel != self.channel
@@ -2291,6 +2308,11 @@ class ExploreController(QtCore.QObject):
     # know a neighbour is genuinely switch-ready, and must not read the
     # cache dict directly.
     overview_prepared = QtCore.pyqtSignal(object, str, int, bool)
+    # Public (docs/v17_step0_engine_plan.md §10.2): what the marker layer
+    # shows may have changed -- colour, mapping, visibility, selection or a
+    # newly installed overview record (with its range). A notice only:
+    # the reader asks for the state itself.
+    display_changed = QtCore.pyqtSignal()
 
     def __init__(self, provider, scheduler, compute, grid: TileGridSpec,
                  view: ExploreView, channel: str, settle_ms: int = 80,
@@ -2816,6 +2838,15 @@ class ExploreController(QtCore.QObject):
         self.view.corrected_floor_item.setLookupTable(lut)
         self._raw_pool.set_lookup_table(lut)
         self._precise_pool.set_lookup_table(lut)
+        self._announce_display()
+
+    def _announce_display(self):
+        """`display_changed`, from a setter that may run on an object built
+        without `__init__` (tests drive the setters on bare objects)."""
+        try:
+            self.display_changed.emit()
+        except (AttributeError, RuntimeError, TypeError):
+            pass
 
     # ── display mapping (core/display_mapping.py) ─────────────────────
 
@@ -2881,6 +2912,7 @@ class ExploreController(QtCore.QObject):
             return
         self._display_lo, self._display_hi, self._gamma = lo, hi, gamma
         self._apply_display_mapping()
+        self._announce_display()
 
     @property
     def display_mapping(self):
@@ -2905,6 +2937,7 @@ class ExploreController(QtCore.QObject):
         self.view.corrected_floor_item.setOpacity(alpha)
         self._raw_pool.set_layer_opacity(alpha)
         self._precise_pool.set_layer_opacity(alpha)
+        self._announce_display()
 
     def set_selection(self, channel=_UNSET, method=_UNSET, params=_UNSET):
         """Change channel/method/params. Marks the precise layer
@@ -3040,6 +3073,7 @@ class ExploreController(QtCore.QObject):
             # this the 80ms `gesture_quiet` never fires and a background
             # consumer can never reach its own SETTLED.
             self._settle_timer.start(self.settle_ms)
+        self._announce_display()
 
     def _try_atomic_cached_channel_swap(self):
         """If every visible tile of the NEW selection is already cached,
@@ -3416,6 +3450,7 @@ class ExploreController(QtCore.QObject):
         self._overview_cache_put(rec)
         # Levels of the pools and the table follow the (possibly new) range.
         self._apply_display_mapping()
+        self._announce_display()
 
     def _clear_overview(self):
         """Drop the live overview and hide it. Used the instant a switch

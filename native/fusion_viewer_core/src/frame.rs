@@ -8,11 +8,13 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 mod compose;
+mod covered;
 mod drawlog;
 mod pace;
 pub mod phase_time;
 mod shown;
 pub(crate) use shown::shown_rows;
+pub(crate) use covered::view_covered;
 pub use compose::{draw_labels, ComposeKey};
 pub use pace::Pacing;
 

@@ -174,6 +174,103 @@ def _mark_target(n, target):
                     w=target.width(), h=target.height(), up="/".join(chain))
 
 
+class _S0First(QtCore.QObject):
+    """S0-0: the first PAINT of Step0's full image after action `n` that
+    shows a corrected tile of the live selection -- its channel, method and
+    the parameters / quality `correction_identity` gives its level -- as
+    `a9.s0_first` (ms since the action). A floor or an older selection's
+    tile does not count. Measuring only: reads the controller's pool.
+
+    S0-A (docs/v17_step0_engine_plan.md §10.8): when the Rust engine draws
+    the selection (Original, a matching saved product), the first PRESENTED
+    frame of its host whose published picture is that selection counts."""
+
+    TIMEOUT_S = 90.0
+
+    def __init__(self, page, n):
+        tab = getattr(page, "_explore_tab", None)
+        stack = getattr(tab, "stack", None)
+        self.ctl = getattr(stack, "controller", None)
+        super().__init__(page)
+        self.n = n
+        self.t0 = time.perf_counter()
+        self._queued = False
+        if self.ctl is None:
+            perf_trace.mark("a9.s0_first", n=n, error="no full image")
+            return
+        self.viewport = self.ctl.view.graphics.viewport()
+        # who draws the result is decided by the TARGET selection, at the
+        # moment a frame appears (the action runs after this is built)
+        self.engine = getattr(tab, "engine", None)
+        if self.engine is not None and self.engine.host is not None:
+            self.engine.host.frameSwapped.connect(self._check_engine)
+        self.viewport.installEventFilter(self)
+        QtCore.QTimer.singleShot(int(self.TIMEOUT_S * 1000), self._timeout)
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        if event.type() == QtCore.QEvent.Paint and not self._queued:
+            self._queued = True
+            QtCore.QTimer.singleShot(0, self._check)
+        return False
+
+    def _engine_draws(self):
+        e = self.engine
+        c = self.ctl
+        return (e is not None and not e.refused and e.host is not None
+                and e.identity_for(c.channel, c.method, tuple(c.params)) is not None)
+
+    def _timeout(self):
+        if self.viewport is not None:
+            self._done(timed_out=True)
+
+    def _check_engine(self):
+        if self.viewport is None or not self._engine_draws():
+            return
+        e = self.engine
+        host = e.host
+        if e.picture == "engine" and host.current is not None \
+                and host.current.identity == e._wanted_identity():
+            self._done(engine=True, view_level=self.ctl.level, channel=self.ctl.channel)
+
+    def _done(self, **fields):
+        if self.viewport is None:
+            return
+        if self.engine is not None:
+            try:
+                self.engine.host.frameSwapped.disconnect(self._check_engine)
+            except (TypeError, RuntimeError, AttributeError):
+                pass
+            self.engine = None
+        self.viewport.removeEventFilter(self)
+        self.viewport = None
+        perf_trace.mark("a9.s0_first", n=self.n,
+                        ms=round((time.perf_counter() - self.t0) * 1000.0, 1), **fields)
+        self.deleteLater()
+
+    def _check(self):
+        self._queued = False
+        c = self.ctl
+        if self.viewport is None:
+            return
+        if time.perf_counter() - self.t0 > self.TIMEOUT_S:
+            self._done(timed_out=True)
+            return
+        if self._engine_draws():
+            return                         # the engine's presented frame decides
+        if c.method is None:
+            self._done(original=True)
+            return
+        for entry in list(c._precise_pool.entries.values()):
+            key = entry.key
+            if (key is None or not entry.item.isVisible() or entry.item.opacity() <= 0
+                    or getattr(key, "channel", None) != c.channel or getattr(key, "method", None) != c.method):
+                continue
+            params, quality, _algo = c.correction_identity(entry.level)
+            if tuple(key.params) == tuple(params) and key.quality == quality:
+                self._done(level=entry.level, quality=str(quality), view_level=c.level, channel=c.channel)
+                return
+
+
 class Driver(QtCore.QObject):
     def __init__(self, window, actions):
         super().__init__(window)
@@ -246,6 +343,10 @@ class Driver(QtCore.QObject):
 
     def _wait_for_project(self):
         ready = bool((getattr(self.w, "step0_output", None) or {}).get("step0_manifest_path"))
+        if os.environ.get("BLOCK01_A9_WAIT") == "dataset":
+            # S0-0: Step0 is measured on a loaded dataset; no handoff needed
+            tab = getattr(getattr(self.w, "_step0", None), "_explore_tab", None)
+            ready = getattr(tab, "stack", None) is not None
         if not ready:
             QtCore.QTimer.singleShot(500, self._wait_for_project)
             return
@@ -390,6 +491,102 @@ class Driver(QtCore.QObject):
                           float(a.get("gamma", 1.0)), origin="a9-drive")
         self._after_settle(lambda: perf_trace.mark(
             "a9.window_reads", n=self.i, reads=read_ledger.delta(before).get("total", 0)))
+
+    # ── Step0 correction preview (S0-0, docs/v17_step0_engine_plan.md §5) ──
+    def _do_s0method(self, a, _t):
+        """Original / TopHat / cuCIM, by the toolbar button the user clicks."""
+        btn = self.w._step0._full_method_buttons[a["source"]]
+        perf_trace.mark("a9.delivered", n=self.i, kind="programmatic")
+        _S0First(self.w._step0, self.i)
+        btn.click()
+        self._after_settle(lambda: None, timeout_s=float(a.get("timeout_s", 60)))
+
+    def _do_s0saved(self, a, _t):
+        """S0-A measurement: the saved corrected store as a Save or a
+        handoff registers it (`set_corrected_zarr_store`), so the viewers'
+        `saved_product` can find it on a read-only project copy."""
+        loader = self.w._step0.loader
+        loader.set_corrected_zarr_store(a["zarr"], dict(a["decisions"]))
+        perf_trace.mark("a9.s0saved", ok=bool(getattr(loader, "_corrected_zarr_path", None)))
+        self._next(0)
+
+    def _do_s0tick(self, a, _t):
+        """A Step0 channel row's checkbox, as the user ticks it."""
+        row = self.w._step0._channel_rows[a["channel"]]
+        perf_trace.mark("a9.delivered", n=self.i, kind="programmatic")
+        row["checkbox"].setChecked(bool(a.get("on", True)))
+        self._next(int(a.get("wait_ms", 300)))
+
+    def _do_s0window(self, a, _t):
+        """A channel's Min / Max / Gamma typed in Step0 (its public setter)."""
+        perf_trace.mark("a9.delivered", n=self.i, kind="programmatic")
+        self.w._step0.set_display_mapping(a["channel"], float(a["min"]), float(a["max"]),
+                                          float(a.get("gamma", 1.0)))
+        self._next(int(a.get("wait_ms", 300)))
+
+    def _do_s0probe(self, a, _t):
+        """Measurement: Step0's selection and windows, the shared display
+        scope and the Tissue Preview's last published frame."""
+        page = self.w._step0
+        display = self.w._display
+        state = display.state
+        coord = display.coordinator
+        pub = dict(getattr(coord, "_last_published", None) or {})
+        chans = a.get("channels") or []
+        fields = {"current": page.current_channel,
+                  "scope": (state.scope() if hasattr(state, "scope") else None),
+                  "active": getattr(coord, "_active", None),
+                  "pub_rev": pub.get("rev"), "pub_owner": pub.get("owner"),
+                  "pub_channels": "|".join(str(c) for c in (pub.get("channels") or ())),
+                  "input_rev": getattr(coord, "_input_rev", None),
+                  "pub_fp": pub.get("fingerprint")}
+        for ch in chans:
+            lo, hi, g = page.display_window(ch)
+            fields[f"win_{ch}"] = f"{lo:.4g}/{hi:.4g}/{g:.3g}"
+            fields[f"vis_{ch}"] = page._channel_display_visible(ch)
+            # the whole-slide array the Tissue Preview composes from
+            try:
+                low = page.tissue_lowres_array(ch)
+                fields[f"low_{ch}"] = ("none" if low is None else
+                                       f"{low.dtype}:{float(low.min()):.3g}/{float(low.mean()):.3g}/{float(low.max()):.3g}")
+                fields[f"col_{ch}"] = str(page._channel_color(ch))
+            except Exception as exc:                         # noqa: BLE001 -- measurement only
+                fields[f"low_{ch}"] = f"err:{exc}"
+        # what each Tissue Preview panel shows now, as a picture
+        out_dir = os.path.dirname(os.environ.get("BLOCK01_PERF_LOG", "") or "")
+        if out_dir:
+            for k, panel in enumerate(coord._panels()):
+                try:
+                    # the picture the panel was GIVEN, apart from what it shows
+                    stored = getattr(panel, "_channel_rgb", None)
+                    if stored is not None:
+                        import numpy as np
+                        np.save(os.path.join(out_dir, f"stored_{self.i:03d}_{a.get('label', '')}_{k}.npy"),
+                                np.asarray(stored))
+                    if panel.isVisible():
+                        panel.grab().save(os.path.join(out_dir, f"tissue_{self.i:03d}_{a.get('label', '')}_{k}.png"))
+                except Exception:                            # noqa: BLE001 -- measurement only
+                    pass
+        perf_trace.mark("a9.s0probe", **fields, label=a.get("label", ""))
+        self._next(int(a.get("wait_ms", 0)))
+
+    def _do_s0channel(self, a, _t):
+        """Select a marker in Step0's channel list, as a row click does."""
+        page = self.w._step0
+        perf_trace.mark("a9.delivered", n=self.i, kind="programmatic")
+        page._on_channel_selected_by_id(a["channel"])
+        page._on_channel_row_clicked(a["channel"])
+        self._after_settle(lambda: None, timeout_s=float(a.get("timeout_s", 60)))
+
+    def _do_s0param(self, a, _t):
+        """A radius / sigma typed into the channel's box and Enter pressed."""
+        page = self.w._step0
+        box = page._dec_radius if a.get("method", "tophat") == "tophat" else page._dec_sigma
+        perf_trace.mark("a9.delivered", n=self.i, kind="programmatic")
+        _S0First(page, self.i)
+        box.setValue(int(a["value"]))
+        box.lineEdit().returnPressed.emit()
+        self._after_settle(lambda: None, timeout_s=float(a.get("timeout_s", 60)))
 
     def _do_camera(self, a, _t):
         """§41: put Step1's camera at (cx, cy) level-0 px, `scale` screen px
@@ -546,6 +743,11 @@ class Driver(QtCore.QObject):
         tab = getattr(getattr(w, "_step0", None), "_explore_tab", None)
         stack = getattr(tab, "stack", None)
         out.append(getattr(stack, "scheduler", None))
+        # S0-A: the Step0 engine's cores (their reads) while it runs
+        engine = getattr(tab, "engine", None)
+        host = getattr(engine, "host", None)
+        if host is not None and getattr(engine, "running", False):
+            out.extend(slot.core for slot in host.cores())
         for name in ("_step1_mount", "_step3_mount"):
             mount = w.__dict__.get(name)
             try:
@@ -555,6 +757,14 @@ class Driver(QtCore.QObject):
             hstack = getattr(host, "_stack", None) or getattr(host, "stack", None)
             out.append(getattr(hstack, "scheduler", None))
         return [s for s in out if s is not None and hasattr(s, "idle")]
+
+    def _step0_engine_target(self):
+        """S0-A: does the Step0 engine draw the current selection?"""
+        tab = getattr(getattr(self.w, "_step0", None), "_explore_tab", None)
+        engine = getattr(tab, "engine", None)
+        c = getattr(getattr(tab, "stack", None), "controller", None)
+        return (engine is not None and c is not None and not engine.refused
+                and engine.identity_for(c.channel, c.method, tuple(c.params)) is not None)
 
     def _expected_where(self, step=None):
         step = int(getattr(self.w, "_current_step", 0) or 0) if step is None else int(step)
@@ -594,6 +804,8 @@ class Driver(QtCore.QObject):
             # -- the host's own CPU view (hidden beneath a working GPU layer
             # its frames are always empty, so they never qualify)
             kinds = (("gpu", "cpu-step1") if where == "gpu" else (where,)) if where else ()
+            if where == "cpu" and self._step0_engine_target():
+                kinds = ("gpu",)          # S0-A: the Step0 engine draws this selection
             frame, presented = {}, False
             for kind in kinds:
                 f = coverage_probe.LAST_BY.get(kind) or {}

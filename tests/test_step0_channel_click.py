@@ -277,6 +277,41 @@ def test_ticking_a_marker_shows_only_that_one_too(app):
         "a tick took the reference layer off"
 
 
+def test_ticking_a_marker_selects_it(app):
+    """User report, 2026-10-27: HsBAg was ticked, the marker that had been on
+    screen went off, and HsBAg's Min/Max/Gamma moved nothing -- Step0 draws
+    the SELECTED channel and the tick had not selected it. A tick now does
+    what the click does."""
+    page = _page(app)
+    state = page.display.state
+    _click_row(page, "CD3")
+
+    page._channel_rows["CD20"]["checkbox"].setChecked(True)
+    QtWidgets.QApplication.processEvents()
+
+    assert state.selected_channel() == "CD20"
+    assert page.current_channel == "CD20"
+
+
+def test_ticking_the_nucleus_or_unticking_does_not_move_the_selection(app):
+    """DAPI is the reference layer with its own switch, and hiding a marker is
+    not a request to edit another one."""
+    page = _page(app)
+    state = page.display.state
+    _click_row(page, "CD3")
+    page._channel_rows["DAPI"]["checkbox"].setChecked(False)
+    QtWidgets.QApplication.processEvents()
+
+    page._channel_rows["DAPI"]["checkbox"].setChecked(True)
+    QtWidgets.QApplication.processEvents()
+    assert state.selected_channel() == "CD3"
+
+    page._channel_rows["CD3"]["checkbox"].setChecked(False)
+    QtWidgets.QApplication.processEvents()
+    assert state.selected_channel() == "CD3"
+    assert page.current_channel == "CD3"
+
+
 def test_unticking_a_marker_hides_only_that_one(app):
     """Nothing else moves: hiding is not a request to show something else."""
     page = _page(app)

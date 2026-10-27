@@ -547,14 +547,14 @@ def test_the_landing_thumbnail_never_composites_dapi_onto_itself(app):
     assert np.array_equal(_thumb(page), off)
 
 
-# ── 6. the marker's DISPLAY answer and its SCIENTIFIC weight ─────────────
+# ── 6. the marker's DISPLAY answer, and NOT its scientific weight ────────
 #
-# Two different facts, and B4-A is where Step0 started obeying both. A hidden
-# channel contributes nothing because nobody is looking at it; a channel
-# weighted `0.0` contributes nothing because somebody said it counts for
-# nothing. The single-channel MAIN viewer deliberately applies neither the
-# weight nor anything else -- it is the channel as it is, which is what makes
-# it the reference the correction decisions are made against.
+# A hidden channel contributes nothing because nobody is looking at it. The
+# fusion weight is a Step1 answer and Step0 does not draw it (user ruling,
+# 2026-10-27, reversing B4-A): Step0 is where a channel's correction is
+# judged, so the Tissue Preview shows it as it is, like the main viewer and
+# the compare panels. Applying it made every marker of a reopened project --
+# placeholder zeros until Step1 restored its weights -- invisible in Step0.
 
 def _weights(page):
     return page.display.fusion
@@ -592,8 +592,9 @@ def test_a_hidden_dapi_contributes_nothing_to_the_thumbnail(app):
     assert r > 40.0, (r, g, b)
 
 
-def test_the_thumbnail_applies_the_markers_representative_weight(app):
-    """1.0 -> a middle value -> 0.0, and the picture follows each of them."""
+def test_the_thumbnail_does_not_apply_the_fusion_weight(app):
+    """1.0 -> a middle value -> 0.0: the picture stays the channel as it is,
+    and drawing it writes nothing into the model."""
     page = _page(app)
     page._on_nucleus_visibility_toggled(False)
     page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
@@ -601,34 +602,46 @@ def test_the_thumbnail_applies_the_markers_representative_weight(app):
     model.edit_channel_weight("CD3", 1.0, origin="test")
     page._update_tissue_preview()
     _settle(page)
-    full = _mean_rgb(_thumb(page))[0]
-    assert full > 40.0
+    full = _thumb(page).copy()
+    assert _mean_rgb(full)[0] > 40.0
 
-    model.edit_channel_weight("CD3", 0.4, origin="test")
-    page._queue_tissue_preview(kind="weight")
-    _settle(page)
-    middle = _mean_rgb(_thumb(page))[0]
+    for value in (0.4, 0.0):
+        model.edit_channel_weight("CD3", value, origin="test")
+        page._queue_tissue_preview(kind="weight")
+        _settle(page)
+        assert np.array_equal(_thumb(page), full), value
 
-    model.edit_channel_weight("CD3", 0.0, origin="test")
-    page._queue_tissue_preview(kind="weight")
-    _settle(page)
-    zero = _mean_rgb(_thumb(page))[0]
-
-    assert 0.0 < middle < full, (zero, middle, full)
-    assert zero == 0.0, (zero, middle, full)
-    # An EXPLICIT zero is an answer, not an absence: the provisional
-    # full-strength default may not bring the channel back.
     assert model.weight_provenance("CD3") == "explicit"
-    # ...and nothing was written back into the model by drawing it.
     assert model.representative_weight("CD3").value == 0.0
 
 
-def test_a_channel_in_two_groups_shows_its_representative_weight(app):
-    """0.2 in one group and 0.7 in another: the preview draws the
-    representative value and does not flatten the project by drawing it."""
+def test_placeholder_zero_weights_do_not_hide_the_marker(app):
+    """THE REPORTED CASE (2026-10-27): a reopened project builds its groups at
+    placeholder zeros, and Step1's saved weights only arrive when Step1
+    opens. Step0's preview showed DAPI alone until then."""
     page = _page(app)
     page._on_nucleus_visibility_toggled(False)
     page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+    model = _weights(page)
+    model.initialize_dataset({"markers": ["CD3"]}, "DAPI",
+                             channels=["DAPI", "CD3"])
+    assert model.representative_weight("CD3").value == 0.0
+
+    page._update_tissue_preview()
+    _settle(page)
+
+    assert _mean_rgb(_thumb(page))[0] > 40.0
+
+
+def test_a_channel_in_two_groups_is_drawn_without_flattening_them(app):
+    """0.2 in one group and 0.7 in another: the preview draws the channel and
+    does not flatten the project by drawing it."""
+    page = _page(app)
+    page._on_nucleus_visibility_toggled(False)
+    page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+    page._update_tissue_preview()
+    _settle(page)
+    unweighted = _thumb(page).copy()
     model = _weights(page)
     model.install_draft({
         "groups": {"A": {"group_weight": 1.0, "channels": {"CD3": 0.2}},
@@ -642,8 +655,9 @@ def test_a_channel_in_two_groups_shows_its_representative_weight(app):
 
     rep = model.representative_weight("CD3")
     assert rep.mixed is True and rep.value == pytest.approx(0.7)
-    drawn = _mean_rgb(_thumb(page))[0]
-    assert 0.0 < drawn
+    assert _mean_rgb(unweighted)[0] > 40.0
+    assert np.array_equal(_thumb(page), unweighted), \
+        "the preview applied a group's weight"
     # The groups still disagree afterwards -- looking at the preview did not
     # unify them.
     groups = model.groups()
@@ -669,16 +683,15 @@ def test_a_channel_nobody_has_weighted_is_drawn_at_full_strength(app):
 
 
 def test_the_single_channel_main_viewer_does_not_apply_the_weight(app):
-    """THE EXCEPTION, deliberately: Step0's main viewer shows the channel as
-    it is. The compare panels are the reference a correction decision is made
-    against, so a scientific weight must not dim them; the Tissue Preview is
-    the shared picture and does apply it."""
+    """Step0's main viewer shows the channel as it is. The compare panels are
+    the reference a correction decision is made against, so a scientific
+    weight must not dim them -- and neither does the Tissue Preview."""
     page = _page(app)
     model = _weights(page)
     model.edit_channel_weight("CD3", 0.25, origin="test")
 
     snapshot = page.tissue_render_snapshot(computed_only=False)
-    assert snapshot["marker_weight"] == pytest.approx(0.25)
+    assert "marker_weight" not in snapshot
 
     # The panels are given the channel's own colour and its display window
     # -- never a weight, and never a colour dimmed by one.

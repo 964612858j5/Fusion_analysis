@@ -951,10 +951,19 @@ class GlobalChannelDock(QtWidgets.QWidget):
         IN STEP0 A TICK IS A CLICK (user ruling, 2026-09-17): ticking a
         marker shows THAT marker and takes the one that was showing off, the
         same as clicking its row. Step0 shows one marker at a time.
+
+        AND IT SELECTS THE MARKER, as the click does (user ruling,
+        2026-10-27). Step0 draws -- full image, compare panels, Tissue
+        Preview, Intensity window -- the SELECTED channel; a ticked marker
+        that was not selected was shown nowhere and its Min/Max/Gamma moved
+        nothing on screen, while the tick had already hidden the marker that
+        was. DAPI keeps its own switch and does not take the selection.
         """
         self.use_channel(cid, visible, origin=f"dock-step{self._step}")
         if visible and self._step == STEP0:
             self._show_only_this_marker(cid)
+            if self._state is not None and not self._is_nucleus(cid):
+                self._state.set_selected_channel(cid, origin="dock-step0-tick")
 
     def channel_in_use(self, cid):
         """Is this channel fully on, by the step's own definition?
@@ -1130,6 +1139,29 @@ class GlobalChannelDock(QtWidgets.QWidget):
             self._state.set_selected_channel(cid, origin="dock-row-click")
         self.row_clicked.emit(cid)
 
+    def _is_nucleus(self, channel):
+        """Is `channel` the nucleus reference layer?
+
+        WHO THE NUCLEUS IS -- asked of every owner that knows, because no
+        single one always does. A real session logged
+        `channel.visibility channel=DAPI visible=False
+        origin=dock-step0-exclusive`: the capability flag was not set on
+        that page's rows, so the Step0 sweep took the reference layer off
+        the screen. A standalone page has no fusion model instead. Either
+        answer is enough to protect it.
+        """
+        fusion = self._fusion
+        if fusion is not None:
+            try:
+                if channel and channel == str(fusion.nucleus()[0] or ""):
+                    return True
+            except Exception:
+                pass
+        state = self._state
+        if state is None:
+            return False
+        return bool(getattr(state.capabilities(channel), "is_nucleus", False))
+
     def _show_only_this_marker(self, cid):
         """Step0: the clicked marker is the one on screen.
 
@@ -1140,31 +1172,10 @@ class GlobalChannelDock(QtWidgets.QWidget):
         state = self._state
         if state is None:
             return
-        # WHO THE NUCLEUS IS -- asked of every owner that knows, because no
-        # single one always does. A real session logged
-        # `channel.visibility channel=DAPI visible=False
-        # origin=dock-step0-exclusive`: the capability flag was not set on
-        # that page's rows, so the sweep below took the reference layer off
-        # the screen. A standalone page has no fusion model instead. Either
-        # answer is enough to protect it.
-        fusion = self._fusion
-        nucleus_named = ""
-        if fusion is not None:
-            try:
-                nucleus_named = str(fusion.nucleus()[0] or "")
-            except Exception:
-                nucleus_named = ""
-
-        def _is_nucleus(channel):
-            if nucleus_named and channel == nucleus_named:
-                return True
-            return bool(getattr(state.capabilities(channel), "is_nucleus",
-                                False))
-
-        if _is_nucleus(cid):
+        if self._is_nucleus(cid):
             return
         for other in list(self.channel_order()):
-            if other == cid or _is_nucleus(other):
+            if other == cid or self._is_nucleus(other):
                 continue
             caps = state.capabilities(other)
             if not getattr(caps, "display_toggleable", True):

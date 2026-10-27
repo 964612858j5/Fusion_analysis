@@ -8158,14 +8158,14 @@ class Step0Page(QWidget):
         # and is not what a frame is stamped with.
         token = self._dataset_token()
         nuc = self.nucleus_channel
-        # TWO DIFFERENT FACTS about the marker. `marker_visible` is the
-        # display answer -- the row's checkbox, the layer switch, whatever
-        # Step1 recorded -- and the weight is the SCIENTIFIC one, read from
-        # the fusion model. A channel nobody has weighted yet draws at the
-        # provisional full strength; that default is a VIEW's, and is never
-        # written back into the model.
+        # THE DISPLAY ANSWER ONLY -- the row's checkbox. Step1's fusion
+        # weight is NOT applied here (user ruling, 2026-10-27): Step0 is
+        # where each channel's correction is judged, so its Tissue Preview
+        # shows the selected marker as it is, like the full image and the
+        # compare panels. A weight answers a Step1 question; drawing it here
+        # made every marker of a project whose weights were placeholder
+        # zeros invisible until Step1 had been opened.
         marker_visible = self._channel_display_visible(ch)
-        marker_weight = self._marker_render_weight(ch)
         wanted = [ch]
         if nuc and nuc != ch and self._nucleus_layer_visible():
             wanted.append(nuc)
@@ -8231,36 +8231,12 @@ class Step0Page(QWidget):
             "token": token,
             "channel": ch,
             "marker_visible": marker_visible,
-            "marker_weight": marker_weight,
             "nucleus_layer": nucleus_layer,
             "arrays": arrays,
             "mappings": mappings,
             "colors": {name: self._channel_color(name) for name in arrays},
             "loading": tuple(sorted(set(loading))),
         }
-
-    def _marker_render_weight(self, ch):
-        """How much `ch` contributes to the Tissue Preview, scientifically.
-
-        THE FUSION MODEL'S representative value -- the same number Step1's
-        row shows and the shared Weights window edits -- so a weight set
-        anywhere is visible here without this page keeping a copy of it. A
-        channel in several groups at different weights shows the
-        representative value; nothing is written back, so looking at the
-        preview cannot flatten a project.
-
-        `absent` means nobody has weighted this channel yet. The preview then
-        draws it at full strength, which is a VIEW's provisional default and
-        deliberately not an answer: the model is not told, and the first
-        enable still answers 1.0 for itself.
-        """
-        fusion = getattr(getattr(self, "display", None), "fusion", None)
-        if fusion is None or not ch:
-            return 1.0
-        rep = fusion.representative_weight(ch)
-        if rep.absent and not rep.values:
-            return 1.0
-        return max(0.0, float(rep.value))
 
     def _register_block01_display(self):
         """Hand Block01's display layer the four things this page provides.

@@ -65,6 +65,23 @@ def lowres_tinted(arr, mapping, color):
     return lut[idx.astype(np.uint8)]
 
 
+def fit_to_shape(arr, shape):
+    """`arr` resampled (nearest neighbour) onto `shape` (H, W).
+
+    Both whole-slide arrays cover the SAME slide, but they can come off
+    different pyramid levels: the low-res reader that answers before a viewer
+    exists reads a coarser level than the viewer later hands over. Measured
+    2026-10-27 on the user's slide: DAPI 912x450 next to a marker 1822x900.
+    """
+    a = np.asarray(arr)
+    h, w = int(shape[0]), int(shape[1])
+    if a.shape[:2] == (h, w):
+        return a
+    rows = (np.arange(h) * a.shape[0] // max(h, 1)).clip(0, a.shape[0] - 1)
+    cols = (np.arange(w) * a.shape[1] // max(w, 1)).clip(0, a.shape[1] - 1)
+    return a[rows[:, None], cols[None, :]]
+
+
 def step0_rgb_u8(channel, arrays, mappings, colors, nucleus="",
                  marker_visible=True):
     """The single-channel thumbnail, with DAPI composited additively.
@@ -88,7 +105,11 @@ def step0_rgb_u8(channel, arrays, mappings, colors, nucleus="",
         rgb = lowres_tinted(arr, mappings[channel], colors[channel])
     else:
         rgb = np.zeros(arr.shape[:2] + (3,), dtype=np.uint8)
-    if nuc_arr is not None and nuc_arr.shape[:2] == arr.shape[:2]:
+    if nuc_arr is not None:
+        # A DAPI array off another pyramid level is the same slide: it is
+        # fitted to the marker's grid, never dropped -- dropping it was the
+        # reported "DAPI disappears when a marker is ticked".
+        nuc_arr = fit_to_shape(nuc_arr, arr.shape[:2])
         rgb = np.clip(
             rgb.astype(np.uint16)
             + lowres_tinted(nuc_arr, mappings[nucleus], colors[nucleus]),
@@ -163,6 +184,15 @@ def compose(request, cache, span=None):
             request.get("channel"), arrays, mappings, colors,
             nucleus=request.get("nucleus_layer") or "",
             marker_visible=bool(request.get("marker_visible", True)))
+    if mode in (MODE_OVERLAY, MODE_FUSION):
+        # Arrays off different pyramid levels cannot be summed; the odd ones
+        # are fitted to the finest grid (the others keep their identity, so
+        # the compose cache still hits for them).
+        grid = max((np.asarray(a).shape[:2] for a in arrays.values()),
+                   key=lambda hw: hw[0] * hw[1])
+        arrays = {ch: (a if np.asarray(a).shape[:2] == grid
+                       else fit_to_shape(a, grid))
+                  for ch, a in arrays.items()}
     if mode == MODE_OVERLAY:
         return overlay_rgb_u8(arrays, mappings, colors,
                               request.get("weights") or {}, cache, span=span)

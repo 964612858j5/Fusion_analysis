@@ -8237,9 +8237,10 @@ class Step0Page(QWidget):
             return None
         if not marker_visible:
             tissue_log.note("snapshot.ready", channel=ch, marker_visible=False)
-        nucleus_layer = (nuc if (nuc in arrays and nuc != ch
-                                 and arrays[nuc].shape[:2]
-                                 == arrays[ch].shape[:2]) else "")
+        # The two arrays may come off different pyramid levels (a reader
+        # that answered before the viewer existed reads a coarser one); the
+        # compose fits DAPI to the marker's grid rather than dropping it.
+        nucleus_layer = nuc if (nuc in arrays and nuc != ch) else ""
         return {
             "mode": tissue_compose.MODE_STEP0,
             "token": token,

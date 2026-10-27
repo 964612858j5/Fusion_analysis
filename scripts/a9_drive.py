@@ -510,6 +510,22 @@ class Driver(QtCore.QObject):
         perf_trace.mark("a9.s0saved", ok=bool(getattr(loader, "_corrected_zarr_path", None)))
         self._next(0)
 
+    def _do_s0click(self, a, _t):
+        """A REAL mouse click in Step0's channel list: on the row's name, or
+        (`box: true`) on its checkbox -- the user's gesture, not a setter."""
+        from PyQt5 import QtTest, QtWidgets as _W
+        row = self.w._step0._channel_rows[a["channel"]]
+        if a.get("box"):
+            target = row["checkbox"]
+        else:
+            widget = row["row_widget"]
+            target = next((c for c in widget.findChildren(_W.QLabel)
+                           if c.text().startswith(a["channel"])), widget)
+        perf_trace.mark("a9.delivered", n=self.i, kind="click")
+        QtTest.QTest.mouseClick(target, QtCore.Qt.LeftButton,
+                                pos=target.rect().center())
+        self._next(int(a.get("wait_ms", 300)))
+
     def _do_s0tick(self, a, _t):
         """A Step0 channel row's checkbox, as the user ticks it."""
         row = self.w._step0._channel_rows[a["channel"]]
@@ -539,7 +555,15 @@ class Driver(QtCore.QObject):
                   "pub_rev": pub.get("rev"), "pub_owner": pub.get("owner"),
                   "pub_channels": "|".join(str(c) for c in (pub.get("channels") or ())),
                   "input_rev": getattr(coord, "_input_rev", None),
-                  "pub_fp": pub.get("fingerprint")}
+                  "pub_fp": pub.get("fingerprint"),
+                  "dapi_layer": page._nucleus_layer_visible()}
+        try:
+            snap = page.tissue_render_snapshot(computed_only=True) or {}
+            fields["snap_nucleus"] = snap.get("nucleus_layer")
+            fields["snap_loading"] = "|".join(snap.get("loading") or ())
+            fields["snap_arrays"] = "|".join(sorted(snap.get("arrays") or {}))
+        except Exception as exc:                             # noqa: BLE001 -- measurement only
+            fields["snap_err"] = str(exc)[:80]
         for ch in chans:
             lo, hi, g = page.display_window(ch)
             fields[f"win_{ch}"] = f"{lo:.4g}/{hi:.4g}/{g:.3g}"

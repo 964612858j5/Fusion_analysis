@@ -744,3 +744,69 @@ class _ReceivingStrip:
             return lambda *a, **k: self.__dict__.setdefault(
                 name[4:], (a, k))
         raise AttributeError(name)
+
+
+# ── 7. DAPI off another pyramid level (user report 2026-10-27) ────────────
+#
+# Measured on the user's slide: DAPI was read by the fallback reader before
+# any viewer existed (912x450), the marker later came from the viewer
+# (1822x900), and the shape gate dropped DAPI from every Step0 frame.
+
+class _CoarseDapiLoader(_LowresLoader):
+    def read_region_lowres(self, ch, y0, y1, x0, x1, ds, normalize=False):
+        arr = super().read_region_lowres(ch, y0, y1, x0, x1, ds, normalize)
+        return arr[::2, ::2].copy() if ch == "DAPI" else arr
+
+
+def test_fit_to_shape_resamples_the_whole_slide_onto_the_other_grid():
+    from block01.core import tissue_compose
+    small = np.arange(6, dtype=np.float32).reshape(2, 3)
+    big = tissue_compose.fit_to_shape(small, (4, 6))
+    assert big.shape == (4, 6)
+    assert big[0, 0] == small[0, 0] and big[-1, -1] == small[-1, -1]
+    assert tissue_compose.fit_to_shape(big, (2, 3)).tolist() == small.tolist()
+
+
+def test_dapi_from_a_coarser_level_is_still_composited(app):
+    page = sp.Step0Page()
+    page.loader = _CoarseDapiLoader()
+    page.ome_path = "/fake/slide.ome.tif"
+    page.patches = []
+    page.nucleus_channel = "DAPI"
+    page._rebuild_channel_list()
+    page._explore_tab = _Tab()
+    page.overview.loader = page.loader
+    page.overview.full_h, page.overview.full_w = SLIDE_H, SLIDE_W
+    page._sync_step0_to_workbench()
+    page._apply_channel_color("CD3", (1.0, 0.0, 0.0))
+    page._apply_channel_color("DAPI", (0.0, 0.0, 1.0))
+    page.current_channel = "CD3"
+    page._on_channel_row_clicked("CD3")
+    page._update_tissue_preview()
+    _settle(page)
+
+    snapshot = page.tissue_render_snapshot(computed_only=False)
+    assert snapshot["arrays"]["DAPI"].shape != snapshot["arrays"]["CD3"].shape
+    assert snapshot["nucleus_layer"] == "DAPI"
+    r, _g, b = _mean_rgb(_thumb(page))
+    assert r > 0.0, "the marker was not drawn"
+    assert b > 0.0, "DAPI was dropped from the picture"
+
+
+@pytest.mark.parametrize("mode", ["overlay", "fusion"])
+def test_step1_frames_fit_arrays_off_different_levels(mode):
+    """The same mixed levels in Step1's frames: summed, not a crash."""
+    from block01.core import tissue_compose
+    from block01.core.preview_compose import PreviewCache
+    fine = np.linspace(0, 100, 64 * 32, dtype=np.float32).reshape(64, 32)
+    coarse = fine[::2, ::2].copy()
+    request = {"mode": mode, "arrays": {"CD3": fine, "DAPI": coarse},
+               "mappings": {"CD3": (0.0, 100.0, 1.0), "DAPI": (0.0, 100.0, 1.0)},
+               "colors": {"CD3": (1.0, 0.0, 0.0), "DAPI": (0.0, 0.0, 1.0)},
+               "weights": {"CD3": 1.0, "DAPI": 1.0},
+               "groups": {"g": {"CD3": 1.0}}, "group_weights": {"g": 1.0},
+               "nucleus": ("DAPI", 1.0),
+               "fallback_norm": lambda a: np.asarray(a, np.float32) / 100.0,
+               "to_rgb": lambda cyto, nuc: np.stack([cyto, cyto * 0, nuc], -1)}
+    rgb = tissue_compose.compose(request, PreviewCache())
+    assert rgb is not None and rgb.shape[:2] == (64, 32)

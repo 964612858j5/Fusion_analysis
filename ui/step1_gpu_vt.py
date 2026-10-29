@@ -28,7 +28,7 @@ F_BLOCKS = 4
 MAX_LEVELS = 16
 MAX_LEVELS_PER_CHANNEL = 8
 BLOCK_ROWS = 3
-PARAM_TEXELS = 5
+PARAM_TEXELS = 9  # mapping, colour, group, levels x2, S0-B per-level gains x4 (0 = 1)
 
 
 def shader_source(template: str, u_blocks: int, f_blocks: int) -> str:

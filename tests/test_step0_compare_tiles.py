@@ -256,7 +256,7 @@ class _Tab:
     def set_dataset(self, _p):
         pass
 
-    def release_for_production(self, reason):
+    def release_for_production(self, reason, keep_picture=False):
         self.released = True
         self.releases.append(reason)
 

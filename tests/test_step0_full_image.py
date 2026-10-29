@@ -92,7 +92,7 @@ class _RecordingExploreTab:
         self.build_attempts += 1
         return True
 
-    def release_for_production(self, reason):
+    def release_for_production(self, reason, keep_picture=False):
         self.released.append(reason)
 
     def teardown(self, **_kw):

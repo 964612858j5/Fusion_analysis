@@ -3555,7 +3555,7 @@ class Step0Page(QWidget):
             return "whole-slide correction (Save)"
         return None
 
-    def _release_explore_for_production(self, reason):
+    def _release_explore_for_production(self, reason, keep_picture=False):
         """Suspend the Explore stack and WAIT for it, before a GPU run.
 
         `ExploreController.suspend_for_production` must not return while a
@@ -3582,7 +3582,7 @@ class Step0Page(QWidget):
         if explore_tab is None or explore_tab.stack is None:
             return
         t0 = time.perf_counter()
-        explore_tab.release_for_production(reason)
+        explore_tab.release_for_production(reason, keep_picture=keep_picture)
         print(f"[step0] suspended Explore for {reason} in "
               f"{(time.perf_counter() - t0) * 1000:.0f} ms", flush=True)
 
@@ -6921,7 +6921,11 @@ class Step0Page(QWidget):
         row = self._channel_rows.get(ch)
         if not row:
             return
-        row["row_widget"].setStyleSheet("background:#2a2a1a;border-radius:3px;")
+        style = "background:#2a2a1a;border-radius:3px;"
+        # §15.5 4: the same style again re-polishes the whole row (up to
+        # 60 ms on a parameter change) for nothing
+        if row["row_widget"].styleSheet() != style:
+            row["row_widget"].setStyleSheet(style)
         self._refresh_channel_state(ch)
 
     def _set_channel_done(self, ch):
@@ -9142,6 +9146,7 @@ class Step0Page(QWidget):
         """
         if getattr(self, "_loading_decision", False):
             return
+        perf_trace.mark("step0.param_commit", method=method)   # §15.5 5: the timing starts here
         boxes = {"tophat": self._dec_radius, "cucim": self._dec_sigma}
         if method not in boxes:
             # Backward-compatible programmatic call: commit both and run both.
@@ -10691,7 +10696,8 @@ class Step0Page(QWidget):
             "cucim_sigma": sigma,
         }}
         self._set_channel_computing(ch)
-        self._proc_pbar.setVisible(True)
+        # headless (see where it is made): showing it would open it as a
+        # window of its own, and nothing ever hides it again
         self._proc_pbar.setValue(0)
         self._btn_stop_process.setEnabled(True)
         self._process_completed = False
@@ -10706,7 +10712,8 @@ class Step0Page(QWidget):
         self._batch_worker.progress.connect(self._gen_slot(self._on_batch_progress))
         self._batch_worker.error_signal.connect(self._gen_slot(self._on_batch_error))
         self._batch_worker.canceled.connect(self._gen_slot(self._on_batch_canceled))
-        self._release_explore_for_production("patch background correction")
+        # the engine may keep its picture through this short run (plan §13)
+        self._release_explore_for_production("patch background correction", keep_picture=True)
         self._watch_production_worker(self._batch_worker)
         self._batch_worker.start()
 

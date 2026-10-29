@@ -43,6 +43,9 @@ pub(super) fn draw(core: &mut ViewerCore, rep: &mut FrameReport, fbo: u32, w: i3
                    -> Option<(Vec<(Ch, Vec<TileAt>)>, bool)> {
     // R7c step 3: the candidates, less the channels the gate keeps back
     let rows = if base_overflow { Vec::new() } else { let r = drawn_rows(core); shown_rows(core, r, view) };
+    // S0-B: rows being prepared are fetched and uploaded, not composed
+    let display = super::composed_display(core);
+    let rows: Vec<_> = rows.into_iter().filter(|(c, _)| display.iter().any(|(d, _)| d == c)).collect();
     let viewer_frames = core.frames;
     let gpu = core.gpu.as_mut().unwrap();
     if pc.on {
@@ -57,7 +60,7 @@ pub(super) fn draw(core: &mut ViewerCore, rep: &mut FrameReport, fbo: u32, w: i3
     // the display's rows in order (a channel may have several, Fusion
     // groups), those of channels drawn now
     let drawn: std::collections::HashSet<_> = rows.iter().map(|(c, _)| *c).collect();
-    let params_rows: Vec<_> = core.display.iter().filter(|(c, _)| drawn.contains(c)).copied().collect();
+    let params_rows: Vec<_> = display.iter().filter(|(c, _)| drawn.contains(c)).copied().collect();
     let (gl, render, timers) = (&gpu.gl, &mut gpu.render, &mut gpu.timers);
     unsafe { pc.begin(gl, timers, pt::TARGETS) };
     let made = unsafe { render.ensure_targets(gl, w.max(1), h.max(1)) };

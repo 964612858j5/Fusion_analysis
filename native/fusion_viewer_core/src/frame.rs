@@ -14,9 +14,32 @@ mod pace;
 pub mod phase_time;
 mod shown;
 pub(crate) use shown::shown_rows;
-pub(crate) use covered::view_covered;
+pub(crate) use covered::{view_covered, view_covered_at};
 pub use compose::{draw_labels, ComposeKey};
 pub use pace::Pacing;
+
+/// S0-B (§11.3, §11.5): one paint drawn with the rows being prepared
+/// promoted and the rows they replace yielded -- the composition only;
+/// the display, the planner and the reads are not touched.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Trial {
+    pub promote: Vec<crate::plan::Ch>,
+    pub yield_: Vec<crate::plan::Ch>,
+    /// §14.6: the report's `trial_exact` counts only tiles of this level or
+    /// finer (None: not asked)
+    pub max_level: Option<u8>,
+}
+
+/// The display rows this paint composes: a row being prepared only when a
+/// trial promotes its channel, a yielded channel's rows not at all.
+pub(crate) fn composed_display(core: &ViewerCore) -> Vec<(crate::plan::Ch, crate::vt::RowParams)> {
+    let trial = core.trial.as_ref();
+    core.display.iter().filter(|(c, p)| match trial {
+        Some(t) if t.yield_.contains(c) => false,
+        Some(t) if p.preparing => t.promote.contains(c),
+        _ => !p.preparing,
+    }).copied().collect()
+}
 
 /// What one frame did, for the Python side's measurement and pacing.
 #[derive(Debug, Default)]
@@ -58,6 +81,14 @@ pub struct FrameReport {
     pub composed: bool,
     /// GUI-thread time on Step3's masks since the last report (R3b gate)
     pub label_ms: f64,
+    /// S0-B: a trial paint's coverage of the view over the rows it composed
+    pub trial_covered: Option<bool>,
+    /// §14.6: the same, counting only tiles of the gate level or finer --
+    /// the trial's `max_level` or this frame's admission level, the finer
+    pub trial_exact: Option<bool>,
+    /// §14.6: the same at this frame's admission level (the budget-limited
+    /// exception publishes only when this holds)
+    pub trial_admitted: Option<bool>,
 }
 
 /// What each channel draws now (coarse first, then fine coarse to fine),
@@ -101,7 +132,9 @@ fn top_up(core: &mut ViewerCore, w: i32, h: i32, hot: bool, base_overflow: bool)
         store.targets = now.into_iter().collect();     // no speculative block then
         return false;
     }
-    let need = crate::store_plan::Need { channels, coarse_slots: (across * down) as usize, w, h };
+    let have = [0, 1].map(|fam| crate::family::ALL.iter().filter(|f| f.family() == fam)
+        .map(|f| store.live_blocks(*f)).sum());
+    let need = crate::store_plan::Need { channels, coarse_slots: (across * down) as usize, w, h, have };
     let room = store.max_bytes().saturating_sub(store.slack_bytes(&formats));
     let plan = crate::store_plan::plan(&need, &|f| store.layers(f) as usize, &|f| store.block_bytes(f),
                                        room, gpu.render.units);
@@ -133,7 +166,29 @@ fn top_up(core: &mut ViewerCore, w: i32, h: i32, hot: bool, base_overflow: bool)
 
 /// `view`: the world rect on screen now (x0, x1, y0, y1); `fbo`, `w`, `h`:
 /// Qt's framebuffer and its device size.
-pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) -> FrameReport {
+pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4],
+             trial: Option<Trial>) -> FrameReport {
+    let is_trial = trial.is_some();
+    let max_level = trial.as_ref().and_then(|t| t.max_level);
+    core.trial = trial;
+    let mut rep = paint_now(core, fbo, w, h, view);
+    if is_trial && rep.error.is_empty() && rep.read_failure.is_empty() {
+        rep.trial_covered = Some(view_covered(core, view));
+        let admitted = admitted_level(core.pyr.coarsest(), rep.level);
+        rep.trial_exact = max_level.map(|m| view_covered_at(core, view, m.min(admitted)));
+        rep.trial_admitted = max_level.map(|_| view_covered_at(core, view, admitted));
+    }
+    core.trial = None;
+    rep
+}
+
+/// The level this frame admitted: the report's `level`, `coarse_only` (-1)
+/// read as the coarsest level.
+fn admitted_level(coarsest: u8, level: i64) -> u8 {
+    u8::try_from(level).map_or(coarsest, |l| l.min(coarsest))
+}
+
+fn paint_now(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) -> FrameReport {
     let started = Instant::now();
     let mut rep = FrameReport { frame: core.frames + 1, ..Default::default() };
     core.frames += 1;
@@ -267,4 +322,17 @@ pub fn paint(core: &mut ViewerCore, fbo: u32, w: i32, h: i32, view: [f64; 4]) ->
     rep.total_ms = started.elapsed().as_secs_f64() * 1000.0;
     rep.label_ms = std::mem::take(&mut core.lab.gui_ms);
     rep
+}
+
+#[cfg(test)]
+mod tests {
+    use super::admitted_level;
+
+    #[test]
+    fn coarse_only_is_the_coarsest_level() {
+        assert_eq!(admitted_level(3, -1), 3);
+        assert_eq!(admitted_level(3, 1), 1);
+        assert_eq!(admitted_level(3, 0), 0);
+        assert_eq!(admitted_level(3, 9), 3);
+    }
 }

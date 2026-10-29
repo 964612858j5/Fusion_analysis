@@ -81,3 +81,40 @@ fn stand_ins_share_the_carry_nearest_level_first() {
     let kept: Vec<_> = (0..2).filter(|ty| p.keeps(0, TileAt { level: 0, tx: 0, ty: *ty })).collect();
     assert_eq!(kept, vec![0], "one stand-in, the first in (level, ty, tx) order");
 }
+
+#[test]
+fn a_dropped_channel_leaves_nothing_and_the_rest_is_untouched() {
+    let mut p = planner();
+    let mut t = HashMap::new();
+    t.insert(0x8000u16, 4u64);
+    p.set_texels(t);
+    p.set_active(vec![0, 0x8000]);
+    p.set_view(View { level: 0, bbox_l0: [0, 0, 1024, 1024], epoch: 1 });
+    deliver_all(&mut p);
+    assert!(p.holds_channel(0x8000) && p.has_fine(0x8000));
+    let drawn_before = p.drawn(0, &|_, _| true);
+
+    p.drop_channel(0x8000);
+
+    assert!(!p.holds_channel(0x8000));
+    assert!(!p.keeps(0x8000, TileAt { level: 2, tx: 0, ty: 0 }));
+    assert_eq!(p.active(), &[0]);
+    assert_eq!(p.drawn(0, &|_, _| true), drawn_before);
+    let (coarse, fine) = p.wanted();
+    assert!(coarse.iter().chain(&fine).all(|(c, _)| *c != 0x8000));
+}
+
+#[test]
+fn a_thousand_retired_channels_leave_the_planner_as_it_was() {
+    let mut p = planner();
+    p.set_active(vec![0]);
+    p.set_view(View { level: 0, bbox_l0: [0, 0, 1024, 1024], epoch: 1 });
+    for n in 0..1000u16 {
+        let c = 0x8000 + n;
+        p.set_active(vec![0, c]);
+        deliver_all(&mut p);
+        p.drop_channel(c);
+        assert!(!p.holds_channel(c));
+    }
+    assert_eq!(p.active(), &[0]);
+}

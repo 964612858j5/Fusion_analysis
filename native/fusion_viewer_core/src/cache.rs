@@ -69,6 +69,26 @@ impl Cache {
         Some(Arc::clone(&entry.0))
     }
 
+    /// S0-B: a channel added at run time (a Python source) counts against
+    /// the corrected allowance from now on.
+    pub fn add_corrected(&mut self, channel: u16) {
+        self.corrected.insert(channel);
+    }
+
+    /// S0-B: every tile of `channel` leaves, and the channel leaves its
+    /// class (a retired Python source; its number is never used again).
+    pub fn remove_channel(&mut self, channel: u16) {
+        let gone: Vec<Key> = self.map.keys().filter(|k| k.0 == channel).copied().collect();
+        for key in gone {
+            let class = self.class(&key);
+            if let Some((old, t)) = self.map.remove(&key) {
+                self.order[class].remove(&t);
+                self.bytes[class] -= old.data.len();
+            }
+        }
+        self.corrected.remove(&channel);
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -128,5 +148,19 @@ mod tests {
         c.insert(key(1, 1), tile(10));         // corrected over 20
         assert!(!c.contains(&key(1, 0)) && c.contains(&key(0, 1)));
         assert_eq!(c.bytes(), 16);
+    }
+
+    #[test]
+    fn a_run_time_channel_counts_as_corrected_and_leaves_whole() {
+        let mut c = Cache::new([10, 20], std::collections::HashSet::new());
+        c.add_corrected(0x8000);
+        c.insert(key(0x8000, 0), tile(15));     // over the raw 10, within 20
+        c.insert(key(0x8000, 1), tile(4));
+        c.insert(key(0, 0), tile(6));
+        assert_eq!((c.bytes_of(RAW), c.bytes_of(CORRECTED)), (6, 19));
+        c.remove_channel(0x8000);
+        assert!(!c.contains(&key(0x8000, 0)) && !c.contains(&key(0x8000, 1)));
+        assert_eq!((c.bytes_of(RAW), c.bytes_of(CORRECTED)), (6, 0));
+        assert!(c.contains(&key(0, 0)));
     }
 }

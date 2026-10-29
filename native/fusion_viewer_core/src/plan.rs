@@ -165,6 +165,11 @@ impl Planner {
         self.coarse.get(&c).is_some_and(|k| k.got.len() == k.expected)
     }
 
+    /// Has the coarse tile `t` of `c` been delivered (§15.6: read-only)?
+    pub fn coarse_has(&self, c: Ch, t: TileAt) -> bool {
+        self.coarse.get(&c).is_some_and(|k| k.got.contains(&t))
+    }
+
     /// Does `c` hold fine tiles (delivered and kept for the current view)?
     pub fn has_fine(&self, c: Ch) -> bool {
         self.fine.get(&c).is_some_and(|m| !m.is_empty())
@@ -273,6 +278,30 @@ impl Planner {
             self.plan_channel(c);
         }
         taken
+    }
+
+    /// S0-B: a retired channel (a Python source) leaves for good -- its
+    /// coarse state, fine tiles, plan, hybrid gate, texel size and refusal.
+    /// `set_active` alone keeps a dropped channel's coarse state (a channel
+    /// may come back); a retired number never does.
+    pub fn drop_channel(&mut self, c: Ch) {
+        self.active.retain(|a| *a != c);
+        self.coarse.remove(&c);
+        self.fine.remove(&c);
+        self.plans.remove(&c);
+        self.opened.remove(&c);
+        self.unavailable.remove(&c);
+        if self.texels.remove(&c).is_some() {
+            self.admission = None;
+        }
+    }
+
+    /// Does the planner hold anything at all for `c` (tests: a retirement
+    /// leaves nothing behind)?
+    pub fn holds_channel(&self, c: Ch) -> bool {
+        self.active.contains(&c) || self.coarse.contains_key(&c) || self.fine.contains_key(&c)
+            || self.plans.contains_key(&c) || self.opened.contains(&c) || self.unavailable.contains(&c)
+            || self.texels.contains_key(&c)
     }
 
     /// Does the planner still hold this delivered tile (coarse or kept fine)?

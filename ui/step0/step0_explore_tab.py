@@ -50,6 +50,8 @@ import traceback
 from PyQt5 import QtCore, QtWidgets
 
 from ...core import resource_tiers as _tiers
+from ...utils import perf_trace
+
 RAW_CACHE_BYTES = _tiers.STEP0_VIEWER_RAW_CACHE_BYTES  # (block A8 / A5: one place)
 CORRECTED_CACHE_BYTES = _tiers.STEP0_VIEWER_CORRECTED_CACHE_BYTES  # (block A8 / A5: one place)
 TILE_SIZE = 512
@@ -817,7 +819,7 @@ class Step0ExploreTab(QtWidgets.QWidget):
         if self._engine is not None:
             self._engine.sync()
 
-    def release_for_production(self, reason):
+    def release_for_production(self, reason, keep_picture=False):
         """Give the GPU up to a production correction run -- by SUSPENDING
         the live stack, not by tearing it down.
 
@@ -838,10 +840,15 @@ class Step0ExploreTab(QtWidgets.QWidget):
         # BEFORE the suspend: its queued work is cancelled with its own
         # generation rather than being waited out by the scheduler drain.
         self.stop_hot()
+        kept = False
         if self._engine is not None:
-            self._engine.release_for_production()
+            # the patch background correction may keep the engine's picture
+            # (plan §13); its requests are cancelled before the drain below
+            kept = bool(self._engine.release_for_production(keep_picture=keep_picture))
         t0 = time.perf_counter()
         timings = self._stack.controller.suspend_for_production(reason) or {}
+        if kept and timings.get("scheduler_drained") is False:
+            perf_trace.mark("step0.keep_drain_timeout")
         self._released = True
         print(f"[explore] suspended for {reason} in "
               f"{(time.perf_counter() - t0) * 1000:.0f} ms "

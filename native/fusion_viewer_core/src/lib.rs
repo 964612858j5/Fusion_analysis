@@ -43,6 +43,7 @@ pub mod manifest;
 pub mod notify;
 pub mod plan;
 pub mod pool;
+pub mod python_source;
 pub mod posread;
 pub mod reader;
 pub mod read_split;

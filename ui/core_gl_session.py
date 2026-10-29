@@ -80,8 +80,18 @@ class CoreGlSession(QtCore.QObject):
         self.core.forget_gl()
 
     # ── one paint ─────────────────────────────────────────────────────
-    def paint(self, fbo: int, width: int, height: int, view) -> dict:
-        report = self.core.paint(int(fbo), max(1, int(width)), max(1, int(height)), view)
+    def paint(self, fbo: int, width: int, height: int, view, trial=None) -> dict:
+        """`trial`: S0-B's `(promote, yield)` channel lists for this paint
+        alone (docs/v17_step0_engine_plan.md §11.5), optionally with a third
+        element, the gate level (§14.6: the report's `trial_exact`); None for
+        a normal paint."""
+        if trial is None:
+            report = self.core.paint(int(fbo), max(1, int(width)), max(1, int(height)), view)
+        else:
+            level = trial[2] if len(trial) > 2 else None
+            report = self.core.paint(int(fbo), max(1, int(width)), max(1, int(height)), view,
+                                     (list(trial[0]), list(trial[1])),
+                                     None if level is None else int(level))
         if report.get("error"):
             perf_trace.mark("gpu.core_error", error=str(report["error"])[:160].replace(" ", "_"))
         return report

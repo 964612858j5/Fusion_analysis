@@ -41,6 +41,9 @@ impl ViewerCore {
         let mut ahead = self.planner.ahead(self.planner.prefetch, self.cache_slots(), self.cfg.threads);
         ahead.with_visible.retain(|k| !picture.contains(k));
         ahead.after.retain(|k| !picture.contains(k));
+        // S0-B: Python sources are never read ahead (their tiles are computed)
+        ahead.with_visible.retain(|k| !crate::python_source::PythonSources::is_python(k.0));
+        ahead.after.retain(|k| !crate::python_source::PythonSources::is_python(k.0));
         let pf: std::collections::HashSet<(Ch, TileAt)> = ahead.with_visible.iter().chain(&ahead.after).copied().collect();
         fine.extend(ahead.with_visible.iter().copied());
         let order: HashMap<Ch, usize> = self.planner.active().iter().enumerate().map(|(i, c)| (*c, i)).collect();
@@ -69,6 +72,7 @@ impl ViewerCore {
         let mut now_issued = std::collections::HashSet::with_capacity(tiers.len());
         let mut ahead_jobs = std::collections::HashSet::new();
         let mut now_ahead = std::collections::HashSet::new();
+        let mut python_wants = std::collections::HashSet::new();
         {
             let mut cache = self.pool.shared().cache.lock().unwrap();
             for (key, fine) in tiers {
@@ -92,6 +96,15 @@ impl ViewerCore {
                     jobs.push(key);
                     continue;
                 }
+                // S0-B: a Python source's tile is the cache's or Python's to
+                // make -- never the reader pool's
+                if crate::python_source::PythonSources::is_python(key.0) {
+                    match cache.get(&key) {
+                        Some(tile) => hits.push((key, tile)),
+                        None => { python_wants.insert(key); }
+                    }
+                    continue;
+                }
                 // a key newly the picture's (also one read ahead before) is a new "req"
                 if !self.issued.contains(&key) {
                     self.trace.stamp("req", Some(key), vec![("fine", fine)]);
@@ -105,6 +118,11 @@ impl ViewerCore {
         }
         self.issued = now_issued;
         self.issued_ahead = now_ahead;
+        if self.demand.set_wants(python_wants) {
+            if let Some(n) = &self.notifier {
+                n.notify();                        // Python drains the new wants
+            }
+        }
         if self.planner.prefetch != crate::plan::prefetch::Mode::Off {
             // measurement evidence: the mode, the rings, why a ring was left out
             let mode = match self.planner.prefetch { crate::plan::prefetch::Mode::Odon => 1.0, _ => 2.0 };

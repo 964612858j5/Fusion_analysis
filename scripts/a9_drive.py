@@ -228,8 +228,13 @@ class _S0First(QtCore.QObject):
             return
         e = self.engine
         host = e.host
-        if e.picture == "engine" and host.current is not None \
-                and host.current.identity == e._wanted_identity():
+        # S0-B: the published picture is the selection itself (a live
+        # method's switch included), not merely its core
+        shows = getattr(e, "shows_wanted", None)
+        ok = shows() if shows is not None else (
+            e.picture == "engine" and host.current is not None
+            and host.current.identity == e._wanted_identity())
+        if ok:
             self._done(engine=True, view_level=self.ctl.level, channel=self.ctl.channel)
 
     def _done(self, **fields):
@@ -606,10 +611,23 @@ class Driver(QtCore.QObject):
         """A radius / sigma typed into the channel's box and Enter pressed."""
         page = self.w._step0
         box = page._dec_radius if a.get("method", "tophat") == "tophat" else page._dec_sigma
-        perf_trace.mark("a9.delivered", n=self.i, kind="programmatic")
+        perf_trace.mark("a9.delivered", n=self.i, kind="keys")
         _S0First(page, self.i)
-        box.setValue(int(a["value"]))
-        box.lineEdit().returnPressed.emit()
+        # §15.5 5: real key events, as the user types -- select all, the
+        # digits, Return (the GC pacer and Qt see the same input path)
+        # (to the spin box, as the keyboard does: it forwards to its line
+        # edit -- sent to the line edit directly, Return commits twice)
+        box.setFocus()
+        box.selectAll()
+        for ch in str(int(a["value"])):
+            for kind in (QtCore.QEvent.KeyPress, QtCore.QEvent.KeyRelease):
+                QtWidgets.QApplication.sendEvent(box, QtGui.QKeyEvent(
+                    kind, int(QtCore.Qt.Key_0) + int(ch), QtCore.Qt.NoModifier, ch))
+        for kind in (QtCore.QEvent.KeyPress, QtCore.QEvent.KeyRelease):
+            QtWidgets.QApplication.sendEvent(box, QtGui.QKeyEvent(
+                kind, int(QtCore.Qt.Key_Return), QtCore.Qt.NoModifier, "\r"))
+        if box.value() != int(a["value"]):
+            perf_trace.mark("a9.s0param_typed_wrong", want=int(a["value"]), got=int(box.value()))
         self._after_settle(lambda: None, timeout_s=float(a.get("timeout_s", 60)))
 
     def _do_camera(self, a, _t):
@@ -772,6 +790,8 @@ class Driver(QtCore.QObject):
         host = getattr(engine, "host", None)
         if host is not None and getattr(engine, "running", False):
             out.extend(slot.core for slot in host.cores())
+            # S0-B: the Python sources' work (computed tiles still owed)
+            out.extend(slot.adapter for slot in host.cores() if slot.adapter is not None)
         for name in ("_step1_mount", "_step3_mount"):
             mount = w.__dict__.get(name)
             try:

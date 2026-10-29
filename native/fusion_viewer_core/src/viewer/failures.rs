@@ -26,6 +26,21 @@ pub struct ReadCheck {
 
 impl ViewerCore {
     pub fn check_reads(&mut self) -> ReadCheck {
+        // S0-B: the Python sources' tiles keep their own failures (they
+        // never reach the pool); given up there is given up here
+        let python = self.demand.check(monotonic());
+        if python.give_up.is_some() {
+            return python;
+        }
+        let mut pool = self.check_pool_reads();
+        pool.retry_ms = match (pool.retry_ms, python.retry_ms) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        pool
+    }
+
+    fn check_pool_reads(&mut self) -> ReadCheck {
         let shared = self.pool.shared().clone();
         let (run, needed) = {
             let f = shared.failures.lock().unwrap();

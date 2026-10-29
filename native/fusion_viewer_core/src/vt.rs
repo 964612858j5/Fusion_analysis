@@ -11,7 +11,9 @@ use crate::plan::Ch;
 use std::collections::HashMap;
 
 pub const BLOCK_ROWS: usize = 3;
-pub const PARAM_TEXELS: usize = 5;
+/// mapping, colour, group, levels (two texels), and S0-B's per-level
+/// display gain (four texels: 16 levels)
+pub const PARAM_TEXELS: usize = 9;
 pub const MAX_LEVELS: usize = 16;
 
 /// One drawn row's display: mapping (lo, hi, gamma), colour, weight, and
@@ -23,6 +25,19 @@ pub struct RowParams {
     pub weight: f32,
     pub group: f32,
     pub group_weight: f32,
+    /// S0-B: fetched and uploaded but not composed (a source being
+    /// prepared), unless a trial paint promotes it
+    pub preparing: bool,
+    /// S0-B: per pyramid level, the display gain the mapping is divided by
+    /// on that level (Step0's approximate levels); 0 means 1
+    pub gains: [f32; MAX_LEVELS],
+}
+
+impl Default for RowParams {
+    fn default() -> Self {
+        RowParams { mapping: [0.0, 1.0, 1.0], color: [1.0; 3], weight: 1.0, group: 0.0,
+                    group_weight: 0.0, preparing: false, gains: [0.0; MAX_LEVELS] }
+    }
 }
 
 pub struct Vt {
@@ -32,6 +47,9 @@ pub struct Vt {
     pub width: usize,
     pub height: usize,
     pub channel_slots: HashMap<Ch, usize>,
+    /// S0-B: page layers a retired channel gave back, reused before the
+    /// page texture grows
+    free_slots: Vec<usize>,
     /// layers x height x width, -1 = empty
     pub pages: Vec<i32>,
     written: HashMap<Ch, HashMap<TileAt, i32>>,
@@ -66,7 +84,7 @@ impl Vt {
         }
         let height = grid.iter().map(|g| g.1).max().unwrap_or(1) as usize;
         Vt { grid, offset, ds, width: x as usize, height, channel_slots: HashMap::new(),
-             pages: Vec::new(), written: HashMap::new(), dirty_pages: Vec::new(), pages_resized: true,
+             free_slots: Vec::new(), pages: Vec::new(), written: HashMap::new(), dirty_pages: Vec::new(), pages_resized: true,
              caps, meta_rows: blocks * BLOCK_ROWS, meta_width: layers.max(1),
              meta: vec![[0.0; 4]; blocks * BLOCK_ROWS * layers.max(1)],
              meta_dirty_rows: Vec::new(), meta_resized: true }
@@ -84,19 +102,42 @@ impl Vt {
         self.meta_resized = true;
     }
 
+    /// The page texture's depth: every layer ever handed out (a retired
+    /// channel's layer stays allocated, empty, until reused), at least one.
     pub fn layers(&self) -> usize {
-        self.channel_slots.len().max(1)
+        let plane = self.height * self.width;
+        (if plane == 0 { 0 } else { self.pages.len() / plane }).max(1)
     }
 
     fn slot_of(&mut self, c: Ch) -> usize {
-        let n = self.channel_slots.len();
-        let slot = *self.channel_slots.entry(c).or_insert(n);
-        let need = self.layers() * self.height * self.width;
+        if let Some(slot) = self.channel_slots.get(&c) {
+            return *slot;
+        }
+        let slot = self.free_slots.pop().unwrap_or_else(|| {
+            let plane = self.height * self.width;
+            if plane == 0 { 0 } else { self.pages.len() / plane }
+        });
+        self.channel_slots.insert(c, slot);
+        let need = (slot + 1) * self.height * self.width;
         if self.pages.len() < need {
             self.pages.resize(need, -1);
             self.pages_resized = true;
         }
         slot
+    }
+
+    /// S0-B: a retired channel's page layer goes back to empty (-1: the
+    /// shader's "no tile"; 0 would name block 0, layer 0) and is reused by
+    /// the next new channel. CPU side only; uploaded with the next paint.
+    pub fn release_channel(&mut self, c: Ch) {
+        let Some(slot) = self.channel_slots.remove(&c) else { return };
+        let plane = self.height * self.width;
+        if (slot + 1) * plane <= self.pages.len() {
+            self.pages[slot * plane..(slot + 1) * plane].fill(-1);
+            self.dirty_pages.push((slot, 0, self.height));
+        }
+        self.written.remove(&c);
+        self.free_slots.push(slot);
     }
 
     /// Bring the page tables to `rows` (drawn channels and their drawn
@@ -202,6 +243,9 @@ impl Vt {
             out[r + 2] = [p.group, p.group_weight, used.len() as f32, 0.0];
             out[r + 3] = [padded[0], padded[1], padded[2], padded[3]];
             out[r + 4] = [padded[4], padded[5], padded[6], padded[7]];
+            for q in 0..4 {
+                out[r + 5 + q] = [p.gains[q * 4], p.gains[q * 4 + 1], p.gains[q * 4 + 2], p.gains[q * 4 + 3]];
+            }
         }
         out
     }
@@ -224,5 +268,45 @@ impl Vt {
         self.pages.fill(-1);
         self.written.clear();
         self.pages_resized = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vt() -> Vt {
+        Vt::new(&Pyramid { shapes: vec![(1024, 1024), (512, 512)] }, [2, 1], 4)
+    }
+
+    #[test]
+    fn a_released_layer_is_emptied_and_reused_without_growing() {
+        let mut v = vt();
+        let a = v.slot_of(1);
+        let b = v.slot_of(0x8000);
+        assert_eq!((a, b, v.layers()), (0, 1, 2));
+        let plane = v.height * v.width;
+        v.pages[b * plane] = 7;
+        v.release_channel(0x8000);
+        assert!(v.pages[b * plane..(b + 1) * plane].iter().all(|p| *p == -1));
+        for n in 0..1000u16 {
+            let id = 0x8001 + n;
+            assert_eq!(v.slot_of(id), 1);
+            v.release_channel(id);
+        }
+        assert_eq!(v.layers(), 2, "the page texture grew with retired channels");
+        assert_eq!(v.slot_of(2), 1);
+        assert_eq!(v.slot_of(3), 2);
+        assert_eq!(v.layers(), 3);
+    }
+
+    #[test]
+    fn a_hole_below_a_live_layer_keeps_the_live_one_addressable() {
+        let mut v = vt();
+        v.slot_of(1);
+        v.slot_of(2);
+        v.slot_of(3);
+        v.release_channel(2);
+        assert_eq!(v.layers(), 3, "layer 2 of channel 3 would fall outside the texture");
     }
 }

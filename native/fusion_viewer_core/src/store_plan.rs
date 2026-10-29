@@ -17,6 +17,8 @@ pub struct Need {
     /// canvas, device pixels
     pub w: i32,
     pub h: i32,
+    /// blocks per family now: [integer, float]
+    pub have: [usize; 2],
 }
 
 pub struct StorePlan {
@@ -48,8 +50,13 @@ pub fn plan(need: &Need, layers: &dyn Fn(Format) -> usize, block_bytes: &dyn Fn(
     };
     let (d0, d1) = (demand(&want, 0), demand(&want, 1));
     let units = units.max(2);
+    // samplers to spare: a family keeps the blocks it has (empty ones
+    // too) unless the other family needs their samplers -- else a channel
+    // switched off and on again (Step0's Original <-> live preview, a
+    // parameter change's old and new picture) gives its blocks back and
+    // pays each new block's first use again on the GUI thread
     let f = if d0 + d1 <= units {
-        d1.clamp(1, units - 1)
+        d1.max(need.have[1].min(units - d0.max(1))).clamp(1, units - 1)
     } else {
         ((units * d1).div_ceil(d0 + d1)).clamp(1, units - 1)
     };
@@ -82,7 +89,8 @@ mod tests {
 
     #[test]
     fn twenty_raw_channels_take_the_integer_family() {
-        let need = Need { channels: HashMap::from([(Format::U8, 20)]), coarse_slots: 16, w: 1307, h: 788 };
+        let need = Need { channels: HashMap::from([(Format::U8, 20)]), coarse_slots: 16, w: 1307, h: 788,
+                          have: [0, 0] };
         let p = plan(&need, &layers, &bytes, 1536 << 20, 29);
         assert_eq!(p.targets[&Format::U8], 6);
         assert_eq!(p.caps, [28, 1]);
@@ -92,7 +100,7 @@ mod tests {
     fn corrected_channels_get_float_samplers() {
         // 3 raw + 3 corrected: f32 needs 3 x 63 slots / 64 per block
         let need = Need { channels: HashMap::from([(Format::U8, 3), (Format::F32, 3)]),
-                          coarse_slots: 16, w: 1307, h: 788 };
+                          coarse_slots: 16, w: 1307, h: 788, have: [0, 0] };
         let p = plan(&need, &layers, &bytes, 1536 << 20, 29);
         assert_eq!(p.targets[&Format::F32], 4);
         assert_eq!(p.caps[1], 4);
@@ -101,9 +109,30 @@ mod tests {
 
     #[test]
     fn over_the_samplers_the_targets_are_cut() {
-        let need = Need { channels: HashMap::from([(Format::F32, 40)]), coarse_slots: 16, w: 1307, h: 788 };
+        let need = Need { channels: HashMap::from([(Format::F32, 40)]), coarse_slots: 16, w: 1307, h: 788,
+                          have: [0, 0] };
         let p = plan(&need, &layers, &bytes, 1 << 40, 29);
         assert_eq!(p.caps, [1, 28]);
         assert_eq!(p.targets[&Format::F32], 28);
+    }
+
+    #[test]
+    fn a_family_keeps_its_blocks_while_the_other_does_not_need_the_samplers() {
+        // one corrected channel was drawn on 4 float blocks; now none is
+        let need = Need { channels: HashMap::from([(Format::U16, 1)]), coarse_slots: 16, w: 1307, h: 788,
+                          have: [2, 4] };
+        let p = plan(&need, &layers, &bytes, 1536 << 20, 29);
+        assert_eq!(p.caps, [25, 4]);
+        assert!(!p.targets.contains_key(&Format::F32), "kept, not reserved ahead");
+        // ... as many as the integer family leaves free ...
+        let need = Need { channels: HashMap::from([(Format::U16, 52)]), coarse_slots: 16, w: 1307, h: 788,
+                          have: [2, 4] };
+        assert_eq!(plan(&need, &layers, &bytes, 1 << 40, 29).caps, [27, 2]);
+        // ... and all of them when the integer family needs the samplers
+        let need = Need { channels: HashMap::from([(Format::U16, 400)]), coarse_slots: 16, w: 1307, h: 788,
+                          have: [2, 4] };
+        let p = plan(&need, &layers, &bytes, 1 << 40, 29);
+        assert_eq!(p.caps, [28, 1]);
+        assert_eq!(p.targets[&Format::U16], 28);
     }
 }

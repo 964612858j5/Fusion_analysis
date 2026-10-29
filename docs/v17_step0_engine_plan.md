@@ -424,3 +424,329 @@ codex 建议"在现有来源 / 发请求路径里加一种由 Python 完成的�
   - 实时预览（仍是 Python）不变。
   - 换源仍比 Python 慢：全片约 +7 ms；第 4 / 0 层中位数接近、尾部更长；**原图 → 实时**慢约 65 ms（引擎画原图时 Python 没有原图细图块垫底、HOT 的 floor 预热被闸门挡掉，§10.8 已申报）；实时 → 已保存慢约 40 ms。这些在 S0-B（一个 core 运行中换来源、实时预览也走引擎）里才能根治。
 - 未做：与今天 Step0 的截图画面差异对比、GL 上下文 / 显存 / 内存峰值的正式记录（设计上 Step0 多 1 个上下文）。
+
+## 11. S0-B 申请（第三版，2026-10-27；codex 第 3 轮批准，`codex_s0b_app_3.out`（两处文字已改）；第一、二版被否决，`codex_s0b_app_1.out`、`_2.out`，逐条回应见 11.10、11.11）
+
+依据 §3.3（第三版已批准的设计）、§3.5、§4、§5、§6；S0-A（§10）与验收修正（`884f02c`、`055be4a`）在 HEAD `055be4a`。本节写 S0-B 的落地方式与它和 §3.3 不同的地方。
+
+### 11.1 范围
+- 实时 TopHat / cuCIM（NATIVE 精确层、INTERACTIVE 近似层；SAVED 仍走 S0-A 的已保存结果 core）由引擎绘制：引擎缺图时向 Python 要，Python 用**现有** `CorrectionCompute` 与 stack 的**同一个** `TileScheduler` 计算，交回引擎。
+- 不在本段：三图对比（S0-C）；导航小图、ROI 小图、拼图；校正算法进 Rust；删除 Python 回退。
+- 用户可见变化（§8 第 2 条，已告知）：粗层实时画面逐块计算，不再用整图 floor（floor 只校准增益），差异只报告；原图 ↔ 实时不再新建 core。
+
+### 11.2 文件白名单
+- Rust（`native/fusion_viewer_core/`）：新建 `src/python_source.rs`（登记表）、`src/viewer/demand.rs`（需求、完成、失败、撤销）；改 `src/cache.rs`、`src/vt.rs`、`src/plan.rs`、`src/viewer.rs`、`src/viewer/issue.rs`、`src/viewer/formats.rs`、`src/viewer/failures.rs`、`src/gpu_store.rs`（按通道驱逐，不删块）、`src/frame.rs`、`src/frame/compose.rs`、`src/frame/covered.rs`、`src/render/upload.rs`、`shaders/step1_gpu_vt.frag`、`src/py/viewer.rs`、`src/py/stats.rs`；Rust 单测。
+- Python：新建 `ui/step0/python_source.py`；改 `ui/step0/engine_mount.py`、`ui/step0/gl_host.py`、`viewer/explore_view.py`（只校准状态及退出时恢复）、`viewer/scheduler.py`（只加一个 `forget_generation`，见 11.4）、`ui/step1_gpu_vt.py` 与 `ui/shaders/step1_gpu_vt.frag`（参数表加增益列，填 1；两份着色器逐字节相同）；测试；`scripts/a9_drive.py`。
+- 其他文件不改；需要时先回来申请。
+
+### 11.3 Rust：Python 来源
+- **来源号**：通道号空间保留段 `0x8000..0xFFFF`，同一 core 内单调递增、不复用（到顶拒绝并回退，实际不会到）。
+- **登记表** `python_source.rs`：来源号 → 格式 F32、状态（登记 / 撤销）。所有"这个通道是什么"的判断改为先查登记表再查 `sources`：
+  - `format_of`（F32）；`update_total` 的非原图判断（加 F32 的块余量，回应第一版 P2-6）；`cache_slots` 的额度（校正额度）；
+  - CPU 缓存类别：`Cache` 的校正集合改为可在运行中加入 / 移除（`add_class` / `remove_channel`），登记时加入；
+  - 读盘池不认识这些号：Python 来源的键从不进 `pool` 的任何队列（见需求协议）。
+- **上界**：每个 core 同时登记最多 2 个（当前 + 准备中），第三个登记返回错误，Python 必须先撤销。测试：换参 1000 次，页层、缓存条目、GPU 占用、失败表、需求表不增长。
+- **撤销** `drop_source(id)`（不需要 GL 上下文，回应第一版 P2-7）：
+  - 规划器 `Planner::drop_channel`（粗层状态、计划、已打开记录、`fine`、`active` 中的该号）；`held`；`issued` / `issued_ahead`；
+  - CPU 缓存 `remove_channel`；需求表、在途表、该号的失败记录（Python 来源的失败表在 `demand.rs`，不在 `pool::Failures`）；
+  - GPU：`Store::evict_channel(c)` 只调用现有 `evict`（簿记 + 标脏，不调用 GL、不删块），所以块保留、之后不必重新预热；元数据与页表的变化在下一次绘制（上下文当前）时同步上传；
+  - 虚拟纹理：该页层写回空值 **-1**（不是 0；0 指整数族第 0 块第 0 层），放入空闲层表；新来源先用空闲层；`layers()` 改为按已分配深度（`pages.len() / (height*width)`）计算，不再按活着的通道数，避免中间空洞使后面的层不可寻址。
+- **需求协议**（`demand.rs`）：
+  - `issue_once` 中属于 Python 来源的键：CPU 缓存命中照常立即交付；未命中进该来源的需求表，不进读盘队列，不参与预读。
+  - `drain_demands()` 返回（新增, 撤回）：新增 = 本次规划要、之前没交出过、不在缓存、不在在途、且不在失败退避期内；撤回 = 已交出、本次不要、未完成。交出后进在途表。
+  - 唤醒：有新增需求时经通知 socket 唤醒 GUI（与读盘结果同一通道、同一 drain → ack → 取工作顺序）。
+- **完成** `complete(id, level, tx, ty, data, valid)`：GUI 线程、不在其他 core 调用内部（适配器经排队信号）。已撤销 → 丢弃并计数；形状与 `tile_shape` 不符 → 拒绝并记一次失败；否则进 CPU 缓存（校正类别）、清该键失败计数、规划器要就交付并请求重画。
+- **失败**（回应第一版 P2-5）：`fail(id, level, tx, ty, why)` 记入 `demand.rs` 自己的失败表（键 → 次数、时间）。退避：失败后 `RETRY_S`（200 ms）内 `drain_demands` 不再交出；到期且规划器仍要时再交出；单键 `KEY_LIMIT`（3）次或连续 `RUN_LIMIT`（8）次失败即放弃。`check_reads` 同时看这张表：放弃时 paint 报 `read_failure`（现有回退），退避中报 `retry_ms`。成功清该键计数与连续计数；撤销清该来源的全部记录。
+- **准备中行**：`set_display` 的行加"准备中"标记：进规划器活动集合（取图、上传、计入准入），`compose` 跳过。
+- **试画**（第三版，回应第二版 P2-1）：`paint(fbo, w, h, view, trial=None)`；`trial` 是本次绘制要把哪些准备中行"提升"、哪些旧行"让出"。只改这一次合成用的行，**不调用 `set_display`、不改规划器**（旧来源的图块、计划、已打开记录都不动）。返回值多一项：按试画的行算的覆盖结果。
+- **按层增益**：参数表每行 5 → 9 列（新 4 列放 16 层增益）。着色器在采样所用的那一层上用 `lo/g, hi/g`；其他查看器与 Python GPU 路径填 1，像素测试验证不变。
+- **覆盖查询**：`view_covered(view, channels=None)`：默认查全部显示行（含新开的 DAPI 行）；给定来源号时只查这些（只作就绪前的提示，发布判定见 11.5）。
+
+### 11.4 Python：适配器 `ui/step0/python_source.py`
+- **令牌**（回应第一版 P1-1）：每个适配器实例取一个进程级唯一编号（`itertools.count()`），请求的 generation 为 `("s0b", 适配器编号, 来源号, level, tx, ty, 第几次交出)`。不同 core、同一 core 的不同来源、同一块的重新交出都不会撞号。
+- **取消粒度**（回应第一版 P2-4）：每块一个令牌；撤回 → `cancel_generation(该块令牌)`：排队中的直接以 `cancelled` 结束，已开始的完成时以 `stale` 结束；来源撤销 → 对该来源所有在途令牌逐个取消。
+- **恰好一次释放额度**：所有请求都设 `notify_on_stale_completion=True`，于是每个请求恰好一次终结回调（命中同步回调、完成、`cancelled`、`stale`、`shutdown`）；额度何时释放见下面"额度的生命"。
+- **令牌不累积**：`viewer/scheduler.py` 只加 `forget_generation(gen)`（从 `_stale_gens` 移除）；适配器在一个令牌的终结回调到达后调用它（此时已无等待者持有该令牌）。`_stale_gens` 因此有界。
+- **额度与提交**（§3.3）：最多 64 块且 128 MiB；发请求前预留；同步命中也计入；回调只入队（经 Qt 排队信号到 GUI 线程），GUI 每轮最多提交 4 ms，余下下一轮；额度满时新增需求留在适配器里等。
+- **额度的生命**（第三版，回应第二版 P2-2）：额度覆盖"已发出未结束"加"已结束待提交"。成功结果的额度一直保留到它被 GUI 提交给引擎、或被丢弃（来源撤销、已撤回、关闭）时才释放；`cancelled` / `stale` / 错误 / `shutdown` 结束时立即释放。
+- **令牌的生命**：令牌状态为 在途 → 已结束（终结回调到达时，随即 `forget_generation`）。撤回时只对"在途"令牌调用 `cancel_generation`；"已结束"的令牌不再取消（否则会把已忘记的令牌重新加回 `_stale_gens`），它若还有待提交的结果，直接丢弃该结果并释放额度。
+- **载荷**：`TileResult.pixels.handle`（float32 ndarray）原样传入，不乘增益；有效区按结果。
+- **键**：`correction_plan.plan(method, params, level, downsample, saved=None)` → `CorrectionKey`（与 Python 画面同一身份，命中同一缓存）。
+- 不新建调度器、不新建校正缓存；HOT 预读继续只填 Python 校正缓存。
+
+### 11.5 挂载与宿主：同一 core 内换源（回应第一版 P1-2）
+- 原图与实时共用原图 core；已保存结果仍是另一个 core（S0-A 候选 / 备用不变）。
+- **画面身份**：`CoreSlot` 增加 `picture`（当前选择的来源号与显示行的指纹），与 `CoreSlot.identity`（core 身份）分开。
+- **准备期间**：显示行 = 旧行 + 新来源的准备中行。当前 core 每次绘制照常画旧行并发布，所以**平移时旧图跟着走**（§3.3），不是冻结旧 FBO。
+- **切换帧（精确的发布闸门，第三版）**：准备期间所有新加入的行（新来源的行、本次新打开的 DAPI 等）都是准备中行。宿主在一次 `paintGL` 里：
+  1. 以 `trial = (提升全部准备中行, 让出被取代的旧行)` 画进待发布 FBO（当前视野、当前尺寸）；
+  2. 绘制成功、按试画行算的覆盖满足、且 `picture` 仍是挂载要的选择 → 发布这帧；然后挂载调用 `set_display(最终行)` 使之成为正式显示行（此时才改规划器、才撤销旧来源）；
+  3. 否则（覆盖不满足或绘制失败）→ 在**同一次 `paintGL`、同一视野**里再按正常行（旧行，准备中行不合成）画一次并照常发布。所以平移中每一帧都画在当前视野，旧图始终跟着走；规划器从未改变，无需回滚。
+  - **空画面例外保留**：试画后的显示行为空（标记与 DAPI 都关）时，与现在宿主相同（`gl_host.py` 约 :438），成功绘制即可发布，不看覆盖。
+- **之后**：发布成功后才撤销旧来源（若旧的是 Python 来源）；发布的 FBO 自带像素，不依赖旧来源的纹理。
+- **准备期间再次调参**：撤销准备中来源、登记新的，旧图继续。
+- **增益**（回应第一版 P1-3 后半）：登记新来源时，挂载先读控制器的当前增益快照 `controller.current_gains()`（新加的只读方法，返回 `(ctx, gains)`）；ctx 与新选择一致就随登记一起下发；之后 `gains_ready(ctx, gains)` 到达时核对 ctx 再更新（不重传像素）。精确层增益恒为 1。
+- **近似角标**：当前画面有近似层时显示 `APPROX_BADGE`。
+
+### 11.6 控制器"只校准"状态（`viewer/explore_view.py`）
+- `set_engine_owns_view(True)`：floor 任务照常排队与计算（同一线程、同一守卫与缓存），不画到 Python 图层；三处闸门（`prepare_floor_async` 约 :4128、`_start_floor_job` 约 :4217、后台待办 约 :4464）放行；两条安装路径（缓存命中约 :4192、计算完成约 :4410）只安装 `_level_gain` / `_gain_ctx` 并发 `gains_ready`。
+- **退出时恢复**（回应第一版 P1-3）：`set_engine_owns_view(False)` 明确做三件事：打开视野请求；当前选择的 floor 在缓存里 → 走现有缓存命中路径画出；不在 → 置 `_floor_pending` 并启动 floor 任务。运行中回退（选择不变）也走这条。
+- 生命周期不变：`suspend_for_production` 等 floor 线程；换数据集与关闭的排空不变。
+
+### 11.7 生命周期
+| 情况 | 引擎 / 适配器 |
+|---|---|
+| 离开 Step0 | `pause`；适配器停止交出新需求，在途照常结束（额度按"额度的生命"释放），结果若来源仍登记则进缓存 |
+| 开始正式计算 / Save 交接 | `pause`；撤销全部 Python 来源（逐块取消）；`release_to_coarse`；结束后 `resume` 并重新登记当前选择 |
+| 隐藏时 Save 完成 | 同上一行，回到 Step0 时按当前选择登记 |
+| 核心退役 / 重建（换到已保存结果、备用替换） | 退役 core 的适配器撤销全部来源后丢弃；新 core 用新的适配器编号，令牌不可能与旧的相撞 |
+| 换数据集 / 关闭 | core `close`；适配器逐块取消、清空待提交队列 |
+| 运行中回退 | 撤销全部 Python 来源；控制器 `set_engine_owns_view(False)`（11.6 的恢复）；本数据集内不再尝试 |
+
+### 11.8 测试与验收（回应第一版 P2-8）
+1. Rust 单测：登记 / 撤销清全部状态（规划器、`held`、`issued`、缓存、失败表、需求表、GPU 簿记、页层置 -1 并复用、`layers()` 按深度）；1000 次换参不增长；需求差分；退避与放弃；完成（已撤销丢弃、形状不符拒绝、清失败计数）；准备中行不合成但取图；增益列；`update_total` 含 F32 余量。
+2. Python：令牌唯一（core 退役重建、同块重新交出）；逐块撤回取消；恰好一次释放额度（命中、完成、cancelled、stale、shutdown）；`forget_generation` 后 `_stale_gens` 有界；4 ms 提交；回调里不调 core；关闭中完成；控制器只校准的三闸门与两条安装路径（缓存命中也发正确增益）、退出时恢复 floor（缓存命中与需计算两种）；登记前已装的增益通过快照下发。
+3. 真实 GL：原图 ↔ TopHat ↔ cuCIM、换参、平移中换参、换参时 DAPI 新打开，截图序列无新旧混合帧；引擎回读的图块与 `CorrectionCompute` 逐字节一致；同一载荷下显示映射一致（含增益）；Step1 / Step3 / 区域页像素不变；core 退役重建后同一调度器继续可用；隐藏时 Save 完成后回来正常。
+4. 实测：按 §5（每项至少 5 次）与 §10.10 的做法，**同期**跑 Python 对照（同副本、同条件、同 CuPy 编译缓存状态），冷热各 2 轮；项目：原图 → 实时首块校正图上屏、视野完整、卡顿；换参；拖动 / 缩放；原图 ↔ 实时切换；**准备迟迟不完整时持续平移**（试画 + 正常重画两次绘制的代价）。门槛：不劣于同期 Python；单独报告新块预热造成的延迟（第一版附注 9）。
+5. 资源记录（显存、内存、页层数、`_stale_gens` 大小）；全量回归；用户项目副本回放；用户真机验收。
+
+### 11.9 风险
+- 需求 / 完成 / 撤销是新机制，竞态专门测。
+- 参数表 5 → 9 列影响所有引擎查看器与 Python GPU 路径：两份着色器同改，像素测试兜底。
+- 额度与提交时长为估计值，实测后只调数值。
+- 工期 11–16 天。
+
+### 11.10 第一版审核意见与回应
+| 意见 | 回应 |
+|---|---|
+| P1-1 令牌跨 core 撞号 | 11.4 适配器进程级编号 + 每块令牌 |
+| P1-2 同 core 发布闸门不精确、旧图不跟随平移 | 11.5 单次 paintGL 内的切换帧；准备期间照常发布旧行 |
+| P1-3 退出只校准不恢复 floor；登记前已装的增益 | 11.6 显式恢复；11.5 增益快照 |
+| P2-4 撤回不取消、额度恰好一次 | 11.4 每块令牌 + `notify_on_stale_completion` + `forget_generation` |
+| P2-5 失败退避不是自动复用 | 11.3 `demand.rs` 自己的退避与放弃，`check_reads` 同看 |
+| P2-6 `update_total` 漏判 | 11.3 登记表优先 |
+| P2-7 页层空值 -1、`layers()`、GL 上下文 | 11.3 -1、按深度、`evict_channel` 不调 GL |
+| P2-8 验收 | 11.8 |
+| 附注 9 预热 | 撤销不删块（11.3），并在 11.8 单独报告 |
+| 事实更正 | 着色器路径与 `pixels.handle` 已改 |
+
+### 11.11 第二版审核意见与回应
+| 意见 | 回应 |
+|---|---|
+| P2-1 试画失败时旧图冻结；还原行会改规划器 | 11.3 试画只改本次合成；11.5 失败时同一 paintGL 按旧行重画并发布 |
+| P2-2 成功结果在提交前就释放额度；已忘记的令牌被再次取消 | 11.4 额度保留到提交或丢弃；令牌"已结束"后不再取消 |
+| 附注 空画面例外 | 11.5 保留 |
+
+## 12. S0-B 实测后的两处修正（草案，2026-10-27，待用户授权）
+
+### 12.1 实测发现
+1. **新显存块反复预热**：Step0 实时预览在引擎上，每次 原图 ↔ 实时 切换、隔一次换参，都新建 GPU 块（`gpu.grow`，每块首用 50–75 ms，在 GUI 线程的绘制里）：TMA4 每轮 32 次，用户项目 59 次；Python 画面 0 次。原因：`store_plan::plan` 在采样器够用时把浮点族的上限定为"当前要画的浮点块数"，画的浮点通道一减少（换参时新旧两张 → 一张；实时 → 原图），`frame::top_up` 调 `fit_caps` 把空闲浮点块删掉（`drop_block`），下次再建、再预热。
+2. **用户项目上换参慢 15–60 倍**（`/sda1/Fusion/a9_bench/s0a/user/u7_*`，同期对照）：TopHat 整图换参首张新图 Python 50/73 ms（中位/p95）、引擎 3821/4581 ms；中等缩放 80 vs 1196 ms；cuCIM 54–83 vs 1163–1220 ms。原因（codex `codex_s12_plan_1.out` 更正）：该项目有 4 个补丁，按回车即启动"补丁背景校正"，Step0 让出 GPU（`release_for_production`）。Python 画面**保留并复用**池里已有的瓦片——粗层的半径按 `max(1, round(base/downsample))` 缩放，换参后粗层像素身份常常不变，不必重算（16 次换参 15 次两边都无 `sched.compute`，floor join 0 ms）；引擎按 11.7 撤销全部 Python 来源（新参数是新来源，旧瓦片不复用）、`release_to_coarse`、宿主隐藏，补丁算完（约 1–4 s，含一次 0.6–1.4 s 的空闲全量 GC）才重新登记、上传、再预热新块。TMA4 副本无补丁，故 11.8 实测未暴露。
+
+### 12.2 修正 A：保留空闲块（已做原型，codex 技术批准 `codex_keepblocks_1.out`）
+- `store_plan.rs`：`Need.have = [整数族块数, 浮点族块数]`；采样器够用时 `f = d1.max(have[1].min(units - d0.max(1))).clamp(1, units - 1)`——一族保留已有块（含空块），除非另一族需要这些采样器。超额分支不变；预算压力仍走 `make_room` / `reclaim_idle`（先还别的格式的空块）。
+- `frame.rs::top_up` 传 `have`。新增单测 2 例（保留、按另一族需要让出）。
+- 实测（原型，TMA4 副本 4 轮 `run_k_eng_*`，对同期 Python `b_py`）：新块 33 → 7 次/轮；深层换参首图 78–81 vs Python 114–160 ms、完整 62–65 vs 244–264 ms；拖动 / 滚轮更快且无卡顿；整图 / 中层换参首图中位慢 15–20 ms（p95 相当）；平移中准备后的滚轮仍慢（441–491 vs 190–273 ms）。用户项目上换参慢的问题不受影响（12.3）。
+- 影响：Step1/2/3 共用内核，空闲浮点块保留到预算压力、显式释放或销毁；`set_split` 程序有缓存。白名单增加 `store_plan.rs`。
+
+### 12.3 修正 B：补丁背景校正时不交还引擎的图（第一稿，codex 否决 `codex_s12_plan_1.out`，待重写）
+补丁背景校正只算几个 512×512 小块，不需要引擎交出显存。改 11.7 第二行，只对这一种交接（`reason == "patch background correction"`；Save / 全片正式计算不变）：
+1. **先算完当前视野再让出**（与 Python 的 floor join 对等）：`release_for_production` 前，适配器 `pump` 一次交出当前需求；控制器的 `suspend_for_production` 本就等同一调度器空闲，在途图块因此在交接前算完。
+2. **只暂停，不撤销**：`pause` + 适配器 `set_paused(True)`；不撤销 Python 来源、不 `release_to_coarse`；完成的结果照常进缓存（第 3 轮修正已保证暂停时不起新读）。
+3. **暂停期间照常绘制已有图块**：宿主不隐藏；`paintGL` 只合成、发布缓存里已有的图块，不读、不算（core 已 `pause`）；切换帧（11.5）照常，新图齐了就发布。
+4. 结束后 `resume`，与现在相同。
+- 测试：真实 GL，补丁交接期间新参数整图上屏且无新旧混合帧；交接期间 core 读数与适配器请求数不变；Save 交接仍撤销并 `release_to_coarse`。
+- 实测：用户项目回放 `make_scen_user7.py`，引擎对 Python 同期；门槛不劣于 Python。
+
+- 第一稿否决要点：①允许暂停时绘制会经 `check_reads` / 重规划 / 失败重试起新读（frame.rs:178、200，failures.rs:70）；②同步 suspend 10 s 超时后仍启动批处理，保留的待算任务可能与批处理同时占 GPU，且 Rust 读池的 pause 不等在途读；③一次 `pump` 不等于当前视野算完（额度 64 块，GUI 阻塞时回调不处理）；④"不需要交出显存"须实测；⑤更小的候选：先准备并发布当前选择、再暂停，批处理中只呈现已发布的画面（gl_host.py:396、536 的现成分支）。
+- 另一方向（未审）：同一通道同方法、粗层像素身份相同的瓦片跨来源复用（与 Python 池的行为对等），换参时不必等批处理。
+
+## 13. 修正 B 第二稿（codex 第 1 轮否决 `codex_s13_plan_1.out`，修订见 13.5；第 2 轮否决 `codex_s13_plan_2.out`，修订见 13.6；第 3 轮否决 `codex_s13_plan_3.out`，修订见 13.7；第 4 轮否决 `codex_s13_plan_4.out`，修订见 13.8）：标签相同就沿用——交接前从缓存取齐、发布，交接中只呈现（2026-10-28，用户授权"同意'标签相同就沿用'，先让 codex 审核"）
+
+### 13.1 依据（代码事实）
+- 引擎的 Python 来源与 Python 画面用**同一个** `TileScheduler`、同一个 corrected 缓存、同一把"标签"：`PythonSourceAdapter._key` 经 `controller.correction_identity(level, ...)` 得到按层缩放后的有效参数（`correction_plan.plan`）。新参数在粗层的有效参数与旧的相同时，`CorrectionKey` 相同，`scheduler.request` 同步命中缓存（u7 回放：16 次换参 15 次两边都无 `sched.compute`）。
+- 所以慢不在"认不出同标签"，而在**时序**：回车 → `_on_dec_param_changed` → `set_selection` → 引擎 `sync` → 当前 core 登记新来源、`request_switch`（试画帧在下一次 paintGL 才做，需求在那时才被 `pump` 取走）→ 同一事件中 `_process_current_channel` → `_release_explore_for_production` → 引擎 `release_for_production` 撤销全部 Python 来源 + `release_to_coarse` + `set_running(False)`（宿主 hidden）。新来源一次也没被 pump 过；补丁批处理结束（1–4 s）后才重新登记、命中、上传、发布。
+- Python 画面快的直接原因（codex 更正）：池里同标签的瓦片仍有效，直接跳过请求（explore_view.py:5247），不必等批处理；调度器命中回调虽同步，结果处理经 Qt 排队信号（explore_view.py:2634），不能说"同步上屏"。"新来源一次也没被 pump 过"限于本次回车才提交参数的路径（此前失焦已提交、已开始准备的选择不在此列）。
+
+### 13.2 做法（只针对"补丁背景校正"这一种交接；Save / 全片正式计算的交接不变）
+1. **交接前，只从缓存取（不算、不读盘、不排队）**：引擎 `release_for_production(keep_picture=True)`（仅 `_release_explore_for_production` 传；`begin_release_for_production`（Save）不传）先对当前 core 做 `prefill_from_cache()`，全部在 GUI 线程同步完成：
+   a. `core.drain_demands()`；撤回的照常处理（同 `pump`）。
+   b. 每个新需求按 `_key` 生成 `CorrectionKey`，调新增的只读 `TileScheduler.peek_corrected(key)`：只读 corrected 缓存（`self.corrected_cache.get(key)`），不建 entry、不入堆、不回调、不碰 generation。命中 → 直接 `core.complete_python_tile`（不在任何 core 调用之内）；未命中 → 放进 `_waiting`（与 `pump` 相同，后续照常请求或随撤销丢弃）。不占额度（不经请求），所以没有额度 / 排队回调的问题（否决点③）。
+   c. 交出后 core 可能重规划出新需求（`take_reissue`）：重复 a–b，直到一轮没有新命中，最多 `PREFILL_ROUNDS = 4` 轮。
+   d. 一次同步绘制：`host.paint_now()`（新增：`makeCurrent` → `_paint_current` → `doneCurrent`，再 `update()` 呈现）。是否发布由现有的切换试画规则决定（11.5：新行齐了才发布，否则旧图不动）。这次绘制发生在暂停**之前**，与平时任何一帧相同（它可能起原始通道的读——那是暂停前的正常行为，暂停时 `pause` 清队列）。
+2. **判断能否保留**：`kept = 当前 core 无 pending 切换（slot.pending is None）且 slot.picture 是当前选择的来源`。
+   - kept：`set_running(False)`（core `pause`、适配器 `set_paused(True)`、宿主 hidden）；**不**撤销 Python 来源、**不** `release_to_coarse`。批处理期间宿主 `paintGL` 走现成分支：hidden → 不调 core 绘制，只 `_present` 已发布的 FBO（gl_host.py:396、536）——没有暂停中的 core 绘制，否决点①不出现。
+   - 否则：与现在完全相同（撤销全部 Python 来源、`release_to_coarse`、hidden）。新图在批处理结束后出来，与 Python 在真需要计算时（cuCIM→31，Python 也等 floor 528 ms）同类。
+3. **drain 失败时退回**：kept 之后控制器 `suspend_for_production` 返回 `scheduler_drained=False`（10 s 超时）→ 立即补做第 2 条的"否则"分支（撤销来源 = 取消适配器在途请求）。kept 时适配器已暂停、不再发新请求；暂停前已提交的请求属于同一调度器，drain 覆盖它们（codex 第一稿审阅已确认）。超时后批处理照常启动是现状（Python 画面同样如此），本稿不改。Rust 读池：`pause` 清队列，在途的是 CPU 读盘，结果进 CPU 缓存；hidden 期间无 core 绘制，不上传、不占 GPU（否决点②中与本稿相关的部分）。
+4. **结束后**：`_on_production_worker_finished` → `set_running(True)` → `resume`，与现在相同；kept 时来源仍在，`resume` 重新 `issue` 只补缺的块。
+5. **显存（否决点④）**：kept 时保留的是引擎当前已驻留的纹理（S0-0 实测单 core 约 143 MiB，进程约 570 MiB），批处理另用 CUDA。实测：用户项目副本回放时记录批处理峰值（nvidia-smi 进程显存，kept 与不 kept 各一轮），写进 13.4；若峰值使批处理失败或明显变慢，再定阈值（届时另行审批），本稿不预设。
+
+### 13.3 改动文件（白名单）
+`ui/step0/engine_mount.py`（`release_for_production(keep_picture)`、`prefill_from_cache`、kept 判断、drain 失败退回入口）、`ui/step0/python_source.py`（`fill_from_cache()`：a–c）、`ui/step0/gl_host.py`（`paint_now`）、`ui/step0/step0_explore_tab.py`（传 `keep_picture`；读 `scheduler_drained` 调退回）、`ui/step0/step0_page.py`（`_release_explore_for_production` 传 `keep_picture=True`）、`viewer/scheduler.py`（`peek_corrected`，只读）。不改 Rust。测试：`tests/test_step0_python_source.py`（假 core / 假调度器：命中直接交出、未命中进 waiting、不发请求、轮数上限）、`tests/test_step0_engine_live.py`（真实 GL：①粗层同标签换参 + 补丁交接 → 交接返回时新图已发布、来源未撤销、批处理期间 core 绘制次数 0；②需要重算的换参 → 走旧路径；③Save 交接仍撤销并 `release_to_coarse`；④drain 超时 → 退回撤销）。
+
+### 13.4 验收实测
+用户项目副本回放 `make_scen_user7.py`，引擎（本稿）对 Python 同期：换参首张新图门槛不劣于 Python（同标签情形目标 < 100 ms）；需要重算的情形与现状相同；批处理时长、显存峰值、GUI 卡顿记录。
+
+### 13.5 第三稿修订（回应 `codex_s13_plan_1.out`；13.1–13.4 中与下列冲突处以本节为准）
+1. **同步试画不派活（blocker 1）**：`paint_now()` 走 `_paint_current(..., pump_adapter=False)`，参数贯穿 `_paint_current → _try_switch → _paint_slot`，含试画失败后的旧图重画；`_paint_slot` 在 `pump_adapter=False` 时不调 `adapter.pump()`。普通 paintGL 默认 True，行为不变。于是预填阶段 Python 侧零新请求、零额度、零计算。文案更正：预填阶段可能有**原始通道的读盘**——`complete_python_tile` 交出后的 `issue()`（demand.rs:189）与试画都会排原始读，这与暂停前任何一帧相同，`pause` 时清队列；不声称零 I/O，只声称零校正计算、零 Python 请求。
+2. **超时退回必须等真正停下才开批处理（blocker 2）**：只在 kept 分支需要（旧路径在等待前已撤销来源，维持现状）。`step0_explore_tab.release_for_production` 返回 `(kept, timings)`；kept 且 `scheduler_drained is False` → ① 撤销全部 Python 来源 + `release_to_coarse`（旧路径）；② `controller.begin_suspend_for_production(reason)`（已挂起时它照样等 floor 与调度器真正 idle，explore_view.py:4043 起），返回 event。`_process_current_channel` 的**启动条件变更（明确列入本稿授权）**：拿到 event 时不立即 `start()`，用 50 ms `QTimer` 轮询 event；set 后若数据集代次、当前通道与 worker 未变才 `start()`，否则丢弃这次运行并恢复 viewer（`_on_production_worker_finished` 同路径）。其余情况（kept 且已 drain，或旧路径）立即启动，与现状相同。
+3. **账务（finding 4）**：预填只 peek 本轮 `drain_demands()` 新交出的键；命中 → `complete_python_tile`（Rust 侧 succeeded 清 handed/wants），未命中 → 进 `_waiting`（Rust 侧保持 handed，后续 drain 不会重复返回，由暂停解除后的普通 pump 请求或随撤销丢弃）。不 peek 已在 `_waiting` 的旧键（避免命中后 waiting 残留）。撤回键照 `pump` 处理。每轮先完成全部交出、返回后再 `drain`（不在 core 调用内递归）；`PREFILL_ROUNDS = 4` 只是上限，不以轮数推断"取齐"，以试画是否发布为准。`peek_corrected` 会更新 LRU 次序与命中计数（不新增工作）。
+4. **区分退回原因（finding 5）**：kept=false 时记 `perf_trace.mark("step0.keep_fallback", why=...)`：`miss`（有未命中键）/ `upload`（全部命中但试画未发布：非最粗层受每帧上传预算限制）/ `not_running` / `drain_timeout`。`paint_now` 只发布到内部 FBO，真正上屏在回到事件循环后的 present；验收以呈现帧计时（a9 的首帧 / 完整帧）为准。若实测 `upload` 常见，再另议（不在本稿）。
+5. **只对可见的全图引擎（finding 6）**：预填与 kept 的前提是 mount `_running`、`host.hidden` 为假、`host.current` 存在且为当前选择的 core；Compare 视图或引擎未显示时直接走旧路径。
+6. **测试（finding 8）**：真实 core（`fusion_viewer_core.ViewerCore`，非 FakeCore）+ 真实 `TileScheduler`（假 compute 计数）：①部分命中 → 预填 + 同步试画后 scheduler 新请求数 0、额度不变、命中键 handed/wants 清掉、未命中键在 `_waiting` 且暂停解除后被请求一次；②全命中最粗层 → 试画发布、kept、批处理期间 core 绘制 0 次、呈现像素为新参数（对照直接计算的像素）；③非最粗层全命中但上传未齐 → `upload` 退回、无混图帧；④受控慢 compute 跨过 drain 超时 → batch worker 在调度器 idle 前未 `start()`，idle 后启动；⑤kept / 退回两种恢复后画面与来源正确；⑥Save 交接仍撤销 + `release_to_coarse`、等待语义不变；⑦Compare 视图回车走旧路径。验收实测见 13.4，另记首次呈现、完整视野、显存峰值（kept / 非 kept）、退回原因计数。
+
+### 13.6 第四稿修订（回应 `codex_s13_plan_2.out`；**取代 13.5 第 2 条与 13.2 第 3 条**，13.5 其余各条不变）
+不再延后启动批处理——`_process_current_channel` 的启动条件**不改**，第二轮的三个生命周期缺口（等待中再回车、等待中换通道、等待中换数据集）因此不存在。改为让 kept 路径在交接时的 GPU 风险**不超过现有旧路径**：
+1. **kept 前取消适配器的全部未结束请求，但不撤销来源**：新增 `PythonSourceAdapter.suspend_requests()`，在 `set_running(False)` 之前、控制器 `suspend_for_production` 之前调用：对每个未结束的请求 `scheduler.cancel_generation(token)`，其瓦片放回 `_waiting`（Rust 侧这些键仍是 handed，不会再被 drain 返回；暂停解除后普通 `pump` 再请求一次）。调度器对排队中的任务"无人要了就丢弃不跑"（scheduler.py:635–645），已开始的任务跑完（结果照常进 corrected 缓存，回调以 stale 结束、额度释放、`forget_generation`）。已算好待交出的（`_ready`）保留，暂停中照常交出（现有 `set_paused` 行为）。
+2. 于是 kept 路径在等待开始时留在调度器里的适配器工作 = 已开始的任务，与旧路径（撤销来源 → 取消请求 → 已开始的跑完）**完全相同**；同步 suspend 照旧等 floor 与调度器 idle，10 s 超时后照旧启动批处理——这是现状（旧路径与 Python 画面相同），本稿不改，也不新增。
+3. drain 超时时 kept 路径不另做处理（暂停中的适配器不发新请求，来源保留，hidden 期间无 core 绘制）；记 `keep_fallback` 不再有 `drain_timeout` 一项，改记 `perf_trace.mark("step0.keep_drain_timeout")` 供实测统计。
+4. 测试（替换 13.5 第 6 条之④）：④' kept 前有排队与运行中的适配器请求 → `suspend_requests` 后排队的被调度器丢弃不跑（假 compute 计数不增）、运行中的跑完以 stale 结束、额度归零、瓦片在 `_waiting`；暂停解除后每块恰好请求一次、画面补齐；④'' 等待中再回车 / 换通道 / 换数据集：行为与旧路径相同（现有 busy 门与清理不变，仅回归）。
+
+### 13.7 第五稿修订（回应 `codex_s13_plan_3.out`；补全 13.6 第 1 条的账务）
+1. **只重排仍有效的需求（finding 2）**：`suspend_requests()` 对每个未结束请求都 `cancel_generation(token)`（与现在撤回相同），但只有 `self._by_tile.get(tile) == token` 的（未被撤回、Rust 侧仍 handed）才把 `tile` 放回 `_waiting`；已撤回的（`_withdraw` 已删 `_by_tile`，Rust 已删 handed）不重排。
+2. **在途的成功结果与重排协调（finding 1）**：取消前已在 Qt 队列里的成功回调仍会进 `_ready`、暂停中照常交出。统一规则：**任何瓦片交给 core 时（`_hand_over` 里 `complete_python_tile` 之后，不论 taken 与否），`self._waiting.pop(tile, None)`**；`_on_ended` 成功入 `_ready` 时同样 `pop`。于是同一瓦片要么因成功结果交出而离开 `_waiting`，要么留在 `_waiting` 由恢复后的 pump 请求一次，不会两者都发生。（taken 为假 = 来源已撤销或形状错，前者无需再请求，后者 Rust 记失败并按退避重新 drain 返回。）`_request_waiting` 对 `_by_tile` 已有活 token 的瓦片跳过（防御，保证同一瓦片同时最多一个请求）。
+3. **覆盖所有保留 core（finding 3）**：kept 路径对 `host.cores()` 中每个 slot（current 与 standby）的 adapter 调 `suspend_requests()`；standby 的 adapter 本已暂停，其排队请求在此一并取消。等价性只针对计算任务；保留纹理的显存按 13.2 第 5 条实测。
+4. 测试补充（真实 scheduler、假 compute 可控时序）：⑧取消前已发出成功回调（结果在 Qt 队列）→ 交出一次、恢复后不再请求（compute 计数与 `complete_python_tile` 次数各 1）；⑨先平移撤回、请求未终结时回车 → 撤回的瓦片恢复后不被请求；⑩A→B 换通道后 standby 仍有排队请求时回车 → 其排队任务被丢弃不跑；⑪全部场景额度归零、`_by_tile` 无悬挂 token。
+
+### 13.8 第六稿修订（回应 `codex_s13_plan_4.out`）
+1. **普通失败也清 waiting（finding 1）**：`_on_ended` 的普通失败分支（error 非 cancelled/stale/shutdown 且来源仍在）在 `_free()` 之前，若 `self._by_tile.get(tile) == token`，`self._waiting.pop(tile, None)`，再 `fail_python_tile`——失败交给 Rust 的退避与上限，之后由 drain 重新返回（200 ms 退避、三次上限不被绕过）。取消 / stale 分支保留有效 waiting（13.7 第 1 条）。统一表述：**一个请求的终结若把该瓦片的结论交给了 Rust（成功交出或失败上报），就从 `_waiting` 移除；只有取消 / stale 终结才把仍有效的瓦片留在 `_waiting`。**
+2. **文字修正（finding 4）**：`taken` 为假还包括"已成功缓存但 planner 已不需要"（demand.rs:184 先 `succeeded()` 再 `deliver()`），此时 Rust 侧已清 handed/wants，同样无需再请求；13.7 第 2 条"无条件清 waiting"不变。
+3. 不改（finding 3，S0-B 既有 advisory）：已撤回 token 的成功结果与同瓦片新 token 的结果可能都交出——不在本稿范围。
+4. 测试补充：⑫普通错误已在 Qt 队列 → 回车取消 → 恢复：不立即重请求，退避后经 drain 重来；连续失败到上限后放弃（与无交接时相同）。
+
+### 13.9 实现与实测（2026-10-28）
+- 实现按 13.5–13.8；代码审查 codex 第 1 轮 APPROVED（`codex_s13_code_1.out`，非阻断建议：退回原因把此前未完成的请求也计为 miss——已改；保留帧加像素对照——已加）。Step0 相关 51 个测试文件全通过（含真实 GL 4 例、适配器 5 例新增）。
+- 用户项目副本回放（`make_scen_user7.py`，`/sda1/Fusion/a9_bench/s0a/user/u13_*`），换参首张新图（ms，16 次逐次）：
+  - Python 画面 `u13_py`：47–85（cuCIM→31 516）。
+  - 本稿 `u13_eng`：TopHat 117–248、cuCIM 113–173（→31 1733）；15/16 次保留（1 次 miss）。修正前 `u7_eng` 1163–4581。
+  - 本稿 + 修正 A 原型 `u13_keep`（测完已撤回）：TopHat 40–686（中位约 150）、cuCIM 81–139；交接本身由 75–96 ms 降到 7–17 ms（剩下的 75 ms 中 62 ms 是新建显存块的预热）。
+- 仍比 Python 慢约 2 倍；交接后到首次呈现之间的其余开销（组织预览合成、空闲 GC 等）未细分，待议。
+
+### 13.10 第 3 步（交接后到真正上屏）的原因与修正（2026-10-28，用户授权"同意显存块修正，然后继续查第3步"）
+- 显存块修正 A（12.2）已放入（用户同意）：`store_plan.rs` / `frame.rs` 按 `keepblocks.patch`；Rust 98 测试通过。
+- 临时计时点（已撤）实测：回车处理（含预填、试画发布、交接）在 37–46 ms 内结束，但真正上屏要到 99–190 ms；其间 GUI 线程一直被占（一次连续 110–190 ms 的 gui.gap）。对照实验：补丁批处理推迟 300 ms 启动 → 上屏 30–42 ms。结论：批处理线程一启动就读盘（Python 代码持有 GIL），GUI 线程等 GIL，`update()` 排的那次绘制被拖后。
+- 修正：`paint_now` 发布后立刻做一次**同步的只呈现重绘**（`_present_only` + `repaint()`；paintGL 在此标志下不做 core 绘制、不推进候选，只 `_present`），在批处理线程启动之前把新图送上屏。批处理启动条件不变。
+- 计量更正：Python 画面的 `a9.s0_first` 是"池覆盖"时刻（轮询发现），不是上屏；按"回车 → 视口真正绘制"同口径：Python 约 25–40 ms（同标签时像素本就不变），引擎修正后 42–186 ms、中位约 70 ms（`u13_sync` vs `u13_py2`）。剩余差距：同步重绘要先画整窗其它控件（列表、组织预览等）才到 GL 控件，约 15–95 ms，另行细查。
+- 代码审查：第 2 轮否决（`codex_s13_code_2.out`：Qt 对 OpenGL 窗口每个刷新周期最多同步合成一次，紧邻上次合成的 `repaint()` 会变成排队的 UpdateRequest）→ 修正：`presented_now` 计数，未呈现则 `sendPostedEvents(window(), UpdateRequest)` 当场投递；新增紧邻合成测试（去掉投递即失败）。第 3 轮 APPROVED（`codex_s13_code_3.out`）。
+- 终版实测 `u13_final`（回车 → 引擎真正呈现）：38–193 ms，中位约 72 ms（15/16 保留，1 次 miss）；拖动 / 滚轮仍优于 Python。剩余差距见上（整窗重绘），未处理。
+
+## 14. 深层缩放换参：旧图保持，新图达到应有清晰度后一次性换上（v1 否决 `codex_s14_plan_1.out`，v2 见 14.5，否决 `codex_s14_plan_2.out`，v3 见 14.6，否决 `codex_s14_plan_3.out`，v4 见 14.7；冲突处以最新小节为准）
+
+### 14.1 用户验收结论与要求
+- 用户真机（`Fusion_Final_20260824_Slice1_Scan1.qptiff`，放大到细胞级）：换参后新图"至少 0.5 s"才出现，验收不通过。要求："旧版是立刻直接出新图，我要求一样！不要有切换，不要有体感黑屏，最好直接出校正后的结果，越快越好"；"先出预览、后算补丁"式的可见切换、模糊过渡、黑屏都不允许。
+- 回放 `make_scen_user8.py`（细胞级，10 次换参，`u14*`）：深层时有效半径不缩放，几乎每次都是新标签，缓存命中不了。引擎走 kept（旧图保持）或 miss 退回，**新图要等补丁批处理结束、恢复后才计算**：完整新图 1.1 s（预读结束后）/ 1.9–4.1 s（打开后约 1 分钟内，后台 57 通道补丁预读与批处理争盘，批处理读盘 0.7 s → 2.0 s）。Python：`suspend_for_production` 前已开始的预览计算在 floor join / 调度器 drain 中算完（GUI 阻塞 0.3–0.5 s），新图在批处理之前上屏（first 0.25–1.0 s，interactive 质量），精确层在批处理后补齐（约 1.2 s）。即旧画法实际顺序 = 先把眼前的图算完并显示，再算补丁；中间没有可见过渡。
+
+### 14.2 做法（只改补丁交接 keep_picture 路径；Save 不变）
+1. `_publish_from_cache` 预填后若有未命中（或此前未完成的请求），在暂停之前**同步算完眼前的图**：新增 `PythonSourceAdapter.compute_now(budget_ms)`：
+   a. `_request_waiting()` 照常请求（额度内）；
+   b. 在 GUI 线程上等调度器 idle（`notify_when_idle` 的 Event，超时 = 剩余预算），然后 `QCoreApplication.sendPostedEvents(adapter, QEvent.MetaCall)` 把排队的 `_ended` 当场处理，`_hand_over` 不受 `COMMIT_MS` 限制全部交出；
+   c. 交出后 core 可能有新需求（reissue / 更细的层）：`drain_demands` → 命中走 peek、未命中再请求，回到 b；直到一轮没有新需求或预算用完。预算 `COMPUTE_BUDGET_MS = 1500`（与 Python 的同步交接同量级；Python floor join 不设上限、drain 10 s）。
+   d. 然后 `paint_now()`：试画覆盖则一次性发布并同步上屏（13.10），否则旧图保持。
+2. 之后与 13.6–13.8 相同：kept → `suspend_requests` 取消未结束请求、暂停、批处理期间只呈现；未能发布（预算用完、未覆盖）→ 仍走 kept（旧图一直在屏幕上，来源保留，批处理后恢复计算再一次性切换），**不再走撤销来源 + `release_to_coarse` 的退回**（该退回只为显存保守而设；kept 的显存已实测可行——13.2 第 5 条）。miss 计数照记。
+3. 不改：试画发布规则（11.5：新行覆盖视野才发布，否则旧行照画——没有过渡帧）；批处理启动条件；Save 交接。
+4. 另：打开后的后台补丁预读（`step0.preload_read`）与批处理争盘——本节不处理，单列待办（是否在批处理期间暂停预读需用户决定）。
+
+### 14.3 待审问题
+- GUI 线程上等调度器 idle 时，其他生产者（预读线程不经调度器；控制器请求已因 engine 拥有视野而关闭；比较条 HOT 已先停）是否会让 idle 迟迟不到；`notify_when_idle` 的"到达过 idle"语义是否足够。
+- `sendPostedEvents(adapter, MetaCall)` 只处理 adapter 的排队 `_ended`，是否有重入（`_on_ended` 内 `pump()`、`complete_python_tile` → `issue()`）问题。
+- 试画"覆盖"是否会接受比旧图粗的替代层（`planner.drawn` 含粗层回退？）——若会，则可能出现"先粗后细"的可见切换，需改为要求不粗于旧图所用层。
+- 去掉 miss 退回后的显存与 standby 影响。
+
+### 14.4 测试与验收
+- 真实 GL：细胞级换参（新标签）+ 补丁交接：交接返回时新图已发布并上屏、批处理启动前；期间屏幕只出现旧图或新图（逐帧像素对照，无中间帧）；预算用完时旧图保持、批处理后一次性切换。
+- 回放 `make_scen_user8.py`（引擎 / Python 同条件、预读结束后与预读期间各一轮）：完整新图首次上屏时间不劣于 Python 的首图；记录 GUI 阻塞。
+
+### 14.5 v2（回应 `codex_s14_plan_1.out`）
+**事实更正（取代 14.1 第 2 条后半）**：Python 交接先取消排队请求，再 join floor、等 idle，只是收尾已开始的计算；它在细胞级先出现的是 L+1（interactive）的校正瓦片（u14b_py n=21：批处理 146 ms 启动，267 ms 出现 L2 瓦片，视口 L1，目标层 1187 ms 才完整），`a9.s0_first` 只检查一个身份匹配的瓦片。引擎 u14c_eng n=21：60.7 ms 即 `engine_switched/kept`，但目标层比例 0.5，1237 ms 才为 1——**现在的试画发布接受粗层替代**（covered.rs 经 `planner.drawn`，draw.rs:49 含最粗层），即已存在"先粗后细"，只是用户未察觉。
+
+**契约**：旧图持续显示 → 有界准备（反复计算交出、上传、试画）→ 新图在整个可见区域达到**目标层**后一次发布并同步上屏 → 原有补丁交接；预算用完则旧图与 pending 保留，恢复后经同一质量门再一次发布。
+
+1. **质量门（Step0 专用，Rust 小模块）**：`frame/covered.rs` 增 `view_covered_at(core, view, max_level)`——同 `view_covered`，但只计 `t.level <= max_level` 的瓦片（更细或等于目标层）。试画报告增 `trial_exact: Option<bool>`，`max_level` = 本帧准入层（`admission.level`；`coarse_only` / `base_overflow` 时为最粗层，即与现规则相同）。其他 Viewer 不读它，覆盖语义不变。Step0 宿主 `_try_switch` 改用 `trial_exact`（无此键时退回 `trial_covered`）；**所有 Step0 切换都用它**（含无补丁项目的普通换参），即新图不达目标层不发布，旧图照画（11.5 的旧行路径）。稳定视口下准入层即"当前缩放应有的清晰度"；手势中切换不受影响（试画每帧按当帧准入层判断）。
+2. **同步准备循环**（`PythonSourceAdapter.prepare_sync(deadline)` + mount 驱动，取代 14.2 第 1 条）：
+   - 适配器进入 `_sync` 模式：`_on_ended` 只做记账（入 `_ready` / 释放 / 上报失败），不自动 `pump()`；`_on_ended` 加 `@pyqtSlot(object, object)`，使 `QCoreApplication.sendPostedEvents(adapter, QEvent.MetaCall)` 能定向处理排队的 `_ended`（codex 实验：未声明 slot 时定向投递处理 0 个）。
+   - 每轮（统一由 mount 推进，单一 deadline）：① `drain_demands`，命中 peek 交出、未命中进 waiting；② `_request_waiting`（照 64 块 / 128 MiB 额度分批）；③ 定向 flush 排队的 `_ended`；④ `_ready` 全部交出（不受 `COMMIT_MS`，受 deadline）；⑤ `host.paint_now(present=False)`（不 pump；上传受每帧预算，所以要多轮）；⑥ 若已发布 → 退出；若适配器无 waiting / 在途 / ready 且 core 无新需求且本轮无新上传 → 退出（无可再做）；否则 `notify_when_idle` 的 Event 等至多 5 ms（只作唤醒，不作完成证明），进入下一轮。完成以适配器自身请求状态判断。
+   - 普通失败照旧交 Rust 退避；退避中的键在本轮不再请求。
+   - 退出 `_sync` 前，若已发布则做同步上屏（13.10）。`deadline` = 进入后 1500 ms（**软截止**：停止继续准备；之后的 floor join、drain、同步呈现另计，GUI 总阻塞另行记录，不作承诺）。
+3. **kept 范围**：mount `_running`、宿主可见、`host.current` 健康且 identity 为当前选择 → 总走 kept（旧图或已发布的新图在屏幕上，来源与 pending 保留，`suspend_requests` 对 current 与 standby 都做）；不满足（不可见、跨 core、引擎失败）→ 现有撤销退回不变。Save 不变。
+4. **显存**：kept 保留"旧图来源 + 未发布的新来源 + standby"——未实测，补测该场景的进程峰值（不新增显存机制，若有问题再议）。
+5. **改动文件**：`native/.../frame/covered.rs`、`frame.rs`（报告字段）、`py/viewer.rs`（`trial_exact` 入报告字典）、`ui/step0/gl_host.py`（`_try_switch` 用 `trial_exact`；`paint_now(present=)`）、`ui/step0/python_source.py`（`_sync`、`@pyqtSlot`、`prepare_sync` 各步）、`ui/step0/engine_mount.py`（驱动循环、kept 范围）、测试。
+6. **测试**：Rust：`view_covered_at` 只计目标层及更细（粗层覆盖不算）。真实 GL：①细胞级新标签换参 + 补丁交接：粗层先到、细层延迟 → 试画不发布、旧图逐帧不变，细层齐后一次发布（像素对照：只出现旧图帧或完整新图帧）；②超过一批额度（>64 块）；③idle 早于 `_ended` 投递（受控时序）；④计算完成但上传分多帧；⑤预算耗尽 → 旧图保持、批处理后同一质量门一次发布；⑥无补丁项目的普通换参同样不出粗图帧；⑦Save 不变。回放 `make_scen_user8.py`：引擎与 Python 同条件（预读结束后一轮、预读期间一轮，分别比较），记录首个新像素、完整合格新图、批处理启动、GUI 阻塞。
+
+### 14.6 v3（回应 `codex_s14_plan_2.out`；补充 / 取代 14.5 的第 1、2、6 条，其余不变）
+1. **旧图定格（取代"试画失败后重画旧行"）**：切换等待期间（`slot.switch` 未清），若视野与设备尺寸与已发布帧相同（`published_view` 一致），试画未过门时**不再重画旧行、不发布**，宿主只 `_present` 已发布的旧 FBO——旧图逐像素不变，不受 planner 重留 / 删除旧细层的影响（plan.rs:189 的 carry 不再影响屏幕）。视野变了（切换等待中用户拖动 / 缩放）才照 11.5 重画旧行跟随相机（手势中的画面本就随准入变化，属现状）。不改 planner。
+2. **质量门的目标层（取代 14.5 第 1 条的 `max_level` 定义）**：宿主记录已发布帧的层 `published_level`（报告 `level`，= 该帧准入层）。试画的门槛层 `gate = min(本帧准入层, published_level)`——新图不得比屏幕上的旧图粗。Rust 报告增 `trial_exact` 由 Python 传入 `gate`（`paint` 的 trial 参数加 `max_level`），`view_covered_at` 只计 `level <= gate` 的瓦片。
+   - 过渡期准入变粗（旧行 + 新行共算预算，admit.rs:85）而使 `准入层 > published_level`：新图无法在过渡期达到旧图层 → 不发布、旧图定格；准备循环 / 恢复后照常尝试，直至新图达标。为防永不发布：若连续 `GATE_STALL_S = 3 s`（且预算软截止外）仍因 `准入层 > published_level` 不能达标，记 `perf_trace.mark("step0.gate_budget_limited")` 并按准入层放行（预算受限例外，明确记录；回放中统计次数）。
+   - `coarse_only`：准入层即最粗层，与现规则相同；`base_overflow`：照现有失败处理（`cannot_draw` → 退回 Python 画面），不放行。
+3. **候选发布同门（回应 finding 2）**：`_advance_candidate` 改用 `view_covered_at(view, gate)`，`gate = min(候选准入层, published_level)`（无已发布帧时 = 候选准入层）；`py/viewer.rs` 暴露 `view_covered_at`。候选在自己的 core 上准备，不影响 current 的旧图；current 在候选达标前照常（定格规则同样适用于 current 的无变化视野）。standby 恢复、换通道、saved ↔ live 都经此门。
+4. **准备循环的进展信息（回应 finding 1）**：`paint_now(present=False)` 返回本次各绘制的汇总 `{published, uploads, deferred, deferred_growth, again_ms}`；退出条件改为：已发布；或 适配器无 waiting / 在途 / ready、core 无新需求、且最近一次绘制 `uploads == 0 and deferred == 0 and deferred_growth == 0`；否则继续到 deadline。
+5. **测试（补充 14.5 第 6 条）**：改写 `test_a_change_the_cache_cannot_publish_hands_off_as_before`（现为 miss 撤销来源；改为：有界准备后 kept、新图达标一次发布或旧图定格）。新增：旧图定格（切换等待中逐帧像素与已发布帧相同，且期间 planner 删除旧细层也不影响）；候选（换通道、standby 恢复）粗层先到不发布；预算收紧导致过渡准入变粗 → 不发布、旧图定格，超时后按例外放行并记标记；`uploads == 0` 但 `deferred > 0` 时循环不退出。保留暂停完成、取消恢复测试的账务断言，并在其恢复后验证严格门。Rust：`view_covered_at` 单测。
+6. **文件**：`native/.../frame/covered.rs`（`view_covered_at`）、`frame.rs` 与 `py/viewer.rs`（trial `max_level`、`trial_exact`、暴露 `view_covered_at`）、`ui/step0/gl_host.py`（定格、门槛层、`paint_now` 汇总、候选门）、`ui/step0/python_source.py`、`ui/step0/engine_mount.py`、`tests/test_step0_engine_live.py`、`tests/test_step0_python_source.py`、Rust 单测。不改 planner / admit。
+
+### 14.7 v4（回应 `codex_s14_plan_3.out`；补充 14.6）
+1. **层号归一**：报告 `level == -1`（`coarse_only`，frame.rs:298）时，宿主把 `published_level` 与本帧准入层都记为实际最粗层（`core` 的金字塔层数 − 1，经已有的 `level_count` / 由宿主在建核时记下）；`gate` 永远是有效层号（非负）。测试：旧画面为 `coarse_only` 时换参，新图在最粗层达标即发布。
+2. **到期唤醒**：切换（或候选）因"准入层 > published_level"被门挡住时，宿主记下首次被挡时刻，并 `QTimer.singleShot(剩余到 GATE_STALL_S 的毫秒, request_frame)`（单个定时器，切换完成 / 放弃 / 取消时停止）；到期那一帧按例外放行并记 `step0.gate_budget_limited`。暂停（hidden）期间不计时、不放行（批处理期间只呈现）；恢复（`set_running(True)`）时若仍被挡，重新起算。候选路径同。测试在不做任何鼠标操作、`update()` 或 `grabFramebuffer()` 的情况下，只靠事件循环等待，验证到期发布。
+3. **透传**：`ui/core_gl_session.py` 的 `CoreGlSession.paint` 把 trial 的第三个元素（`max_level`）原样传给 core；白名单加入 `ui/core_gl_session.py`（仅此透传；Step1/2/3 不传第三个元素，行为不变）。
+
+## 15. 换参 0.3 s 硬目标（v1 codex 否决 `codex_s15_plan_1.out`，v2 见 15.5，否决 `codex_s15_plan_2.out`，v3 见 15.6；用户："1.5s是完全不能接受的！整个过程（包括最终成像过程）都不能超过0.3s"）
+14 节（v4，`codex_s14_plan_4.out` APPROVED）的契约保留：旧图定格 → 新图达旧图层后一次发布并同步上屏 → 再开补丁批处理；没有过渡帧。本节把**准备预算改为回车起 300 ms 的总上限**，并去掉关键路径上的浪费。
+
+### 15.1 实测（细胞级，`make_scen_user8.py`，补丁批处理临时推迟 3 s 以排除其影响，临时代码已撤）
+- 回车 → 清晰新图完整上屏：224–559 ms（中位约 400）。分解（n=15，TopHat→25）：回车处理本身 13–28 ms；此后到引擎首次绘制前 GUI 线程上约 120–150 ms 的 Python 时间：**pyqtgraph 底层 ImageItem 重画 42–124 ms**（引擎拥有视野时这些层被盖住，看不见，却被整窗重绘带着重画，`_rescaleData_nditer` / `_clip`）、**`_set_channel_computing` 的 `setStyleSheet` 6–61 ms**、**空闲全量 GC 108–122 ms**（gc_pacer 恰在此刻触发；另有 0.6–1.3 s 的大 GC）；引擎首帧 78 ms，其中**新建显存块预热 56 ms**；之后约 25 块校正计算从 217 ms 才开始（4 路并行，每块 10–95 ms），其中可见的只有约 8–12 块，其余是为平移预取的。
+- 补丁批处理若照常立即启动，再加 0.7–2 s（见 14）。
+
+### 15.2 做法
+1. **批处理排在新图之后**（14 v4 的同步准备循环），准备循环截止 = 回车起 `250 ms`（留 50 ms 给同步上屏与余量）；到点未达标 → 旧图定格、开批处理、之后照 14 继续，一次性切换（这时会超过 0.3 s，记 `step0.switch_over_budget`，回放中统计）。
+2. **可见优先**：准备循环中只请求当前视野内（试画门所需）的瓦片；预取瓦片（`issued_ahead`）推迟到新图发布之后。适配器请求的优先级：视野内 > 视野外（同层内）。
+3. **引擎拥有视野时不重画 pyqtgraph 底层图像**：mount 发布后把控制器的 ImageItem（marker / overlay / floor）`setVisible(False)`，交还 Python 画面（`_to_python`、失败退回）时恢复；`_hold_scene_repaint` 现只挡视口更新，挡不住整窗重绘带来的 ImageItem.paint。
+4. **`_set_channel_computing` 不再每次 `setStyleSheet`**：改为预先建好的两种样式之间切换（Qt 动态属性 + 一次性样式表，或缓存同一样式字符串时跳过），避免整行重新 polish。
+5. **GC 让路**：`gc_pacer` 在用户输入（键盘 / 鼠标 / 换参）后 `GC_QUIET_S = 2 s` 内不做空闲全量 GC；补丁批处理与准备循环期间也不做。
+6. **显存块预热移出关键路径**：实时预览来源上屏后，空闲时预先建好并预热一个空闲浮点块（修正 A 之后它会被保留），换参时不再在首帧里付 56 ms。
+7. 其余：14 v4 全部条款（质量门、定格、候选同门、`trial_exact`、唤醒、透传、kept 范围、Save 不变）。
+
+### 15.3 目标与验收
+- 回放 `make_scen_user8.py`（细胞级 10 次新标签换参）与 `make_scen_user7.py`（整图 / 中层）：**回车 → 清晰新图上屏 ≤ 300 ms**，逐次报告（不只中位），超出的逐次列原因；过程中只出现旧图帧与完整新图帧（逐帧像素）。预读期间（打开后约 1 分钟）单列。
+- 若 2–6 全做仍有超 300 ms 的情形（如半径极大、视野内瓦片过多），如实报告并给出剩余瓶颈，不以放宽质量门换速度。
+
+### 15.4 文件
+14 v4 的文件 + `ui/step0/step0_page.py`（`_set_channel_computing`）、`utils/gc_pacer.py`、`ui/step0/engine_mount.py`（ImageItem 隐藏 / 恢复、预热触发）、`ui/step0/python_source.py`（可见优先）、必要时 `native/.../viewer`（预热一个空闲块的入口、视野内需求的区分——若需 Rust 改动另列）。
+
+### 15.5 v2（回应 `codex_s15_plan_1.out`；取代 15.2–15.4）
+**原则**：硬目标 = 每一次"回车（参数提交入口）→ 清晰校正新图真实上屏"≤ 300 ms；任何一次超过即该目标未通过（旧图保持、FBO 已发布、worker 完成都不算达标）。实现分两批，先做第一批、逐次实测归因，再定第二批。
+
+**第一批**
+1. 实现第 14 节 v4（质量门、旧图定格、候选同门、同步准备循环、批处理在新图之后）。准备循环不设 250 ms 截止：截止 = 14 的软截止（1500 ms，仅作防卡死上限）；超过 300 ms 的每一次如实记为失败并逐次归因（不以提前开批处理来"保住"时间）。
+2. **门所需瓦片优先**：适配器在消耗额度、提交 scheduler 之前排序——先是 trial 质量门需要的瓦片（视野内、目标层），再是其余需求（最粗层、辅助层、视野外）；后者在新图发布前不提交（`Cur` / `coarse_only` 时门依赖最粗层：此时最粗层即门所需，照常优先）。Rust 侧需提供"门所需瓦片"的判定：`py/viewer.rs` 增 `gate_tiles(view, max_level)`（视野内、`level == max_level` 的该来源瓦片集合；`coarse_only` 时为最粗层），新文件 `native/.../viewer/gate_tiles.rs`（小模块）；原始 halo 读取属计算本身，不受影响。
+3. **持续抑制被遮挡的 Python 图像**：控制器增 `set_layers_suppressed(bool)`（`viewer/explore_view.py`），在 `_apply_*` 可见性规则的出口统一 AND 上"未被抑制"，覆盖 overview、raw / precise pools、corrected floor、DAPI pool 及之后新建的项；mount 发布时置真，`_to_python` 按现有供图恢复顺序先恢复供图、再置假并按**当前**规则重算可见性（不恢复快照）；floor 的增益校准照常（只停绘制）。只作用于全图实例，不影响 Compare 三面板、组织预览与交互层。
+4. **`_set_channel_computing` 相同状态跳过**（已是计算中则不再设样式）；实测真实状态切换的代价，若仍显著再议局部绘制。
+5. **计时与回放口径**：回放的换参改为向数值框发送真实 `KeyPress`（数字 + Return），使 `gc_pacer` 的输入时间、Qt 事件路径与用户一致；计时起点 = 参数提交入口（`_on_dec_param_entered` 进入时打标），终点 = 新来源达质量门的那一帧 `frameSwapped`（`_presented`），并逐帧像素记录只出现旧图帧或新图帧。场景：细胞级（`make_scen_user8.py`）、整图 / 中层（`make_scen_user7.py`）；冷态（重启后首次）、热态、预读期间、首次换参、Compare 往返、Python 退回；每一次单独列出。
+
+**第二批（第一批实测后再定，各自单独审）**：有界 GC 避让（保留 120 s / 1200 s 兜底的处理方式、退出后补收集、内存峰值验证）；在当前 GL context、空闲且预算允许时经 `frame.rs` 的 caps / split / VT 链尽力预热一个空闲块；整块视野一次性校正（减少每块 halo 重算与 Python→Rust 复制）；补丁预读在准备与批处理期间让盘。
+
+**可行性说明（写给用户）**：按记录的最坏单块 95 ms、12 块、4 路，仅计算就约 285 ms；热态常见情形有望 ≤ 300 ms，冷态、大半径、视野内瓦片多的情形第一批不能保证，需第二批（尤其整块一次性校正）再测。
+
+**文件（第一批）**：14 v4 的文件 + `native/fusion_viewer_core/src/viewer/gate_tiles.rs`（新）、`viewer.rs`（mod 声明）、`py/viewer.rs`（`gate_tiles`）、`viewer/explore_view.py`（`set_layers_suppressed`）、`ui/step0/step0_page.py`（相同状态跳过、提交入口打标）、`scripts/a9_drive.py`（真实 KeyPress）、测试。
+
+### 15.6 v3（回应 `codex_s15_plan_2.out`；修订 15.5 第一批第 2 条）
+1. **门所需集合 = 绘制前置依赖 + 目标层可见瓦片**：`gate_tiles(view, max_level)` 返回该来源的（a）planner 绘制前置依赖——`plan/draw.rs` 中 `drawn` 要求的**整层最粗瓦片**中尚未到齐者（`coarse_complete` 之前，`Cur` / `coarse_only` 与 hybrid 一律纳入，避免"发布等粗层、粗层等发布"）；（b）视野内、`level == max_level`（`coarse_only` 时即最粗层，与 a 合并）的瓦片。其余需求（辅助层、视野外非最粗层）在新图发布前留在适配器 `_waiting`，不丢弃、不提交；Rust 侧它们保持 handed（demand.rs:54），不会重复交出；发布后普通 `pump` 照常请求。
+2. **分类时机**：每轮准备循环、以及恢复后每次 `pump`，都按当前 trial 来源、当前视野与当前门槛层重新分类（视野变了门集合随之变）；撤回照常处理。发布（或放弃切换）后不再分类，恢复普通顺序。
+3. **抑制只影响绘制**：`set_layers_suppressed` 只在各 ImageItem 的可见性出口 AND"未抑制"，不改 DAPI 的 `effective_enabled`（engine_mount.py:570 用它决定引擎是否画 DAPI）、不改 floor 校准、不改任何"是否启用"的状态。
+4. 验收补充：视野外最粗瓦片尚未到齐时换参（新开数据集后立即换参）——门集合包含它们，新图仍能发布；逐次计时照 15.5 第 5 条。
+
+### 15.7 第一批实现与实测（2026-10-28，用户："同意先做第一批，同时可以放宽到0.4s"）
+- 实现：Rust `frame/covered.rs`（`view_covered_at`、`counts`）、`frame.rs`（`Trial.max_level`、`trial_exact`）、`viewer/gate_tiles.rs`（新）、`plan.rs`（只读 `coarse_has`）、`py/viewer.rs`（`trial_level`、`view_covered_at`、`coarsest_level`、`gate_tiles`）；`ui/core_gl_session.py`（透传）；`ui/step0/gl_host.py`（定格、门、`GATE_STALL_S` 定时器、`paint_now(present)` + `present_now` + `last_paint`、层号归一）；`ui/step0/python_source.py`（`_sync`、`@pyqtSlot`、`step_sync`、`gate_fn` 排序、`gate_pending`）；`ui/step0/engine_mount.py`（`_can_keep`、`_prepare_switch`、`_gate_for`、`_NoPaint` 视口不绘）；`ui/step0/step0_page.py`（相同样式跳过、`step0.param_commit`）；`scripts/a9_drive.py`（真实按键送到数值框——送到内部行编辑会提交两次，曾引发 Busy 模态卡住回放）。15.5 第 3 条的"抑制"按更简单的等价做法实现：引擎为画面时吞掉被 GL 宿主覆盖的视口的 Paint 事件（不碰任何可见性 / 启用状态 / floor 校准），回到 Python 画面时移除。
+- 测试：Rust 100 通过；`test_step0_engine_live.py` 23 通过（新增：未命中先算后交接、等待中旧图逐帧不变、粗层替代不发布（深层视图，去掉门即失败）、预算受限 3 s 定时放行、额度 2 块仍在交接前发布、被覆盖的 ImageItem 不绘（去掉过滤即失败））。
+- 回放 `u16_deep`（细胞级，含预读期间）/ `u16_mid`（整图 / 中层），"提交 → 新图真实上屏"：细胞级 9 次 32–372 ms（第一次值未变不计），整图 / 中层 16 次 23–116 ms；全部 ≤ 400 ms；每次新图首帧 `exact_fraction=1`（目标层完整）。
+
+### 15.8 代码审核第 1 轮修正（`codex_s15_code_1.out` 否决 5 条）
+1. **门槛层 = min(本帧准入层, 屏上层)**（P1-1）：Rust `frame::paint` 在试画时自己取 `min(trial max_level, 本帧准入层)`（`coarse_only` 读作最粗层，`admitted_level` 单测）；宿主无已发布帧时传 `NO_GATE = 255`，即按准入层判断，不再退回任意层覆盖。候选路径同：`view_covered_at(min(准入层, 屏上层))`。请求排序 `_gate_for` 改用 `Step0GlHost.gate_levels(slot)`：同一 min（`slot.admitted` = 该核上一帧准入层）。
+2. **超时例外只在准入层覆盖时放行**（P1-2）：Rust 报告增 `trial_admitted`（准入层或更细的覆盖）；`_gate_open` 超时后要求它为真，否则不放行、等下一块到来再判。超时后 `gate_levels` 同时返回准入层，准入层的块也排在前面请求。
+3. **发布后立刻补发延期块**（P2-3）：切换 / 候选发布时 `adapter.pump_soon()`（下一轮事件循环 pump，不在 core 调用内）。
+4. **计时按所有者**（P2-4）：`_gate_open(..., owner)`，所有者为 `("switch", token)` 或 `("candidate", id(slot))`；所有者变了重新起算；`request_switch` 也清零。
+5. **只吞宿主正下方的绘制**（P2-5）：`_NoPaint` 只在 Paint 区域全部落在宿主几何内时吞掉；完全在外的照常；跨越的吞掉并在下一轮事件循环只重绘宿主外的边缘（在绘制内调 `update` 会被清掉）。
+- 测试：Rust 101 通过；新增 5 个（例外只在准入层放行、无屏上图不退回任意层、新切换不继承计时、门槛层取更细者 + 超时含准入层、边缘照常重绘、发布后补发请求）。注意：`test_step0_python_source.py` 在导入时设 `QT_QPA_PLATFORM=offscreen`，与 GL 测试放在同一进程会让 GL 测试跑在无屏模式而偶发失败；GL 测试须单独在真实显示上跑。
+
+### 15.9 代码审核第 2 轮修正（`codex_s15_code_2.out` 否决 2 条；1–3 项已核验通过）
+1. **每个等待中的画面各有自己的计时**（P2-1）：`_gate_since` 按所有者（`_owner_of`：current 的切换按 token、候选按 slot）分别记；`_gate_prune` 只留仍在等待的（current 的切换、candidate），全空时停定时器；单个定时器取最近到期。`_try_switch` 先查 `still_wanted` 再进门——不再需要的旧切换不碰任何计时；发布时只结束自己的计时（`_gate_done`）。`gate_levels` 读本 slot 自己的计时。
+2. **边缘重绘不再画被遮挡的图像**（P2-2）：实测 pyqtgraph 下，无论整块边缘区域还是逐条重绘，`ImageItem.paint` 都会被调用（ViewBox 的裁剪不剔除子项）。改为：只落在宿主外的 Paint 由 `_NoPaint._paint_margin` 自己完成——把 ViewBox 的 `childGroup` 透明度暂设 0（`NoViewportUpdate` 下不引发重绘请求，Qt 跳过全透明项），直接 `graphics.viewportEvent(event)`，再恢复。ViewBox 把子项裁剪在自身形状内，子项本就画不到边缘，所以边缘像素不变；测试用 `QGraphicsView.render`（不经 Paint 事件）逐像素比对边缘（除 ViewBox 边界落在像素之间的 1 像素缝），并用真实 pyqtgraph 视图做完整往返，断言 `ImageItem.paint` 零调用。
+- 测试：engine_live + engine_mount 59 通过（两次）；新增"每个画面各自计时"，改写计时单测为真实等待中的 slot。
+- 第 3 轮审核 **通过**（`codex_s15_code_3.out`）。采纳其建议：`drop_candidate` / `park_current` 也清理计时（`_gate_prune`）。如实记录：ViewBox 边界落在像素之间时，宿主右 / 下侧那 1 像素缝在边缘重绘时会从"部分图像"变为背景色（宿主外、仅此一列 / 一行），属已知小差异。回放 `u18_deep` 9 次 71–344 ms、`u18_mid` 16 次 19–114 ms，无一次超时放行。

@@ -10,6 +10,9 @@ impl ViewerCore {
         use crate::corrected::Source;
         use crate::family::Format;
         use crate::step1_tile::RawKind;
+        if crate::python_source::PythonSources::is_python(c) {
+            return self.python.is_live(c).then_some(Format::F32);     // S0-B
+        }
         match self.sources.of(c)? {
             Source::Raw { .. } => Some(match self.raw_kind {
                 RawKind::U8 => Format::U8,
@@ -41,8 +44,9 @@ impl ViewerCore {
         let mut formats = vec![raw];
         // one block of every format a drawn non-raw channel uses (R7c 1B, 1E)
         for (c, _) in &self.display {
-            let non_raw = matches!(self.sources.of(*c), Some(crate::corrected::Source::Corrected { .. })
-                                                     | Some(crate::corrected::Source::DisplayTiff { .. }));
+            let non_raw = self.python.is_live(*c)                  // S0-B: float32
+                || matches!(self.sources.of(*c), Some(crate::corrected::Source::Corrected { .. })
+                                                 | Some(crate::corrected::Source::DisplayTiff { .. }));
             if let (true, Some(f)) = (non_raw, self.format_of(*c)) {
                 if !formats.contains(&f) {
                     formats.push(f);

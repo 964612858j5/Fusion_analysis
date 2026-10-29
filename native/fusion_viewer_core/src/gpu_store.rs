@@ -244,6 +244,17 @@ impl Store {
         self.generation += 1;
     }
 
+    /// S0-B: every tile of `channel` leaves its slot -- bookkeeping only,
+    /// no GL call and no block deleted (blocks keep their first use paid);
+    /// the meta and page tables follow at the next paint. Returns how many.
+    pub fn evict_channel(&mut self, channel: u16) -> usize {
+        let gone: Vec<Key> = self.slots.keys().filter(|k| k.0 == channel).copied().collect();
+        for k in &gone {
+            self.evict(k);
+        }
+        gone.len()
+    }
+
     /// Drop every tile not in `keep`, then every block left empty
     /// (`release_unused`); context current.
     pub fn release_except(&mut self, gl: &glow::Context, keep: &HashSet<Key>) {

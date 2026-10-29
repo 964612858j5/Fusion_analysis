@@ -71,7 +71,7 @@ class _RecordingExploreTab:
         self.shown.append((channel, method, tuple(params)))
         return True
 
-    def release_for_production(self, reason):
+    def release_for_production(self, reason, keep_picture=False):
         self.released.append(reason)
 
     def teardown(self, **_kw):
@@ -665,6 +665,7 @@ def test_the_same_queued_signals_do_arrive_when_the_generation_holds(
     assert page._last_payload is not None
     assert "8.00" in page._metrics_original.text()
     assert page._proc_pbar.value() == 100             # progress, then all_done
+    assert not page._proc_pbar.isVisible(), "the headless bar came up as a window"
     # error_signal and canceled both write the status line; canceled is
     # emitted last, so it is the one that shows.
     assert page._proc_status.text() == "Stopped."

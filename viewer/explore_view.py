@@ -2267,6 +2267,10 @@ class ExploreController(QtCore.QObject):
     # itself, for the in-view status badge) know the floor's outcome
     # without polling `_floor_ready`.
     floor_ready_changed = QtCore.pyqtSignal(bool)
+    #: S0-B (docs/v17_step0_engine_plan.md §11.6): a gain table installed
+    #: for the live selection while the engine owns the picture --
+    #: `(ctx, gains per level)` (`current_gains`)
+    gains_ready = QtCore.pyqtSignal(object, object)
 
     # ── public, read-only interaction contract ──
     #
@@ -2545,6 +2549,10 @@ class ExploreController(QtCore.QObject):
         # the screen -- while it goes on being the one camera, the one
         # mouse and the one publisher of interaction/quiet/view-rect.
         self._viewport_requests_enabled = True
+        # S0-B (§11.6): the Rust engine draws the corrected picture; the
+        # floor is still computed -- it calibrates the per-level display
+        # gain -- but drawn by nobody (`set_engine_owns_view`)
+        self._engine_owns_view = False
 
         # ── teardown bookkeeping ──
         self._teardown_order = []
@@ -3828,6 +3836,51 @@ class ExploreController(QtCore.QObject):
         """Whether this controller still reads tiles FOR ITS OWN LAYERS."""
         return self._viewport_requests_enabled
 
+    # ── S0-B: the engine owns the picture (docs/v17_step0_engine_plan.md §11.6) ──
+    def _floor_may_run(self) -> bool:
+        """A floor job may run now: no production run holds the GPU, and
+        either this controller's layers are the picture or the engine is
+        (the floor then only calibrates the gain)."""
+        return not self._suspended and (self._viewport_requests_enabled
+                                        or self._engine_owns_view)
+
+    def set_engine_owns_view(self, owns: bool) -> bool:
+        """The Rust engine draws the corrected picture (True), or this
+        controller does again (False).
+
+        True: floor jobs still run -- they calibrate the per-level display
+        gain, delivered as `gains_ready` -- but nothing is drawn into this
+        controller's layers. False hands the picture back and RESTORES it:
+        the viewport supply is turned on and the live selection's floor is
+        put back from the cache, or computed (codex S0-B review 1, P1-3).
+        Returns True when the state changed."""
+        owns = bool(owns)
+        if owns == self._engine_owns_view:
+            return False
+        self._engine_owns_view = owns
+        if owns or self._torn_down:
+            return True
+        self.set_viewport_requests_enabled(True)
+        if self._wants_precise():
+            self._ensure_corrected_floor()
+        return True
+
+    @property
+    def engine_owns_view(self) -> bool:
+        return self._engine_owns_view
+
+    def current_gains(self):
+        """`(ctx, [gain of level 0, 1, ...])` for the live selection: the
+        display gain the picture divides its window by on each level (1 for
+        an exact level, and for every level while no calibration matches
+        the live selection)."""
+        levels = int(getattr(self.provider, "num_levels", 1) or 1)
+        live = self._current_floor_ctx(self._floor_level, self._floor_stride)
+        # the context only when the table is the live selection's: a table of
+        # another selection reads as "not calibrated" (codex S0-B code 2, P2-2)
+        ctx = self._gain_ctx if (self._gain_ctx is not None and self._gain_ctx == live) else None
+        return ctx, [float(self._display_gain_for_level(L)) for L in range(levels)]
+
     def set_viewport_requests_enabled(self, enabled: bool) -> bool:
         """Turn this controller's own camera-driven tile reads on or off.
 
@@ -4124,8 +4177,7 @@ class ExploreController(QtCore.QObject):
         Never calls `set_selection()`: that would change the real product
         state and the picture.
         """
-        if (self._torn_down or self._suspended or method is None
-                or not self._viewport_requests_enabled):
+        if (self._torn_down or method is None or not self._floor_may_run()):
             return False
         floor_level, stride = self._pick_floor_level_and_stride()
         ctx = self._floor_ctx_for(channel, method, params, floor_level, stride)
@@ -4191,6 +4243,13 @@ class ExploreController(QtCore.QObject):
                                                         0) + 1
         self._level_gain = dict(gains)
         self._gain_ctx = ctx if gains else None
+        if self._engine_owns_view:
+            # S0-B: the gains only -- the engine draws the picture; the
+            # floor stays in the cache for a fallback (`set_engine_owns_view`)
+            self._floor_ctx = ctx
+            self.floor_preparing_changed.emit(False)
+            self.gains_ready.emit(*self.current_gains())
+            return True
         ds_y, ds_x = self._downsample_yx(floor_level)
         ds_y, ds_x = ds_y * stride, ds_x * stride
         h, w = gray.shape
@@ -4214,7 +4273,7 @@ class ExploreController(QtCore.QObject):
         levels match) and dispatch `compute.correct_array` on a worker
         thread. Exactly one such job is ever in flight (enforced by
         `_ensure_corrected_floor`/`_handle_floor_result`)."""
-        if self._suspended or not self._viewport_requests_enabled:
+        if not self._floor_may_run():
             # A production run holds the GPU, or this controller's own
             # layers are not the picture. Deferred, not dropped:
             # `resume_from_production` / `set_viewport_requests_enabled(True)`
@@ -4411,6 +4470,14 @@ class ExploreController(QtCore.QObject):
             self._gain_ctx = ctx if gains else None
             if error is not None or result_arr is None:
                 self.stats["floor_compute_failed"] += 1
+            elif self._engine_owns_view:
+                # S0-B: cached for a fallback, drawn by nobody; the gains
+                # go to the engine below
+                self._floor_level = floor_level
+                self._floor_stride = stride
+                self._floor_ctx = ctx
+                self._remember_floor(ctx, floor_level, stride,
+                                     np.asarray(result_arr, dtype=np.float32), gains)
             else:
                 # NOTE (module docstring): when stride > 1 the floor's
                 # effective downsample exceeds its level's, so
@@ -4434,6 +4501,8 @@ class ExploreController(QtCore.QObject):
                 accepted = True
         self.stats["level_display_gain"] = dict(self._level_gain)
         self.stats["gain_calibrated"] = bool(self._level_gain)
+        if current and self._engine_owns_view:
+            self.gains_ready.emit(*self.current_gains())
         if current:
             # The gain table changed: the precise pool's levels closure holds
             # the previous table by value, so hand it the new one.
@@ -4461,7 +4530,7 @@ class ExploreController(QtCore.QObject):
         self._floor_background_request = None
         if request is None or self._torn_down or self._floor_job_running:
             return
-        if self._suspended or not self._viewport_requests_enabled:
+        if not self._floor_may_run():
             return
         key = (request.ctx, request.floor_level, request.stride)
         if key in self._floor_cache:

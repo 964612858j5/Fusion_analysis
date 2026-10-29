@@ -206,10 +206,18 @@ float channel_signal(int row, vec2 world) {
                     raw = total / weights;
                 }
             }
-            float denominator = mapping.y - mapping.x;
+            // S0-B: this level's display gain (texels 5-8, four levels
+            // each; missing or 0 is 1) scales the window, not the pixels
+            vec4 gains = texelFetch(u_params, ivec2(5 + level / 4, row), 0);
+            float gain = gains[level - (level / 4) * 4];
+            if (!(gain > 0.0)) {
+                gain = 1.0;
+            }
+            float lo = mapping.x / gain;
+            float denominator = mapping.y / gain - lo;
             float signal = 0.0;
             if (denominator > 0.0) {
-                signal = pow(clamp((raw - mapping.x) / denominator, 0.0, 1.0),
+                signal = pow(clamp((raw - lo) / denominator, 0.0, 1.0),
                              max(mapping.z, 0.000001));
             }
             return clamp(signal, 0.0, 1.0);

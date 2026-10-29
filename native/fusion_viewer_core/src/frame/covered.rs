@@ -19,7 +19,19 @@ use crate::viewer::ViewerCore;
 
 /// `view`: the world rect drawn (x0, x1, y0, y1).
 pub(crate) fn view_covered(core: &mut ViewerCore, view: [f64; 4]) -> bool {
-    let mut required: Vec<Ch> = core.display.iter().map(|(c, _)| *c).collect();
+    covered_by(core, view, None)
+}
+
+/// §14.5 / 14.6: as `view_covered`, counting only the tiles of `max_level`
+/// or finer -- a coarser stand-in does not make a picture ready (Step0's
+/// quality gate: never coarser than the picture on screen).
+pub(crate) fn view_covered_at(core: &mut ViewerCore, view: [f64; 4], max_level: u8) -> bool {
+    covered_by(core, view, Some(max_level))
+}
+
+fn covered_by(core: &mut ViewerCore, view: [f64; 4], max_level: Option<u8>) -> bool {
+    // the rows this paint composes (S0-B: a trial's, preparing rows otherwise out)
+    let mut required: Vec<Ch> = super::composed_display(core).iter().map(|(c, _)| *c).collect();
     required.sort_unstable();
     required.dedup();
     let (h, w) = core.pyr.shapes[0];
@@ -36,10 +48,17 @@ pub(crate) fn view_covered(core: &mut ViewerCore, view: [f64; 4]) -> bool {
     let planner = &mut core.planner;
     all_covered(&required, region, |c| {
         usable(planner, c, &on_gpu).into_iter()
+            .filter(|t| counts(*t, max_level))
             .filter_map(|t| store.meta.get(&(c, t)).and_then(|m| m.valid))
             .map(|r| reach(r, outer, slack))
             .collect()
     })
+}
+
+/// Does tile `t` count for a gate of `max_level` (None: every tile does)?
+/// Level 0 is the finest: `t.level <= max_level` is that level or finer.
+fn counts(t: TileAt, max_level: Option<u8>) -> bool {
+    max_level.is_none_or(|m| t.level <= m)
 }
 
 /// The tiles of `c` this frame's composition would use: the planner's
@@ -56,7 +75,7 @@ fn all_covered(required: &[Ch], region: [f64; 4], mut rects: impl FnMut(Ch) -> V
 
 #[cfg(test)]
 mod tests {
-    use super::{all_covered, usable};
+    use super::{all_covered, counts, usable};
     use crate::geom::{Pyramid, TileAt};
     use crate::admit::Budgets;
     use crate::plan::{Planner, View};
@@ -100,6 +119,14 @@ mod tests {
     }
 
     const VIEW: [f64; 4] = [0.0, 1024.0, 0.0, 1024.0];
+
+    #[test]
+    fn a_gate_counts_its_level_and_finer_never_a_coarser_stand_in() {
+        let t = |level| TileAt { level, tx: 0, ty: 0 };
+        assert!(counts(t(1), Some(1)) && counts(t(0), Some(1)));
+        assert!(!counts(t(2), Some(1)) && !counts(t(5), Some(1)));
+        assert!(counts(t(5), None), "no gate: every tile counts");
+    }
 
     #[test]
     fn every_required_channel_must_cover() {

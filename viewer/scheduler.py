@@ -275,6 +275,15 @@ class TileScheduler:
         elif outcome == "hit":
             callback(self._wrap_cache_hit(req, cached))
 
+    def peek_corrected(self, key):
+        """The corrected cache's array for `key`, or None -- nothing is
+        computed, read, queued or called back (Step0 engine, plan §13.2:
+        a cache-only fill before a production hand-off). Moves the entry
+        up the LRU like any hit."""
+        if not isinstance(key, CorrectionKey) or self._shutdown:
+            return None
+        return self.corrected_cache.get(key)
+
     def activity_snapshot(self) -> dict:
         """A point-in-time count of PHYSICAL scheduler work, derived from
         `_pending` -- the single source of truth -- not from a parallel
@@ -358,6 +367,15 @@ class TileScheduler:
         with self._lock:
             self._stale_gens.add(gen)
             self._cv.notify_all()
+
+    def forget_generation(self, gen):
+        """Take `gen` out of the stale set again (S0-B,
+        docs/v17_step0_engine_plan.md §11.4). Only for a token whose ONE
+        request has had its terminal callback -- nothing can carry it any
+        more -- so a consumer that cancels a token per tile does not grow
+        the set without bound. A token never cancelled is a no-op."""
+        with self._lock:
+            self._stale_gens.discard(gen)
 
     def shutdown(self):
         """Stop worker threads and the I/O pool, draining in-flight work.

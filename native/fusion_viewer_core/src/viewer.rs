@@ -61,9 +61,11 @@ pub struct Config {
     pub draw_log: bool,
 }
 
+mod demand;
 mod failures;
 mod formats;
 mod issue;
+mod gate_tiles;
 mod gl_life;
 pub mod labels;
 mod memory;
@@ -124,6 +126,11 @@ pub struct ViewerCore {
     pub labels: crate::label_store::Labels,
     /// Step3's masks planned and read here (R3b; `labels`)
     pub lab: labels::LabelState,
+    /// S0-B: the Python sources registered, and their tiles' demand
+    pub python: crate::python_source::PythonSources,
+    pub demand: demand::Demand,
+    /// S0-B: set for one paint only (`frame::paint`'s `trial`)
+    pub trial: Option<crate::frame::Trial>,
 }
 
 impl ViewerCore {
@@ -172,7 +179,8 @@ impl ViewerCore {
                      last_input: -1e9, paused: false,
                      held: HashMap::new(), frames: 0, last_error: String::new(),
                      issued: Default::default(), issued_ahead: Default::default(), faults, attaches: 0, labels: Default::default(),
-                     lab: Default::default() }
+                     lab: Default::default(), python: Default::default(), demand: Default::default(),
+                     trial: None }
     }
 
     /// The rows drawn and their display parameters (Overlay: one per
@@ -238,6 +246,8 @@ impl ViewerCore {
     pub fn pause(&mut self) {
         self.paused = true;
         self.pool.set_jobs(Vec::new());
+        // S0-B: the Python sources' wants stay -- work under way finishes and
+        // is cached (§11.7); the adapter stops asking for more while paused
         if let Some(p) = self.lab.pool.as_ref() {
             p.clear_jobs();
         }

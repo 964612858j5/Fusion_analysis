@@ -51,10 +51,17 @@ impl ViewerCore {
     /// gamma, r, g, b, weight, group, group weight)` (Overlay: group 0;
     /// Fusion: groups in order, the nucleus last with group -1); `fusion`:
     /// the mode.
-    #[pyo3(signature = (rows, smooth, fusion=false))]
+    /// S0-B: `preparing` -- channels whose rows are fetched and uploaded
+    /// but not composed (a source being prepared); `gains` -- per channel,
+    /// the display gain of each pyramid level (missing or 0: 1).
+    #[pyo3(signature = (rows, smooth, fusion=false, preparing=None, gains=None))]
     /// (An 8-tuple row, the S-Raw form without the group fields, is
     /// group 0, weight 0.)
-    fn set_display(&self, rows: Vec<Bound<'_, PyAny>>, smooth: bool, fusion: bool) -> PyResult<()> {
+    fn set_display(&self, rows: Vec<Bound<'_, PyAny>>, smooth: bool, fusion: bool,
+                   preparing: Option<Vec<u16>>, gains: Option<std::collections::HashMap<u16, Vec<f32>>>)
+                   -> PyResult<()> {
+        let preparing = preparing.unwrap_or_default();
+        let gains = gains.unwrap_or_default();
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let (c, lo, hi, g, r, gr, b, w, group, gw) = match row.len()? {
@@ -64,7 +71,13 @@ impl ViewerCore {
                 }
                 _ => row.extract::<(u16, f32, f32, f32, f32, f32, f32, f32, f32, f32)>()?,
             };
-            out.push((c, RowParams { mapping: [lo, hi, g], color: [r, gr, b], weight: w, group, group_weight: gw }));
+            let mut level_gains = [0.0f32; crate::vt::MAX_LEVELS];
+            for (i, v) in gains.get(&c).map(|v| v.as_slice()).unwrap_or(&[]).iter()
+                .take(crate::vt::MAX_LEVELS).enumerate() {
+                level_gains[i] = *v;
+            }
+            out.push((c, RowParams { mapping: [lo, hi, g], color: [r, gr, b], weight: w, group, group_weight: gw,
+                                     preparing: preparing.contains(&c), gains: level_gains }));
         }
         self.inner.borrow_mut().set_display(out, smooth, fusion);
         Ok(())
@@ -110,8 +123,18 @@ impl ViewerCore {
     }
 
     /// Draw into `fbo` at device size; `view` = world rect (x0, x1, y0, y1).
-    fn paint<'py>(&self, py: Python<'py>, fbo: u32, w: i32, h: i32, view: [f64; 4]) -> PyResult<Bound<'py, PyDict>> {
-        let r = crate::frame::paint(&mut self.inner.borrow_mut(), fbo, w, h, view);
+    /// S0-B `trial`: `(promote, yield)` channel lists -- this paint alone
+    /// composes the rows being prepared of `promote` instead of `yield`'s;
+    /// the report's `trial_covered` then says whether they cover the view.
+    /// §14.6 `trial_level`: the report's `trial_exact` then counts only
+    /// tiles of that level or of this frame's admission level, the finer
+    /// (255: no picture on screen, the admission level alone), and
+    /// `trial_admitted` only tiles of the admission level or finer.
+    #[pyo3(signature = (fbo, w, h, view, trial=None, trial_level=None))]
+    fn paint<'py>(&self, py: Python<'py>, fbo: u32, w: i32, h: i32, view: [f64; 4],
+                  trial: Option<(Vec<u16>, Vec<u16>)>, trial_level: Option<u8>) -> PyResult<Bound<'py, PyDict>> {
+        let trial = trial.map(|(promote, yield_)| crate::frame::Trial { promote, yield_, max_level: trial_level });
+        let r = crate::frame::paint(&mut self.inner.borrow_mut(), fbo, w, h, view, trial);
         let d = PyDict::new(py);
         for (k, v) in [("frame", r.frame as f64), ("channels", r.channels as f64), ("planes", r.planes as f64),
                        ("received", r.received as f64), ("uploads", r.uploads as f64),
@@ -130,6 +153,9 @@ impl ViewerCore {
         d.set_item("read_failure", r.read_failure)?;
         d.set_item("retry_ms", r.retry_ms)?;
         d.set_item("label_ms", r.label_ms)?;
+        d.set_item("trial_covered", r.trial_covered)?;
+        d.set_item("trial_exact", r.trial_exact)?;
+        d.set_item("trial_admitted", r.trial_admitted)?;
         Ok(d)
     }
 
@@ -138,6 +164,86 @@ impl ViewerCore {
     /// last composition would use? Read-only; asked right after a paint.
     fn view_covered(&self, view: [f64; 4]) -> bool {
         crate::frame::view_covered(&mut self.inner.borrow_mut(), view)
+    }
+
+    /// §14.6: `view_covered` counting only tiles of `max_level` or finer.
+    fn view_covered_at(&self, view: [f64; 4], max_level: u8) -> bool {
+        crate::frame::view_covered_at(&mut self.inner.borrow_mut(), view, max_level)
+    }
+
+    /// The slide's coarsest level (§14.7: a report's level -1 means this).
+    fn coarsest_level(&self) -> u8 {
+        self.inner.borrow().pyr.coarsest()
+    }
+
+    /// §15.6: the tiles `(level, tx, ty)` of `channel` a Step0 switch needs
+    /// before its gate at `level` can open (see `viewer/gate_tiles.rs`).
+    fn gate_tiles(&self, channel: u16, view: [f64; 4], level: u8) -> Vec<(u8, u32, u32)> {
+        self.inner.borrow().gate_tiles(channel, view, level).into_iter().map(|t| (t.level, t.tx, t.ty)).collect()
+    }
+
+    // ── S0-B: Python sources (docs/v17_step0_engine_plan.md §11.3) ──
+    /// Register a source whose tiles Python computes (0x8000 and above,
+    /// rising, at most two at once). ValueError: refused (fall back).
+    fn add_python_source(&self, channel: u16) -> PyResult<()> {
+        self.inner.borrow_mut().add_python_source(channel).map_err(pyo3::exceptions::PyValueError::new_err)
+    }
+
+    /// Retire a source: everything of it goes (no GL call). False: unknown.
+    fn drop_python_source(&self, channel: u16) -> bool {
+        self.inner.borrow_mut().drop_python_source(channel)
+    }
+
+    /// `(new, withdrawn)` tiles `(channel, level, tx, ty)` since the last drain.
+    #[allow(clippy::type_complexity)]
+    fn drain_demands(&self) -> (Vec<(u16, u8, u32, u32)>, Vec<(u16, u8, u32, u32)>) {
+        let (new, gone) = self.inner.borrow_mut().drain_demands();
+        let f = |v: Vec<crate::cache::Key>| v.into_iter().map(|(c, t)| (c, t.level, t.tx, t.ty)).collect();
+        (f(new), f(gone))
+    }
+
+    /// A computed tile: float32 native-endian bytes, the tile's real shape.
+    /// True when the planner took it (paint again).
+    fn complete_python_tile(&self, channel: u16, level: u8, tx: u32, ty: u32, data: Vec<u8>) -> bool {
+        self.inner.borrow_mut().complete_python_tile(channel, crate::geom::TileAt { level, tx, ty }, data)
+    }
+
+    fn fail_python_tile(&self, channel: u16, level: u8, tx: u32, ty: u32) {
+        self.inner.borrow_mut().fail_python_tile(channel, crate::geom::TileAt { level, tx, ty });
+    }
+
+    /// Tests (§4 item 3): the bytes the CPU cache holds for a tile, or None.
+    fn cached_tile_for_test<'py>(&self, py: Python<'py>, channel: u16, level: u8, tx: u32, ty: u32)
+                                 -> Option<(Bound<'py, PyBytes>, usize, usize)> {
+        let core = self.inner.borrow();
+        let mut cache = core.pool.shared().cache.lock().unwrap();
+        let tile = cache.get(&(channel, crate::geom::TileAt { level, tx, ty }))?;
+        Some((PyBytes::new(py, &tile.data), tile.rows, tile.cols))
+    }
+
+    /// Does the core hold anything of `channel` (tests)?
+    fn holds_python_source(&self, channel: u16) -> bool {
+        self.inner.borrow().holds_python_source(channel)
+    }
+
+    /// `{registered, retired, live, wants, handed, failures, completed,
+    /// late_dropped, rejected, page_layers}` (tests, resource record).
+    fn python_stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let core = self.inner.borrow();
+        let d = PyDict::new(py);
+        let (wants, handed, failures) = core.demand.counts();
+        d.set_item("registered", core.python.registered)?;
+        d.set_item("retired", core.python.retired)?;
+        d.set_item("live", core.python.live())?;
+        d.set_item("wants", wants)?;
+        d.set_item("handed", handed)?;
+        d.set_item("failures", failures)?;
+        d.set_item("completed", core.demand.completed)?;
+        d.set_item("late_dropped", core.demand.late_dropped)?;
+        d.set_item("rejected", core.demand.rejected)?;
+        d.set_item("page_layers", core.gpu.as_ref().map_or(0, |g| g.vt.layers()))?;
+        d.set_item("cache_tiles", core.pool.shared().cache.lock().unwrap().len())?;
+        Ok(d)
     }
 
     /// The GUI side drained the notice socket (order: drain, ack, work).

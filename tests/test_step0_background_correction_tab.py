@@ -682,7 +682,7 @@ def _install_gpu_path_recorders(monkeypatch, timeline):
     monkeypatch.setattr(mod, "_WsiCorrectionProgressDialog", _Dialog)
     monkeypatch.setattr(
         Step0Page, "_release_explore_for_production",
-        lambda self, reason: timeline.append(f"release:{reason}"))
+        lambda self, reason, keep_picture=False: timeline.append(f"release:{reason}"))
     # Block CS P2: Save's own, non-blocking hand-off.
     monkeypatch.setattr(
         Step0Page, "_begin_release_explore_for_production",
@@ -849,7 +849,7 @@ def test_a_failing_release_stops_the_worker_from_starting(gpu_path_page,
     page = gpu_path_page
     monkeypatch.setattr(
         Step0Page, "_release_explore_for_production",
-        lambda self, reason: (_ for _ in ()).throw(RuntimeError("release failed")))
+        lambda self, reason, keep_picture=False: (_ for _ in ()).throw(RuntimeError("release failed")))
 
     with pytest.raises(RuntimeError, match="release failed"):
         page._process_current_channel()

@@ -180,30 +180,45 @@ def test_original_is_drawn_by_the_engine(app, tab):
     assert host.isVisible()
 
 
-def test_saved_and_original_are_engine_live_is_python(app, tab):
+def _live_on(tab, selection):
+    """The engine shows a Python source for `selection` on the current core."""
+    e = tab.engine
+    if not _engine_on(tab, ORIGINAL if selection[0] == "CD3" else None):
+        return False
+    slot = e.host.current
+    return (slot.adapter is not None and slot.picture is not None and slot.picture >= 0x8000
+            and slot.adapter.selection_of(slot.picture) == selection and slot.switch is None)
+
+
+def test_saved_original_and_live_are_all_engine(app, tab):
+    """S0-B (§11.5): a live method is a Python source on the channel's
+    Original core -- the engine's picture, the controller only calibrating."""
     assert _show(tab, "CD3", None)
     assert _wait(app, lambda: _engine_on(tab, ORIGINAL))
     _show(tab, "CD3", "tophat", (15,))
     assert _wait(app, lambda: _engine_on(tab, SAVED_ID))
     assert tab.engine.host.candidate is None
-    # no saved product for 16: the Python picture, supply on
+    # no saved product for 16: live, on the Original core (the standby)
     _show(tab, "CD3", "tophat", (16,))
-    assert tab.engine.picture == em.PYTHON
-    assert tab.stack.controller.viewport_requests_enabled
+    assert _wait(app, lambda: _live_on(tab, ("CD3", "tophat", (16,))), 60)
+    c = tab.stack.controller
+    assert not c.viewport_requests_enabled and c.engine_owns_view
     host = tab.engine.host
-    assert host.live_cores() == [] and host.standby.identity == SAVED_ID
+    assert host.standby.identity == SAVED_ID
     _show(tab, "CD3", None)
-    assert _wait(app, lambda: _engine_on(tab, ORIGINAL))
-    assert not tab.stack.controller.viewport_requests_enabled
+    assert _wait(app, lambda: _engine_on(tab, ORIGINAL) and host.current.picture == 1)
+    assert not c.viewport_requests_enabled
     assert len(host.cores()) <= 2
 
 
 def test_another_channel_with_a_method_has_no_saved_product(app, tab):
+    """No saved product: that channel's Original core, a live source on it."""
     assert _show(tab, "CD8", "tophat", (15,))
-    app.processEvents()
-    assert tab.engine is not None and tab.engine.picture == em.PYTHON
-    assert tab.engine.identity_for("CD8", "tophat", (15,)) is None
-    assert tab.engine.identity_for("CD3", "cucim", (15,)) is None
+    assert tab.engine.identity_for("CD8", "tophat", (15,)) == ("CD8", None, (), None)
+    assert tab.engine.identity_for("CD3", "cucim", (15,)) == ORIGINAL
+    assert _wait(app, lambda: _engine_on(tab, ("CD8", None, (), None))
+                 and tab.engine.host.current.picture is not None
+                 and tab.engine.host.current.picture >= 0x8000, 60)
 
 
 def test_python_backend_builds_no_engine(app, tab, monkeypatch):
@@ -406,23 +421,24 @@ def test_going_back_resumes_the_previous_core(app, tab, monkeypatch):
     assert len(host.cores()) == 2
 
 
-def test_engine_python_engine_resumes_the_core(app, tab, monkeypatch):
-    """Original -> a live method (Python) -> Original: the Original core was
-    paused, not closed, and is published again without a new core."""
+def test_original_live_original_stays_on_one_core(app, tab, monkeypatch):
+    """S0-B: Original -> a live method -> Original never builds a core:
+    the switches are prepared and published on the Original core."""
     _show(tab, "CD3", None)
     assert _wait(app, lambda: _engine_on(tab, ORIGINAL))
     host = tab.engine.host
     original = host.current.core
-    _show(tab, "CD3", "tophat", (16,))
-    assert tab.engine.picture == em.PYTHON and not host.isVisible()
-    assert host.current is None and host.standby.core is original
     import fusion_viewer_core as fvc
     built = []
     real = fvc.ViewerCore
     monkeypatch.setattr(fvc, "ViewerCore", lambda *a, **k: built.append(1) or real(*a, **k))
+    _show(tab, "CD3", "tophat", (16,))
+    assert _wait(app, lambda: _live_on(tab, ("CD3", "tophat", (16,))), 60)
+    assert host.current.core is original and host.isVisible()
     _show(tab, "CD3", None)
-    assert _wait(app, lambda: _engine_on(tab, ORIGINAL))
+    assert _wait(app, lambda: host.current.picture == 1 and host.current.switch is None, 30)
     assert host.current.core is original and built == []
+    assert host.current.adapter.sources == {}, "the live source was not retired"
 
 
 def test_a_resumed_core_shows_what_changed_while_it_was_parked(app, tab, window):
@@ -557,8 +573,9 @@ def test_the_first_published_frame_is_whole(app, window, slide):
 
 
 def test_engine_to_live_starts_the_floor(app, tab):
-    """§10.5.4: the supply is on BEFORE the selection, so the floor and its
-    gain calibration of an uncached live method really complete."""
+    """§11.6: the engine draws a live method, the controller only
+    calibrates -- the floor and its gains still complete, nothing is drawn
+    into the Python layers, and the gains reach the engine's rows."""
     _show(tab, "CD3", None)
     assert _wait(app, lambda: _engine_on(tab, ORIGINAL))
     c = tab.stack.controller
@@ -568,11 +585,15 @@ def test_engine_to_live_starts_the_floor(app, tab):
             assert _wait(app, lambda: _engine_on(tab, SAVED_ID))
             params = (17,)
         _show(tab, "CD3", "tophat", params)
-        assert tab.engine.picture == em.PYTHON
-        assert _wait(app, lambda: c._floor_ready and not c._floor_pending
+        assert _wait(app, lambda: _live_on(tab, ("CD3", "tophat", params)), 60)
+        assert c.engine_owns_view
+        assert _wait(app, lambda: not c._floor_pending and not c._floor_job_running
                      and c._floor_ctx == c._current_floor_ctx(c._floor_level, c._floor_stride), 60), \
             "the live method's floor never completed"
         assert c.stats["gain_calibrated"], "its gain calibration never completed"
+        assert not c.view.corrected_floor_item.isVisible(), "the floor was drawn under the engine"
+        slot = tab.engine.host.current
+        assert tab.engine._gains_for(slot).get(slot.picture), "the gains did not reach the engine"
 
 
 # ── failures ─────────────────────────────────────────────────────────
@@ -677,8 +698,9 @@ def test_an_roi_only_product_is_not_used(app, tab, slide):
     try:
         _show(tab, "CD3", "tophat", (15,))
         app.processEvents()
-        assert tab.engine.identity_for("CD3", "tophat", (15,)) is None
-        assert tab.engine.picture == em.PYTHON
+        # not the saved product: live, on the Original core
+        assert tab.engine.identity_for("CD3", "tophat", (15,)) == ORIGINAL
+        assert _wait(app, lambda: _live_on(tab, ("CD3", "tophat", (15,))), 60)
     finally:
         arr.attrs["roi_bbox_fullres"] = [0, H, 0, W]
         saved_correction.register_loader(loader)

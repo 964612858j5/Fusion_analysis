@@ -346,6 +346,9 @@ def build_default_stack(path, channel, parent_widget=None, *,
 class Step0ExploreTab(QtWidgets.QWidget):
     """Hosts the Explore stack for the currently loaded dataset."""
 
+    #: S0-C: the engine's first picture of this stack is on screen
+    engine_first_picture = QtCore.pyqtSignal()
+
     def __init__(self, page=None, stack_factory=build_default_stack,
                  parent=None, busy_probe=None):
         """`busy_probe` is an optional read-only callable returning the name
@@ -701,6 +704,7 @@ class Step0ExploreTab(QtWidgets.QWidget):
             mount.deleteLater()
             return
         self._engine = mount
+        mount.first_picture.connect(self.engine_first_picture.emit)
         self._engine_follow()
 
     def show_source(self, channel, method, params=(), *, viewport_l0=None,

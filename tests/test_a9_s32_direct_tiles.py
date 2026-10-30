@@ -163,3 +163,40 @@ def test_threads_reading_at_once_get_the_zarr_pixels(tmp_path, monkeypatch):
     finally:
         direct.close()
         viazarr.close()
+
+
+def test_a_thread_without_a_handle_reads_through_the_shared_one(tmp_path):
+    """S0-C (2026-10-30): a short-lived thread (a floor job) reading a level
+    with no direct-read table uses the provider's one shared handle -- no
+    file parse of its own per thread -- and gets the same pixels."""
+    import threading
+    import numpy as np
+    import tifffile
+    from block01.viewer.raw_tile_provider import RawTileProvider
+
+    data = (np.arange(3 * 96 * 80, dtype=np.uint16) % 4093).reshape(3, 96, 80)
+    path = str(tmp_path / "stripped.ome.tif")
+    tifffile.imwrite(path, data, photometric="minisblack", metadata={"axes": "CYX"})
+    provider = RawTileProvider(path, handle_mode="per_thread")
+    try:
+        opened = provider.open_count
+        assert not provider._direct_plan(0)          # stripped: the zarr path
+        out = []
+
+        def job():
+            out.append(provider.read_region(1, 0, 10, 50, 5, 70))
+
+        threads = [threading.Thread(target=job) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert len(out) == 4
+        # one shared open (by the plan's check, a thread with no handle of
+        # its own either), not one per thread
+        assert provider.open_count == opened + 1
+        for got in out:
+            region = got[0] if isinstance(got, tuple) else got
+            np.testing.assert_array_equal(np.asarray(region), data[1, 10:50, 5:70])
+    finally:
+        provider.close()

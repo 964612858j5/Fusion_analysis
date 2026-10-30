@@ -1567,6 +1567,13 @@ class RightClickViewBox(pg.ViewBox):
     def mouseClickEvent(self, ev):
         if ev.button() == QtCore.Qt.RightButton:
             ev.accept()
+            if ev.double():
+                # A double right-click is ONE gesture: its first click has
+                # acted (into compare, or back out). Its second half lands
+                # on whatever that click put up -- with the compare strip
+                # prepared ahead, the panels -- and must not undo it (S0-C,
+                # measured 2026-10-30: compare opened and shut at once).
+                return
             try:
                 point = self.mapToView(ev.pos())
                 x, y = float(point.x()), float(point.y())
@@ -4088,12 +4095,20 @@ class ExploreController(QtCore.QObject):
         self.view.view_box.setMouseEnabled(True, True)
 
         start_floor = self._floor_pending and not self._floor_job_running
+        # owed while suspended, but already in the (shared) cache: the full
+        # image's own preparation, or the strip's, computed it
+        restored = start_floor and self._restore_cached_floor(self._floor_gen)
+        start_floor = start_floor and not restored
         preparing = self._wants_precise() and (start_floor or self._floor_job_running)
         self._badge_preparing = bool(preparing)
         self._refresh_badge(force=True)
         if start_floor:
             self._floor_pending = False
             self._start_floor_job(self._floor_gen)
+        elif restored:
+            # after the badge: a background preparation is not the
+            # selection's own, so it never shows "preparing" (codex r3 P3)
+            self._start_next_floor_job()
 
         if self._current_bbox is not None and not self._blocked_on_overview():
             self._issue_raw_requests()
@@ -4450,7 +4465,10 @@ class ExploreController(QtCore.QObject):
             # nothing else consumes `_floor_pending`.
             if self._floor_pending:
                 self._floor_pending = False
-                self._start_floor_job(self._floor_gen)
+                if self._restore_cached_floor(self._floor_gen):
+                    self._start_next_floor_job()
+                else:
+                    self._start_floor_job(self._floor_gen)
             else:
                 self._start_next_floor_job()
             return
@@ -4511,7 +4529,10 @@ class ExploreController(QtCore.QObject):
 
         if self._floor_pending:
             self._floor_pending = False
-            self._start_floor_job(self._floor_gen)
+            if self._restore_cached_floor(self._floor_gen):
+                self._start_next_floor_job()
+            else:
+                self._start_floor_job(self._floor_gen)
         else:
             self.floor_preparing_changed.emit(False)
             self._start_next_floor_job()

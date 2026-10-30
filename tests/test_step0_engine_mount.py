@@ -132,7 +132,7 @@ def _engine_on(tab, identity=None):
     return identity is None or (e.host.current is not None and e.host.current.identity == identity)
 
 
-ORIGINAL = ("CD3", None, (), None)
+ORIGINAL = em.RAW_CORE          # S0-C §16.16: one raw core for every channel
 SAVED_ID = ("CD3", "tophat", (15,), "synthetic-save-1")
 
 
@@ -183,7 +183,7 @@ def test_original_is_drawn_by_the_engine(app, tab):
 def _live_on(tab, selection):
     """The engine shows a Python source for `selection` on the current core."""
     e = tab.engine
-    if not _engine_on(tab, ORIGINAL if selection[0] == "CD3" else None):
+    if not _engine_on(tab, ORIGINAL):
         return False
     slot = e.host.current
     return (slot.adapter is not None and slot.picture is not None and slot.picture >= 0x8000
@@ -212,13 +212,11 @@ def test_saved_original_and_live_are_all_engine(app, tab):
 
 
 def test_another_channel_with_a_method_has_no_saved_product(app, tab):
-    """No saved product: that channel's Original core, a live source on it."""
+    """No saved product: the raw core, a live source of that channel on it."""
     assert _show(tab, "CD8", "tophat", (15,))
-    assert tab.engine.identity_for("CD8", "tophat", (15,)) == ("CD8", None, (), None)
+    assert tab.engine.identity_for("CD8", "tophat", (15,)) == ORIGINAL
     assert tab.engine.identity_for("CD3", "cucim", (15,)) == ORIGINAL
-    assert _wait(app, lambda: _engine_on(tab, ("CD8", None, (), None))
-                 and tab.engine.host.current.picture is not None
-                 and tab.engine.host.current.picture >= 0x8000, 60)
+    assert _wait(app, lambda: _live_on(tab, ("CD8", "tophat", (15,))), 60)
 
 
 def test_python_backend_builds_no_engine(app, tab, monkeypatch):
@@ -310,7 +308,8 @@ def test_the_nucleus_is_added_and_never_doubled(app, window, slide):
         assert len(rows) == 2
         # the marker IS the nucleus: one row, not two
         _show(t, "DAPI", None)
-        assert _wait(app, lambda: _engine_on(t, ("DAPI", None, (), None)))
+        assert _wait(app, lambda: _engine_on(t, ORIGINAL) and host.current.picture == 0
+                     and host.current.switch is None)
         assert len(t.engine._rows_for_display()) == 1
     finally:
         t.teardown()
@@ -475,8 +474,8 @@ def test_a_resumed_core_shows_what_changed_while_it_was_parked(app, tab, window)
 
 
 def test_a_third_source_drops_the_standby_first(app, tab):
-    """Original (current) + saved (standby) -> another channel: the standby
-    goes before the new core is built -- never three."""
+    """Original (current) + saved (standby) -> another channel: a switch on
+    the raw core (S0-C §16.16) -- no new core, never three."""
     _show(tab, "CD3", "tophat", (15,))
     assert _wait(app, lambda: _engine_on(tab, SAVED_ID))
     _show(tab, "CD3", None)
@@ -484,14 +483,13 @@ def test_a_third_source_drops_the_standby_first(app, tab):
     host = tab.engine.host
     assert host.standby is not None and len(host.cores()) == 2
     em.TEST_CONFIG["test_read_delay_ms"] = 60.0
+    raw = host.current
     _show(tab, "CD8", None)
     seen = []
-    assert _wait(app, lambda: seen.append(len(host.cores())) or host.candidate is not None
-                 or _engine_on(tab, ("CD8", None, (), None)))
-    assert max(seen) <= 2
-    assert host.standby is None or host.standby.identity != SAVED_ID
-    assert _wait(app, lambda: _engine_on(tab, ("CD8", None, (), None)))
-    assert len(host.cores()) <= 2 and host.standby.identity == ORIGINAL
+    assert _wait(app, lambda: seen.append(len(host.cores())) or (
+        _engine_on(tab, ORIGINAL) and host.current.picture == 2 and host.current.switch is None))
+    assert max(seen) <= 2 and host.candidate is None
+    assert host.current is raw, "another channel built another core"
 
 
 def test_a_failure_leaves_no_standby(app, tab, monkeypatch):
@@ -625,8 +623,10 @@ def test_a_failing_current_core_never_publishes_a_ready_candidate(app, tab, monk
     real = session.paint
     monkeypatch.setattr(session, "paint", lambda *a: dict(real(*a), error="injected"))
     advanced = []
-    original_advance = host._advance_candidate
-    monkeypatch.setattr(host, "_advance_candidate", lambda *a: advanced.append(1) or original_advance(*a))
+    from block01.ui.step0 import gl_host
+    original_advance = gl_host.Panel.trial_candidate
+    monkeypatch.setattr(gl_host.Panel, "trial_candidate",
+                        lambda self, *a: advanced.append(1) or original_advance(self, *a))
     _show(tab, "CD3", "tophat", (15,))
     assert _wait(app, lambda: bool(tab.engine.refused))
     assert host.published_count == count
@@ -675,15 +675,15 @@ def test_capacity_exceeded_hands_over(app, tab, monkeypatch):
     report the core gives then is injected into the candidate's paint."""
     _show(tab, "CD3", None)
     assert _wait(app, lambda: _engine_on(tab, ORIGINAL))
-    host = tab.engine.host
-    real_add = host.add_candidate
+    panel = tab.engine.panel                     # S0-C: the mount's panel makes its cores
+    real_add = panel.add_candidate
 
     def add(*a, **k):
         slot = real_add(*a, **k)
         real = slot.session.paint
         slot.session.paint = lambda *pa: dict(real(*pa), capacity_exceeded=True)
         return slot
-    monkeypatch.setattr(host, "add_candidate", add)
+    monkeypatch.setattr(panel, "add_candidate", add)
     _show(tab, "CD3", "tophat", (15,))
     assert _wait(app, lambda: bool(tab.engine.refused), 30)
     assert "GPU blocks" in tab.engine.refused
@@ -772,3 +772,40 @@ def test_quitting_closes_the_engine(app, window, slide):
     host = t.engine.host
     app.aboutToQuit.emit()
     assert t.engine is None and host._disposed
+
+
+def test_an_offered_raw_manifest_is_taken_only_for_the_same_unchanged_file(tmp_path):
+    """The compare panels take the full image's raw manifest instead of
+    reading the pyramid again -- only for the same path and stage, and only
+    while the file on disk is still the one it describes."""
+    a = tmp_path / "a.tif"
+    b = tmp_path / "b.tif"
+    a.write_bytes(b"x" * 100)
+    b.write_bytes(b"y" * 100)
+
+    def offer(path, stage="raw"):
+        size, mtime_ns, ino = em.adapter._identity(os.stat(path))
+        key = (os.path.abspath(path), stage)
+        return key, {"size": size, "mtime_ns": mtime_ns, "file_number": ino}
+
+    key_a, man_a = offer(a)
+    assert em._offered_manifest(key_a, [None, (key_a, man_a)]) is man_a
+    # another file, or the same file under another stage: built again
+    assert em._offered_manifest(key_a, [offer(b)]) is None
+    assert em._offered_manifest(key_a, [offer(a, "other")]) is None
+    # the file changed in place (size, then time only)
+    a.write_bytes(b"x" * 101)
+    assert em._offered_manifest(key_a, [(key_a, man_a)]) is None
+    key_a, man_a = offer(a)
+    os.utime(a, ns=(man_a["mtime_ns"] + 10 ** 9, man_a["mtime_ns"] + 10 ** 9))
+    assert em._offered_manifest(key_a, [(key_a, man_a)]) is None
+    # replaced by another file at the same path (same size and time)
+    key_a, man_a = offer(a)
+    b.write_bytes(b"y" * man_a["size"])
+    os.replace(b, a)
+    os.utime(a, ns=(man_a["mtime_ns"], man_a["mtime_ns"]))
+    assert os.stat(a).st_size == man_a["size"]
+    assert em._offered_manifest(key_a, [(key_a, man_a)]) is None
+    # gone
+    os.remove(a)
+    assert em._offered_manifest(key_a, [(key_a, man_a)]) is None

@@ -262,6 +262,15 @@ class RawTileProvider:
             return False
         try:
             import imagecodecs
+            if tf is None and self.handle_mode == "per_thread" \
+                    and getattr(self._thread_local, "state", None) is None:
+                # a thread with no handle of its own: the shared one, as its
+                # reads (`read_region`) -- never a parse of its own for this
+                with self._shared_lock:
+                    if self._closed:
+                        return False
+                    shared, _levels = self._shared_state()
+                    return self._build_chunk_plan(level, shared)
             if tf is None:
                 tf, _levels = self._per_thread_state()
             series = tf.series[0]
@@ -410,6 +419,19 @@ class RawTileProvider:
         self._thread_local.state = state
         return state
 
+    def _shared_read(self, c, level, y0, y1, x0, x1):
+        with self._shared_lock:
+            if self._closed:
+                raise RuntimeError(
+                    f"RawTileProvider for {self.path!r} is closed; "
+                    "no further reads are allowed")
+            tf, levels = self._shared_state()
+            zarr_arr = levels.get(level)
+            if zarr_arr is None:
+                zarr_arr = self._open_level_array(tf, level)
+                levels[level] = zarr_arr
+            return np.asarray(zarr_arr[c, y0:y1, x0:x1])
+
     def _shared_state(self):
         """Return the single shared (TiffFile, {level: zarr array}) pair,
         opening it lazily on first use. Caller must hold `_shared_lock`."""
@@ -455,6 +477,13 @@ class RawTileProvider:
             # in the middle of a zoom. One thread builds; the others find it.
             for level in range(len(self._level_shapes)):
                 self._direct_plan(level, tf)
+            # ...and the shared handle the threads without one read through
+            # (`read_region`): parsed once, here, not by a floor job's read
+            # in the middle of a compare entry
+            if any(not self._direct_plan(level) for level in range(len(self._level_shapes))):
+                with self._shared_lock:
+                    if not self._closed:
+                        self._shared_state()
             return True
         except Exception:
             return False
@@ -557,6 +586,15 @@ class RawTileProvider:
         elif self.handle_mode == "per_thread" and self._direct_plan(level) is not None:
             data = self._direct_read(self._chunk_plans[level], c, cy0, cy1, cx0, cx1)
 
+        elif self.handle_mode == "per_thread" and getattr(self._thread_local, "state", None) is None:
+            # a thread with no handle of its own -- a floor job's, one per
+            # job -- reads through the provider's one shared handle: a
+            # handle of its own would parse the file again first (~110 ms
+            # holding the GIL on the Slice1 qptiff, for its stripped
+            # overview level; two such jobs at a compare entry starved the
+            # GUI thread, S0-C 2026-10-30)
+            data = self._shared_read(c, level, cy0, cy1, cx0, cx1)
+
         elif self.handle_mode == "per_thread":
             tf, levels = self._per_thread_state()
             zarr_arr = levels.get(level)
@@ -566,13 +604,7 @@ class RawTileProvider:
             data = np.asarray(zarr_arr[c, cy0:cy1, cx0:cx1])
 
         elif self.handle_mode == "shared_lock":
-            with self._shared_lock:
-                tf, levels = self._shared_state()
-                zarr_arr = levels.get(level)
-                if zarr_arr is None:
-                    zarr_arr = self._open_level_array(tf, level)
-                    levels[level] = zarr_arr
-                data = np.asarray(zarr_arr[c, cy0:cy1, cx0:cx1])
+            data = self._shared_read(c, level, cy0, cy1, cx0, cx1)
 
         else:
             raise ValueError(f"unknown handle_mode: {self.handle_mode!r}")

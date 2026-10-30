@@ -1241,6 +1241,23 @@ class Step0Page(QWidget):
 
         self._compare_strip_widget.publication_changed.connect(
             _on_compare_published)
+        # S0-C (plan §16.14 1): a parameter edit published by the engine
+        # moves no channel, so it has no `publication_changed` -- the same
+        # measurement is planned on it
+        self._compare_strip_widget.params_published.connect(
+            _on_compare_published)
+
+        # S0-C (§16.6): the compare panels are drawn by the engine on the full
+        # image's GL host, when the full image has one
+        def _engine_host(_ref=_page_ref):
+            page = _ref()
+            tab = getattr(page, "_explore_tab", None) if page is not None else None
+            engine = getattr(tab, "engine", None) if tab is not None else None
+            if engine is None or engine.refused:
+                return None
+            return engine.host
+
+        self._compare_strip_widget.set_engine_host_provider(_engine_host)
         pvl.addWidget(self._compare_strip_widget, stretch=1)
 
         self._preview_status = QLabel(
@@ -1837,6 +1854,15 @@ class Step0Page(QWidget):
         # neighbourhood of the same slide, so a second provider would only
         # be a second way for the two to disagree.
         self._explore_tab.set_hot_specs_provider(self._compare_hot_specs)
+        # S0-C: the compare strip is prepared once the full image is up and
+        # still (a weak closure: see `_on_compare_camera`)
+        def _prepare_ahead(_ref=weakref.ref(self)):
+            page = _ref()
+            if page is not None:
+                page._watch_full_image_input()
+                page._schedule_compare_ahead()
+
+        self._explore_tab.engine_first_picture.connect(_prepare_ahead)
         self._full_image_host.addWidget(self._explore_tab, stretch=1)
         # Catch up on the dataset: `set_dataset` may have run before this
         # existed. `ome_path` is None until a slide is loaded, which is
@@ -2815,6 +2841,108 @@ class Step0Page(QWidget):
             self._connect_overview_seed(controllers[0], owner=strip)
         return strip
 
+    #: S0-C: the compare strip is prepared ahead once the full image has
+    #: been still this long -- after loading, a channel or a parameter
+    #: change (Fable review 2026-10-30: never while the picture is moved)
+    _COMPARE_AHEAD_QUIET_MS = 600
+
+    def _schedule_compare_ahead(self):
+        """(Re)start the wait before `_prepare_compare_ahead`."""
+        if self._compare_mode():
+            return
+        timer = getattr(self, "_compare_ahead_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+
+            def _fire(_ref=weakref.ref(self)):
+                page = _ref()
+                if page is not None:
+                    page._prepare_compare_ahead()
+
+            timer.timeout.connect(_fire)
+            self._compare_ahead_timer = timer
+        timer.start(self._COMPARE_AHEAD_QUIET_MS)
+
+    def _watch_full_image_input(self):
+        """The full image's camera moves postpone the preparation ahead and
+        stop its paints (each is tens of ms on the GUI thread)."""
+        explore_tab = getattr(self, "_explore_tab", None)
+        controller = getattr(getattr(explore_tab, "stack", None), "controller", None)
+        watched = getattr(self, "_ahead_watched", None)
+        if controller is None or (watched is not None and watched() is controller):
+            return
+
+        def _moved(_kind=None, _snapshot=None, _ref=weakref.ref(self)):
+            page = _ref()
+            if page is not None:
+                page._on_full_image_moved()
+
+        controller.interaction_event.connect(_moved)
+        self._ahead_watched = weakref.ref(controller)
+
+    def _on_full_image_moved(self):
+        if self._compare_mode():
+            return
+        strip = getattr(self, "_compare_strip_widget", None)
+        timer = getattr(self, "_compare_ahead_timer", None)
+        stopped = strip is not None and strip.stop_engine_ahead()
+        if stopped or (timer is not None and timer.isActive()):
+            self._schedule_compare_ahead()
+
+    def _compare_ahead_size(self):
+        """One compare panel's device size: the panels' own once they have
+        been on screen, else a third of the full image's host."""
+        strip = getattr(self, "_compare_strip_widget", None)
+        size = (strip.panel_px(0) if strip is not None
+                and getattr(self, "_compare_opened", False) else None)
+        host = getattr(getattr(self._explore_tab, "engine", None), "host", None)
+        if host is None:
+            return None
+        ratio = float(host.devicePixelRatioF()) or 1.0
+        if size is not None:
+            return (max(1, int(round(size[0] * ratio))), max(1, int(round(size[1] * ratio))))
+        return (max(1, int(round(host.width() * ratio / 3.0))),
+                max(1, int(round(host.height() * ratio))))
+
+    def _prepare_compare_ahead(self):
+        """S0-C (codex review 2026-10-30, a trial the user approved): once
+        the full image is up and still (`_schedule_compare_ahead`), the
+        compare strip is built, put away as on leaving compare, and its
+        engine's three cores are made and painted off screen, so the first
+        right-click is an entry like every later one (measured: 1.4 s the
+        first time, 65 ms after). Again after a channel or a parameter
+        chosen on the full image: the prepared cores switch to it.
+
+        Built on the full image's view as it is now; the entry moves the
+        panels to the right-click."""
+        if self._compare_mode() or self.production_correction_busy():
+            return
+        strip = getattr(self, "_compare_strip_widget", None)
+        channel = self.current_channel
+        camera = self._full_image_camera()
+        if strip is None or not channel or camera is None:
+            return
+        t0 = time.monotonic()
+        cx, cy, scale = (float(v) for v in camera)
+        built = strip.built
+        if self._ensure_compare_strip(channel, (cx, cy), scale) is None:
+            return
+        if not built:
+            strip.suspend("full image",
+                          badge="Paused \u2014 the full image is on screen.",
+                          wait=False)
+        size = self._compare_ahead_size()
+        if size is None:
+            return
+        width, height = size
+        # a preparation still running is for the selection before this one
+        # (a parameter edit stops nothing else): started again, for this one
+        strip.stop_engine_ahead()
+        started = strip.prepare_engine_ahead(width, height)
+        perf_trace.mark("step0.compare_ahead_start", built=not built, started=started,
+                        ms=round((time.monotonic() - t0) * 1000.0), w=width, h=height)
+
     def _compare_params_for(self, source):
         """The parameter tuple panel `source` should show: the CURRENT
         channel row's numbers, the same ones the full image's own method
@@ -2936,6 +3064,7 @@ class Step0Page(QWidget):
         if strip is None or not strip.built:
             return
         strip.set_params(self._compare_params_for, method=method)
+        self._schedule_compare_ahead()          # S0-C: hidden, prepared again
         # Through the SAME coalescing entry as a channel change: dragging a
         # radius spinner is a stream of parameter edits exactly as clicking
         # down a marker list is a stream of channel changes, and a second
@@ -2985,6 +3114,7 @@ class Step0Page(QWidget):
         strip.set_channel(channel, params_for=self._compare_params_for,
                           tint=self._full_image_tint())
         self._refresh_preview_display(keep_zoom=True)
+        self._schedule_compare_ahead()          # S0-C: hidden, prepared again
         # The IMAGE switch above is the whole of what a row click owes the
         # user, and it is finished before this returns. The measurement is
         # not: it is planned here and runs once the clicking stops.
@@ -3178,6 +3308,8 @@ class Step0Page(QWidget):
             if strip is not None and strip.built:
                 strip.set_hot_specs_provider(self._compare_hot_specs)
                 strip.start_hot()
+        else:
+            self._schedule_compare_ahead()      # S0-C: its panels were given back
         explore_tab = getattr(self, "_explore_tab", None)
         if explore_tab is None or not getattr(explore_tab, "released", False):
             return
@@ -3578,6 +3710,20 @@ class Step0Page(QWidget):
         strip = getattr(self, "_compare_strip_widget", None)
         if strip is not None:
             strip.stop_hot()
+            # S0-C: nor, off screen, its prepared-ahead panels and their work
+            # (codex review 2026-10-30, P2-1) -- waited out, as the Save path
+            # does: a preview computation still running is never a reason to
+            # start (only the stacks going away ends the wait)
+            hidden, gone = strip.release_hidden_for_production(reason), strip.stacks_gone()
+            while not hidden.wait(0.05):
+                if gone():
+                    break
+            # S0-C (§16.7, 16.13 2): an Enter while comparing -- the edited
+            # panel's new picture is prepared and on screen before the run's
+            # thread starts (the panels keep running through the run)
+            engine = getattr(strip, "engine", None)
+            if keep_picture and engine is not None and self._compare_mode():
+                engine.prepare_now()
         explore_tab = getattr(self, "_explore_tab", None)
         if explore_tab is None or explore_tab.stack is None:
             return
@@ -3594,14 +3740,31 @@ class Step0Page(QWidget):
         reached idle (already set when there is no stack)."""
         import threading
         strip = getattr(self, "_compare_strip_widget", None)
+        hidden = None
         if strip is not None:
             strip.stop_hot()
+            # S0-C: nor, off screen, its prepared-ahead panels and their work
+            hidden = strip.release_hidden_for_production(reason, cancelled=cancelled)
         explore_tab = getattr(self, "_explore_tab", None)
         if explore_tab is None or explore_tab.stack is None:
-            done = threading.Event()
+            done, timings = threading.Event(), {}
             done.set()
-            return done, {}
-        return explore_tab.begin_release_for_production(reason, cancelled=cancelled)
+        else:
+            done, timings = explore_tab.begin_release_for_production(reason, cancelled=cancelled)
+        if hidden is None or hidden.is_set():
+            return done, timings
+        both = threading.Event()
+        stop = cancelled or (lambda: False)
+
+        def wait():
+            for event in (hidden, done):
+                while not event.wait(0.05):
+                    if stop():
+                        return
+            both.set()
+
+        threading.Thread(target=wait, daemon=True, name="step0-production-handoff").start()
+        return both, timings
 
     @property
     def preview_source_provider(self):
@@ -7628,11 +7791,83 @@ class Step0Page(QWidget):
                         metrics = _compute_bg_metrics(arr)
                     except Exception:                       # noqa: BLE001
                         metrics = None
+                elif stacks is not None and self._compare_engine_level(source) is not None:
+                    # §16.8: the engine draws, the Python panels read nothing
+                    # themselves -- the tiles are asked for, cache-only, and
+                    # the measurement planned again once they are in
+                    self._fill_compare_metric_tiles(stacks, source)
             if metrics:
                 label.setText(self._metric_text(name, metrics)
                               + "   (preview)")
             else:
                 label.setText(f"{name} \u2192 \u2014")
+
+    def _compare_engine_level(self, source):
+        """§16.8: the level the engine's published picture of panel `source`
+        was admitted at, when the engine draws the strip; else None."""
+        strip = getattr(self, "_compare_strip_widget", None)
+        engine = getattr(strip, "engine", None) if strip is not None else None
+        if engine is None or engine.picture != "engine":
+            return None
+        try:
+            idx = COMPARE_SOURCES.index(source)
+            return engine.panels[idx].published_level
+        except (ValueError, IndexError):
+            return None
+
+    def _compare_metric_region(self, stacks, source):
+        """`(controller, level, y0, x0, h, w)` of panel `source`, or None."""
+        try:
+            idx = COMPARE_SOURCES.index(source)
+        except ValueError:
+            return None
+        controllers = list(getattr(stacks, "controllers", ()) or ())
+        if idx >= len(controllers):
+            return None
+        controller = controllers[idx]
+        bbox = getattr(controller, "_current_bbox", None)
+        if bbox is None:
+            return None
+        level = self._compare_engine_level(source)
+        if level is None:
+            level = int(getattr(controller, "level", 0) or 0)
+        try:
+            ds = float(stacks.provider.level_downsample(level))
+            y0_l0, x0_l0, y1_l0, x1_l0 = (float(v) for v in bbox)
+        except Exception:                                   # noqa: BLE001
+            return None
+        if not ds > 0:
+            return None
+        y0, x0 = max(0, int(y0_l0 / ds)), max(0, int(x0_l0 / ds))
+        h = max(1, int((y1_l0 - y0_l0) / ds))
+        w = max(1, int((x1_l0 - x0_l0) / ds))
+        return controller, int(level), y0, x0, h, w
+
+    def _fill_compare_metric_tiles(self, stacks, source):
+        """The tiles panel `source`'s measurement lacks, asked for on the
+        strip's scheduler (cache-only, behind the visible work); one new
+        measurement plan once the last of them is in."""
+        region = self._compare_metric_region(stacks, source)
+        scheduler = getattr(stacks, "scheduler", None)
+        if region is None or scheduler is None:
+            return
+        controller, level, y0, x0, h, w = region
+        tile_size = int(getattr(getattr(controller, "grid", None), "tile_size", 0) or 0)
+        if tile_size <= 0:
+            return
+        corrected = getattr(controller, "method", None) in ("tophat", "cucim")
+        cache = getattr(scheduler, "corrected_cache" if corrected else "raw_cache", None)
+        if cache is None:
+            return
+        keys = []
+        for ty in range(y0 // tile_size, (y0 + h - 1) // tile_size + 1):
+            for tx in range(x0 // tile_size, (x0 + w - 1) // tile_size + 1):
+                key = (controller._make_correction_key(tx, ty, level) if corrected
+                       else controller._make_raw_key(tx, ty, level))
+                if cache.get(key) is None:
+                    keys.append(key)
+        if keys:
+            _CompareMetricFill.ask(self, scheduler, source, keys)
 
     def _compare_region_arrays(self, stacks, source):
         """`_snapshot_from_caches` over panel `source`'s current viewport.
@@ -7640,30 +7875,13 @@ class Step0Page(QWidget):
         The region is the controller's own `_current_bbox` -- what IT
         decided is visible, in level-0 coordinates -- converted to the level
         it is drawing at, so the arrays are the pixels on screen and nothing
-        beyond them.
+        beyond them. When the engine draws the strip, the level is the one
+        its published picture was admitted at (§16.8).
         """
-        try:
-            idx = COMPARE_SOURCES.index(source)
-        except ValueError:
+        region = self._compare_metric_region(stacks, source)
+        if region is None:
             return {}
-        controllers = list(getattr(stacks, "controllers", ()) or ())
-        if idx >= len(controllers):
-            return {}
-        controller = controllers[idx]
-        bbox = getattr(controller, "_current_bbox", None)
-        if bbox is None:
-            return {}
-        level = int(getattr(controller, "level", 0) or 0)
-        try:
-            ds = float(stacks.provider.level_downsample(level))
-            y0_l0, x0_l0, y1_l0, x1_l0 = (float(v) for v in bbox)
-        except Exception:                                   # noqa: BLE001
-            return {}
-        if not ds > 0:
-            return {}
-        y0, x0 = max(0, int(y0_l0 / ds)), max(0, int(x0_l0 / ds))
-        h = max(1, int((y1_l0 - y0_l0) / ds))
-        w = max(1, int((x1_l0 - x0_l0) / ds))
+        controller, level, y0, x0, h, w = region
         return self._snapshot_from_caches(
             controller, getattr(stacks, "scheduler", None),
             controller.channel, level, y0, x0, h, w)
@@ -12578,3 +12796,74 @@ class Step0Page(QWidget):
             "handoff_schema_version": manifest.get("handoff_schema_version", 1),
             "geometry_revision": int(manifest.get("geometry_revision") or 0),
         }
+
+
+class _CompareMetricFill(QtCore.QObject):
+    """S0-C (§16.8): one panel's missing measurement tiles, asked for on the
+    compare strip's scheduler -- into its caches only, never a picture --
+    and, when the last one has come back, one new measurement plan on the
+    page. A newer ask for the same panel cancels the older one."""
+
+    _landed = pyqtSignal()
+    _live = {}
+    _serial = 0
+    #: behind the visible work and HOT (`HOT_PRIORITY_BASE` 5000)
+    PRIORITY = 9000
+
+    @classmethod
+    def ask(cls, page, scheduler, source, keys):
+        old = cls._live.pop(source, None)
+        if old is not None:
+            old.cancel()
+        fill = cls(page, scheduler, keys)
+        cls._live[source] = fill
+        fill.start()
+
+    def __init__(self, page, scheduler, keys):
+        super().__init__(page)
+        _CompareMetricFill._serial += 1
+        self._page = weakref.ref(page)
+        self._scheduler = scheduler
+        self._keys = list(keys)
+        self._left = len(self._keys)
+        import threading
+        self._lock = threading.Lock()
+        self._generation = ("compare_metrics", _CompareMetricFill._serial)
+        self._landed.connect(self._done, QtCore.Qt.QueuedConnection)
+
+    def start(self):
+        from ...viewer.tile_types import TileRequest
+        for k, key in enumerate(self._keys):
+            try:
+                self._scheduler.request(
+                    TileRequest(key=key, generation=self._generation, priority=self.PRIORITY + k),
+                    self._one)
+            except Exception:                               # noqa: BLE001 -- a dash stays
+                self._one(None)
+
+    def _one(self, _result):
+        # a worker thread: count, and hand the last one to the GUI thread
+        with self._lock:
+            self._left -= 1
+            last = self._left == 0
+        if last:
+            self._landed.emit()
+
+    def cancel(self):
+        try:
+            self._scheduler.cancel_generation(self._generation)
+        except Exception:                                   # noqa: BLE001
+            pass
+        self._left = -1
+
+    def _done(self):
+        if self._left < 0:
+            return
+        page = self._page()
+        for source, fill in list(_CompareMetricFill._live.items()):
+            if fill is self:
+                del _CompareMetricFill._live[source]
+        if page is not None:
+            page._schedule_compare_metrics()
+        self.deleteLater()
+

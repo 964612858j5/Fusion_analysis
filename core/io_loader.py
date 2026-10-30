@@ -3,6 +3,8 @@ block01/core/io_loader.py — OME-TIFF lazy loader.
 """
 
 import os
+import threading
+
 import numpy as np
 import tifffile
 import zarr
@@ -290,24 +292,16 @@ class OMETIFFLoader:
         avoiding loading the full page.
         """
         try:
-            with tifffile.TiffFile(self.filepath) as tif:
-                store = tif.aszarr()
-                z = zarr.open(store, mode='r')
-
-                if isinstance(z, zarr.hierarchy.Group):
-                    z0 = z[0] if '0' in z else next(iter(z.values()))
-                else:
-                    z0 = z
-
-                ys, xs = slice(y0, y1, step), slice(x0, x1, step)
-                if z0.ndim == 3:
-                    region = np.array(z0[page_idx, ys, xs])
-                elif z0.ndim == 4:
-                    region = np.array(z0[0, page_idx, ys, xs])
-                elif z0.ndim == 2:
-                    region = np.array(z0[ys, xs])
-                else:
-                    raise ValueError(f"Unknown zarr dimensions: {z0.ndim}")
+            z0 = self._thread_zarr()
+            ys, xs = slice(y0, y1, step), slice(x0, x1, step)
+            if z0.ndim == 3:
+                region = np.array(z0[page_idx, ys, xs])
+            elif z0.ndim == 4:
+                region = np.array(z0[0, page_idx, ys, xs])
+            elif z0.ndim == 2:
+                region = np.array(z0[ys, xs])
+            else:
+                raise ValueError(f"Unknown zarr dimensions: {z0.ndim}")
 
             return region.copy()
 
@@ -317,6 +311,41 @@ class OMETIFFLoader:
                 f"Please ensure zarr is installed: pip install zarr\n"
                 f"And tifffile >= 2021.x: pip install --upgrade tifffile"
             ) from e
+
+    def _thread_zarr(self):
+        """The slide's level-0 zarr array, opened once per thread and kept
+        while the file is unchanged. Opening it parses every page header in
+        Python (a qptiff: hundreds); done per read, the background patch
+        reads held the GIL so much that every drag of the compare panels
+        stuttered (user acceptance 2026-10-29: a 20-step drag 0.6-0.86 s,
+        0.35 s without those reads). One handle per thread: tifffile's
+        handle is not shared across threads here."""
+        local = self.__dict__.get("_zarr_local")
+        if local is None:
+            local = self.__dict__.setdefault("_zarr_local", threading.local())
+        st = os.stat(self.filepath)
+        key = (os.path.abspath(self.filepath), st.st_ino, st.st_size, st.st_mtime_ns)
+        held = getattr(local, "held", None)
+        if held is not None and held[0] == key:
+            return held[2]
+        if held is not None:
+            local.held = None
+            try:
+                held[1].close()
+            except Exception:                                   # noqa: BLE001
+                pass
+        tif = tifffile.TiffFile(self.filepath)
+        try:
+            z = zarr.open(tif.aszarr(), mode='r')
+            if isinstance(z, zarr.hierarchy.Group):
+                z0 = z[0] if '0' in z else next(iter(z.values()))
+            else:
+                z0 = z
+        except Exception:
+            tif.close()
+            raise
+        local.held = (key, tif, z0)
+        return z0
 
     @staticmethod
     def _norm(arr):

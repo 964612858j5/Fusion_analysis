@@ -1,6 +1,7 @@
-"""Block A9 §40: buffer swaps are asked not to wait for the display refresh
-(swap interval 0), unless BLOCK01_VSYNC=1; the Step1 GPU layer asks for the
-application's interval, since Qt5 hands a widget's interval up to its window."""
+"""Buffer swaps wait for the display refresh (swap interval 1) by default;
+BLOCK01_VSYNC=0 asks for the Block A9 §40 interval 0 again; the Step1 GPU
+layer asks for the application's interval, since Qt5 hands a widget's
+interval up to its window."""
 
 import os
 
@@ -21,24 +22,24 @@ def default_format():
     QtGui.QSurfaceFormat.setDefaultFormat(saved)
 
 
-def test_swaps_do_not_wait_for_the_refresh_by_default(monkeypatch, default_format):
+def test_swaps_wait_for_the_refresh_by_default(monkeypatch, default_format):
     monkeypatch.delenv("BLOCK01_VSYNC", raising=False)
     before = QtGui.QSurfaceFormat.defaultFormat()
-    assert gpu_warmup.configure_surface_format() is True
+    fmt = QtGui.QSurfaceFormat.defaultFormat()
+    fmt.setSwapInterval(0)
+    QtGui.QSurfaceFormat.setDefaultFormat(fmt)
+    assert gpu_warmup.configure_surface_format() == 1
     after = QtGui.QSurfaceFormat.defaultFormat()
-    assert after.swapInterval() == 0
+    assert after.swapInterval() == 1
     # nothing else of the default format is touched
     assert (after.majorVersion(), after.minorVersion(), after.profile(), after.depthBufferSize()) == \
         (before.majorVersion(), before.minorVersion(), before.profile(), before.depthBufferSize())
 
 
-def test_vsync_1_leaves_the_default_alone(monkeypatch, default_format):
-    monkeypatch.setenv("BLOCK01_VSYNC", "1")
-    fmt = QtGui.QSurfaceFormat.defaultFormat()
-    fmt.setSwapInterval(1)
-    QtGui.QSurfaceFormat.setDefaultFormat(fmt)
-    assert gpu_warmup.configure_surface_format() is False
-    assert QtGui.QSurfaceFormat.defaultFormat().swapInterval() == 1
+def test_vsync_0_asks_for_no_wait(monkeypatch, default_format):
+    monkeypatch.setenv("BLOCK01_VSYNC", "0")
+    assert gpu_warmup.configure_surface_format() == 0
+    assert QtGui.QSurfaceFormat.defaultFormat().swapInterval() == 0
 
 
 @pytest.mark.parametrize("interval", [0, 1])

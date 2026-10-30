@@ -1323,8 +1323,13 @@ def test_every_io_worker_warms_its_own_handle(small_ome_tiff):
             time.sleep(0.01)
         assert sched.warmed_workers == n_io
         # One open for the constructing thread (metadata) + exactly one per
-        # warmed I/O worker thread -- no more, no fewer.
-        assert provider.open_count == 1 + n_io
+        # warmed I/O worker thread -- no more, no fewer -- + the one shared
+        # handle threads without their own read through, opened at warm-up
+        # when some level has no direct-read table (S0-C 2026-10-30)
+        shared = int(provider._shared_tf is not None)
+        assert shared == int(any(not provider._direct_plan(level)
+                                 for level in range(len(provider._level_shapes))))
+        assert provider.open_count == 1 + n_io + shared
     finally:
         sched.shutdown()
         provider.close()

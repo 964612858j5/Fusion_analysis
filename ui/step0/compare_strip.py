@@ -44,6 +44,7 @@ instrument:
 """
 
 import math
+import threading
 import weakref
 
 from PyQt5 import QtCore, QtWidgets
@@ -382,6 +383,13 @@ class CompareStrip(QtWidgets.QWidget):
     # publish, which touches three views.
     _pending_tile = QtCore.pyqtSignal(int, object)
 
+    # S0-C (plan §16.14 1): the engine published a parameter edit's picture
+    # (no channel moved, so no `publication_changed`): the page measures again
+    params_published = QtCore.pyqtSignal()
+    # S0-C: the frame on which the engine's three panels show the selection
+    # reached the screen (measurement)
+    engine_done = QtCore.pyqtSignal()
+
     def __init__(self, page=None, stack_factory=build_compare_stacks,
                  parent=None):
         super().__init__(parent)
@@ -425,6 +433,17 @@ class CompareStrip(QtWidgets.QWidget):
         self._pending_tile.connect(self._on_pending_tile,
                                    QtCore.Qt.QueuedConnection)
 
+        # ── S0-C: the engine (plan §16.6, 16.13) ─────────────────────────
+        # () -> the full image's GL host, or None: set by the page
+        self._engine_host_provider = None
+        self._engine = None
+        # the selection the engine is preparing, `(channel, params_for,
+        # tint)`, until its three pictures are published together
+        self._engine_target = None
+        self._engine_banner_armed = False
+        # an edit (no channel target) the engine has not settled yet
+        self._engine_edit_open = False
+
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(2)
@@ -443,12 +462,25 @@ class CompareStrip(QtWidgets.QWidget):
         # TIM3 is only honest if it is labelled, and a title that says TIM3
         # over CD22 pixels with no hint is the state this exists to
         # prevent.
-        self._pending_lbl = QtWidgets.QLabel("")
+        #
+        # Its row is ALWAYS there, one line high, shown or not: the panels
+        # are aspect-locked, and a panel that grows and shrinks by a row on
+        # every switch is refitted each time, a little wider -- eight
+        # switches took the view from cell level out to a whole core (user
+        # acceptance, 2026-10-29).
+        self._pending_lbl = QtWidgets.QLabel("X")
         self._pending_lbl.setAlignment(QtCore.Qt.AlignCenter)
-        self._pending_lbl.setWordWrap(True)
         self._pending_lbl.setStyleSheet(
             "color:#ffd479;font-size:11px;font-weight:bold;background:#2a2418;"
             "padding:2px;")
+        self._pending_lbl.ensurePolished()
+        self._pending_lbl.setFixedHeight(self._pending_lbl.sizeHint().height())
+        self._pending_lbl.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                        QtWidgets.QSizePolicy.Fixed)
+        keep = self._pending_lbl.sizePolicy()
+        keep.setRetainSizeWhenHidden(True)
+        self._pending_lbl.setSizePolicy(keep)
+        self._pending_lbl.setText("")
         self._pending_lbl.setVisible(False)
         self._layout.addWidget(self._pending_lbl)
 
@@ -509,6 +541,17 @@ class CompareStrip(QtWidgets.QWidget):
     @property
     def built(self):
         return self._stacks is not None
+
+    @property
+    def panes_widget(self):
+        """The widget the three panels are laid out in (the engine's host
+        covers their ViewBoxes in it)."""
+        return self._panes
+
+    @property
+    def engine(self):
+        """The compare engine, or None."""
+        return self._engine
 
     def set_dataset(self, path):
         """Bind to `path`. A CHANGE tears the old strip down completely
@@ -603,6 +646,10 @@ class CompareStrip(QtWidgets.QWidget):
         # be issued into a scheduler that is joining its workers, and no
         # slot fires on a controller that is being destroyed.
         self.stop_hot()
+        # S0-C (§16.13 3): the engine's panels -- their cores and Python
+        # sources, whose requests are on the scheduler shut down below -- go
+        # before anything else of the strip
+        self._close_engine()
         # Before the scheduler is asked to join its workers: a pending
         # switch owns a generation on it and a queued `_pending_tile`
         # delivery that must not reach a strip whose stacks are gone.
@@ -833,6 +880,23 @@ class CompareStrip(QtWidgets.QWidget):
         params_for = params_for or self._displayed_params_for
         if tint is None:
             tint = self._displayed_tint
+        if self._engine_draws():
+            # S0-C (§16.13 1): the engine publishes the three together
+            self._select_for_engine(channel, params_for, tint)
+            return
+        engine = self._engine
+        if engine is not None and engine.usable and self._suspended and not self.isVisible():
+            # S0-C: put away, its engine prepared ahead -- nothing is on
+            # screen to stage: the controllers take the channel now (they
+            # issue nothing while suspended), the page prepares the cores
+            # again, and the entry shows them only once they draw it
+            # (`CompareEngine._show_if_ready`); a switch the engine was still
+            # preparing when compare was left is superseded by this one
+            # (codex review 2026-10-30 round 2, P2)
+            self._engine_target = None
+            self._engine_banner_armed = False
+            self._publish(channel, params_for, tint)
+            return
 
         if channel == self._displayed_channel:
             # Not a switch. The row the user clicked may carry different
@@ -908,6 +972,11 @@ class CompareStrip(QtWidgets.QWidget):
         """The words the strip is showing about a pending switch, or None."""
         if self._pending_error is not None:
             return self._pending_error
+        if self._engine_target is not None:
+            if not self._engine_banner_armed:
+                return None
+            return "Preparing %s — still showing %s" % (
+                self._engine_target[0], self._displayed_channel or "the previous channel")
         if self._pending is None:
             return None
         return "Preparing %s — still showing %s" % (
@@ -915,11 +984,19 @@ class CompareStrip(QtWidgets.QWidget):
 
     @property
     def pending(self):
-        """True while a channel switch is prepared but not yet published."""
-        return self._pending is not None
+        """True while a channel switch is prepared but not yet published --
+        or, the engine drawing, while any panel's new picture (a parameter
+        edit's too) is not yet published: nothing on screen may be measured
+        as the new selection before it is (codex S0-C code 1, P2-4)."""
+        if self._pending is not None or self._engine_target is not None:
+            return True
+        engine = self._engine
+        return engine is not None and engine.usable and engine.picture == "engine" and engine.waiting()
 
     @property
     def pending_channel(self):
+        if self._engine_target is not None:
+            return self._engine_target[0]
         return self._pending["channel"] if self._pending else None
 
     @property
@@ -1107,6 +1184,7 @@ class CompareStrip(QtWidgets.QWidget):
     def _show_pending_banner(self):
         text = self.pending_text()
         self._pending_lbl.setText(text or "")
+        self._pending_lbl.setToolTip(text or "")
         self._pending_lbl.setVisible(bool(text))
         self.pending_changed.emit()
 
@@ -1312,6 +1390,12 @@ class CompareStrip(QtWidgets.QWidget):
         recomputing TopHat (and vice versa).
         """
         self._displayed_params_for = params_for
+        if self._engine_draws():
+            # S0-C: an edit the engine prepares; whether it is published or
+            # cancelled (edited back to what is on screen), the page measures
+            # again once nothing waits (codex S0-C code 2)
+            self._engine_edit_open = True
+            QtCore.QTimer.singleShot(0, self._engine_target_shown)
         if self._pending is not None:
             # The parameters are IN the CorrectionKey, so an edit makes
             # every key the pending plan prepared a key nobody will ask for
@@ -1404,7 +1488,7 @@ class CompareStrip(QtWidgets.QWidget):
 
     # ── the GPU hand-off ─────────────────────────────────────────────────
 
-    def suspend(self, reason, badge=None):
+    def suspend(self, reason, badge=None, wait=True):
         """Off screen: stop issuing, drop what is queued, join the floors,
         and KEEP the pools, the caches and the camera -- so coming back to
         the same place is a re-issue for what is missing, not a rebuild.
@@ -1417,6 +1501,7 @@ class CompareStrip(QtWidgets.QWidget):
         if self._suspended or not self.controllers:
             return {}
         self._suspended = True
+        self._engine_follow()                       # S0-C: paused before the stacks
         # FIRST, and before `suspend_for_production` waits the scheduler
         # idle: HOT is a producer of scheduler work, and a producer that is
         # still refilling while somebody waits for idle is a wait that need
@@ -1434,14 +1519,71 @@ class CompareStrip(QtWidgets.QWidget):
             if controller is None:
                 continue
             try:
-                timings[source] = controller.suspend_for_production(
-                    reason, badge=badge)
+                if wait:
+                    timings[source] = controller.suspend_for_production(
+                        reason, badge=badge)
+                else:
+                    # put away before ever being shown (the page's
+                    # `_prepare_compare_ahead`): nothing to hand the GPU
+                    # to, so the producers stop and nobody waits for the
+                    # build's first reads to finish (2.8 s on a hard disk)
+                    controller.begin_suspend_for_production(
+                        reason, badge=badge, cancelled=self.stacks_gone())
             except Exception:                               # noqa: BLE001
                 pass
         return timings
 
+    def stacks_gone(self, cancelled=None):
+        """For a hand-off's waiter thread: True once these stacks are torn
+        down (or `cancelled()`) -- a scheduler shut down never calls its
+        idle callback back (codex review 2026-10-30, P2-2)."""
+        ref, stacks = weakref.ref(self), self._stacks
+
+        def gone():
+            strip = ref()
+            return (strip is None or strip._stacks is not stacks
+                    or (cancelled is not None and bool(cancelled())))
+        return gone
+
+    def release_hidden_for_production(self, reason, cancelled=None):
+        """A production run while the strip is built but not on screen
+        (prepared ahead, or left): the engine's paints stop, its panels'
+        Python sources go (requests cancelled) and their tiles are given
+        back, and the three controllers' work is waited out as the full
+        image's is (codex review 2026-10-30, P2-1). Returns an event set
+        once that work has ended -- at once when the strip is on screen
+        (the panels keep running through a run) or not built."""
+        done = threading.Event()
+        if self._stacks is None or not self._suspended or self.isVisible():
+            done.set()
+            return done
+        if self._engine is not None:
+            self._engine.release_hidden_for_production()
+        gone = self.stacks_gone(cancelled)
+        events = []
+        for controller in self.controllers:
+            if controller is None:
+                continue
+            try:
+                events.append(controller.begin_suspend_for_production(
+                    reason, cancelled=gone)[0])
+            except Exception:                               # noqa: BLE001
+                pass
+
+        def wait():
+            for event in events:
+                while not event.wait(0.05):
+                    if gone():
+                        return
+            done.set()
+
+        threading.Thread(target=wait, daemon=True,
+                         name="compare-production-handoff").start()
+        return done
+
     def resume(self):
         if not self._suspended:
+            self._engine_follow()
             return
         self._suspended = False
         for controller in self.controllers:
@@ -1455,6 +1597,7 @@ class CompareStrip(QtWidgets.QWidget):
         # the effective parameters as they are NOW -- not from whatever was
         # true when the strip was put away.
         self.start_hot()
+        self._engine_follow()
 
     @property
     def suspended(self):
@@ -1586,3 +1729,160 @@ class CompareStrip(QtWidgets.QWidget):
         if self._hot is None:
             return
         self._hot.set_specs(self._hot_specs())
+
+    # ── S0-C: the engine draws the three panels (plan §16) ───────────────
+    #
+    # The Python stacks stay whole underneath (camera, selection, fallback);
+    # `CompareEngine` draws what their controllers select, the three panels'
+    # new pictures published together. While it draws, a channel switch
+    # does not go through the cache preflight above: the controllers take
+    # the new selection at once and the engine keeps the old three pictures
+    # up until all three new ones are ready (§16.13 1).
+
+    def set_engine_host_provider(self, provider):
+        """`provider()` -> the full image's GL host (`Step0GlHost`) or None
+        (no engine there: the strip draws with Python)."""
+        self._engine_host_provider = provider
+        self._engine_follow()
+
+    def _engine_draws(self):
+        engine = self._engine
+        return engine is not None and engine.usable and engine.picture == "engine"
+
+    def _engine_follow(self):
+        """The engine runs while the strip is built, on screen and not
+        suspended -- made on first need, from the full image's host."""
+        running = (self._stacks is not None and not self._suspended and self.isVisible())
+        engine = self._engine
+        if engine is None and running:
+            engine = self._make_engine()
+        if engine is not None and engine.usable:
+            engine.set_running(running)
+
+    def _make_engine(self):
+        provider = self._engine_host_provider
+        host = provider() if provider is not None else None
+        if host is None or getattr(host, "failed", "") or self._stacks is None:
+            return None
+        from .compare_engine import CompareEngine
+        try:
+            engine = CompareEngine(self, host, self._stacks, parent=self)
+        except Exception as exc:                            # noqa: BLE001 -- Python picture
+            print(f"[compare] engine not used: {type(exc).__name__}: {exc}", flush=True)
+            return None
+        if not engine.usable:
+            print(f"[compare] engine not used: {engine.refused}", flush=True)
+            engine.close()
+            return None
+        engine.committed.connect(self._on_engine_committed)
+        engine.presented.connect(self.engine_done.emit)
+        engine.frame_presented.connect(self._on_engine_frame)
+        engine.failed.connect(self._on_engine_failed)
+        self._engine = engine
+        return engine
+
+    def prepare_engine_ahead(self, width, height):
+        """Codex review 2026-10-30 (a trial): the engine and its three cores
+        made now, while the strip is built but not on screen, and painted
+        off screen at `width` x `height` (`CompareEngine.prepare_ahead`).
+        True when that started."""
+        if self._stacks is None or self.isVisible():
+            return False
+        engine = self._engine or self._make_engine()
+        return engine is not None and engine.prepare_ahead(width, height)
+
+    def stop_engine_ahead(self):
+        """`prepare_engine_ahead`'s paints end now (a production run, the
+        full image moved). True when they were still going."""
+        return self._engine is not None and self._engine.stop_ahead()
+
+    def _close_engine(self):
+        engine, self._engine = self._engine, None
+        self._engine_target = None
+        self._engine_banner_armed = False
+        if engine is not None:
+            engine.close()
+            engine.deleteLater()
+
+    def _select_for_engine(self, channel, params_for, tint):
+        """The three controllers take `channel` in this turn and the engine
+        is synced in it too; what the strip says it SHOWS changes when the
+        engine has published the three (`_on_engine_committed`)."""
+        # HOT works for the old neighbourhood on the same scheduler (as
+        # `_enter_pending`); it comes back, re-planned, at the publication
+        target = (channel, params_for, tint)
+        if self._engine_target == target and self.selection()[0][0] == channel:
+            return                               # the same click delivered twice: already selected
+        self.stop_hot()
+        self._engine_target = target
+        self._engine_banner_armed = False
+        for source, controller in zip(COMPARE_SOURCES, self.controllers):
+            if controller is None:
+                continue
+            method = COMPARE_METHODS.get(source)
+            params = () if method is None else tuple(
+                params_for(source) if params_for is not None else ())
+            controller.set_selection(channel=channel, method=method, params=params)
+            if tint is not None:
+                try:
+                    controller.set_tint(tint, channel=channel)
+                except TypeError:
+                    controller.set_tint(tint)
+        self._engine.sync_all()
+        # back to what is already on screen (A -> B -> A before B was
+        # published): no publication will come -- it is done now (codex S0-C
+        # code 1, P2-1)
+        QtCore.QTimer.singleShot(0, self._engine_target_shown)
+
+    def _engine_target_shown(self):
+        engine = self._engine
+        if engine is None or engine.waiting() or not engine.shows_wanted():
+            return
+        if self._engine_target is not None:
+            self._on_engine_committed()
+        elif self._engine_edit_open:
+            self._engine_edit_open = False
+            self.params_published.emit()
+
+    def _on_engine_frame(self):
+        """A frame of the strip reached the screen: a selection still being
+        prepared then is a real wait, and is said so."""
+        if self._engine_target is not None and not self._engine_banner_armed:
+            engine = self._engine
+            if engine is not None and engine.waiting():
+                self._engine_banner_armed = True
+                self._show_pending_banner()
+        self._engine_target_shown()
+
+    def _on_engine_committed(self):
+        """The three panels show their controllers' selections."""
+        target, self._engine_target = self._engine_target, None
+        self._engine_banner_armed = False
+        if target is None:
+            self._engine_edit_open = False
+            self.params_published.emit()
+            return
+        channel, params_for, tint = target
+        self._displayed_channel = channel
+        self._displayed_params_for = params_for
+        self._displayed_tint = tint
+        self._clear_pending_banner()
+        self.refresh_hot()
+        if self._hot is None:
+            self.start_hot()
+        self.publication_changed.emit()
+
+    def _on_engine_failed(self, _why):
+        """The Python panels are the picture again (the mounts handed over):
+        a selection the engine was preparing is what they show now."""
+        if self._engine_target is not None:
+            self._on_engine_committed()
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        self._engine_follow()
+
+    def hideEvent(self, event):  # noqa: N802
+        super().hideEvent(event)
+        self._engine_follow()
+

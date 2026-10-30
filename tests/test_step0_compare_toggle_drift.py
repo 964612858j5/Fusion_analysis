@@ -853,3 +853,37 @@ def test_the_right_click_and_escape_ways_out_agree(app):
     by_escape = page._full_image_camera()
     assert by_click == pytest.approx(before, rel=1e-9, abs=1e-6)
     assert by_escape == pytest.approx(by_click, rel=1e-9, abs=1e-6)
+
+
+def test_a_double_right_click_is_one_gesture(app):
+    """S0-C (2026-10-30): the second half of a double right-click must not
+    act again -- it undid the first (compare opened and shut at once)."""
+    import pyqtgraph as pg
+    from PyQt5 import QtCore
+    from block01.viewer.explore_view import RightClickViewBox
+
+    box = RightClickViewBox()
+    got = []
+    box.sigRightClicked.connect(lambda x, y: got.append((x, y)))
+
+    class _Click:
+        def __init__(self, double):
+            self._double, self.accepted = double, False
+
+        def button(self):
+            return QtCore.Qt.RightButton
+
+        def double(self):
+            return self._double
+
+        def accept(self):
+            self.accepted = True
+
+        def pos(self):
+            return QtCore.QPointF(1.0, 1.0)
+
+    single, double = _Click(False), _Click(True)
+    box.mouseClickEvent(single)
+    box.mouseClickEvent(double)
+    assert len(got) == 1 and single.accepted and double.accepted
+    del pg

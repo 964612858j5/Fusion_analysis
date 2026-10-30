@@ -27,21 +27,22 @@ from ..utils import perf_trace
 
 
 def configure_surface_format():
-    """Block A9 §40: ask for buffer swaps that do not wait for the display's
-    refresh (swap interval 0). With an OpenGL widget in the window, Qt
-    composes and swaps the whole window on the GUI thread; the default
-    interval 1 made that swap wait up to a refresh period, during which no
-    input was handled (measured: a single notch on screen 28-33 ms -> 17 ms).
-    The desktop compositor (GNOME, Windows DWM) still presents in step with
-    the display. A REQUEST, not a guarantee: a driver may ignore it.
-    `BLOCK01_VSYNC=1` leaves Qt's default untouched (a machine that tears).
-    Called before the QApplication exists."""
-    if os.environ.get("BLOCK01_VSYNC") == "1":
-        return False
+    """Set the application's buffer swap interval; called before the
+    QApplication exists.
+
+    Default 1 (swaps wait for the display refresh). Block A9 §40 had asked
+    for 0, to keep the GUI thread from waiting up to a refresh period in the
+    whole-window swap (a single notch on screen 28-33 ms -> 17 ms). On the
+    user's machine (NVIDIA 535, GNOME/mutter X11) interval 0 left the Step0
+    compare panels' swaps off the screen -- frames drawn, nothing shown, drag
+    dead -- and interval 1 fixed it (user acceptance 2026-10-29, S0-C).
+    `BLOCK01_VSYNC=0` asks for 0 again, for diagnosis. A REQUEST, not a
+    guarantee: a driver may ignore it. Returns the interval asked for."""
+    interval = 0 if os.environ.get("BLOCK01_VSYNC") == "0" else 1
     fmt = QtGui.QSurfaceFormat.defaultFormat()
-    fmt.setSwapInterval(0)
+    fmt.setSwapInterval(interval)
     QtGui.QSurfaceFormat.setDefaultFormat(fmt)
-    return True
+    return interval
 
 
 class GpuWarmup(QtCore.QObject):

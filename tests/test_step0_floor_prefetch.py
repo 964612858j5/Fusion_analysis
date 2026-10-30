@@ -197,6 +197,84 @@ def test_a_background_result_only_reaches_the_cache():
     assert controller._gain_ctx is None
 
 
+def test_an_owed_floor_served_from_the_cache_still_lets_the_waiting_one_run():
+    """A background result fills the cache the pending foreground wants: the
+    foreground is restored from it, and the WAITING background preparation
+    still runs -- no job of its own ends to start it (codex 2026-10-30)."""
+    controller = _controller_like()
+    level, stride = controller._pick_floor_level_and_stride()
+    from block01.viewer.explore_view import _FloorRequest
+
+    def request_for(method, param):
+        ctx = controller._floor_ctx_for("CD3", method, (param,), level, stride)
+        return _FloorRequest(generation=3, channel="CD3", method=method,
+                             base_params=(param,), floor_level=level,
+                             stride=stride, ctx=ctx, foreground=False)
+
+    landed, waiting = request_for("tophat", 15), request_for("cucim", 50)
+    controller._floor_job_running = True
+    controller._floor_background_request = waiting
+    controller._floor_pending = True
+    controller._level_gain = {}
+    controller._gain_ctx = None
+    restored, started = [], []
+    controller._restore_cached_floor = lambda gen: restored.append(gen) or True
+    controller._start_floor_job = lambda gen: started.append(("foreground",))
+    controller._run_floor_job = lambda request: started.append(request.method)
+
+    controller._handle_floor_result(
+        (3, landed.ctx, level, stride, np.zeros((4, 4), np.float32), None,
+         {0: 1.0}, None, landed))
+
+    assert restored == [3], "the owed floor was not looked up in the cache"
+    assert started == ["cucim"], (
+        f"after a cache hit the waiting preparation did not run: {started}")
+    assert controller._floor_pending is False
+
+
+def test_resuming_from_the_cache_runs_the_waiting_one_without_preparing_badge():
+    """Resume serves the owed floor from the cache, then lets the waiting
+    background preparation run -- which is not the selection's own, so the
+    badge must not say "preparing" (codex 2026-10-30, P3)."""
+    from types import SimpleNamespace
+    from block01.viewer.explore_view import _FloorRequest
+
+    controller = _controller_like()
+    level, stride = controller._pick_floor_level_and_stride()
+    ctx = controller._floor_ctx_for("CD3", "cucim", (50,), level, stride)
+    controller._floor_background_request = _FloorRequest(
+        generation=3, channel="CD3", method="cucim", base_params=(50,),
+        floor_level=level, stride=stride, ctx=ctx, foreground=False)
+    controller._suspended = True
+    controller._floor_pending = True
+    controller._suspend_reason = controller._suspend_badge = None
+    controller._current_bbox = None
+    controller._engine_owns_view = False
+    controller.view = SimpleNamespace(view_box=SimpleNamespace(
+        setMouseEnabled=lambda *a: None))
+    controller._wants_precise = lambda: True
+    controller._refresh_badge = lambda force=False: None
+
+    def restore(gen):
+        controller._floor_pending = False
+        return True
+
+    def run(request):
+        controller._floor_job_running = True
+        started.append(request.method)
+
+    started = []
+    controller._restore_cached_floor = restore
+    controller._start_floor_job = lambda gen: started.append("foreground")
+    controller._run_floor_job = run
+
+    controller.resume_from_production()
+
+    assert started == ["cucim"], started
+    assert controller._badge_preparing is False, (
+        "a background preparation showed the selection as preparing")
+
+
 def test_the_historical_eight_element_payload_still_means_foreground():
     """Existing callers deliver eight elements; that must keep working."""
     controller = _controller_like()
@@ -1513,5 +1591,35 @@ def test_the_neighbouring_channels_still_get_no_floor_at_all(
             for method in ("tophat", "cucim"):
                 assert controller.has_cached_floor(
                     neighbour, method, PARAM_FOR[method]) is False
+    finally:
+        tab.teardown()
+
+
+# ── resuming takes an owed floor from the cache ────────────────────────
+
+def test_resuming_installs_an_owed_floor_from_the_cache(app, providers,
+                                                         floor_jobs):
+    """A selection changed while suspended owes a floor; when the full
+    image has already prepared it, resuming installs it -- no job."""
+    tab = open_full_image()
+    try:
+        controller = tab.stack.controller
+        assert wait_until(
+            lambda: controller.has_cached_floor("CD3", "cucim",
+                                                PARAM_FOR["cucim"]))
+        assert wait_until(lambda: not controller._floor_job_running)
+        controller.suspend_for_production("test")
+        controller.set_selection(method="cucim", params=PARAM_FOR["cucim"])
+        assert controller._floor_pending, "the suspended change owed nothing"
+        ran = len(floor_jobs.ran)
+        hits = controller.stats.get("floor_cache_hits", 0)
+
+        controller.resume_from_production()
+        drain(400)
+
+        assert len(floor_jobs.ran) == ran, (
+            "resuming recomputed a floor the cache already had")
+        assert controller.stats.get("floor_cache_hits", 0) == hits + 1
+        assert not controller._floor_pending
     finally:
         tab.teardown()

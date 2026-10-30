@@ -28,7 +28,7 @@ H, W = 3000, 2500
 NAMES = ["DAPI", "CD3", "CD8"]
 BACKGROUND = 2000          # CD3 everywhere ...
 DOT = 9000                 # ... plus 3x3 dots every 64 px: TopHat keeps the dots
-ORIGINAL = ("CD3", None, (), None)
+ORIGINAL = em.RAW_CORE          # S0-C §16.16: one raw core for every channel
 LIVE = ("CD3", "tophat", (15,))
 
 
@@ -806,7 +806,9 @@ def test_paints_beside_the_host_still_reach_the_viewport(app, monkeypatch):
         corner = widget.mapFromScene(scene.topLeft())
         cover = QtCore.QRect(corner.x(), corner.y(), int(round(scene.width())), int(round(scene.height())))
         assert QtCore.QRect(viewport.rect()) != cover          # there is a margin
-        host = type("H", (), {"isVisible": lambda self: True, "geometry": lambda self: cover})()
+        host = QtWidgets.QWidget(viewport)               # stands where the GL host would
+        host.setGeometry(cover)
+        host.show()
         viewport.installEventFilter(em._NoPaint(viewport, host, widget, view_box.childGroup))
         painted = []
         real = pg.ImageItem.paint

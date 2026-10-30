@@ -750,3 +750,155 @@ codex 建议"在现有来源 / 发请求路径里加一种由 Python 完成的�
 2. **边缘重绘不再画被遮挡的图像**（P2-2）：实测 pyqtgraph 下，无论整块边缘区域还是逐条重绘，`ImageItem.paint` 都会被调用（ViewBox 的裁剪不剔除子项）。改为：只落在宿主外的 Paint 由 `_NoPaint._paint_margin` 自己完成——把 ViewBox 的 `childGroup` 透明度暂设 0（`NoViewportUpdate` 下不引发重绘请求，Qt 跳过全透明项），直接 `graphics.viewportEvent(event)`，再恢复。ViewBox 把子项裁剪在自身形状内，子项本就画不到边缘，所以边缘像素不变；测试用 `QGraphicsView.render`（不经 Paint 事件）逐像素比对边缘（除 ViewBox 边界落在像素之间的 1 像素缝），并用真实 pyqtgraph 视图做完整往返，断言 `ImageItem.paint` 零调用。
 - 测试：engine_live + engine_mount 59 通过（两次）；新增"每个画面各自计时"，改写计时单测为真实等待中的 slot。
 - 第 3 轮审核 **通过**（`codex_s15_code_3.out`）。采纳其建议：`drop_candidate` / `park_current` 也清理计时（`_gate_prune`）。如实记录：ViewBox 边界落在像素之间时，宿主右 / 下侧那 1 像素缝在边缘重绘时会从"部分图像"变为背景色（宿主外、仅此一列 / 一行），属已知小差异。回放 `u18_deep` 9 次 71–344 ms、`u18_mid` 16 次 19–114 ms，无一次超时放行。
+
+## 16. S0-C 申请（第一版否决 `codex_s16_plan_1.out`，第二版见 16.13，否决 `codex_s16_plan_2.out`，第三版见 16.14，codex 第 3 轮批准 `codex_s16_plan_3.out`；冲突处以最新小节为准；2026-10-29；用户："开始执行内核下一步"）：三图对比由引擎画
+
+### 16.1 现状（三图对比，`ui/step0/compare_strip.py`）
+- 三个 `ExploreView` + 三个 `ExploreController`（Original / TopHat / cuCIM），一个后端：自己的 `TileScheduler`，借用全图的原图缓存、校正缓存、整图概览库、floor 缓存（`build_compare_stacks`，`compare_strip.py:152`）。
+- 一个镜头：任一面板变化以"中心 + 比例"复制给另两个（`_mirror_from`，`:658`）。
+- 换通道两条路（`set_channel`，`:785`）：缓存齐了一个 GUI 回合内三个一起换（`_publish`，`:858`）；否则旧三图不动、横幅写"Preparing X — still showing Y"、只往缓存里要缺的块，齐了再一起换（`_enter_pending` / `_settle_pending`，`:930`、`:1062`）。
+- 调参（`set_params`，`:1307`）：只重选被改的方法面板，逐块重算，无"三图一起换"保证。
+- 全图 ↔ 三图：`_hand_gpu_to_compare` / `_hand_gpu_to_full_image`（`step0_page.py:2890`、`:2908`）——Python 侧一方 `suspend_for_production`、另一方恢复。全图引擎在全图页隐藏时已经暂停（`step0_explore_tab.py:427`）。
+- 指标（SNR / BG-CV）：静止后从 scheduler 的原图 / 校正缓存按面板自己的层取块拼图计算（`step0_page.py:7600`）。
+- 正式计算（含调参 Enter 触发的补丁批处理）时三图不暂停，只停 HOT（`step0_page.py:3558`）。
+
+### 16.2 基线（S0-0 遗留项，本段开始前补测）
+工具：`scripts/a9_drive.py` 新增 `s0compare` / `s0compare_exit` / `s0cmp_channel` / `s0cmp_param` 与 `a9.s0cmp_done`（三个面板都显示目标选择、当前层可见块齐全的时刻；读面板的块池，池齐 = 下一次绘制上屏）。场景 `a9_bench/s0a/user/make_scen_cmp1.py`（用户项目副本，Slice1 qptiff，CD45RA 起，进入三图后换 6 次通道、TopHat / cuCIM 各 3 次调参），整图 / 中层 / 细胞级三档。结果见 16.9。
+
+### 16.3 与 Odon 的逐项对照（`/sda1/Fusion/analysis_pipline/odon`）
+| 项 | Odon | 我们（本段） | 复用 / 理由 |
+|---|---|---|---|
+| GL 上下文 | 整个程序一个 glow 上下文，每个视图区是一个 egui `PaintCallback`，带自己的矩形（`src/mosaic/mod.rs:5549`，`src/mosaic/tiles_gl.rs:103` `paint(info, …)` 用 `info.viewport`） | Step0 一个 `Step0GlHost`（一个上下文），三图时三个面板矩形 | **复用**：一个上下文、按矩形画多个视图区 |
+| 多个图像共用纹理库 | 马赛克所有条目共用一个 `MosaicTilesGl`（`tiles_gl.rs:44`，一个容量） | 每个面板一个 core，各自的块库（显存合计按一个全图查看器预算分配） | **不复用**：我们的 core 一个视图一个画面，三面板同一位置不同来源；改成一个 core 多视图要改 Rust 规划器，超出本段 |
+| 原子性 | 立即模式，每帧画当时已驻留的块，不等齐（渐进出现） | 三个面板的新画面全部达标才在同一帧一起换（16.5） | **不复用**：用户对三图的既有要求是"一起换、不出现一张新两张旧"（`compare_strip.py:785` 的测量与裁定） |
+| 镜头 | 一个相机 | 三个 ViewBox 互相镜像（现状不变），每个面板的视野各自读自己的 ViewBox | 现状保留 |
+
+### 16.4 容器：一个宿主，两种布局（`ui/step0/gl_host.py`）
+1. **面板对象**：把今天宿主里"一个画面"的全部状态与逻辑原样搬进 `Panel`（current / candidate / standby、已发布 FBO、`published_view` / `published_level`、各自的质量门计时、`_paint_current` / `_try_switch` / `_advance_candidate` / `gate_levels`、挂钩 `view_rect` / `still_wanted` / `expected_channels` / `cannot_draw` / `on_published` / `on_switched`）。宿主保留上下文、失败、定时器、呈现、显存统计。宿主对外的旧属性（`host.current`、`host.request_switch` 等）委托给全图面板，所以全图挂载和现有测试不改语义。
+2. **两种布局**：全图布局 = 一个面板，宿主盖在全图 ViewBox 上（现状）；三图布局 = 三个面板，宿主盖在三图区（`CompareStrip._panes`）里三个 ViewBox 的外接矩形上，每个面板矩形按各自 ViewBox 的场景矩形换算（含 DPR）。切换布局时宿主**改挂父控件**（同一顶层窗口内改父不重建上下文——已实测：`aboutToBeDestroyed` 0 次、`initializeGL` 1 次、上下文对象不变；万一重建，现有 `_context_going` / `initializeGL` 重挂路径照旧处理）。全图面板的 core 在三图期间保持暂停（现状：全图页隐藏即暂停），回到全图时恢复。
+3. **呈现**：每个面板的已发布 FBO 拷到自己的矩形；面板之间的缝隙（各 GraphicsView 的边距、三列间距）用底下控件的背景色清屏（边距取 ExploreView 的背景、列间距取 `_panes` 的调色板），与今天看到的一致。三个视口下的 Python 图像项照 §15.5 3 的做法不绘（每个视口一个 `_NoPaint`，只吞宿主正下方，边缘照常）。
+4. **未发布时**：三图第一次进入时三个面板都还没有引擎画面——宿主隐藏，三面板照旧显示 Python 画面，三个候选在屏外准备（现有 `_drive` 路径），三个都达标后一起发布并显示宿主（同 S0-A 的首次接管）。
+
+### 16.5 三图原子发布
+- 每次绘制先对每个"有待换内容"（切换或候选）的面板做试画并按 §14.6–15.9 的门判断（不提交）；只有**所有**有待换内容的面板都在这一次绘制中达标，才在同一帧一起提交（交换 FBO、`on_switched` / `on_published`）；否则全部不提交，各面板照旧（视野没动则定格旧图，动了则旧行跟镜头）。没有待换内容的面板正常画。
+- 只改了一个方法的参数时只有那个面板有待换内容，它自己达标即换（与今天只重选该面板一致）；换通道时三个都有待换内容，一起换。
+- **同一回合登记**：三个面板的选择变化由三图引擎在**同一个 GUI 回合**里一起同步（一个合并的 `singleShot(0)`，不是每个面板各排一个），避免两个回合之间插进一次绘制让先登记的面板单独换上。
+- 等待时三图区显示现有横幅"Preparing X — still showing Y"（引擎有待换内容即视为 pending），发布时清掉并发 `publication_changed`（指标在此之后计划，同今天）。
+- 某一面板失败：沿用 §10.6——引擎退出（全图与三图都回 Python 画面，本数据集不再尝试），旧画面先由 Python 接手，不出现混合帧。
+
+### 16.6 挂载（`ui/step0/engine_mount.py`、新 `ui/step0/compare_engine.py`）
+- `Step0EngineMount` 改为面向一个 `Panel`（宿主由外部给出或自建），其余逻辑不动：来源判定、显示行、增益、Python 来源适配器、切换、门的请求排序、`_NoPaint`。
+- `CompareEngine`（新，小文件）：给三个面板各建一个面板挂载，`stack` 用一个轻量对象装该面板的 controller / view / overlay 与三图共享的 provider / scheduler；负责布局切换（`set_running(True)` 时宿主改挂到三图区并切三面板布局）、同回合同步、pending 状态、发布信号、失败。它借用全图挂载的宿主；全图引擎被拒或失败时三图也用 Python 画面。
+- `CompareStrip` 接线（只加不改 Python 路径）：引擎在画三图时，`set_channel` 不走 Python 的缓存预检 / pending（引擎自己保证一起换），直接 `_publish`（三个 controller 一个回合内 `set_selection`），然后交给 `CompareEngine.sync_all()`；`pending` / `pending_text` 在引擎画三图时读引擎的等待状态；`suspend` / `resume` 同时暂停 / 恢复引擎。引擎不画三图时一切照旧。
+- 显存与内存：三个面板各自 current + candidate，三面板合计按一个全图查看器的 GPU 预算（每个 core 1/6）；每个 core 的 CPU 缓存同理 1/6；三图面板不留 standby（换通道后旧 core 直接关闭），所以三图最多 6 个 core，加上全图暂停的最多 2 个。
+- 全图 ↔ 三图：Python 侧现有交接不变；引擎侧由页面可见性驱动——全图页隐藏时全图挂载暂停（现状），三图恢复时 `CompareEngine.set_running(True)`；回到全图时三图引擎暂停、宿主改挂回全图、全图挂载恢复，全图面板保留的已发布画面先呈现，再按当前镜头重画。
+
+### 16.7 调参 Enter 与正式计算
+- 今天三图在正式计算期间不暂停，只停 HOT——保持。
+- 与 §13–15 相同的问题（批处理线程一启动就抢 GIL，新图被拖慢）：Enter 在三图下触发批处理前，先对三图做同样的有界同步准备（每面板 `step_sync` + 一次 `paint_now(present=False)`，三面板一起达标即一起发布并同步呈现），然后批处理照常开始，三图照常运行。预算与全图相同（守护 1.5 s，目标 0.4 s）。
+
+### 16.8 指标
+- 引擎画三图时，Python controller 不再自己取块，原图缓存不一定有 Original 面板当前层的块，校正缓存里的块是引擎所在层的。改为：指标按每个面板**已发布画面的层**取键（参数按该层的有效值，`correction_identity(level)`），缺的块在静止后以缓存专用请求向三图 scheduler 补要（同 `_request_missing` 的做法，不进任何画面），补齐后计算；补齐前显示"—"（同今天）。
+
+### 16.9 基线结果（2026-10-29，Python 画三图，`a9_bench/s0a/user/c0_n{0,6,14}`）
+"提交 → 三个面板都齐"（毫秒；通道依次 CD8、CD68、CD45RO、CD45RA、CD8、CD163；调参依次 TopHat 15、25、11，cuCIM 40、60、31）：
+| 档 | 换通道 | 调参 |
+|---|---|---|
+| 整图（层 5） | 729、317、334、309、272、134 | 59、25、26、802、125、127 |
+| 中层（层 4） | 595、517、467、284、125、240 | 58、352、131、132、177、59 |
+| 细胞级（层 1） | 1008、662、333、482、130、190 | 95、529、374、520、565、553 |
+说明：读的是面板块池（池齐后下一次绘制上屏，约差一帧）；第一次换通道含进入三图后的冷读。
+
+### 16.10 验收
+- 自动：三图截图序列中任何一帧都不出现新旧混合（换通道、调参、换通道时拖动）；首次进入三图先 Python 后三个一起换成引擎；全图 ↔ 三图来回无黑屏；三图下 Enter 的补丁批处理前新图已上屏；任一面板注入失败三图回 Python 画面；指标数值与 Python 画三图时一致（同一视野）。
+- 计时（回放 `make_scen_cmp1.py` 三档，同 16.9）：换通道"三图都换上"每档中位数不慢于基线；调参"被改的面板换上"每次 ≤ 0.4 s（同全图）。
+- 用户真机验收。
+
+### 16.11 文件白名单
+`ui/step0/gl_host.py`、`ui/step0/engine_mount.py`、`ui/step0/compare_engine.py`（新）、`ui/step0/compare_strip.py`（接线）、`ui/step0/step0_page.py`（三图交接、Enter 前同步准备、指标取层）、`ui/step0/python_source.py`（如需按面板区分 scheduler，仅接口）、`scripts/a9_drive.py`（测量）、测试（`tests/test_step0_compare_engine.py` 新、`tests/test_step0_engine_live.py`、现有三图测试的假对象适配）。不改 Rust、不改 `viewer/` 下的读取 / 调度 / 缓存 / 算子。
+
+### 16.12 风险
+- 宿主拆成面板是对已验收全图路径的重构：全图的全部现有测试必须原样通过，回放 `u16_deep` / `u16_mid` 复测不变差。
+- 三图最多 6 个 core 同时在用（各自读盘线程）；CPU 缓存按 1/6 分配后命中率下降，以回放实测为准。
+- 改父控件在其他平台（WSL）的行为未验证；上下文重建路径有测试覆盖。
+
+### 16.13 第二版（回应 `codex_s16_plan_1.out` 四条 P2 与表中意见）
+1. **引擎路径不调用 `_publish()`**（P2-1）：`CompareStrip` 新增引擎路径 `_select_for_engine(channel, params_for, tint)`：只在一个回合内对三个 controller `set_selection` / `set_tint`，记下目标，停 HOT（同 `_enter_pending` 的时序），然后 `CompareEngine.sync_all()`。`_displayed_channel` / `_displayed_params_for` / `_displayed_tint` 的更新、横幅清除、HOT 恢复（`start_hot` / `refresh_hot`）、`publication_changed` 统一由组提交回调 `_engine_committed()` 做。横幅：选择后第一次绘制组仍未提交（引擎真在等）才显示"Preparing X — still showing Y"，提交时清除。`pending` / `pending_text` / `pending_channel` / `displayed_channel` 在引擎路径读这里的目标与已显示身份。只改参数（`set_params`）时同样只重选被改的方法面板，不改已显示通道，不发 `publication_changed`（同今天），页面照旧排指标。Python 路径一字不改。
+2. **Enter 先同步最新选择再准备**（P2-2）：`CompareEngine.prepare_now(deadline)`：①当前回合内立刻执行排队的三面板同步（不等 `singleShot(0)`），使新来源已登记；②统一 deadline（守护 1.5 s）的准备循环：每个有待换内容的面板 `step_sync`，再一次 `paint_now(present=False)`（三图布局，组提交在其中）；组已提交、无进展、或超时即退出；③已提交则同步呈现；④返回后才 `worker.start()`。由 `_release_explore_for_production(keep_picture=True)` 在三图模式下先调用（全图的 release 照旧）。验收包含"在数值框里输入新值、未失焦、直接回车"的真实按键路径（`a9_drive` 的 `s0cmp_param` 已是真实按键）。
+3. **所有权与边界**（P2-3）：
+   - 宿主**唯一拥有者是全图挂载**（建于全图 `start`，毁于全图 `close`）。`CompareEngine` 只借用；宿主提供 `on_closing` 回调列表，全图挂载销毁宿主前先通知借用者，借用者关闭自己面板的 core 与适配器。正常换数据集的顺序（先拆三图、后拆全图，`step0_page.py:10777`）下借用者已先关闭。
+   - **一切暂停 / 释放 / 关闭只作用于本面板**：`Panel.paused` 取代挂载对 `host.hidden` 的直接写；宿主的 `hidden` = 当前布局的所有面板都暂停。挂载的 `release_for_production` / `_retire_python` / `release_to_coarse` / `close` 只遍历自己面板的 core（全图挂载今天遍历的 `host.cores()` 改为 `panel.cores()`）。`CompareEngine.close()` 在 `CompareStrip.teardown` 最开始（`stacks.teardown()` 关 scheduler 之前）执行，适配器先于其 scheduler 关闭。
+   - 离开 Step0：三图页 / 全图页各自的隐藏事件暂停各自面板（全图今天已如此；三图由 `CompareStrip` 的 `suspend` 与 hide 驱动）。宿主级失败（任一面板）通知所有挂载回 Python 画面（失败回调列表），本数据集不再尝试。
+   - `attach` 拆成首次 `attach`（初始化前）与布局切换 `use_full(view)` / `use_compare(panes, views)`（改父、断开旧 ViewBox 信号、接新信号、重算几何），后者可在初始化后调用。
+   - `_NoPaint`：每个被覆盖的视口一个，覆盖矩形按"宿主几何映射到该视口坐标"计算（不再直接用宿主在父控件里的 `geometry()`）。
+4. **测量**（P2-4）：`_S0CompareDone` 分两种口径，按目标选择在动作时判定：引擎画三图时**只**认宿主 `frameSwapped`、且三个面板的已发布画面都等于本次目标（每面板 `shows_wanted`），记录在那次呈现；Python 画三图时为"三个面板块池都齐之后、三个视口各自完成的下一次绘制"（绘制事件之后的回合记时）。起点：调参用 `step0.param_commit`（Enter 处理入口），换通道用行点击动作。基线按此口径重测，替换 16.9。
+5. **表中意见**：
+   - 显存：三图一个查看器额度不是 Step0 总额度。进入三图时全图面板的 core 释放到粗层（`release_to_coarse`，保留 CPU 缓存与粗层），所以三图期间 Step0 显存 ≈ 一个查看器额度 + 全图粗层 + 各 FBO（`gpu_bytes` 已计入 FBO）；回到全图的耗时在回放中测并报告。`gpu_memory` 的回收按宿主 `hidden`（= 当前布局全部暂停）。
+   - 指标：按面板已发布帧的**准入层**取键是近似（准入层不保证每个像素的实际采样层）；验收固定同一视野、同一层、同一来源身份，与 Python 画三图时的指标比；细化期间指标仍只在静止后计算。
+   - HOT：引擎路径等待期间停 HOT（同今天 pending），提交后恢复；回放中记录 HOT 活跃时的换通道耗时。
+   - 验收补充：窗口缩放 / DPR、DAPI 开关与范围、Marker = DAPI 时去重、三面板 resize 后矩形正确。
+   - Odon 对照更正：Odon 每个瓦片要求所有可用通道齐全才画（`tiles_gl.rs:140`），并非完全不等齐；但没有多视图整组发布。
+
+### 16.14 第三版（回应 `codex_s16_plan_2.out`：首轮四条已关闭，新增一条 P2 与一条建议）
+1. **调参发布后重排指标**（P2）：引擎路径下只改参数的面板组提交时，`_engine_committed(kind="params")` 调页面现有的 `_schedule_compare_metrics()`（同一个定时器，不发 `publication_changed`），使"等待期间指标计划因 pending 被丢弃"之后在新图上屏时再算一次。验收：无补丁的项目，三图下改参数回车，新图异步准备超过指标静止时间（150 ms），新图上屏后指标显示数值而非"—"。
+2. **测量建议**：`_S0CompareDone` 增 `panels` 参数——调参只等被改方法的面板（另两个面板不重绘），换通道等三个。基线调参部分按此重测。
+
+### 16.15 基线重测（新口径，替换 16.9 的数字；`a9_bench/s0a/user/c2_n{0,6,14}`）
+口径：换通道 = 三个视口各自"开始时块池已齐"的那次绘制结束；调参 = 只等被改方法的面板。毫秒：
+| 档 | 换通道（CD8、CD68、CD45RO、CD45RA、CD8、CD163） | 调参（TopHat 15、25、11；cuCIM 40、60、31） |
+|---|---|---|
+| 整图（层 5） | 782、264、391、121、102、92 | 45、29、25、910、156、152 |
+| 中层（层 4） | 805、460、495、279、122、313 | 55、446、159、232、204、179 |
+| 细胞级（层 1） | 920、838、798、432、132、354 | 83、499、515、496、639、563 |
+
+### 16.16 实施记录（2026-10-29，进行中）与一处偏离
+- **宿主拆面板**（`ui/step0/gl_host.py`）：`Panel` 承载 current / candidate / standby、已发布 FBO、`published_view` / `published_level`、门计时（`gate_since`）、`paused`、`keep_standby`、`rect` 与挂钩；`trial_switch` / `trial_candidate` 只试画并返回"提交"闭包，`paint_old` 画旧图（或定格）。宿主 `_paint_panels`：先画所有没有切换的当前画面、试画所有切换，再试画候选；多面板时"所有等待的面板都达标"才提交（否则全不提交），提交前先补画未提交切换的旧图，任何一步失败即返回（失败的绘制里不发布任何东西，保留 `test_a_failing_current_core_never_publishes_a_ready_candidate` 的保证）。旧的宿主属性经 `_forward` 转给全图面板。`hidden` = 当前布局全部面板暂停（全图挂载写 `host.hidden` 即写全图面板）。`use_full` / `use_compare` 改父与重算几何（三面板矩形按各 ViewBox，DPR 换算）；面板间缝隙在 `_present` 里用剪刀测试 + `glClear` 按各自背景色清（最初用 QPainter，在 `show()` 引起的同步绘制里偶发段错误，改为直接 GL；本机 PyQt5 无 `versionFunctions` 模块，四个 GL 1.x 函数取自系统 libGL，`glBindFramebuffer` 取自上下文）。宿主新增 `failure_hooks` / `smooth_hooks` / `closing_hooks` / `commit_hooks`。
+- **挂载**（`engine_mount.py`）：一切 core 操作经 `self.panel`；`start_on(host, panel)` 借用宿主；`budget_share`（全图 2、三图 6）按份额分 GPU 与 CPU 缓存；`group` 不为空时显示变化交给三图引擎同回合同步；拥有者 `close` 先调 `closing_hooks` 再销毁宿主，借用者只清自己的面板；`_NoPaint` 把宿主映射到各视口坐标。
+- **三图引擎**（新 `compare_engine.py`）与 `CompareStrip` / 页面接线按 16.6、16.13、16.14 实现；指标按 16.8（`_CompareMetricFill`）。
+- **偏离（需 codex 与用户知情）——换通道不再新建 core**：首次三图回放（`a9_bench/s0a/user/e1_n6`）换通道 600–1280 ms，比基线慢。时间线：每次换通道三个面板各新建一个 core（各约 20–30 ms），每个新 core 预热显存块约 50–65 ms（串行，第二次扩容再各约 50 ms），旧 core 在发布的那次绘制里关闭各约 18 ms。改为：原图与实时方法的 core 不按通道区分，一个数据集一个"原图 core"（`RAW_CORE`），换通道与 Original ↔ 实时一样，是同一个 core 上的切换（准备中行 + 试画 + 质量门 + 三面板一起提交）；已保存结果仍是自己的 core。全图同样受益（换通道不再建新 core）。测试中按通道断言 core 身份的地方改为断言"同一个 core、画面通道正确"（`test_another_channel_...`、`test_..._never_three`、`test_the_nucleus_is_added_...`）。
+
+### 16.17 代码审核第 1 轮修正（`codex_s16_code_1.out` 否决 5 条 P2 + 测量缺口；RAW_CORE 技术上可接受，待用户确认）
+1. A→B→A（B 未发布）：选择后与每个呈现帧检查"目标已是屏上画面且无等待"即完成（`_engine_target_shown`）。
+2. 构建阶段失败：挂载 `fail()` 之后调用宿主 `_fail`，所有挂载（两种模式）回 Python。
+3. 宿主 `_panels` 登记所有面板（布局外的也算）：显存统计、回收、上下文销毁 / 重建都覆盖暂停的三图面板；借用者关闭时 `forget_panel`。
+4. 引擎画三图时，任一面板有待换画面（含调参）`pending` 即为真，指标不在新画面发布前计算；发布后 `params_published` 重排。
+5. `prepare_now` 覆盖候选 core（保存结果 → 新半径）：`paint_now(candidates=True)`，完成条件"无候选、身份为目标、切换完成"。
+- 测量：`_S0CompareDone` 记下本次动作的目标（通道，或面板与参数值），引擎呈现信号只在目标匹配时结束计时。
+- 新增测试 5 个（共 13 个三图测试）。
+
+### 16.18 代码审核第 2 轮修正（`codex_s16_code_2.out`：首轮五项已关闭，新增一条 P2 与探针建议）
+- 调参改回屏上的值（等待被取消、没有发布）时也重排指标：引擎画三图时 `set_params` 记 `_engine_edit_open`，之后任一呈现帧（或选择后的下一回合）发现"无等待且三面板都是目标"即发 `params_published`。测试 `test_an_edit_taken_back_is_measured_again`。
+- 探针：调参探针同时绑定动作时的通道；Python 口径的完成判定也用本次目标（通道与被改面板的参数值）。
+
+### 16.19 User acceptance fixes (2026-10-29)
+
+1. **Zoom walked out on every compare channel switch.** The pending banner sat in the strip's layout; showing/hiding it resized the aspect-locked ViewBoxes (519 <-> 542 px), each refit wider (8 switches: 0.60 -> 0.25 screen px per level-0 px). Its row is now always reserved (one fixed line). Test `test_channel_switches_keep_the_magnification`.
+2. **Compare drags stuttered** (20-step drag into new tissue 0.60-0.86 s vs 0.34 nominal). Causes (py-spy + an experiment with the patch preload off: 0.35-0.39 s): the preload readers re-opened the qptiff and parsed every page header in Python per read (GIL), `_Gl` rebuilt every frame (`find_library` subprocess; cache keyed on a fresh wrapper's id), saved-product disk checks per paint. Fixes: per-thread open TiffFile/zarr in `OMETIFFLoader._thread_zarr`, `_libgl()` once + `host._gl`, `_saved` cached on `saved_correction.version()` for 1 s. After: preload read 23 ms avg (was 130-340), compare drags 0.34-0.40 s, full 0.33-0.43 s. Codex fix review 1: APPROVED (advisory: idle preload workers may keep the old loader's handles after a dataset change -- bounded).
+
+### 16.20 User acceptance round 2 (2026-10-29)
+
+1. **VISTA -> compare: no drag for 20 s.** A compare mount stopped its Python stack (requests off, scene repaint held) when ITS candidate was published, but the host shows only when all three have a picture: an early panel froze. Now `take_picture()` runs for all three in the turn the host is shown (`CompareEngine._show_if_ready`), at once for later publications. Test `test_a_panel_published_early_keeps_its_python_picture_live` (fails before, passes after). Codex fix review 2: APPROVED.
+2. **"The picture does not stick to the mouse."** Measured with real XTest drags: in-app injection -> frame swapped (a9_xwheel_report) full p50 11 / p95 18 ms, compare 14 / 25-30 ms; on screen (root capture at 120 Hz, phase correlation, scratch `laganal.py`): engine full p50 ~29 ms, compare ~34 ms; old Python picture 43 / 58 ms; Odon (same method, Kevin TMA4 OME-TIFF) ~50-55 ms. The engine moves exactly as far as the view (in-app test: 96 px -> 96 px). Full screen did not change the on-screen lag. The rest is the desktop compositor + 60 Hz scan-out. Bench: a9_bench/s0a/user/make_scen_xdrag.py (+ _fs), lagcap.sh / laganal.py in the session scratchpad.
+
+### 16.21 User acceptance round 3 (2026-10-30): drag in compare, entry time
+
+1. **"Drag does nothing" in compare** -- root cause: swap interval 0 (vsync off). The engine drew unthrottled and starved the GUI thread of input. Vsync is now on by default (`BLOCK01_VSYNC=0` restores the old behaviour); the user confirmed the fix. The three mounts share one manifest.
+2. **Entry wait unacceptable** (target <= 0.4 s). The compare strip is now prepared ahead, hidden: about 600 ms after the full image goes quiet, the three engine cores are built and painted off screen (`GlHost.paint_ahead`), then paused. Entry only resumes them and shows them once all three are ready (`EngineMount.ahead_ready`; the P2-3 gate never shows a stale picture). A channel or parameter change in the full image prepares it again. A move stops the off-screen paints. The size is the real panel size.
+3. **Remaining entry stall.** The owed floor jobs (`_floor_pending`) were started without looking in the shared floor+gain cache that the full image's HOT already fills (`_prepare_centre_floors`). Fixed at three sites in `ExploreController`: restore from the cache first, then let a waiting background request run. Codex r3: one P2 (stranded background request) and one P3 (preparing badge), both fixed. No new idle-time computation was added.
+4. **Codex r2 fixes:** a hidden channel choice now supersedes a pending engine target (stale label). The blocking production hand-off waits until done or the stacks are gone, with no 10 s timeout. The ahead paints stop before preparing again.
+5. **File reader** (`raw_tile_provider`, user-approved): short-lived threads with no handle of their own read through one shared handle, instead of re-parsing the qptiff (~110 ms each, holding the GIL).
+6. **Double right-click** counts as one gesture (`RightClickViewBox`), user-approved: its second half used to close compare again at once.
+7. **Measurement trap:** the bench `_present` glReadPixels probe inflated compare GUI blocks. It now runs only with `DIAG_FB`.
+
+**Results, real machine** (`a9_bench/s0a/user/en25-27`):
+
+| | Before | After |
+|---|---|---|
+| First entry: picture shown | 0.26-0.34 s | 61-84 ms |
+| First entry: longest GUI block | 0.35-0.40 s | 111-135 ms |
+| First entry: first camera move | -- | ~0.1 s |
+| Re-entries: picture shown | -- | ~50 ms |
+
+User acceptance passed 2026-10-30.
+
+**Open:** Step1/2 drag re-measure with vsync on; split `ensure_built`.

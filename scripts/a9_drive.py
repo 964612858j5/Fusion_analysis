@@ -276,6 +276,122 @@ class _S0First(QtCore.QObject):
                 return
 
 
+class _S0CompareDone(QtCore.QObject):
+    """S0-C baseline: after action `n`, the first moment ALL THREE compare
+    panels show the page's channel complete -- each panel's visible tiles at
+    its own level, of its own method and current parameters (Original: raw
+    tiles of the channel) -- as `a9.s0cmp_done` (ms since the action).
+    Measuring only (plan §16.13 4): per panel, the end of the first paint
+    of its viewport that began with its pool complete -- the picture on
+    screen, not the pool. An engine-drawn strip is measured by its own
+    presented frame (`engine_done`, when there is one)."""
+
+    TIMEOUT_S = 90.0
+
+    def __init__(self, page, n, panels=(0, 1, 2), channel=None, param=None):
+        super().__init__(page)
+        self.page, self.n = page, n
+        #: this action's own target (codex S0-C code 1): the channel all
+        #: three must show, or `(panel, value)` the edited panel's parameter
+        self.want_channel, self.want_param = channel, param
+        #: the panels whose picture the action changes (a parameter: its
+        #: method's panel alone -- the other two do not repaint)
+        self.panels = tuple(panels)
+        self.t0 = time.perf_counter()
+        self._queued = False
+        strip = getattr(page, "_compare_strip_widget", None)
+        self.ctls = list(getattr(strip, "controllers", ()) or ())
+        self.viewports = []
+        self._shown = [None if k in self.panels else True for k in range(3)]
+        if len(self.ctls) != 3:
+            perf_trace.mark("a9.s0cmp_done", n=n, error="no compare strip")
+            return
+        engine = getattr(strip, "engine", None)
+        self.engine = None
+        for c in self.ctls:
+            vp = c.view.graphics.viewport()
+            self.viewports.append(vp)
+        if engine is not None and engine.picture == "engine":
+            # §16.13 4: the engine draws -- only its presented frame on which
+            # all three panels show their selections counts, never the pools
+            self.engine = strip.engine_done
+            self.engine.connect(self._engine)
+        else:
+            for vp in self.viewports:
+                vp.installEventFilter(self)
+        QtCore.QTimer.singleShot(int(self.TIMEOUT_S * 1000), self._timeout)
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        # §16.13 4: a viewport's paint SHOWS its panel complete when the
+        # pool was already complete as the paint began; it is done once
+        # that paint has run (the next turn)
+        if event.type() == QtCore.QEvent.Paint and watched in self.viewports:
+            k = self.viewports.index(watched)
+            if self._shown[k] is None and self._complete(self.ctls[k], self.page.current_channel):
+                self._shown[k] = False
+                QtCore.QTimer.singleShot(0, lambda k=k: self._painted(k))
+        return False
+
+    def _painted(self, k):
+        if not self.viewports:
+            return
+        self._shown[k] = True
+        if all(self._shown):
+            self._done(level=self.ctls[0].level, channel=self.page.current_channel)
+
+    def _timeout(self):
+        if self.viewports:
+            self._done(timed_out=True)
+
+    def _engine(self, *_a):
+        """A presented frame on which the three panels show their
+        controllers' selections -- counted only when that is this action's
+        target (an overlapping earlier one does not end this probe)."""
+        ctls = self.ctls
+        if self.want_channel is not None and any(c.channel != self.want_channel for c in ctls):
+            return
+        if self.want_param is not None:
+            k, value = self.want_param
+            if tuple(int(v) for v in ctls[k].params) != (int(value),):
+                return
+        self._done(engine=True)
+
+    def _done(self, **fields):
+        if not self.viewports:
+            return
+        for vp in self.viewports:
+            try:
+                vp.removeEventFilter(self)
+            except RuntimeError:
+                pass
+        self.viewports = []
+        if self.engine is not None:
+            try:
+                self.engine.disconnect(self._engine)
+            except (TypeError, RuntimeError):
+                pass
+        perf_trace.mark("a9.s0cmp_done", n=self.n,
+                        ms=round((time.perf_counter() - self.t0) * 1000.0, 1), **fields)
+        self.deleteLater()
+
+    def _complete(self, c, channel):
+        if self.want_channel is not None:
+            channel = self.want_channel
+        if c.channel != channel or not c._visible_tiles:
+            return False
+        if self.want_param is not None and c is self.ctls[self.want_param[0]]:
+            if tuple(int(v) for v in c.params) != (int(self.want_param[1]),):
+                return False
+        if c.method is None:
+            for tx, ty in c._visible_tiles:
+                entry = c._raw_pool.get(c.level, tx, ty)
+                if entry is None or getattr(entry.key, "channel", None) != channel:
+                    return False
+            return True
+        return bool(c._coverage_complete())
+
+
+
 class Driver(QtCore.QObject):
     def __init__(self, window, actions):
         super().__init__(window)
@@ -438,6 +554,12 @@ class Driver(QtCore.QObject):
     # ── actions ─────────────────────────────────────────────────────────
     def _do_mark(self, a, _t):
         self._next(0)
+
+    def _do_fullscreen(self, a, _t):
+        """Measurement: the main window full screen (a compositor that
+        unredirects full-screen windows skips its own frame)."""
+        self.w.showFullScreen() if a.get("on", True) else self.w.showMaximized()
+        self._next(int(a.get("wait_ms", 2000)))
 
     def _do_pause(self, a, _t):
         self._next(int(a.get("ms", 500)))
@@ -612,7 +734,8 @@ class Driver(QtCore.QObject):
         page = self.w._step0
         box = page._dec_radius if a.get("method", "tophat") == "tophat" else page._dec_sigma
         perf_trace.mark("a9.delivered", n=self.i, kind="keys")
-        _S0First(page, self.i)
+        if not a.get("_nofirst"):
+            _S0First(page, self.i)
         # §15.5 5: real key events, as the user types -- select all, the
         # digits, Return (the GC pacer and Qt see the same input path)
         # (to the spin box, as the keyboard does: it forwards to its line
@@ -628,13 +751,55 @@ class Driver(QtCore.QObject):
                 kind, int(QtCore.Qt.Key_Return), QtCore.Qt.NoModifier, "\r"))
         if box.value() != int(a["value"]):
             perf_trace.mark("a9.s0param_typed_wrong", want=int(a["value"]), got=int(box.value()))
+        if a.get("_nosettle"):
+            self._next(0)
+            return
         self._after_settle(lambda: None, timeout_s=float(a.get("timeout_s", 60)))
+
+    def _do_s0compare(self, a, _t):
+        """Into compare mode at the middle of the full image, as a
+        right-click there does (the page's own entry)."""
+        page = self.w._step0
+        perf_trace.mark("a9.delivered", n=self.i, kind="programmatic")
+        page._enter_compare_mode()
+        self._next(0)          # settle does not know compare mode: the scenario pauses
+
+    def _do_s0compare_exit(self, a, _t):
+        page = self.w._step0
+        perf_trace.mark("a9.delivered", n=self.i, kind="programmatic")
+        page._exit_compare_mode()
+        self._next(0)          # settle does not know compare mode: the scenario pauses
+
+    def _do_s0cmp_channel(self, a, _t):
+        """A channel row click while comparing; `a9.s0cmp_done` times all
+        three panels."""
+        page = self.w._step0
+        perf_trace.mark("a9.delivered", n=self.i, kind="programmatic")
+        _S0CompareDone(page, self.i, channel=a["channel"])
+        page._on_channel_selected_by_id(a["channel"])
+        page._on_channel_row_clicked(a["channel"])
+        self._next(0)          # settle does not know compare mode: the scenario pauses
+
+    def _do_s0cmp_param(self, a, _t):
+        """`s0param` while comparing, timed over all three panels."""
+        k = 1 if a.get("method", "tophat") == "tophat" else 2
+        page = self.w._step0
+        _S0CompareDone(page, self.i, panels=(k,), param=(k, a["value"]), channel=page.current_channel)
+        self._do_s0param(dict(a, _nofirst=True, _nosettle=True), _t)
 
     def _do_camera(self, a, _t):
         """§41: put Step1's camera at (cx, cy) level-0 px, `scale` screen px
         per level-0 px -- through the viewer's own `apply_camera`."""
         mount = getattr(self.w, "_step1_mount", None)
         ok = bool(mount is not None and mount.apply_camera(
+            float(a["cx"]), float(a["cy"]), float(a["scale"])))
+        perf_trace.mark("a9.camera_set", ok=ok, cx=a["cx"], cy=a["cy"], scale=a["scale"])
+        self._next(0)
+
+    def _do_s0camera(self, a, _t):
+        """S0-C: put Step0's camera at (cx, cy) level-0 px, `scale` screen px
+        per level-0 px -- through the page's own `apply_camera_snapshot`."""
+        ok = bool(self.w._step0.apply_camera_snapshot(
             float(a["cx"]), float(a["cy"]), float(a["scale"])))
         perf_trace.mark("a9.camera_set", ok=ok, cx=a["cx"], cy=a["cy"], scale=a["scale"])
         self._next(0)
@@ -664,7 +829,7 @@ class Driver(QtCore.QObject):
             raise RuntimeError("no uncovered viewer point on screen")
         _mark_target(self.i, target)
         layers = [w for w in QtWidgets.QApplication.allWidgets()
-                  if type(w).__name__ in ("Step1GpuLayer", "Step1CoreLayer")   # v16_5 S-Raw
+                  if type(w).__name__ in ("Step1GpuLayer", "Step1CoreLayer", "Step0GlHost")   # v16_5 S-Raw; S0-C
                   and _alive_visible(w)]
         rx = _WheelRx(target, layers)
         g = target.mapToGlobal(pos)
@@ -704,8 +869,13 @@ class Driver(QtCore.QObject):
         for local in candidates:
             g = best.mapToGlobal(local)
             top = QtWidgets.QApplication.widgetAt(g)
+            # S0-C: the Step0 GL host lets the mouse through to the compare
+            # panels laid out under it, in its parent
+            through = best.parentWidget() if best.testAttribute(QtCore.Qt.WA_TransparentForMouseEvents) else None
             if top is not None and top.window() is self.w and (top is best or best.isAncestorOf(top)
-                                                              or top.isAncestorOf(best)):
+                                                              or top.isAncestorOf(best)
+                                                              or (through is not None
+                                                                  and through.isAncestorOf(top))):
                 return top, top.mapFromGlobal(g)
         return None, None
 
@@ -733,6 +903,14 @@ class Driver(QtCore.QObject):
 
     def _do_drag(self, a, _t):
         target, pos = self._viewer()
+        if a.get("cmp_panel") is not None:
+            # a compare panel itself (a popup may sit over the strip's middle)
+            strip = getattr(self.w._step0, "_compare_strip_widget", None)
+            views = strip.views if strip is not None else []
+            k = int(a["cmp_panel"])
+            if k < len(views) and views[k] is not None:
+                target = views[k].graphics.viewport()
+                pos = target.rect().center()
         if target is None:
             raise RuntimeError("no viewer on screen")
         _mark_target(self.i, target)

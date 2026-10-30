@@ -14,6 +14,8 @@ or `/DX:DY:N@MS:BACK` (R6 plan §3, a "stroke": the same drag, but the button
 is released AT THE END POINT, then the pointer moves back to the start with
 no button held and the injector waits BACK ms; logged as kinds "move",
 "release_end" (xy = where it was released) and "hover").
+`R` right-clicks where the pointer is (S0-C: the way into compare);
+`mDX:DY:N@MS` moves the pointer by DX, DY in N steps with no button held.
 `cX:Y` clicks the left button at the absolute screen point (X, Y) (R6 S2:
 the Tissue Preview), logged as kind "click"; a stroke first moves the
 pointer to its start (kind "hover"), so it can follow a click elsewhere.
@@ -90,6 +92,16 @@ def parse(pattern):
             continue
         if tok[0] == "w":
             steps.append(("wait", float(tok[1:]) / 1000.0))
+            continue
+        if tok[0] == "m":                 # S0-C: pointer moves, no button held
+            spec, ms = tok[1:].split("@")
+            dx, dy, n = spec.split(":")
+            for k in range(1, int(n) + 1):
+                steps.append(("wait", float(ms) / 1000.0))
+                steps.append(("move", (float(dx) * k / int(n), float(dy) * k / int(n))))
+            continue
+        if tok == "R":                    # S0-C: a right-click where the pointer is
+            steps.append(("notch", 3))
             continue
         if tok[0] == "c":
             cx, cy = tok[1:].split(":")

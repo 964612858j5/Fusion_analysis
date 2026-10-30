@@ -902,3 +902,13 @@ codex 建议"在现有来源 / 发请求路径里加一种由 Python 完成的�
 User acceptance passed 2026-10-30.
 
 **Open:** Step1/2 drag re-measure with vsync on; split `ensure_built`.
+
+### 16.22 Follow-ups after acceptance (2026-10-30)
+
+1. **Vsync vs Step1/2 drags** (`a9_bench/s0a/user/make_scen_xdrag12.py`, runs `xs12_*`, 3 runs per mode). Injection to on-screen frame, p50: Step1 ~57-60 ms and Step2 ~68-72 ms, the same with vsync on and off. Step1 has occasional stalls of 180-280 ms in both modes, so they are not caused by vsync (backlog).
+2. **Splitting the hidden preparation** (Fable 5b). The 1.17 s GUI block had three parts: the qptiff open (~480 ms), the widgets, and the engine. Changes:
+   - The slide is opened on a worker thread (`CompareStrip.open_source_ahead`). The result is handed over through an app-long `_OpenRelay` holding a weakref to the strip, because the strip can be deleted while the thread runs (codex r4 P1).
+   - The build and the engine preparation run in separate turns, 50 ms apart. The quiet wait still applies between the steps (`_compare_ahead_between`, codex r4 P2).
+   - Codex r4_2 found it ready to commit.
+   - Result: two blocks, about 0.25-0.6 s and about 0.25 s. The remaining time is GIL contention from the new strip's first requests. Entry is unchanged: about 0.09 s the first time, about 0.05 s after.
+3. **Not done** (user, 2026-10-30): the ~4.8 s GUI freeze at slide load. About 2.2 s of it is the full image's engine `_source_setup`.

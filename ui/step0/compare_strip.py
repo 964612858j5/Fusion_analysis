@@ -155,7 +155,7 @@ def build_compare_stacks(path, channel, parent_widget=None, *,
                          tint=None, nucleus_channel=None, nucleus_tint=None,
                          nucleus_enabled=False, viewport_l0=None,
                          overview_store=None, caches=None,
-                         floor_cache=None):
+                         floor_cache=None, provider=None):
     """Build the three tile stacks for `path` over ONE backend.
 
     `overview_store` is the FULL IMAGE's whole-slide overview store, lent
@@ -198,6 +198,10 @@ def build_compare_stacks(path, channel, parent_widget=None, *,
     `build_default_stack` does it last -- before that the controllers are
     blocked on the overview and a camera move would issue nothing.
 
+    `provider` is `path` already opened (`CompareStrip.open_source_ahead`,
+    off the GUI thread); the strip owns it from here exactly as one opened
+    here, failure path included.
+
     The failure path closes whatever was already built. A half-built strip
     must not leave twelve worker threads and an open TIFF handle behind.
     """
@@ -216,12 +220,12 @@ def build_compare_stacks(path, channel, parent_widget=None, *,
     # Match main.py: standalone construction must not render transposed.
     pg.setConfigOptions(imageAxisOrder="row-major")
 
-    provider = None
     scheduler = None
     store = None
     controllers, views, overlays = [], [], []
     try:
-        provider = open_viewer_source(path)        # through PixelSource (A9-P)
+        if provider is None:
+            provider = open_viewer_source(path)    # through PixelSource (A9-P)
         if not channel or channel not in provider.channel_names:
             channel = provider.channel_names[0]
         # ONE of each -- BORROWED from the full image when it has them, so a
@@ -310,6 +314,49 @@ def build_compare_stacks(path, channel, parent_widget=None, *,
         raise
 
 
+class _OpenRelay(QtCore.QObject):
+    """Hands a slide opened on a worker thread to its strip on the GUI
+    thread -- or closes it, when the strip is gone by then. One for the
+    application, never deleted."""
+
+    opened = QtCore.pyqtSignal(object)
+
+    def __init__(self):
+        super().__init__()
+        self.opened.connect(self._deliver, QtCore.Qt.QueuedConnection)
+
+    def _deliver(self, payload):
+        from PyQt5 import sip
+
+        ref, serial, path, provider = payload
+        strip = ref()
+        if strip is None or sip.isdeleted(strip):
+            _close_quietly(provider)
+            return
+        strip._on_source_opened((serial, path, provider))
+
+
+_RELAY = None
+
+
+def _open_relay():
+    """The relay, made on first use -- on the GUI thread, by
+    `open_source_ahead`."""
+    global _RELAY
+    if _RELAY is None:
+        _RELAY = _OpenRelay()
+    return _RELAY
+
+
+def _close_quietly(provider):
+    if provider is None:
+        return
+    try:
+        provider.close()
+    except Exception:                                       # noqa: BLE001
+        pass
+
+
 def _cleanup_partial(controllers, store, scheduler, provider, views):
     """Undo a half-built strip, in the same order a whole one unwinds."""
     try:
@@ -389,6 +436,8 @@ class CompareStrip(QtWidgets.QWidget):
     # S0-C: the frame on which the engine's three panels show the selection
     # reached the screen (measurement)
     engine_done = QtCore.pyqtSignal()
+    # S0-C (Fable 5b): the slide opened ahead (`open_source_ahead`) is ready
+    source_ready = QtCore.pyqtSignal()
 
     def __init__(self, page=None, stack_factory=build_compare_stacks,
                  parent=None):
@@ -398,6 +447,12 @@ class CompareStrip(QtWidgets.QWidget):
         self._stacks = None
         self._dataset_path = None
         self._build_error = None
+        # S0-C (Fable 5b): the slide opened off the GUI thread for the next
+        # build -- the serial of the open in flight, and `(path, provider)`
+        # once it is done (provider None: it failed, the build reports it)
+        self._opening = None
+        self._opening_serial = 0
+        self._opened_source = None
         # Re-entrancy guard for the camera link. A `setRange` on a follower
         # emits its own `sigRangeChanged`, so without this the three would
         # chase each other for as long as floating point kept changing the
@@ -564,6 +619,61 @@ class CompareStrip(QtWidgets.QWidget):
         self._dataset_path = path
         self._build_error = None
 
+    @property
+    def opening_source(self):
+        return self._opening is not None
+
+    def open_source_ahead(self):
+        """S0-C (Fable 5b): open the slide for a build still to come on a
+        worker thread -- parsing a qptiff's page headers is ~0.5 s that was
+        the largest part of the GUI-thread block preparing compare ahead.
+        `source_ready` follows. True while an open is in flight (started
+        now or before); False when there is nothing to open: built, opened
+        already, no dataset, or a builder that takes no provider."""
+        if (self._stacks is not None or not self._dataset_path
+                or self._opened_source is not None
+                or not self._factory_takes("provider")):
+            return False
+        if self._opening is not None:
+            return True
+        self._opening_serial += 1
+        serial, path = self._opening_serial, self._dataset_path
+        self._opening = serial
+        # through the app-long relay, never this strip's own signal: the
+        # strip may be deleted while the thread runs (codex r4 P1)
+        emit, strip = _open_relay().opened.emit, weakref.ref(self)
+
+        def work():
+            from ...viewer.source_tile_provider import open_viewer_source
+            try:
+                provider = open_viewer_source(path)
+            except Exception:                               # noqa: BLE001
+                provider = None
+            emit((strip, serial, path, provider))
+
+        threading.Thread(target=work, daemon=True, name="compare-open-source").start()
+        return True
+
+    def _on_source_opened(self, payload):
+        serial, path, provider = payload
+        if (serial != self._opening or path != self._dataset_path
+                or self._stacks is not None):
+            if serial == self._opening:
+                self._opening = None
+            _close_quietly(provider)
+            return
+        self._opening = None
+        self._opened_source = (path, provider)
+        self.source_ready.emit()
+
+    def _drop_opened_source(self):
+        """An open in flight is disowned (its arrival closes it) and one
+        that landed unused is closed."""
+        self._opening = None
+        opened, self._opened_source = self._opened_source, None
+        if opened is not None:
+            _close_quietly(opened[1])
+
     def _factory_takes(self, name):
         """Whether this strip's builder accepts `name`.
 
@@ -601,6 +711,12 @@ class CompareStrip(QtWidgets.QWidget):
         if not self._dataset_path:
             return None
         extra = {}
+        opened, self._opened_source = self._opened_source, None
+        if opened is not None and opened[1] is not None:
+            if opened[0] == self._dataset_path:
+                extra["provider"] = opened[1]
+            else:
+                _close_quietly(opened[1])
         if floor_cache is not None and self._factory_takes("floor_cache"):
             extra["floor_cache"] = floor_cache
         if caches is not None and self._factory_takes_caches():
@@ -646,6 +762,7 @@ class CompareStrip(QtWidgets.QWidget):
         # be issued into a scheduler that is joining its workers, and no
         # slot fires on a controller that is being destroyed.
         self.stop_hot()
+        self._drop_opened_source()
         # S0-C (§16.13 3): the engine's panels -- their cores and Python
         # sources, whose requests are on the scheduler shut down below -- go
         # before anything else of the strip

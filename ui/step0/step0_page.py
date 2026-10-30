@@ -2845,6 +2845,8 @@ class Step0Page(QWidget):
     #: been still this long -- after loading, a channel or a parameter
     #: change (Fable review 2026-10-30: never while the picture is moved)
     _COMPARE_AHEAD_QUIET_MS = 600
+    #: ...and its steps (open, build, engine) this far apart
+    _COMPARE_AHEAD_STEP_MS = 50
 
     def _schedule_compare_ahead(self):
         """(Re)start the wait before `_prepare_compare_ahead`."""
@@ -2887,8 +2889,27 @@ class Step0Page(QWidget):
         strip = getattr(self, "_compare_strip_widget", None)
         timer = getattr(self, "_compare_ahead_timer", None)
         stopped = strip is not None and strip.stop_engine_ahead()
-        if stopped or (timer is not None and timer.isActive()):
+        opening = strip is not None and strip.opening_source
+        between = getattr(self, "_compare_ahead_between", False)
+        if stopped or opening or between or (timer is not None and timer.isActive()):
             self._schedule_compare_ahead()
+
+    def _watch_compare_source(self, strip):
+        """The slide opened ahead continues the preparation -- unless the
+        full image moved meanwhile: the quiet wait then runs again."""
+        if getattr(self, "_source_watched", None) is not None and self._source_watched() is strip:
+            return
+
+        def _ready(_ref=weakref.ref(self)):
+            page = _ref()
+            if page is None:
+                return
+            timer = getattr(page, "_compare_ahead_timer", None)
+            if timer is None or not timer.isActive():
+                page._prepare_compare_ahead()
+
+        strip.source_ready.connect(_ready)
+        self._source_watched = weakref.ref(strip)
 
     def _compare_ahead_size(self):
         """One compare panel's device size: the panels' own once they have
@@ -2926,12 +2947,43 @@ class Step0Page(QWidget):
         t0 = time.monotonic()
         cx, cy, scale = (float(v) for v in camera)
         built = strip.built
+        if not built:
+            # Fable 5b: one step per turn of the event loop, never the
+            # whole ~1 s at once -- the slide is opened on a worker thread
+            # first (`source_ready` comes back here), then the panels are
+            # built, then (next turn) the engine is prepared
+            strip.set_dataset(self.ome_path)
+            self._watch_compare_source(strip)
+            if strip.open_source_ahead():
+                return
         if self._ensure_compare_strip(channel, (cx, cy), scale) is None:
             return
         if not built:
             strip.suspend("full image",
                           badge="Paused \u2014 the full image is on screen.",
                           wait=False)
+
+            def _next(_ref=weakref.ref(self)):
+                from PyQt5 import sip
+
+                page = _ref()
+                if (page is None or sip.isdeleted(page)
+                        or not page._compare_ahead_between):
+                    return
+                page._compare_ahead_between = False
+                # moved or chosen anew in between: the quiet wait decides
+                # (codex r4 P2)
+                timer = getattr(page, "_compare_ahead_timer", None)
+                if timer is None or not timer.isActive():
+                    page._prepare_compare_ahead()
+
+            self._compare_ahead_between = True
+            # not 0: a zero timer runs before the input and the paints
+            # waiting, and the two steps measured as one block again
+            QTimer.singleShot(self._COMPARE_AHEAD_STEP_MS, _next)
+            perf_trace.mark("step0.compare_ahead_built",
+                            ms=round((time.monotonic() - t0) * 1000.0))
+            return
         size = self._compare_ahead_size()
         if size is None:
             return

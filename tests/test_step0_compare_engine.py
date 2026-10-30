@@ -626,3 +626,96 @@ def test_an_entry_on_screen_releases_nothing_hidden(app, rig):
     assert _wait(app, rig.compare_on, 90)
     assert rig.strip.release_hidden_for_production("test run").is_set()
     assert rig.compare_on()
+
+
+# ── the slide opened ahead, off the GUI thread (Fable 5b) ─────────────
+@pytest.fixture
+def opens(monkeypatch):
+    """Every open of the slide: the thread it ran on and what it returned,
+    whose `close` is counted."""
+    from block01.viewer import source_tile_provider as stp
+    real = stp.open_viewer_source
+    seen = []
+
+    def counted(path, *a, **k):
+        import threading
+        provider = real(path, *a, **k)
+        closes = []
+        orig_close = provider.close
+
+        def close():
+            closes.append(1)
+            return orig_close()
+
+        provider.close = close
+        seen.append((threading.current_thread().name, provider, closes))
+        return provider
+
+    monkeypatch.setattr(stp, "open_viewer_source", counted)
+    return seen
+
+
+def test_the_slide_opened_ahead_is_the_one_the_build_uses(app, rig, opens):
+    ready = []
+    rig.strip.source_ready.connect(lambda: ready.append(1))
+    assert rig.strip.open_source_ahead() is True
+    assert rig.strip.opening_source
+    assert rig.strip.open_source_ahead() is True, "a second open was started"
+    assert _wait(app, lambda: ready, 30), "the open never came back"
+    assert [name for name, _p, _c in opens] == ["compare-open-source"], opens
+    assert rig.strip.open_source_ahead() is False, "opened, but it would open again"
+
+    stacks = rig.strip.ensure_built("CD3", params_for=_params_for, tint=(1.0, 1.0, 1.0))
+    assert stacks is not None
+    assert len(opens) == 1, "the build opened the slide again"
+    assert stacks.provider is opens[0][1]
+    assert rig.strip.open_source_ahead() is False
+
+
+def test_an_open_overtaken_by_the_build_or_a_new_dataset_is_closed(app, rig, opens):
+    import threading
+
+    # the user enters compare while the slide is still being opened
+    assert rig.strip.open_source_ahead() is True
+    stacks = rig.strip.ensure_built("CD3", params_for=_params_for, tint=(1.0, 1.0, 1.0))
+    assert stacks is not None
+    assert _wait(app, lambda: len(opens) == 2 and not any(
+        t.name == "compare-open-source" for t in threading.enumerate()), 30)
+    app.processEvents()
+    late = [p for name, p, c in opens if name == "compare-open-source"]
+    assert len(late) == 1 and stacks.provider is not late[0]
+    assert [c for name, p, c in opens if p is late[0]][0], "the late slide was left open"
+
+    # ...and one that landed unused is closed with the dataset it was for
+    rig.strip.teardown()
+    del opens[:]
+    assert rig.strip.open_source_ahead() is True
+    assert _wait(app, lambda: rig.strip._opened_source is not None, 30)
+    rig.strip.set_dataset(None)
+    assert opens[0][2], "an unused opened slide outlived its dataset"
+
+
+def test_a_strip_deleted_while_its_slide_opens_closes_the_slide(app, slide, opens, monkeypatch):
+    """The open lands after the strip is gone: no crash, the slide closed
+    (codex r4 P1: the strip's own signal was emitted on a deleted object)."""
+    import threading
+    import time as _time
+    from block01.viewer import source_tile_provider as stp
+
+    counted = stp.open_viewer_source
+
+    def slow(path, *a, **k):
+        _time.sleep(0.4)
+        return counted(path, *a, **k)
+
+    monkeypatch.setattr(stp, "open_viewer_source", slow)
+    strip = CompareStrip()
+    strip.set_dataset(slide)
+    assert strip.open_source_ahead() is True
+    strip.deleteLater()
+    app.processEvents()
+    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    del strip
+    assert _wait(app, lambda: opens and not any(
+        t.name == "compare-open-source" for t in threading.enumerate()), 30)
+    assert _wait(app, lambda: opens[0][2], 10), "the slide of a deleted strip was left open"

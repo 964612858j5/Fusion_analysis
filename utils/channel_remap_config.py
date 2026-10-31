@@ -311,10 +311,9 @@ def save_channel_remap_config(config, path):
             + "\n  ".join(errors)
         )
 
-    parent = os.path.dirname(os.path.abspath(path))
-    os.makedirs(parent, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2, sort_keys=False)
+    # atomic (docs/v17_review_fixes_plan.md §4): rewritten in place
+    from ..core import provenance as prov
+    prov.write_json_atomic(path, cfg)
     return cfg
 
 

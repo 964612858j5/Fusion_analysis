@@ -70,6 +70,9 @@ from ...utils.segmentation_config import (
     MESMER_NUCLEI,
     MESMER_NUCLEAR_GUIDED,
     available_segmentation_methods,
+    RetiredMethodError,
+    is_retired_method,
+    retired_method_message,
     get_segmentation_method_config,
     normalize_segmentation_config,
 )
@@ -1192,10 +1195,20 @@ class SearchCtrlPanel(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "Error", "Failed to load params:\n" + str(e))
 
+    def check_method_offered(self, method):
+        """Raise ValueError unless the method box offers `method`: a retired
+        method (docs/v17_review_fixes_plan.md §1) or any other unlisted one is
+        refused, never silently replaced by the method on screen."""
+        if is_retired_method(method):
+            raise RetiredMethodError(retired_method_message(method))
+        if self._method_combo.findData(method) < 0:
+            raise ValueError(f"Unknown segmentation method: {method}")
+
     def apply_seg_config_to_ui(self, cfg):
         """Restore method-specific parameter widgets from a saved config."""
         p = normalize_segmentation_config(cfg or {})
         method = p.get("method") or CELLPOSE_WHOLECELL_FUSION
+        self.check_method_offered(method)           # before any widget changes
         idx = self._method_combo.findData(method)
         if idx >= 0:
             self._method_combo.setCurrentIndex(idx)

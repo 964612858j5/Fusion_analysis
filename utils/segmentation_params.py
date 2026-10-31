@@ -62,8 +62,9 @@ def save_segmentation_params(output_dir, config):
         "history": history,
         "updated_at": updated,
     })
-    with open(params_index_path(output_dir), "w", encoding="utf-8") as f:
-        json.dump(index, f, indent=2, ensure_ascii=False)
+    # atomic (review fixes §4): the index lists every saved parameter file
+    from ..core import provenance as prov
+    prov.write_json_atomic(params_index_path(output_dir), index)
     return _abs(path), index
 
 

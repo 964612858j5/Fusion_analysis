@@ -488,6 +488,11 @@ class Step4Page(QWidget):
         )
         self._batch_btn.clicked.connect(self._open_batch)
         nav.addWidget(self._batch_btn)
+        # Hidden (user ruling 2026-10-31, docs/v17_review_fixes_plan.md §2):
+        # the dialog globs the legacy `segmentation_runs/seg_*` layout,
+        # quantifies only the first region and reports success when every
+        # sample failed. Kept in code until it is rebuilt.
+        self._batch_btn.setVisible(False)
 
         self._btn_stop = QPushButton('⏹ Stop')
         self._btn_stop.setEnabled(False)

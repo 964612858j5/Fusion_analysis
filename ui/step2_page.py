@@ -36,13 +36,17 @@ from ..utils.segmentation_config import (
     STARDIST_NUCLEI_EXPANSION,
     available_segmentation_methods,
     get_segmentation_method_config,
+    RetiredMethodError,
+    is_retired_method,
     normalize_segmentation_config,
+    retired_method_message,
 )
 from ..utils.segmentation_params import (
     PARAM_INDEX,
     params_index_path,
 )
 from ..utils.tile_strategy import suggest_tile_strategy
+from ..core.provenance import write_json_atomic
 from ..utils.roi_project import mark_roi_step
 from ..workers.hq_marker_segmentation import (
     CONSENSUS_MODES,
@@ -1332,7 +1336,15 @@ class Step2Page(QWidget):
 
     def apply_draft(self, draft):
         """Put a saved Step2 draft back on screen."""
-        cfg = normalize_segmentation_config((draft or {}).get("segmentation_config") or {})
+        try:
+            cfg = normalize_segmentation_config((draft or {}).get("segmentation_config") or {})
+            if cfg:
+                self._check_method_offered(cfg.get("method"))
+        except ValueError as exc:
+            # Refused whole: nothing of the draft is applied (plan §1, §6b).
+            print(f"[Step2] Step2 draft not restored: {exc}")
+            QMessageBox.warning(self, "Step2", f"The saved Step2 settings were not restored.\n\n{exc}")
+            return False
         if not cfg:
             return False
         cfg = self._without_handover_regions(dict(cfg))   # an older draft may still carry them
@@ -1368,7 +1380,10 @@ class Step2Page(QWidget):
     def _same_effective_settings(a, b):
         """Do two Step2 configurations run the same: method and parameters
         (normalised), whatever their bookkeeping fields?"""
-        na, nb = normalize_segmentation_config(dict(a or {})), normalize_segmentation_config(dict(b or {}))
+        try:
+            na, nb = normalize_segmentation_config(dict(a or {})), normalize_segmentation_config(dict(b or {}))
+        except ValueError:                       # an unknown method is never "the same"
+            return False
         return na.get("method") == nb.get("method") and \
             dict(na.get("params") or {}) == dict(nb.get("params") or {})
 
@@ -1535,11 +1550,9 @@ class Step2Page(QWidget):
         if not load:
             self._seg_param_file = display_path
             return
+        # (a failed load has already said why: one dialog, not two)
         if display_path and self._load_seg_params_index(display_path, silent=False, apply_active=False):
             self._set_param_source("index")
-            return
-        if display_path:
-            QMessageBox.warning(self, 'Error', 'Select segmentation_params/ or segmentation_params_index.json.')
 
     def _resolve_seg_params_index_path(self, path):
         path = os.path.abspath(path or "")
@@ -1582,6 +1595,13 @@ class Step2Page(QWidget):
             methods = index.get("methods") or {}
             if not methods:
                 raise ValueError('segmentation_params_index.json has no methods.')
+            # Retired methods (plan §1) are not offered.
+            retired_active = index.get("active_method") if is_retired_method(
+                index.get("active_method")) else None
+            methods = {m: v for m, v in methods.items() if not is_retired_method(m)}
+            if not methods:
+                raise RetiredMethodError('segmentation_params_index.json lists only methods '
+                                         'that are no longer available in Block01.')
             self._seg_params_index = index
             self._seg_params_dir = os.path.dirname(index_path)
             self._seg_params_edit.setText(index_path)
@@ -1603,6 +1623,12 @@ class Step2Page(QWidget):
             finally:
                 self._loading_index_selection = False
 
+            if retired_active:
+                # said even when quiet: the saved choice is not the one used
+                QMessageBox.information(
+                    self, 'Step2', f"{retired_method_message(retired_active)} Its saved "
+                    f"parameters are not used; {self._method_display_name(active_method)} "
+                    "is selected instead.")
             ok = True
             if apply_active:
                 ok = self._apply_index_method(active_method, active_file, silent=silent)
@@ -1611,7 +1637,7 @@ class Step2Page(QWidget):
                 print(f"[Step2] index={index_path}")
             return ok
         except Exception as e:
-            if not silent:
+            if not silent or isinstance(e, RetiredMethodError):
                 QMessageBox.warning(self, 'Error', str(e))
             else:
                 print(f'[Step2] failed to load segmentation params index: {e}')
@@ -1683,7 +1709,7 @@ class Step2Page(QWidget):
             print(f"[Step2] param_file={path}")
             return True
         except Exception as e:
-            if not silent:
+            if not silent or isinstance(e, RetiredMethodError):
                 QMessageBox.warning(self, 'Error', str(e))
             else:
                 print(f'[Step2] failed to load segmentation params: {e}')
@@ -2542,8 +2568,18 @@ class Step2Page(QWidget):
         elif self._csd_constraint_mode.currentData() == 'none':
             self._csd_constraint_mode.setCurrentIndex(max(0, self._csd_constraint_mode.findData('per_cell_best_channel')))
 
+    def _check_method_offered(self, method):
+        """Raise ValueError unless `method` is one the method box offers: a
+        retired method (plan §1) or any other unlisted one is refused, never
+        silently replaced by the method on screen."""
+        if is_retired_method(method):
+            raise RetiredMethodError(retired_method_message(method))
+        if self._method_combo.findData(method) < 0:
+            raise ValueError(f"Unknown segmentation method: {method}")
+
     def _apply_seg_config_to_ui(self, p):
         method = p.get('method', CELLPOSE_WHOLECELL_FUSION)
+        self._check_method_offered(method)          # before any widget changes
         idx = self._method_combo.findData(method)
         if idx >= 0:
             self._method_combo.setCurrentIndex(idx)
@@ -3019,8 +3055,7 @@ class Step2Page(QWidget):
         try:
             os.makedirs(out_dir, exist_ok=True)
             out_path = os.path.join(out_dir, "channel_remap_config.step2ready.json")
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(runtime, f, indent=2, ensure_ascii=False)
+            write_json_atomic(out_path, runtime)     # atomic: review fixes §4
         except Exception as exc:
             self._set_remap_status(f"Step0 remap NOT applied — write error: {exc}")
             return
@@ -3352,6 +3387,10 @@ class Step2Page(QWidget):
         if not self._stardist_grid_ok_for_run():
             return
         seg_config = self.get_seg_config()
+        if is_retired_method(seg_config.get("method")):
+            # Defence in depth (plan §1): no route runs a retired method.
+            QMessageBox.warning(self, 'Step2', retired_method_message(seg_config.get("method")))
+            return
         if self._region_fused_paths:                # block RM: the chosen fuse run's
             seg_config["region_fused_paths"] = dict(self._region_fused_paths)
         identity_confirmation = None

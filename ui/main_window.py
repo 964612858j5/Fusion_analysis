@@ -46,6 +46,7 @@ from ..core.channel_remap import (
     compute_qupath_auto_minmax,
 )
 from ..core.io_loader import OMETIFFLoader
+from ..core.provenance import write_json_atomic
 from ..core import config_hash as _config_hash
 from ..utils import perf_trace
 from ..utils.segmentation_config import (
@@ -4371,8 +4372,6 @@ class MainWindow(QMainWindow):
         ome_path = manifest.get("raw_ome_path") or ""
         if not ome_path or not os.path.exists(ome_path):
             print("[Step1] authoritative manifest has no usable raw OME path")
-            return False
-        if not ome_path or not os.path.exists(ome_path):
             if not auto:
                 QMessageBox.warning(self, "Step1", "Raw OME-TIFF path missing.")
             return False
@@ -4755,8 +4754,8 @@ class MainWindow(QMainWindow):
         try:
             os.makedirs(out_dir, exist_ok=True)
             path = self._step1_session_path(out_dir)
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, ensure_ascii=False)
+            # atomic (review fixes §4): an autosave never truncates the session
+            write_json_atomic(path, payload)
             print("[Step1] session autosaved")
         except Exception:
             print(f"[Step1] failed to autosave session:\n{traceback.format_exc()}")
@@ -5154,6 +5153,10 @@ class MainWindow(QMainWindow):
         if not manifest_path:
             self._refuse_session("This session names no Step0 manifest.")
             return False
+        # Checked BEFORE anything is restored (docs/v17_review_fixes_plan.md
+        # §1): segmentation parameters naming a retired or unknown method are
+        # dropped -- the rest of the session is still valid and restores.
+        sess, dropped = self._step1_session_without_unoffered_method(sess)
 
         # Preserve and validate an already-bound handoff before replacing the
         # small payload used to invoke the authoritative reader.
@@ -5199,7 +5202,31 @@ class MainWindow(QMainWindow):
         )
         if ok:
             self._rm_restore_preseg(sess.get("preseg"))
+            if dropped:
+                QMessageBox.information(
+                    self, "Step1 session",
+                    f"The session was restored without its segmentation parameters:\n\n{dropped}")
         return ok
+
+    def _step1_session_without_unoffered_method(self, sess):
+        """(session, reason): `p2_params` -- and an active method naming the
+        same -- removed when the parameter panel does not offer its method."""
+        sess = dict(sess or {})
+        params = sess.get("p2_params")
+        method = (params or {}).get("method") if isinstance(params, dict) else None
+        check = getattr(self.__dict__.get("search"), "check_method_offered", None)
+        if not method or check is None:
+            return sess, ""
+        try:
+            check(method)
+        except ValueError as exc:
+            sess.pop("p2_params", None)
+            if sess.get("active_segmentation_method") == method:
+                sess.pop("active_segmentation_method", None)
+            print(f"[Step1] session segmentation parameters dropped: {exc}")
+            return sess, str(exc)
+        return sess, ""
+
 
     def _rm_preseg_state(self):
         """What the pre-segmentation tab holds, for the Step1 draft."""

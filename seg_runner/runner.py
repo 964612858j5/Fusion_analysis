@@ -38,14 +38,36 @@ def engine_identity(engine, engine_obj=None):
     return engines.behavior_identity(engine)
 
 
-def _git_commit():
+#: What counts as code for the dirty mark -- the same rule as
+#: `core.provenance.CODE_PATHSPECS` (this runner lives in the engine
+#: environments and does not import the app).
+_CODE_PATHSPECS = ("*.py", "*.rs", "*.frag", "*.vert")
+
+
+def _describe_checkout():
+    """`<short hash>`, `-dirty` marked when a code file differs, or None."""
     try:
         import subprocess
         out = subprocess.run(["git", "-C", str(_REPO), "rev-parse", "--short", "HEAD"],
                              capture_output=True, text=True, timeout=5)
-        return out.stdout.strip() or None
+        commit = out.stdout.strip()
+        if not commit:
+            return None
+        status = subprocess.run(["git", "-C", str(_REPO), "status", "--porcelain", "--",
+                                 *_CODE_PATHSPECS], capture_output=True, text=True, timeout=5)
+        if status.returncode != 0:
+            return commit
+        return commit + ("-dirty" if status.stdout.strip() else "")
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
+
+
+#: captured at import, i.e. when this engine process started (§6c)
+_COMMIT = _describe_checkout()
+
+
+def _git_commit():
+    return _COMMIT
 
 
 def engine_provenance(engine, engine_obj):

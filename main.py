@@ -15,6 +15,10 @@ from .utils.gui_watchdog import start_gui_watchdog
 
 
 def main():
+    # The code version results record, captured before anything runs
+    # (docs/v17_review_fixes_plan.md §6c).
+    from .core import provenance
+    provenance.git_commit()
     # Block A9 §35: how long a thread may hold the GIL while the GUI thread
     # waits for it (CPython's default is 5 ms). Measurement switch for now.
     import os

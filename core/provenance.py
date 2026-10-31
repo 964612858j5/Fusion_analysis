@@ -233,16 +233,40 @@ def safe_register(project_dir, kind, loc, token, **kw) -> Optional[str]:
         return None
 
 
-def git_commit() -> str:
-    """The checkout's commit for `software`, or "" (never raises)."""
+#: What counts as code for the dirty mark: other files (logs, notes) do not.
+CODE_PATHSPECS = ("*.py", "*.rs", "*.frag", "*.vert")
+_COMMIT = None
+
+
+def describe_checkout(repo) -> str:
+    """`<short hash>`, `<short hash>-dirty` when a code file (tracked and
+    changed, or untracked) differs from it, or "" (never raises)."""
     try:
         import subprocess
-        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=here,
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=repo,
                              capture_output=True, text=True, timeout=5)
-        return out.stdout.strip() if out.returncode == 0 else ""
+        if out.returncode != 0:
+            return ""
+        commit = out.stdout.strip()
+        status = subprocess.run(["git", "status", "--porcelain", "--", *CODE_PATHSPECS],
+                                cwd=repo, capture_output=True, text=True, timeout=5)
+        if status.returncode != 0:
+            return commit
+        return commit + ("-dirty" if status.stdout.strip() else "")
     except Exception:
         return ""
+
+
+def git_commit() -> str:
+    """The checkout's commit for `software` (docs/v17_review_fixes_plan.md
+    §6c): marked `-dirty` when the code differs from it. Captured ONCE per
+    process -- `main.py` calls this at start-up -- so it describes the code
+    that was loaded, not whatever the tree holds later."""
+    global _COMMIT
+    if _COMMIT is None:
+        _COMMIT = describe_checkout(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return _COMMIT
 
 
 # ── producers (block A3 2/3, 3/3) ───────────────────────────────────────

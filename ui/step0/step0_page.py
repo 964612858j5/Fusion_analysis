@@ -3,6 +3,7 @@ block01/ui/step0/step0_page.py — Step0Page (main Step 0 QWidget).
 """
 
 import os
+import copy
 import gc
 import math
 import json
@@ -52,6 +53,7 @@ from ...core.bg_correction import (
 )
 from ...core import step0_handoff
 from ...core.io_loader import OMETIFFLoader
+from ...core.provenance import write_json_atomic
 from ...core.fusion_engine import FusionEngine
 from ...workers.geometry_persist_worker import GeometryPersistWorker
 from ...workers import preload_scheduler
@@ -102,6 +104,22 @@ from ..block01_display import (
     Block01DisplayServices, STEP0 as _CTX_STEP0, _to_hex as _color_hex,
 )
 from .roi_context_model import RoiContextModel, patch_color, patch_name
+
+
+def _write_bytes_atomic(path, data):
+    """`data` to `path` through a temporary file, fsync and one rename (the
+    kept correction settings put back exactly as they were)."""
+    folder = os.path.dirname(os.path.abspath(path)) or "."
+    tmp = os.path.join(folder, f".{os.path.basename(path)}.restore.tmp")
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 def patch_button_qss(color):
@@ -7112,7 +7130,7 @@ class Step0Page(QWidget):
                  if ch and ch != getattr(self, "nucleus_channel", None)]
         names = names or ["CHANNEL"]
         width = max(metrics.horizontalAdvance(
-            f"Saved: {ch} {method}  (r={radius}, σ={sigma})")
+            f"Unsaved: {ch} {method}  (r={radius}, σ={sigma})")
             for ch in names for method in ("tophat", "cucim"))
         # PLUS ONE `Background Correction` TAB (user ruling, 2026-09-23): the
         # `Saved: …` line alone left the line's other messages -- "<channel>:
@@ -9383,6 +9401,7 @@ class Step0Page(QWidget):
         # thrown away: the old result stays visible until a Process replaces
         # it, and the glyph is what says it was made with other parameters.
         self._refresh_channel_state(ch)
+        self._show_decision_status(ch)          # now Unsaved (or Saved again)
         # Recompute only the tiled view the user can currently see. Compare
         # owns three visible method controllers; Full Image owns the one
         # source chosen in its toolbar. Patches are navigation bookmarks, not
@@ -9428,6 +9447,96 @@ class Step0Page(QWidget):
         self._on_dec_param_changed(method)
         self._process_current_channel(method)
 
+    # ── saved or not (user ruling 2026-10-31) ──────────────────────────────
+    # "Saved:" says the channel's setting IS the workspace's saved one; an
+    # edit that was not saved (a draft, a cancelled Save) says "Unsaved:".
+
+    @staticmethod
+    def _channel_effect(config, ch):
+        """What `config` does to `ch`: ("original",), or (method, its
+        effective parameter)."""
+        if not isinstance(config, dict):
+            return None
+        decision = step0_handoff.migrate_correction_decision(
+            (config.get("channel_decisions") or {}).get(ch, "original"))
+        if decision not in ("tophat", "cucim"):
+            return ("original",)
+        radius, sigma = resolve_effective_correction_params(
+            config.get("method_params") or {}, config.get("channel_params") or {}, ch)
+        return (decision, int(radius) if decision == "tophat" else int(sigma))
+
+    def _saved_correction_config(self):
+        """The workspace's saved correction settings, or None (none saved).
+        While a Save runs, the file already holds its new settings: until it
+        completes, the saved ones are those it kept (`_rm_keep_settings`)."""
+        kept = self.__dict__.get("_rm_kept_settings")
+        if kept:
+            try:
+                return json.loads(kept["bytes"]) if kept["bytes"] is not None else None
+            except ValueError:
+                return None
+        step0_dir = ((self._roi_context or {}).get("step_dirs") or {}).get("step0")
+        path = os.path.join(step0_dir, "correction_config.json") if step0_dir else ""
+        if not path or not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
+    def _channel_is_saved(self, ch):
+        try:
+            current = self._build_config()
+        except ValueError:
+            return False
+        return self._channel_effect(current, ch) == self._channel_effect(
+            self._saved_correction_config(), ch)
+
+    def _show_decision_status(self, ch):
+        """The decision line of `ch`: Saved / Unsaved with its setting."""
+        if not ch or ch == self.nucleus_channel or ch not in self._channel_rows:
+            return
+        decision = self._channel_final_decision(ch)
+        saved = self._channel_is_saved(ch)
+        if decision != "original":
+            tr, cs = self._resolve_channel_params(ch)
+            prefix = "Saved" if saved else "Unsaved"
+            self._decision_status.setText(f"{prefix}: {ch} {decision}  (r={tr}, σ={cs})")
+        elif saved:
+            self._decision_status.setText(
+                f"{ch}: set radius/sigma, pick a method, press Enter.")
+        else:
+            self._decision_status.setText(f"Unsaved: {ch} original")
+
+    def _unsaved_channels(self, shown, saved):
+        """[(channel, shown effect, saved effect)] where `shown` differs."""
+        out = []
+        for ch in self._channel_order:
+            if not ch or ch == self.nucleus_channel:
+                continue
+            a, b = self._channel_effect(shown, ch), self._channel_effect(saved, ch)
+            if a != b:
+                out.append((ch, a, b))
+        return out
+
+    @staticmethod
+    def _effect_text(effect):
+        if not effect or effect[0] == "original":
+            return "Original"
+        name, value = effect
+        return f"TopHat r={value}" if name == "tophat" else f"cuCIM σ={value}"
+
+    def _warn_unsaved_draft(self, rows):
+        """One notice on opening a workspace whose draft was never saved."""
+        lines = "\n".join(f"  {ch}: {self._effect_text(a)}  (saved: {self._effect_text(b)})"
+                          for ch, a, b in rows)
+        QMessageBox.information(
+            self, "Unsaved Step0 changes",
+            "These channels' background-correction changes were not saved "
+            f"successfully:\n\n{lines}\n\nThey are shown as unsaved; press Save to keep "
+            "them.")
+
     def _update_decision_ui(self):
         ch = self.current_channel
         enabled = bool(ch and ch != self.nucleus_channel and ch in self._channel_rows)
@@ -9453,11 +9562,7 @@ class Step0Page(QWidget):
             self._dec_radius.setValue(tr)
             self._dec_sigma.setValue(cs)
             self._sync_dec_param_enabled()
-            if decision != "original":
-                self._decision_status.setText(f"Saved: {ch} {decision}  (r={tr}, σ={cs})")
-            else:
-                self._decision_status.setText(
-                    f"{ch}: set radius/sigma, pick a method, press Enter.")
+            self._show_decision_status(ch)
         finally:
             self._loading_decision = False
         self._refresh_remap_state_label()
@@ -10885,9 +10990,7 @@ class Step0Page(QWidget):
         # `_on_dec_param_changed`. Applying a METHOD must not freeze the other,
         # inherited parameter as a local override.
         self._refresh_channel_row(ch)      # re-derives the row's state too
-        self._decision_status.setText(
-            f"Saved: {ch} {decision}  (r={self._dec_radius.value()}, "
-            f"σ={self._dec_sigma.value()})")
+        self._show_decision_status(ch)
 
     def _process_current_channel(self, method=None):
         """Recompute one method for one channel across all patches.
@@ -10937,9 +11040,11 @@ class Step0Page(QWidget):
             # that Save/Process could mistake for an all-patch result.
             label = {"tophat": "TopHat", "cucim": "cuCIM"}.get(
                 method, "Correction")
+            state = ("saved" if self._channel_is_saved(self.current_channel)
+                     else "unsaved until Save")
             self._decision_status.setText(
-                f"{label} parameter saved. Current-viewport preview does not "
-                "require a patch; patches are optional navigation bookmarks.")
+                f"{label} parameter set ({state}). Current-viewport preview "
+                "does not require a patch; patches are optional navigation bookmarks.")
             return
         busy = self.production_correction_busy()
         if busy:
@@ -11539,6 +11644,10 @@ class Step0Page(QWidget):
         draft = self._rm_step0_draft(ws)
         shown = (draft or {}).get("correction_config") or config
         self._apply_correction_config_to_ui(shown)
+        unsaved = self._unsaved_channels(shown, config) if draft else []
+        if unsaved:
+            # after the open has finished drawing (user ruling 2026-10-31)
+            QTimer.singleShot(0, lambda rows=unsaved: self._warn_unsaved_draft(rows))
 
         # What the workspace already holds corrected counts as computed.
         sigs, _bboxes = read_corrected_zarr_state(zarr_path)
@@ -11883,7 +11992,8 @@ class Step0Page(QWidget):
         ws = (self._roi_context or {}).get("roi_dir")
         if not ws:
             return base_path or self._rm_base_corrected_path()   # in place, no runs
-        self._rm_discard_pending("superseded by a new Save")
+        # not an end of THIS Save: its kept settings stay kept (plan §3.5)
+        self._rm_discard_pending("superseded by a new Save", settings=False)
         run_dir = run_store.new_run(ws, "correct")
         self._rm_pending_run = run_dir
         zarr_path = os.path.join(run_dir, "corrected_channels.zarr")
@@ -11921,7 +12031,11 @@ class Step0Page(QWidget):
         dataset switch) discards the unpublished run and gives the viewer
         back. A hand-off still in progress is never a reason to start."""
         import threading
-        zarr_path = self._rm_new_correct_run(base_path, copy=copy, defer_copy=True)
+        try:
+            zarr_path = self._rm_new_correct_run(base_path, copy=copy, defer_copy=True)
+        except Exception:
+            self._rm_discard_pending("the correct run could not be created")
+            raise
         needs_copy = bool(copy and base_path and os.path.isdir(base_path)
                           and os.path.abspath(zarr_path) != os.path.abspath(base_path)
                           and not os.path.exists(zarr_path))
@@ -12025,13 +12139,71 @@ class Step0Page(QWidget):
         timer.timeout.connect(poll)
         timer.start()
 
-    def _rm_discard_pending(self, reason):
-        """Remove the correct run this Save started and did not publish."""
+    def _rm_discard_pending(self, reason, settings=True):
+        """Remove the correct run this Save started and did not publish, and
+        -- `settings`, every end of an unfinished Save -- put back the
+        settings it replaced (docs/v17_review_fixes_plan.md §3)."""
         run_dir = self.__dict__.get("_rm_pending_run")
         self._rm_pending_run = None
         if run_dir and not run_store.is_done(run_dir):
             run_store.discard(run_dir)
             print(f"[Step0] correct run {os.path.basename(run_dir)} discarded ({reason})")
+        if settings:
+            self._rm_restore_settings(reason)
+
+    def _rm_keep_settings(self, config_path):
+        """What a Save is about to replace: the correction settings file (its
+        bytes, or that there was none), the loader's settings and the
+        corrected store it reads. Independent of any pending run."""
+        path = os.path.abspath(config_path)
+        try:
+            with open(path, "rb") as f:
+                previous = f.read()
+        except FileNotFoundError:
+            previous = None
+        loader = self.loader
+        binding = getattr(loader, "corrected_store_binding", None)
+        self._rm_kept_settings = {
+            "path": path,
+            "bytes": previous,
+            "loader": loader,
+            "config": copy.deepcopy(getattr(loader, "correction_config", None)),
+            "store": binding() if binding is not None else None,
+        }
+
+    def _rm_forget_settings(self):
+        self._rm_kept_settings = None
+
+    def _rm_restore_settings(self, reason):
+        """Put back what `_rm_keep_settings` kept, then forget it. The file
+        always; the loader only if it is still the same one (another dataset
+        took its place otherwise), its corrected store through
+        `_apply_corrected_store` so the preview cache follows."""
+        kept = self.__dict__.get("_rm_kept_settings")
+        self._rm_kept_settings = None
+        if not kept:
+            return
+        path = kept["path"]
+        try:
+            if kept["bytes"] is None:
+                if os.path.exists(path):
+                    os.remove(path)
+            else:
+                _write_bytes_atomic(path, kept["bytes"])
+        except OSError as exc:
+            print(f"[Step0] the previous correction settings could not be put back "
+                  f"({reason}): {exc}")
+        self._show_decision_status(self.current_channel)    # now "Unsaved"
+        loader = kept["loader"]
+        if loader is None or loader is not self.loader:
+            print(f"[Step0] previous correction settings file restored ({reason})")
+            return
+        loader.set_correction_config(kept["config"])
+        store = kept["store"]
+        binding = getattr(loader, "corrected_store_binding", None)
+        if store is not None and binding is not None and binding() != store:
+            self._apply_corrected_store(store[0], store[1])
+        print(f"[Step0] previous correction settings restored ({reason})")
 
     def _rm_publish_correct_run(self, run_dir, spec):
         """params.json, inputs.json, then .done (application §4): the run's
@@ -12275,8 +12447,10 @@ class Step0Page(QWidget):
         intensity_changed = self._intensity_settings_changed()
 
         def _write_current_correction_config():
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
+            # The previous settings are kept until this Save completes or
+            # ends unfinished (docs/v17_review_fixes_plan.md §3).
+            self._rm_keep_settings(config_path)
+            write_json_atomic(config_path, config)
             self.loader.set_correction_config(config)
 
         def _confirm_actual_save():
@@ -12314,10 +12488,15 @@ class Step0Page(QWidget):
             # Block RM (§16.3-3): the first Save makes a correct run even
             # without corrected channels; later it is reused unless pixels
             # change (a channel withdrawn, or another region).
-            if not base_path or base_sigs or region_rewritten:
-                zarr_path = self._rm_new_correct_run()
-            if not os.path.exists(zarr_path):
-                self._ensure_empty_corrected_zarr(zarr_path, rois)
+            try:
+                if not base_path or base_sigs or region_rewritten:
+                    zarr_path = self._rm_new_correct_run()
+                if not os.path.exists(zarr_path):
+                    self._ensure_empty_corrected_zarr(zarr_path, rois)
+            except Exception:
+                # an unfinished Save: its run goes, the previous settings come back
+                self._rm_discard_pending("the correct run could not be created")
+                raise
             # Reconciles the cache: previously corrected channels revert to raw.
             self._apply_corrected_store(None, {})
             if not self._emit_complete(config, zarr_path, {}):
@@ -12812,6 +12991,8 @@ class Step0Page(QWidget):
             self._last_handoff_run = run
         if new_run:
             self._handoff_windows_to_shared()
+        self._rm_forget_settings()                 # this Save completed (plan §3.6)
+        self._show_decision_status(self.current_channel)
         self.step0_complete.emit(
             self._handoff_payload(config, rois, decisions, manifest, zarr_path))
         return True

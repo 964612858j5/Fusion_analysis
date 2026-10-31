@@ -304,10 +304,15 @@ def test_the_csv_keeps_full_precision_while_the_h5ad_is_float32(tmp_path):
     finally:
         reader.close()
     ci = header.index("CD3_std")
-    want = ["%.6g" % v for v in exact.sink.read("cell_std")[:, 1]]
-    assert [r[ci] for r in rows] == want
+    want = exact.sink.read("cell_std")[:, 1]
+    got = np.array([float(r[ci]) for r in rows])
+    # Lossless (review fixes §5): the CSV reads back the same float64 ...
+    assert np.array_equal(got, want)
     assert json.load(open(res["provenance"]))["settings"]["sink_dtype"] == "f8"
-    assert _read(res["h5ad"]).layers["cell_std"].dtype == np.float32
+    layer = _read(res["h5ad"]).layers["cell_std"]
+    assert layer.dtype == np.float32
+    # ... and its float32 conversion is the h5ad's value
+    assert np.array_equal(got.astype(np.float32), np.asarray(layer)[:, 1])
 
 
 

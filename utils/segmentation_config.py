@@ -341,8 +341,29 @@ def step2_source_aware_runtime_enabled():
         in {"1", "true", "yes", "on"}
 
 
+#: Methods no longer maintained (user ruling 2026-10-31,
+#: docs/v17_review_fixes_plan.md §1): not listed, not applied, not run. Their
+#: registry entries and worker code stay; no run made by them exists.
+RETIRED_METHODS = (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)
+
+
+class RetiredMethodError(ValueError):
+    """A configuration names a retired method: always said to the user,
+    even on a path that is otherwise quiet."""
+
+
+def is_retired_method(method):
+    return str(method or "") in RETIRED_METHODS
+
+
+def retired_method_message(method):
+    name = SEGMENTATION_METHODS.get(str(method), {}).get("display_name") or str(method)
+    return f"{name} is no longer available in Block01."
+
+
 def available_segmentation_methods():
-    return list(SEGMENTATION_METHODS.keys())
+    """The methods a method box lists: the registry without the retired ones."""
+    return [m for m in SEGMENTATION_METHODS if m not in RETIRED_METHODS]
 
 
 def get_segmentation_method_config(method):
@@ -362,7 +383,9 @@ def normalize_segmentation_config(config=None, default_method=CELLPOSE_WHOLECELL
     raw = dict(config or {})
     method = raw.get("method") or default_method
     if method not in SEGMENTATION_METHODS:
-        method = default_method
+        # A name nobody knows is refused, never run as the default
+        # (docs/v17_review_fixes_plan.md §6b); no name still means the default.
+        raise ValueError(f"Unknown segmentation method: {method}")
 
     normalized = get_segmentation_method_config(method)
     params = dict(normalized.get("params") or {})

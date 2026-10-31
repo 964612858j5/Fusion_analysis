@@ -454,12 +454,10 @@ def test_step2_no_box_widgets(_step2):
 # or nothing.
 
 def test_step2_get_seg_config_never_attaches_preview_remap(_step2, tmp_path):
-    from block01.utils.segmentation_config import (
-        CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD,
-        MESMER_WHOLE_CELL, CELLPOSE_WHOLECELL_FUSION)
+    # (HQ / HQ2 / CSD are retired and no longer selectable -- review fixes §1)
+    from block01.utils.segmentation_config import available_segmentation_methods
     _step2.set_roi_context(roi_id="r1", roi_dir=_roi_with_remap(tmp_path))
-    for m in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD,
-              MESMER_WHOLE_CELL, CELLPOSE_WHOLECELL_FUSION):
+    for m in available_segmentation_methods():
         _set_method(_step2, m)
         cfg = _step2.get_seg_config()
         assert "channel_remap_config_path" not in cfg, m

@@ -74,6 +74,12 @@ class OMETIFFLoader:
     def set_correction_config(self, correction_config):
         self.correction_config = _normalize_correction_config(correction_config)
 
+    def corrected_store_binding(self):
+        """(path or None, decisions): the corrected store this loader reads,
+        as `set_corrected_zarr_store` takes it back."""
+        return (getattr(self, "_corrected_zarr_path", None),
+                dict(getattr(self, "_corrected_decisions", None) or {}))
+
     def set_corrected_zarr_store(self, zarr_path, decisions):
         self._corrected_zarr_path = zarr_path if zarr_path and os.path.exists(zarr_path) else None
         self._corrected_decisions = {

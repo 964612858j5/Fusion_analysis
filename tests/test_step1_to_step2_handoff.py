@@ -70,8 +70,8 @@ def _step1_output(tmp_path, method):
 # ── the fix: both Input Data fields auto-sync on entering Step2 ───────────────
 @pytest.mark.parametrize("method", [
     "cellpose_wholecell_fusion",   # the reported case
-    "cellpose_nuclei_hq2",         # method-independent: others too
-    "cellpose_nuclei_csd",
+    "stardist_nuclei_expansion",   # method-independent: others too
+    "mesmer_whole_cell",           # (HQ2 / CSD are retired -- review fixes §1)
 ])
 def test_entering_step2_autosyncs_input_data(window, tmp_path, method):
     # the flag the old gate depended on is (and stays) False in a normal run
@@ -91,6 +91,19 @@ def test_entering_step2_autosyncs_input_data(window, tmp_path, method):
     seg = window._step2._seg_params_edit.text().strip()
     assert seg.endswith("segmentation_params_index.json")
     assert os.path.exists(seg)
+
+
+# ── a Step1 index of a retired method: said once, not used ───────────────────
+def test_entering_step2_with_a_retired_method_says_so_once(window, tmp_path, monkeypatch):
+    from PyQt5.QtWidgets import QMessageBox
+    shown = []
+    for name in ("warning", "information"):
+        monkeypatch.setattr(QMessageBox, name, staticmethod(lambda *a, **k: shown.append(a[2])))
+    window.step1_output = _step1_output(tmp_path, "cellpose_nuclei_hq2")
+    window._go_to_step2()
+    assert window._stack.currentIndex() == 2
+    assert len(shown) == 1 and "no longer available" in shown[0]
+    assert window._step2._method_combo.currentData() != "cellpose_nuclei_hq2"
 
 
 # ── non-clobber: a manual override is preserved across re-entry ──────────────

@@ -23,7 +23,6 @@ import datetime
 import json
 import os
 import shutil
-import subprocess
 import time
 import traceback
 
@@ -73,13 +72,9 @@ def default_output_dir(job_or_run_dir, roi_name=None, workspace=None, run_id=Non
 
 
 def _git_commit():
-    here = os.path.dirname(os.path.abspath(__file__))
-    try:
-        out = subprocess.run(["git", "-C", here, "rev-parse", "--short", "HEAD"],
-                             capture_output=True, text=True, timeout=5)
-        return out.stdout.strip() or None
-    except (OSError, subprocess.SubprocessError):
-        return None
+    """The process's code version, `-dirty` marked (review fixes §6c)."""
+    from ..core import provenance as prov
+    return prov.git_commit() or None
 
 
 def _peak_rss_bytes():
@@ -125,7 +120,10 @@ def _write_csv(path, result, regions_frame=None):
     every obs column of the h5ad is written too, text as text, right after
     the id."""
     names = result.columns
-    fmt = ["%d" if c in INTEGER_COLUMNS else "%.6g" for c in names]
+    # Lossless (docs/v17_review_fixes_plan.md §5): the CSV is float64 by
+    # contract and `%.17g` reads back the same float64; `%.6g` cut centroids
+    # above 1e6 px by up to ten pixels.
+    fmt = ["%d" if c in INTEGER_COLUMNS else "%.17g" for c in names]
     n = int(result.ids.size)
     extra = _region_csv_columns(regions_frame) if regions_frame is not None else []
     with open(path, "w", encoding="utf-8") as f:

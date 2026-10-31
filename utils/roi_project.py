@@ -112,9 +112,10 @@ def load_json(path, default=None):
 
 
 def save_json(path, payload):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
+    """Atomic (docs/v17_review_fixes_plan.md §4): a failed write leaves the
+    previous file whole -- the project index lists every workspace."""
+    from ..core import provenance as prov
+    prov.write_json_atomic(path, payload)
 
 
 def ensure_project_manifest(project_dir, raw_ome_path=None):

@@ -60,6 +60,7 @@ from ..workers.display_seed_worker import (
     DisplaySeedWorker, LowresReadWorker,
 )
 from ..workers.tissue_compose_worker import TissueComposeWorker
+from .widgets.away_hider import hide_when_away
 from .widgets.tissue_navigator_popup import TissueNavigatorPopup
 
 # The frame clock. 33 ms is ~30 FPS and is the interval the Step1 patch
@@ -2461,6 +2462,7 @@ class Block01DisplayServices(QObject):
         nuc = getattr(port, "navigator_nucleus_channel", lambda: "")()
         self._navigator = TissueNavigatorPopup(
             loader=loader, nuc_ch=nuc, parent=self._widget_parent())
+        hide_when_away(self._navigator)            # on top: steps aside for other programs
         try:
             port.furnish_navigator(self._navigator)
         except Exception as exc:                            # noqa: BLE001
@@ -2524,6 +2526,9 @@ class Block01DisplayServices(QObject):
 
     def hide_navigator(self):
         if self._navigator is not None:
+            hider = hide_when_away(self._navigator)
+            if hider is not None:
+                hider.forget_hidden(self._navigator)
             self._navigator.hide()
 
     # ── the Intensity window ──────────────────────────────────────────
@@ -2560,6 +2565,7 @@ class Block01DisplayServices(QObject):
             | Qt.WindowStaysOnTopHint,
         )
         win.setWindowTitle("Intensity")
+        hide_when_away(win)                        # on top: steps aside for other programs
         win.setStyleSheet("background:#1c1c1c;")
         win.setMinimumWidth(260)
         win.resize(320, 460)

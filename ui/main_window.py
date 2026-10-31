@@ -86,6 +86,7 @@ from .block01_display import (
     _bring_to_front,
 )
 from .step0.config_panel import ConfigPanel
+from .widgets.away_hider import hide_when_away
 from .step_frame import FRAME_TAB_QSS, StepFrame, StepFrameMetrics, free_tab_bar
 from . import step_frame
 from .widgets.channel_dock import template as channel_template
@@ -2466,6 +2467,8 @@ class MainWindow(QMainWindow):
         win = self.__dict__.get("_step3_results")
         if win is None:
             win = Step3ResultsWindow(self)
+            # on top: steps aside for other programs, back only on Step3
+            hide_when_away(win, allowed=lambda: self._stack.currentWidget() is self._step3)
             win.ticks_changed.connect(self._step3_apply_masks)
             win.style_changed.connect(self._step3_on_mask_style)
             win.use_requested.connect(self._step3_on_run_chosen)

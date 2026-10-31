@@ -416,6 +416,13 @@ def test_the_results_window_can_be_minimized_and_follows_step3(app, tmp_path, mo
         assert win.windowState() & Qt.WindowMinimized
         w._step3_show_results()
         assert not win.windowState() & Qt.WindowMinimized
+        from block01.ui.widgets import away_hider
+        hider = away_hider.hide_when_away(win)          # registered with Step3's gate
+        allowed = hider._windows[id(win)][1]
+        assert allowed() is True
+        w._stack.setCurrentWidget(w._step4)
+        assert allowed() is False
+        w._stack.setCurrentWidget(w._step3)
         win.close()                                     # closed on Step3: stays closed
         w._stack.setCurrentWidget(w._step4)
         w._stack.setCurrentWidget(w._step3)

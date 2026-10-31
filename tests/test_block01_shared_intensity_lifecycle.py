@@ -840,3 +840,19 @@ def test_a_viewers_completion_reaches_the_inspector_too(app):
             "the viewer's array never reached the Intensity inspector"
     finally:
         _close(w)
+
+
+def test_the_on_top_windows_step_aside_for_other_programs(app):
+    """User ruling 2026-10-31: Tissue Preview and Intensity hide while the
+    user is in another program (`ui/widgets/away_hider.py`)."""
+    from block01.ui.widgets import away_hider
+    w, _loader = _window(app, path="/tmp/b8_lifecycle/away.ome.tiff")
+    try:
+        popup = w._display.ensure_navigator()
+        intensity = w._display.ensure_intensity()
+        hider = away_hider.hide_when_away(popup)
+        assert id(popup) in hider._windows
+        if intensity is not None:
+            assert id(intensity) in hider._windows
+    finally:
+        _close(w)

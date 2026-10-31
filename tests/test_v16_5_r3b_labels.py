@@ -71,6 +71,10 @@ CASES = {
     "l1": {},                           # memory pyramid / zstd -> Python reads; back to the core
     "ratio": {},                        # a new device pixel ratio -> a new outline radius
     "gl_state": {},                     # GL state unchanged around every paint
+    "multi": {},                        # several results at once; a building one withheld
+    "shared": {},                       # one mask in two slots: one build, both take it
+    "l1_builds": {},                    # beside an L1 slot a pyramid is built once, outside L1
+    "pause_add": {},                    # a mask added while paused is built on resume
 }
 
 

@@ -116,6 +116,21 @@ def _binding(app, controller=None, layer=None, **kw):
     return made, controller, layer
 
 
+def put(binding, srcs):
+    """The two masks of one result as slots keyed "cell" / "nucleus"."""
+    binding.set_slots([(kind, srcs[kind], lb.DEFAULT_STYLES[kind])
+                       for kind in lb.KINDS if srcs.get(kind) is not None])
+
+
+def stamp(binding, key):
+    return next(s for k, s, _src in binding._slots if k == key)
+
+
+def slot_error(binding):
+    status = binding.mask_status()
+    return next((status[k]["error"] for k in lb.KINDS if k in status and status[k]["error"]), None)
+
+
 def _idle(binding):
     st = binding.stats()
     return st["queued"] == 0 and st["reading"] == 0
@@ -139,18 +154,18 @@ def made(app):
 def test_only_the_visible_tiles_and_one_ring_are_read(app, tmp_path, made):
     srcs, run = _sources(tmp_path)
     b, ctl, layer = made()
-    b.set_sources(srcs)
+    put(b, srcs)
     visible = {(3, 2), (4, 2), (3, 3), (4, 3)}
     ctl.move(0, visible)
     assert wait(app, lambda: _idle(b) and b.stats()["accepted"] == 16)
-    keys = {k[3:] for k in b._resident}
+    keys = {k[2:] for k in b._resident}
     ring = {(x, y) for x in range(2, 6) for y in range(1, 5)} - visible
     assert keys == visible | ring
-    assert all(k[2] == 0 and k[1] == "cell" for k in b._resident)
+    assert all(k[1] == 0 and k[0] == stamp(b, "cell") for k in b._resident)
     # what arrived is what `read_label_tile` gives
     cell = srcs["cell"]
     for key, plane in b._resident.items():
-        want = sm.read_label_tile(cell, 0, key[3], key[4], T, SHAPES)
+        want = sm.read_label_tile(cell, 0, key[2], key[3], T, SHAPES)
         np.testing.assert_array_equal(plane.ids, want.labels)
         assert plane.world_rect == pytest.approx(want.world_rect)
     last = layer.last.layers
@@ -168,7 +183,7 @@ def test_the_centre_is_read_first(app, tmp_path, made, monkeypatch):
         return real(source, level, tx, ty, *a)
     monkeypatch.setattr(sm, "read_label_tile", slow)
     b, ctl, _ = made()
-    b.set_sources(srcs)
+    put(b, srcs)
     ctl.move(0, {(x, y) for x in range(2, 7) for y in range(2, 5)})
     gate.set()
     assert wait(app, lambda: _idle(b))
@@ -184,7 +199,7 @@ def test_a_camera_move_drops_what_it_no_longer_wants(app, tmp_path, made, monkey
     monkeypatch.setattr(sm, "read_label_tile",
                         lambda *a: (gate.wait(5), real(*a))[1])
     b, ctl, layer = made()
-    b.set_sources(srcs)
+    put(b, srcs)
     ctl.move(0, {(0, 0), (1, 0)}, kind="NAVIGATOR_JUMP")
     assert wait(app, lambda: b.stats()["reading"] == 1)
     queued_before = b.stats()["queued"]
@@ -195,33 +210,33 @@ def test_a_camera_move_drops_what_it_no_longer_wants(app, tmp_path, made, monkey
     assert wait(app, lambda: _idle(b))
     st = b.stats()
     assert st["late_dropped"] >= 1                     # the one being read on the old spot
-    assert {k[3:] for k in b._resident} <= {(x, y) for x in range(7, 11) for y in range(6, 9)}
+    assert {k[2:] for k in b._resident} <= {(x, y) for x in range(7, 11) for y in range(6, 9)}
 
 
 def test_motion_is_throttled_and_a_quiet_camera_catches_up(app, tmp_path, made):
     srcs, _ = _sources(tmp_path)
     b, ctl, _ = made(motion_interval_ms=10_000)
-    b.set_sources(srcs)
+    put(b, srcs)
     ctl.move(0, {(0, 0)})
     first = b._target_level, set(b._wanted)
     ctl.move(0, {(5, 5)})                              # inside the throttle window
     assert set(b._wanted) == first[1]
     ctl.gesture_quiet.emit(ctl.current)
     assert (b.style("cell").visible and
-            {k[3:] for k in b._wanted} >= {(5, 5)})
+            {k[2:] for k in b._wanted} >= {(5, 5)})
 
 
 # ── levels ───────────────────────────────────────────────────────────────
 
 def _level_order(layer_snapshot):
-    return [p.identity[2] for p in layer_snapshot.layers[0].planes]
+    return [p.identity[1] for p in layer_snapshot.layers[0].planes]
 
 
 def test_zooming_in_and_out_keeps_the_other_level_under_the_target(app, tmp_path, made,
                                                                    monkeypatch):
     srcs, _ = _sources(tmp_path)
     b, ctl, layer = made()
-    b.set_sources(srcs)
+    put(b, srcs)
     # jumps: planned at once (a ZOOM inside the 33 ms motion window would
     # wait for the throttle)
     ctl.move(1, {(0, 0), (1, 0)}, kind="NAVIGATOR_JUMP")   # level 1 covers x 0..~381
@@ -252,12 +267,12 @@ def test_zooming_in_and_out_keeps_the_other_level_under_the_target(app, tmp_path
 def test_tiles_that_leave_the_view_are_released(app, tmp_path, made):
     srcs, _ = _sources(tmp_path)
     b, ctl, _ = made()
-    b.set_sources(srcs)
+    put(b, srcs)
     ctl.move(0, {(0, 0)}, kind="NAVIGATOR_JUMP")
     assert wait(app, lambda: _idle(b))
     ctl.move(0, {(9, 7)}, kind="NAVIGATOR_JUMP")
     assert wait(app, lambda: _idle(b))
-    assert all(abs(k[3] - 9) <= 1 and abs(k[4] - 7) <= 1 for k in b._resident)
+    assert all(abs(k[2] - 9) <= 1 and abs(k[3] - 7) <= 1 for k in b._resident)
 
 
 # ── pyramids ─────────────────────────────────────────────────────────────
@@ -270,7 +285,7 @@ def test_without_a_pyramid_coarse_levels_are_not_asked_for(app, tmp_path, made):
         orig = lp.build_in_memory
         lp.build_in_memory = lambda *a, **k: (_ for _ in ()).throw(MemoryError("test"))
         b, ctl, layer = made()
-        b.set_sources(srcs)
+        put(b, srcs)
         assert wait(app, lambda: not b.mask_status()["cell"]["building"])
         ctl.move(1, {(0, 0), (1, 0)})
         assert wait(app, lambda: _idle(b))
@@ -280,7 +295,7 @@ def test_without_a_pyramid_coarse_levels_are_not_asked_for(app, tmp_path, made):
         assert status["unavailable_here"]
         ctl.move(0, {(3, 3)})
         assert wait(app, lambda: _idle(b) and b._resident)
-        assert all(k[2] == 0 for k in b._resident)
+        assert all(k[1] == 0 for k in b._resident)
     finally:
         lp.build_in_memory = orig
         os.chmod(run.dir, 0o755)
@@ -289,11 +304,11 @@ def test_without_a_pyramid_coarse_levels_are_not_asked_for(app, tmp_path, made):
 def test_a_missing_pyramid_is_built_first_then_coarse_levels_show(app, tmp_path, made):
     srcs, run = _sources(tmp_path, pyramid=False)
     b, ctl, layer = made()
-    b.set_sources(srcs)
+    put(b, srcs)
     ctl.move(1, {(0, 0), (1, 0)})
     assert wait(app, lambda: b.stats()["pyramids_built"] == 1)
     assert os.path.isdir(lp.pyramid_path_for(run.mask))
-    assert wait(app, lambda: _idle(b) and any(k[2] == 1 for k in b._resident))
+    assert wait(app, lambda: _idle(b) and any(k[1] == 1 for k in b._resident))
     assert b.mask_status()["cell"]["coarse_unavailable"] is None
 
 
@@ -301,17 +316,17 @@ def test_a_level0_only_source_reads_level_0_while_nothing_is_built(app, tmp_path
     srcs, _ = _sources(tmp_path, method="cellpose_nuclei_dapi")
     assert srcs["cell"] is None and srcs["nucleus"] is not None
     b, ctl, layer = made()
-    b.set_sources(srcs)
+    put(b, srcs)
     ctl.move(0, {(2, 2)})
     assert wait(app, lambda: _idle(b) and b._resident)
-    assert {k[1] for k in b._resident} == {"nucleus"}
+    assert {k[0] for k in b._resident} == {stamp(b, "nucleus")}
     assert [l.kind for l in layer.last.layers] == ["nucleus"]
 
 
 def test_both_masks_are_drawn_nucleus_last(app, tmp_path, made):
     srcs, _ = _sources(tmp_path, method="mesmer_nuclear_guided", nuclei=True)
     b, ctl, layer = made()
-    b.set_sources(srcs)
+    put(b, srcs)
     b.set_style("cell", mode=LABEL_FILL, alpha=0.4)
     ctl.move(0, {(2, 2)})
     assert wait(app, lambda: _idle(b) and len(b._resident) == 18)
@@ -329,7 +344,7 @@ def test_both_masks_are_drawn_nucleus_last(app, tmp_path, made):
 def test_pause_asks_for_nothing_and_resume_catches_up(app, tmp_path, made):
     srcs, _ = _sources(tmp_path)
     b, ctl, _ = made()
-    b.set_sources(srcs)
+    put(b, srcs)
     b.pause()
     ctl.move(0, {(3, 3)})
     ctl.gesture_quiet.emit(ctl.current)
@@ -337,7 +352,7 @@ def test_pause_asks_for_nothing_and_resume_catches_up(app, tmp_path, made):
     assert b.stats()["requested"] == 0 and not b._resident
     b.resume()
     assert wait(app, lambda: _idle(b) and b._resident)
-    assert {k[3:] for k in b._resident} >= {(3, 3)}
+    assert {k[2:] for k in b._resident} >= {(3, 3)}
 
 
 def test_pause_cancels_a_build_and_resume_restarts_it(app, tmp_path, made, monkeypatch):
@@ -351,7 +366,7 @@ def test_pause_cancels_a_build_and_resume_restarts_it(app, tmp_path, made, monke
         return real(group, src, shapes, bbox, cancel_check)
     monkeypatch.setattr(lp, "_write_levels", slow)
     b, ctl, _ = made()
-    b.set_sources(srcs)
+    put(b, srcs)
     assert started.wait(5)
     b.pause()
     release.set()
@@ -367,7 +382,7 @@ def test_pause_cancels_a_build_and_resume_restarts_it(app, tmp_path, made, monke
 def test_dispose_ends_the_thread_and_clears_the_layer(app, tmp_path):
     srcs, _ = _sources(tmp_path)
     b, ctl, layer = _binding(app)
-    b.set_sources(srcs)
+    put(b, srcs)
     ctl.move(0, {(3, 3)})
     out = b.dispose()
     assert out["already_disposed"] is False
@@ -388,13 +403,13 @@ def test_new_sources_drop_everything_of_the_old_ones(app, tmp_path, made):
     srcs, _ = _sources(tmp_path / "a")
     other, _ = _sources(tmp_path / "b")
     b, ctl, layer = made()
-    b.set_sources(srcs)
+    put(b, srcs)
     ctl.move(0, {(3, 3)})
-    b.set_sources(other)
+    put(b, other)
     assert wait(app, lambda: _idle(b) and b._resident)
-    assert all(k[0] == b.stats()["generation"] for k in b._resident)
+    assert all(k[0] == stamp(b, "cell") for k in b._resident)
     np.testing.assert_array_equal(
-        b._resident[(b.stats()["generation"], "cell", 0, 3, 3)].ids,
+        b._resident[(stamp(b, "cell"), 0, 3, 3)].ids,
         sm.read_label_tile(other["cell"], 0, 3, 3, T, SHAPES).labels)
 
 
@@ -405,16 +420,16 @@ def test_over_budget_the_ring_goes_then_the_far_visible_tiles(app, tmp_path, mad
     one = T * T * 4
     visible = {(x, y) for x in range(2, 5) for y in range(2, 5)}          # 9 tiles
     b, ctl, layer = made(budget_bytes=12 * one)                           # 9 + part of the ring
-    b.set_sources(srcs)
+    put(b, srcs)
     ctl.move(0, visible)
     assert wait(app, lambda: _idle(b))
-    assert {k[3:] for k in b._resident} == visible                        # no ring
+    assert {k[2:] for k in b._resident} == visible                        # no ring
     assert b.mask_status()["budget"] is None
     b2, ctl2, _ = made(budget_bytes=5 * one)
-    b2.set_sources(srcs)
+    put(b2, srcs)
     ctl2.move(0, visible)
     assert wait(app, lambda: _idle(b2))
-    got = {k[3:] for k in b2._resident}
+    got = {k[2:] for k in b2._resident}
     assert len(got) == 5 and (3, 3) in got
     assert "mask memory is full" in b2.mask_status()["budget"]
     assert b2.stats()["resident_bytes"] <= b2.budget_bytes
@@ -432,7 +447,7 @@ def test_the_thread_never_holds_more_than_the_budget(app, tmp_path, made, monkey
             peak.append(b._resident_bytes + b._pending_bytes)
         return real(*a)
     monkeypatch.setattr(sm, "read_label_tile", watch)
-    b.set_sources(srcs)
+    put(b, srcs)
     ctl.move(0, {(x, y) for x in range(2, 4) for y in range(2, 5)})      # 6 visible
     assert wait(app, lambda: _idle(b))
     assert peak and max(peak) <= 6 * one
@@ -452,7 +467,7 @@ def test_undelivered_results_count_against_the_budget(app, tmp_path, made, monke
             held.append(b._resident_bytes + b._pending_bytes)
         return real(*a)
     monkeypatch.setattr(sm, "read_label_tile", watch)
-    b.set_sources(srcs)
+    put(b, srcs)
     ctl.move(0, {(2, 2), (3, 2), (2, 3), (3, 3)}, kind="NAVIGATOR_JUMP")   # fills the budget
     time.sleep(0.5)                                                         # read, not accepted
     ctl.move(0, {(8, 6), (9, 6), (8, 7), (9, 7)}, kind="NAVIGATOR_JUMP")   # four more wanted
@@ -461,7 +476,7 @@ def test_undelivered_results_count_against_the_budget(app, tmp_path, made, monke
     with b._cv:
         assert b._pending_bytes <= 4 * one
     assert wait(app, lambda: _idle(b) and len(b._resident) == 4)
-    assert {k[3:] for k in b._resident} == {(8, 6), (9, 6), (8, 7), (9, 7)}
+    assert {k[2:] for k in b._resident} == {(8, 6), (9, 6), (8, 7), (9, 7)}
 
 
 @pytest.mark.parametrize("width,dpr,radius", [
@@ -489,16 +504,16 @@ def test_a_read_failure_is_reported_at_once_and_a_new_source_clears_it(app, tmp_
     monkeypatch.setattr(sm, "read_label_tile", failing)
     b, ctl, _ = made()
     changes = []
-    b.status_changed.connect(lambda: changes.append(b.mask_status()["error"]))
-    b.set_sources(srcs)
+    b.status_changed.connect(lambda: changes.append(slot_error(b)))
+    put(b, srcs)
     ctl.move(0, {(3, 3)}, kind="NAVIGATOR_JUMP")
-    assert wait(app, lambda: b.mask_status()["error"])
-    assert "disk went away" in b.mask_status()["error"]
+    assert wait(app, lambda: slot_error(b))
+    assert "disk went away" in slot_error(b)
     assert any(e and "disk went away" in e for e in changes)      # it was signalled
-    b.set_sources(good)
-    assert b.mask_status()["error"] is None
+    put(b, good)
+    assert slot_error(b) is None
     assert wait(app, lambda: _idle(b) and b._resident)
-    assert b.mask_status()["error"] is None
+    assert slot_error(b) is None
 
 
 def test_an_old_sources_late_error_is_dropped(app, tmp_path, made, monkeypatch):
@@ -516,11 +531,109 @@ def test_an_old_sources_late_error_is_dropped(app, tmp_path, made, monkeypatch):
         return real(source, *a)
     monkeypatch.setattr(sm, "read_label_tile", failing_late)
     b, ctl, _ = made()
-    b.set_sources(srcs)
+    put(b, srcs)
     ctl.move(0, {(3, 3)}, kind="NAVIGATOR_JUMP")
     assert started.wait(5)
-    b.set_sources(good)                                   # the old read is still under way
+    put(b, good)                                   # the old read is still under way
     gate.set()
     assert wait(app, lambda: _idle(b) and b._resident)
-    assert b.mask_status()["error"] is None
+    assert slot_error(b) is None
     assert b.stats()["late_dropped"] >= 1
+
+
+# ── several results at once (multi-result plan §3.3, codex review 1) ────
+
+def _three(tmp_path):
+    """Three results (separate workspaces) without pyramids."""
+    out = []
+    for i in range(3):
+        srcs, _ = _sources(tmp_path / f"r{i}", pyramid=False, seed=i)
+        out.append(srcs["cell"])
+    return out
+
+
+def _gated_builds(monkeypatch):
+    """ensure_pyramid held at a gate per call: [(source, event)] in call order."""
+    real = sm.ensure_pyramid
+    calls, gates = [], {}
+
+    def gated(source, shapes, cancel_check=None):
+        gate = threading.Event()
+        calls.append(source.mask_path)
+        gates[source.mask_path] = gate
+        while not gate.wait(0.01):
+            if cancel_check is not None and cancel_check():
+                return sm.EnsureResult("cancelled", source, "cancelled")
+        return real(source, shapes, cancel_check=cancel_check)
+    monkeypatch.setattr(sm, "ensure_pyramid", gated)
+    return calls, gates
+
+
+def test_adding_a_result_keeps_another_results_queued_build(app, tmp_path, made, monkeypatch):
+    a, b, c = _three(tmp_path)
+    calls, gates = _gated_builds(monkeypatch)
+    bnd, ctl, _ = made()
+    bnd.set_slots([("a", a, lb.MaskStyle()), ("b", b, lb.MaskStyle())])
+    assert wait(app, lambda: calls == [a.mask_path])          # A runs, B waits in the queue
+    bnd.set_slots([("a", a, lb.MaskStyle()), ("b", b, lb.MaskStyle()), ("c", c, lb.MaskStyle())])
+    for path in (a.mask_path, b.mask_path, c.mask_path):
+        assert wait(app, lambda: path in gates), f"{path} was never built"
+        gates[path].set()
+    assert wait(app, lambda: all(s.pyramid is not None for s in bnd.sources().values()))
+    assert not any(bnd.mask_status()[k]["building"] for k in "abc")
+
+
+def test_pause_and_resume_restart_a_queued_build_too(app, tmp_path, made, monkeypatch):
+    a, b, _c = _three(tmp_path)
+    calls, gates = _gated_builds(monkeypatch)
+    bnd, ctl, _ = made()
+    bnd.set_slots([("a", a, lb.MaskStyle()), ("b", b, lb.MaskStyle())])
+    assert wait(app, lambda: calls == [a.mask_path])
+    bnd.pause()                                        # A cancelled, B dropped from the queue
+    assert wait(app, lambda: not bnd.mask_status()["a"]["building"])   # its cancel landed
+    bnd.resume()
+    assert wait(app, lambda: calls.count(a.mask_path) == 2)   # A started again
+    gates[a.mask_path].set()
+    assert wait(app, lambda: b.mask_path in gates), "the queued build never came back"
+    gates[b.mask_path].set()
+    assert wait(app, lambda: all(s.pyramid is not None for s in bnd.sources().values()), 20)
+
+
+def test_a_shared_mask_takes_the_built_pyramid_and_is_never_downgraded(app, tmp_path, made,
+                                                                      monkeypatch):
+    a, _b, _c = _three(tmp_path)
+    bnd, ctl, _ = made()
+    bnd.set_slots([("x", a, lb.MaskStyle())])
+    assert wait(app, lambda: bnd.sources()["x"].pyramid is not None)
+    built = bnd.stats()["pyramids_built"]
+    calls = []
+    monkeypatch.setattr(sm, "ensure_pyramid", lambda *a_, **k: calls.append(1))
+    # a second slot of the same mask, handed with the owner's old source
+    bnd.set_slots([("x", a, lb.MaskStyle()), ("y", a, lb.MaskStyle(color=(1.0, 0.0, 0.0)))])
+    srcs = bnd.sources()
+    assert srcs["x"].pyramid is not None and srcs["y"].pyramid is not None
+    assert calls == [] and bnd.stats()["pyramids_built"] == built
+    # unticked and ticked again: still the built one
+    bnd.set_slots([])
+    bnd.set_slots([("x", a, lb.MaskStyle())])
+    assert bnd.sources()["x"].pyramid is not None and calls == []
+
+
+def test_a_read_error_is_its_own_slots(app, tmp_path, made, monkeypatch):
+    """Errors are per slot (plan §9): one result's failing reads mark its
+    row only; the other keeps drawing without an error."""
+    good, bad, _c = _three(tmp_path)
+    real = sm.read_label_tile
+
+    def failing(source, *a):
+        if source.mask_path == bad.mask_path:
+            raise OSError("disk went away")
+        return real(source, *a)
+    monkeypatch.setattr(sm, "read_label_tile", failing)
+    bnd, ctl, _ = made()
+    bnd.set_slots([("good", good, lb.MaskStyle()), ("bad", bad, lb.MaskStyle())])
+    ctl.move(0, {(3, 3)}, kind="NAVIGATOR_JUMP")
+    assert wait(app, lambda: bnd.mask_status()["bad"]["error"])
+    assert "disk went away" in bnd.mask_status()["bad"]["error"]
+    assert bnd.mask_status()["good"]["error"] is None
+    assert wait(app, lambda: any(k[0] == stamp(bnd, "good") for k in bnd._resident))

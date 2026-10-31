@@ -3,7 +3,8 @@
 `CoreLabelBinding` is `Step3LabelBinding`'s surface for a Rust-drawn viewer:
 the core plans and reads; Python builds missing pyramids, keeps the styles
 and the status (R3b plan §2.4). What the core reads of a mask:
-`step3_core_label_source`.
+`step3_core_label_source`. One SLOT per drawn mask, in drawing order
+(docs/v17_step3_multi_results_plan.md §3.3).
 """
 
 import dataclasses
@@ -16,17 +17,21 @@ from ..core import step3_masks
 from ..utils import closing_threads
 from .step1_gpu_layer import LABEL_FILL, LABEL_TEXTURE_BYTES, label_radius
 from .step3_core_label_source import CoreLabelsRefused, check, describe  # noqa: F401 -- re-exported
-from .step3_label_binding import DEFAULT_STYLES, KINDS, Step3LabelBinding
+from .step3_label_binding import MaskStyle, SlotStamps, Step3LabelBinding, destination
 
 
 class CoreLabelBinding(QtCore.QObject):
     """`Step3LabelBinding`'s surface for a Rust-drawn viewer whose core plans
-    and reads the masks (R3b plan §2.4). Python keeps the pyramid build (one
-    thread, once per mask, cancellable), the styles and the status text;
-    the core does the rest at every camera change. A mask the core does not
-    read (pyramid only in memory, another layout) puts this viewer's masks
-    on an inner `Step3LabelBinding` (L1: Python plans and reads, the core
-    draws), decided when sources are set and when a build ends (§2.6)."""
+    and reads the masks (R3b plan §2.4). Python keeps the pyramid builds
+    (one thread per destination, cancellable), the styles and the status
+    text; the core does the rest at every camera change. A slot whose
+    pyramid is being built is withheld from the core until it is done;
+    the others keep drawing. A mask the core does not read (pyramid only in
+    memory, another layout) puts this viewer's masks on an inner
+    `Step3LabelBinding` (L1: Python plans and reads, the core draws),
+    decided when slots are set and when a build ends (§2.6). The builds
+    stay HERE in both cases -- one writer per destination across every
+    switch -- and the inner binding is handed the built sources."""
 
     status_changed = QtCore.pyqtSignal()
     _built = QtCore.pyqtSignal(object)
@@ -37,149 +42,187 @@ class CoreLabelBinding(QtCore.QObject):
         self.level_shapes = [tuple(int(v) for v in s) for s in level_shapes]
         self.tile_size = int(tile_size)
         self.budget_bytes = LABEL_TEXTURE_BYTES
-        self._sources: Dict[str, Any] = {kind: None for kind in KINDS}
-        self._styles = dict(DEFAULT_STYLES)
-        self._generation = 0
-        self._building: set = set()
-        self._retry_build: set = set()
-        self._reasons: Dict[str, Optional[str]] = {kind: None for kind in KINDS}
+        self._stamps = SlotStamps()
+        self._slots: List = []                          # (key, stamp, source), drawing order
+        self._styles: Dict[str, MaskStyle] = {}
+        self._building: set = set()                     # destinations being built
+        self._retry_build: set = set()                  # destinations cancelled by a pause
+        self._reasons: Dict[str, Optional[str]] = {}    # per destination
         self._paused = False
         self._disposed = False
         self._pyramids_built = 0
         self._builders: List = []
-        #: per kind: the generation whose build thread is still running --
-        #: one writer per pyramid at a time; a build asked for meanwhile
-        #: starts when that thread's result is in (codex R3b review)
-        self._running: Dict[str, Optional[int]] = {kind: None for kind in KINDS}
+        #: per destination: the cancel event of its build thread still
+        #: running -- one writer per pyramid at a time; a build asked for
+        #: meanwhile starts when that thread's result is in (codex R3b review)
+        self._running: Dict[str, threading.Event] = {}
         self._restart_after: set = set()
-        self._cancel = threading.Event()
         self._l1: Optional[Step3LabelBinding] = None
         self.l1_reason: Optional[str] = None
         self._seen = None
-        self._handed = None                              # what the core reads now
+        self._handed = None                              # [(stamp, description)] the core reads now
         self._built.connect(self._on_built, QtCore.Qt.QueuedConnection)
         layer.frameSwapped.connect(self._after_frame)
         layer.on_label_ratio = self._send_styles
 
-    # ── sources ───────────────────────────────────────────────────────
-    def set_sources(self, sources) -> None:
+    # ── slots ─────────────────────────────────────────────────────────
+    def set_slots(self, slots) -> None:
+        """The masks to draw, in drawing order: [(key, MaskSource, MaskStyle)]."""
         if self._disposed:
             return
-        self._generation += 1
-        self._cancel.set()                              # a build of the old sources stops
-        self._cancel = threading.Event()
-        self._building.clear()
-        self._retry_build.clear()
-        self._sources = {kind: (sources or {}).get(kind) for kind in KINDS}
-        self._reasons = {kind: None for kind in KINDS}
-        why = self._readable() if self._l1 is not None else None
-        if self._l1 is not None and why is None:
-            self._leave_l1()
-        if self._l1 is not None:
-            self.l1_reason = why                        # these sources' own reason
-            print(f"[Step3] masks read by Python: {why}")
-            self._l1.set_sources(self._sources)
-            self.status_changed.emit()
-            return
-        self.core.set_label_sources(None)               # nothing is read while pyramids are built
-        self._handed = None
+        slots = list(slots or ())
+        self._slots = self._stamps.assign([(key, src) for key, src, _st in slots])
+        self._styles = {key: (st or MaskStyle()) for key, _src, st in slots}
+        dests = {destination(src) for _k, _s, src in self._slots}
+        for dest in list(self._running):
+            if dest not in dests:
+                self._running[dest].set()               # no slot needs it: it stops
+        self._building &= dests
+        self._retry_build &= dests
+        self._restart_after &= dests
+        self._reasons = {d: r for d, r in self._reasons.items() if d in dests}
         if not self._paused:
             self._queue_builds()
-        self._hand_over()
+        self._route()
         self.status_changed.emit()
 
-    def _readable(self) -> Optional[str]:
-        """Why the core would not read the current sources (None: it does)."""
-        import fusion_viewer_core
-        for kind in KINDS:
-            why = check(fusion_viewer_core, self._sources.get(kind))
-            if why:
-                return f"{kind} mask: {why}"
-        return None
-
-    def _hand_over(self) -> None:
-        """The sources to the core once no pyramid is being built -- or to
-        Python (L1) when the core cannot read them."""
-        if self._building or self._disposed:
-            return
+    def _route(self) -> None:
+        """The slots to the core, or -- when it cannot read one -- all of
+        them to the inner Python binding (L1), which builds nothing."""
         why = self._readable()
-        if why:
+        if why is None:
+            if self._l1 is not None:
+                self._leave_l1()
+            self._hand_over()
+            return
+        if self._l1 is None:
             self._enter_l1(why)
             return
-        kinds = [describe(self._sources.get(kind)) for kind in KINDS]
-        if kinds != self._handed:                       # a resume keeps what the core holds
-            self.core.set_label_sources(kinds if any(kinds) else None)
-            self._handed = kinds
-        self._send_styles()
+        if why != self.l1_reason:
+            self.l1_reason = why                        # these sources' own reason
+            print(f"[Step3] masks read by Python: {why}")
+        self._l1.set_slots(self._l1_slots())
+
+    def _l1_slots(self):
+        return [(key, src, self._styles[key]) for key, _stamp, src in self._slots]
+
+    def _readable(self) -> Optional[str]:
+        """Why the core would not read the current slots (None: it does)."""
+        import fusion_viewer_core
+        for key, _stamp, source in self._slots:
+            why = check(fusion_viewer_core, source)
+            if why:
+                return f"{key}: {why}"
+        return None
+
+    def _style_tuple(self, style):
+        ratio = float(self.layer.devicePixelRatioF()) or 1.0
+        return (bool(style.visible), tuple(float(c) for c in style.color), float(style.alpha),
+                label_radius(style.width, ratio), style.mode == LABEL_FILL, bool(style.dash))
+
+    def _hand_over(self) -> None:
+        """The slots whose pyramid is not being built, to the core."""
+        if self._disposed or self._l1 is not None:
+            return
+        ready = [(key, stamp, src) for key, stamp, src in self._slots
+                 if destination(src) not in self._building]
+        handed = [(stamp, describe(src)) for _key, stamp, src in ready]
+        if handed != self._handed:                      # a resume keeps what the core holds
+            self.core.set_label_slots([(stamp, desc, self._style_tuple(self._styles[key]))
+                                       for (key, stamp, _src), (_s, desc) in zip(ready, handed)])
+            self._handed = handed
+        else:
+            self._send_styles()
         self.layer.update()
 
     def _queue_builds(self, only=None) -> None:
         if len(self.level_shapes) < 2:
             return
-        gen, cancel = self._generation, self._cancel
-        for kind in KINDS:
-            source = self._sources.get(kind)
-            if (source is None or source.pyramid is not None or kind in self._building
-                    or (only is not None and kind not in only)):
+        seen = set()
+        for _key, _stamp, source in self._slots:
+            dest = destination(source)
+            if (source.pyramid is not None or dest in seen or dest in self._building
+                    or self._reasons.get(dest) or (only is not None and dest not in only)):
                 continue
-            self._building.add(kind)
-            if self._running[kind] is not None:          # the last writer is still at it
-                self._restart_after.add(kind)
+            seen.add(dest)
+            self._building.add(dest)
+            if dest in self._running:                   # the last writer is still at it
+                self._restart_after.add(dest)
                 continue
-            self._running[kind] = gen
+            cancel = threading.Event()
+            self._running[dest] = cancel
 
-            def build(kind=kind, source=source):
+            def build(dest=dest, source=source, cancel=cancel):
                 try:
-                    result = step3_masks.ensure_pyramid(source, self.level_shapes, cancel_check=cancel.is_set)
+                    result = step3_masks.ensure_pyramid(source, self.level_shapes,
+                                                        cancel_check=cancel.is_set)
                 except Exception as exc:                # noqa: BLE001 -- reported, level 0 goes on
                     result = exc
-                self._built.emit((gen, kind, result))
+                self._built.emit((dest, cancel, result))
             thread = threading.Thread(target=build, name="step3-pyramid", daemon=True)
             self._builders.append(thread)
             thread.start()
 
     def _on_built(self, payload) -> None:
-        gen, kind, result = payload
-        if self._running.get(kind) == gen:
-            self._running[kind] = None                  # that writer is done
-        if kind in self._restart_after and not self._disposed and not self._paused:
-            self._restart_after.discard(kind)
-            self._building.discard(kind)
-            self._queue_builds(only={kind})             # the build asked for meanwhile
-        if self._disposed or gen != self._generation:
+        dest, cancel, result = payload
+        if self._running.get(dest) is cancel:
+            del self._running[dest]                     # that writer is done
+        if self._disposed:
             return
-        self._building.discard(kind)
+        built = not isinstance(result, Exception) and result.status == "ready"
+        if dest in self._restart_after:
+            self._restart_after.discard(dest)
+            if not built:
+                self._building.discard(dest)
+                if not self._paused:
+                    self._queue_builds(only={dest})      # the build asked for meanwhile
+                return
+            # it was built after all: the build asked for meanwhile is that one
+        needed = any(destination(src) == dest for _k, _s, src in self._slots)
+        if not needed:
+            self._building.discard(dest)
+            if built:
+                self._stamps.remember(result.source)    # for a slot ticked again
+            return
         if isinstance(result, Exception):
-            self._reasons[kind] = f"the zoomed-out levels could not be built ({result})"
+            self._building.discard(dest)
+            self._reasons[dest] = f"the zoomed-out levels could not be built ({result})"
         elif result.status == "cancelled":
             if self._paused:
-                self._retry_build.add(kind)
+                self._retry_build.add(dest)
                 return
-            self._queue_builds(only={kind})            # resumed before the cancel landed
+            self._building.discard(dest)
+            self._queue_builds(only={dest})             # resumed before the cancel landed
             return
+        elif built:
+            self._building.discard(dest)
+            self._slots = self._stamps.take_built(self._slots, dest, result.source)
+            self._reasons[dest] = None
+            self._pyramids_built += 1
         else:
-            self._sources[kind] = result.source
-            self._reasons[kind] = None if result.status == "ready" else result.reason
-            self._pyramids_built += result.status == "ready"
-        if self._reasons[kind]:
-            print(f"[Step3] {kind} mask: zoomed out it cannot be shown: {self._reasons[kind]}")
-        self._hand_over()
+            self._building.discard(dest)
+            # level 0 only -- never in place of a pyramid a slot already has
+            if not any(destination(src) == dest and src.pyramid is not None for _k, _s, src in self._slots):
+                self._slots = self._stamps.take_built(self._slots, dest, result.source)
+                self._reasons[dest] = result.reason or "no label pyramid"
+        if self._reasons.get(dest):
+            print(f"[Step3] {dest}: zoomed out it cannot be shown: {self._reasons[dest]}")
+        self._route()
         self.status_changed.emit()
 
     # ── L1: Python plans and reads, the core draws ────────────────────
     def _enter_l1(self, why: str) -> None:
-        self.core.set_label_sources(None)
+        self.core.set_label_slots([])
         self.l1_reason = why
         print(f"[Step3] masks read by Python: {why}")
         self._l1 = Step3LabelBinding(controller=self.controller, layer=self.layer,
-                                     level_shapes=self.level_shapes, tile_size=self.tile_size, parent=self)
+                                     level_shapes=self.level_shapes, tile_size=self.tile_size,
+                                     builds=False, parent=self)
         self._handed = None
         self._l1.status_changed.connect(self.status_changed.emit)
-        for kind, style in self._styles.items():
-            self._l1.set_style(kind, **dataclasses.asdict(style))
         if self._paused:
             self._l1.pause()
-        self._l1.set_sources(self._sources)
+        self._l1.set_slots(self._l1_slots())
 
     def _leave_l1(self) -> None:
         l1, self._l1, self.l1_reason = self._l1, None, None
@@ -187,24 +230,28 @@ class CoreLabelBinding(QtCore.QObject):
         l1.setParent(None)
 
     # ── styles ────────────────────────────────────────────────────────
-    def set_style(self, kind: str, **changes) -> None:
-        self._styles[kind] = dataclasses.replace(self._styles[kind], **changes)
-        if self._l1 is not None:
-            self._l1.set_style(kind, **changes)
+    def set_style(self, key: str, **changes) -> None:
+        if key not in self._styles:
             return
-        self._send_styles()
+        self._styles[key] = dataclasses.replace(self._styles[key], **changes)
+        if self._l1 is not None:
+            self._l1.set_style(key, **changes)
+            return
+        stamp = next((s for k, s, _src in self._slots if k == key), None)
+        if stamp is not None and self._handed is not None and any(s == stamp for s, _d in self._handed):
+            self.core.set_label_slot_style(stamp, *self._style_tuple(self._styles[key]))
+        self.layer.update()
 
-    def style(self, kind: str):
-        return self._styles[kind]
+    def style(self, key: str):
+        return self._styles[key]
 
     def _send_styles(self) -> None:
-        if self._l1 is not None or self._disposed:
+        if self._l1 is not None or self._disposed or not self._handed:
             return
-        ratio = float(self.layer.devicePixelRatioF()) or 1.0
-        for i, kind in enumerate(KINDS):
-            st = self._styles[kind]
-            self.core.set_label_style(i, bool(st.visible), tuple(float(c) for c in st.color), float(st.alpha),
-                                      label_radius(st.width, ratio), st.mode == LABEL_FILL)
+        handed = {s for s, _d in self._handed}
+        for key, stamp, _src in self._slots:
+            if stamp in handed:
+                self.core.set_label_slot_style(stamp, *self._style_tuple(self._styles[key]))
         self.layer.update()
 
     # ── status ────────────────────────────────────────────────────────
@@ -213,20 +260,26 @@ class CoreLabelBinding(QtCore.QObject):
 
     def mask_status(self) -> Dict[str, Any]:
         if self._l1 is not None:
-            return dict(self._l1.mask_status(), l1=self.l1_reason)
+            out = dict(self._l1.mask_status(), l1=self.l1_reason)
+            for key, _stamp, source in self._slots:      # the builds are this binding's
+                if key in out and destination(source) in self._building:
+                    out[key] = dict(out[key], building=True,
+                                    coarse_unavailable="the zoomed-out levels are being prepared")
+            return out
         stats = self._core_stats()
         level = stats.get("target_level")
+        errors = stats.get("errors") or {}
         out = {}
-        for kind in KINDS:
-            source = self._sources.get(kind)
+        for key, stamp, source in self._slots:
+            dest = destination(source)
             coarse = None
-            if source is not None and source.pyramid is None:
-                coarse = ("the zoomed-out levels are being prepared" if kind in self._building
-                          else (self._reasons.get(kind) or source.pyramid_reason or "no label pyramid"))
-            out[kind] = {"source": source is not None, "coarse_unavailable": coarse,
-                         "building": kind in self._building, "unavailable_here": bool(coarse) and bool(level)}
+            if source.pyramid is None:
+                coarse = ("the zoomed-out levels are being prepared" if dest in self._building
+                          else (self._reasons.get(dest) or source.pyramid_reason or "no label pyramid"))
+            out[key] = {"source": True, "coarse_unavailable": coarse, "building": dest in self._building,
+                        "unavailable_here": bool(coarse) and bool(level), "error": errors.get(stamp)}
         out["budget"] = stats.get("note")
-        out["error"] = stats.get("last_error")
+        out["error"] = None                              # the per-slot errors are in the slots
         out["l1"] = None                                 # the core reads them
         return out
 
@@ -238,18 +291,18 @@ class CoreLabelBinding(QtCore.QObject):
                                              "pushes", "resident", "reading", "queued", "resident_bytes",
                                              "pending_bytes")}
         out.update(pyramids_built=self._pyramids_built, budget_bytes=self.budget_bytes,
-                   target_level=stats.get("target_level"), generation=self._generation,
+                   target_level=stats.get("target_level"), generation=stats.get("generation", 0),
                    thread_alive=bool(stats.get("thread_alive")),
                    building=any(t.is_alive() for t in self._builders))
         return out
 
     def _after_frame(self) -> None:
-        """After a frame: the core's level, budget note or error changed ->
+        """After a frame: the core's level, budget note or errors changed ->
         the status (Python emitted this from every plan)."""
         if self._l1 is not None or self._disposed:
             return
         stats = self._core_stats()
-        seen = (stats.get("target_level"), stats.get("note"), stats.get("last_error"))
+        seen = (stats.get("target_level"), stats.get("note"), tuple(sorted((stats.get("errors") or {}).items())))
         if seen != self._seen:
             self._seen = seen
             self.status_changed.emit()
@@ -265,9 +318,10 @@ class CoreLabelBinding(QtCore.QObject):
             return False
         self._paused = True
         if self._l1 is not None:
-            return self._l1.pause()
+            self._l1.pause()
         self._retry_build |= set(self._building)
-        self._cancel.set()                              # the build stops; resume starts it again
+        for cancel in self._running.values():
+            cancel.set()                                # the build stops; resume starts it again
         return True
 
     def resume(self) -> bool:
@@ -275,14 +329,13 @@ class CoreLabelBinding(QtCore.QObject):
             return False
         self._paused = False
         if self._l1 is not None:
-            return self._l1.resume()
-        if self._retry_build:
-            self._cancel = threading.Event()
-            self._generation += 1                       # the cancelled build's late end is not news
-            self._retry_build.clear()
-            self._building.clear()
-            self._queue_builds()
-        self._hand_over()
+            self._l1.resume()
+        # the builds the pause cancelled, AND the slots added while paused
+        # (`set_slots` builds nothing then; codex review 2)
+        retry, self._retry_build = set(self._retry_build), set()
+        self._building -= retry
+        self._queue_builds()
+        self._route()
         return True
 
     @property
@@ -290,7 +343,8 @@ class CoreLabelBinding(QtCore.QObject):
         return self._paused
 
     def sources(self) -> Dict[str, Any]:
-        return dict(self._l1.sources()) if self._l1 is not None else dict(self._sources)
+        """By slot key, a pyramid built here included."""
+        return {key: src for key, _stamp, src in self._slots}
 
     def dispose(self, timeout: float = 0.0) -> Dict[str, Any]:
         """Stop reading and building, clear the masks; no thread is waited
@@ -298,7 +352,8 @@ class CoreLabelBinding(QtCore.QObject):
         if self._disposed:
             return {"already_disposed": True, "thread_alive": False}
         self._disposed = True
-        self._cancel.set()
+        for cancel in self._running.values():
+            cancel.set()
         try:
             self.layer.frameSwapped.disconnect(self._after_frame)
         except (TypeError, RuntimeError):
@@ -307,7 +362,7 @@ class CoreLabelBinding(QtCore.QObject):
         if self._l1 is not None:
             self._l1.dispose(timeout)
         try:
-            self.core.set_label_sources(None)
+            self.core.set_label_slots([])
         except Exception:                               # noqa: BLE001 -- a closed core
             pass
         for thread in self._builders:

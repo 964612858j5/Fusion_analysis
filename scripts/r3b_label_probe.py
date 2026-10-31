@@ -43,11 +43,23 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 
-def _mask(work, name, shape, compressor=None, base=0):
+
+
+def _slot_error(binding):
+    """The first slot's read error (plan §3.3: errors are per slot)."""
+    status = binding.mask_status()
+    return next((v["error"] for k, v in status.items() if isinstance(v, dict) and v.get("error")), None)
+
+def _put(mount, sources, styles=None):
+    """One result's cell / nucleus as the mount's slots (Step3 plan §3.3)."""
+    from block01.ui.step3_label_binding import kind_slots
+    return mount.set_mask_slots(kind_slots(sources, styles) if sources else None)
+
+def _mask(work, name, shape, compressor=None, base=0, shift=0):
     import numpy as np
     import zarr
     ids = np.zeros(shape, np.uint32)
-    ids[100:400, 100:500] = 2 ** 24 + 5 + base
+    ids[100 + shift:400 + shift, 100 + shift:500 + shift] = 2 ** 24 + 5 + base
     ids[600:900, 300:380] = 7 + base
     ids[1200:1500, 900:1300] = 11 + base
     path = os.path.realpath(os.path.join(work, name, "global_mask_ROI_1.zarr"))
@@ -128,7 +140,7 @@ class Probe:
 def s_follow(p, out):
     path = _mask(p.work, "a", (p.h0, p.w0))
     p.zoom_in()
-    p.mount.set_mask_sources(_source(path, (p.h0, p.w0)))
+    _put(p.mount, _source(path, (p.h0, p.w0)))
     out["shown"] = p.wait(p.settled, 60)
     before = p.stats()
     for x in (700, 1100, 300, 900):                    # moves faster than the slow reads
@@ -147,7 +159,7 @@ def s_follow(p, out):
 def s_pyramid(p, out):
     path = _mask(p.work, "b", (p.h0, p.w0))
     p.zoom_out()
-    p.mount.set_mask_sources(_source(path, (p.h0, p.w0)))
+    _put(p.mount, _source(path, (p.h0, p.w0)))
     building = p.binding.mask_status()["cell"]["building"]
     out["building_at_first"] = building
     out["read_while_building"] = p.stats()["requested"] if building else 0
@@ -167,7 +179,7 @@ def s_level0_only(p, out):
                               for l in range(p.mount.host.stack.provider.num_levels)]).status == "ready"
     shutil.copytree(lp.pyramid_path_for(foreign), lp.pyramid_path_for(path))
     p.zoom_in()
-    p.mount.set_mask_sources(_source(path, (p.h0, p.w0)))
+    _put(p.mount, _source(path, (p.h0, p.w0)))
     out["level0_shown"] = p.wait(p.settled, 60)
     p.zoom_out()
     p.wait(lambda: (p.core()["target_level"] or 0) > 0, 20)
@@ -182,7 +194,7 @@ def s_level0_only(p, out):
 def s_pause(p, out):
     path = _mask(p.work, "d", (p.h0, p.w0))
     p.zoom_in()
-    p.mount.set_mask_sources(_source(path, (p.h0, p.w0)))
+    _put(p.mount, _source(path, (p.h0, p.w0)))
     p.mount.pause_requests()                            # during the build
     out["cancelled_build"] = p.wait(lambda: not p.stats()["building"], 20)
     out["built_while_paused"] = p.stats()["pyramids_built"]
@@ -210,7 +222,7 @@ def s_rapid_pause(p, out):
         n = sum(1 for t in threading.enumerate() if t.name == "step3-pyramid" and t.is_alive())
         most[0] = max(most[0], n)
         return n
-    p.mount.set_mask_sources(_source(path, (p.h0, p.w0)))
+    _put(p.mount, _source(path, (p.h0, p.w0)))
     for _ in range(2):
         p.mount.pause_requests()
         writers()
@@ -226,8 +238,8 @@ def s_switch_build(p, out):
     first = _mask(p.work, "e1", (p.h0, p.w0))
     second = _mask(p.work, "e2", (p.h0, p.w0))
     p.zoom_out()
-    p.mount.set_mask_sources(_source(first, (p.h0, p.w0)))
-    p.mount.set_mask_sources(_source(second, (p.h0, p.w0)))   # while the first builds
+    _put(p.mount, _source(first, (p.h0, p.w0)))
+    _put(p.mount, _source(second, (p.h0, p.w0)))   # while the first builds
     out["shown"] = p.wait(lambda: p.stats()["pyramids_built"] >= 1 and p.settled(), 60)
     src = p.binding.sources()["cell"]
     out["source_is_second"] = src is not None and src.mask_path == second
@@ -249,7 +261,7 @@ def _close_and_wait(p, out):
 def s_close_reading(p, out):
     path = _mask(p.work, "f", (p.h0, p.w0))
     p.zoom_in()
-    p.mount.set_mask_sources(_source(path, (p.h0, p.w0)))
+    _put(p.mount, _source(path, (p.h0, p.w0)))
     out["reading"] = p.wait(lambda: p.stats()["reading"] > 0, 30)
     out["ok"] = out["reading"] and _close_and_wait(p, out)
 
@@ -257,7 +269,7 @@ def s_close_reading(p, out):
 def s_close_build(p, out):
     path = _mask(p.work, "g", (p.h0, p.w0))
     p.zoom_out()
-    p.mount.set_mask_sources(_source(path, (p.h0, p.w0)))
+    _put(p.mount, _source(path, (p.h0, p.w0)))
     out["building"] = p.binding.mask_status()["cell"]["building"]
     out["ok"] = out["building"] and _close_and_wait(p, out)
 
@@ -265,12 +277,12 @@ def s_close_build(p, out):
 def s_errors(p, out):
     path = _mask(p.work, "h", (p.h0, p.w0))
     p.zoom_in()
-    p.mount.set_mask_sources(_source(path, (p.h0, p.w0)))
-    out["error_shown"] = p.wait(lambda: bool(p.binding.mask_status()["error"]), 30)
-    out["error"] = p.binding.mask_status()["error"]
+    _put(p.mount, _source(path, (p.h0, p.w0)))
+    out["error_shown"] = p.wait(lambda: bool(_slot_error(p.binding)), 30)
+    out["error"] = _slot_error(p.binding)
     again = _mask(p.work, "h2", (p.h0, p.w0))
-    p.mount.set_mask_sources(_source(again, (p.h0, p.w0)))
-    out["cleared"] = p.binding.mask_status()["error"] is None
+    _put(p.mount, _source(again, (p.h0, p.w0)))
+    out["cleared"] = _slot_error(p.binding) is None
     out["shown_after"] = p.wait(p.settled, 60)
     out["ok"] = out["error_shown"] and "injected" in str(out["error"]) and out["cleared"] and out["shown_after"]
 
@@ -278,31 +290,31 @@ def s_errors(p, out):
 def s_late_error(p, out):
     path = _mask(p.work, "i", (p.h0, p.w0))
     p.zoom_in()
-    p.mount.set_mask_sources(_source(path, (p.h0, p.w0)))
+    _put(p.mount, _source(path, (p.h0, p.w0)))
     p.wait(lambda: p.stats()["pyramids_built"] == 1, 60)
     out["reading"] = p.wait(lambda: p.stats()["reading"] > 0, 30)
     late = p.stats()["late_dropped"]
-    p.mount.set_mask_sources(None)                      # the failing reads now belong to an old source
+    _put(p.mount, None)                      # the failing reads now belong to an old source
     p.wait(lambda: p.stats()["reading"] == 0, 30)
     p.rig.pump(1.0)
     out["late_dropped"] = p.stats()["late_dropped"] - late
-    out["error"] = p.binding.mask_status()["error"]
+    out["error"] = _slot_error(p.binding)
     out["ok"] = out["reading"] and out["late_dropped"] > 0 and out["error"] is None
 
 
 def s_hide_show(p, out):
     path = _mask(p.work, "j", (p.h0, p.w0))
     p.zoom_in()
-    p.mount.set_mask_sources(_source(path, (p.h0, p.w0)))
+    _put(p.mount, _source(path, (p.h0, p.w0)))
     p.wait(p.settled, 60)
-    p.mount.set_mask_style("cell", visible=False)
+    p.mount.set_slot_style("cell", visible=False)
     p.view(1000, 1400, 1300, 1700)
     p.rig.pump(0.5)
     hidden_req = p.stats()["requested"]
-    p.mount.set_mask_style("cell", visible=True)
+    p.mount.set_slot_style("cell", visible=True)
     out["read_on_show"] = p.wait(lambda: p.stats()["requested"] > hidden_req and p.settled(), 30)
     req = p.stats()["requested"]
-    p.mount.set_mask_style("cell", color=(1.0, 0.0, 0.0))
+    p.mount.set_slot_style("cell", color=(1.0, 0.0, 0.0))
     p.rig.pump(0.5)
     out["read_on_colour"] = p.stats()["requested"] - req
     out["ok"] = out["read_on_show"] and out["read_on_colour"] == 0
@@ -320,15 +332,15 @@ def s_l1(p, out):
     memory = built.source.pyramid.__class__(group=zarr.group(), attrs=built.source.pyramid.attrs, where="memory")
     import dataclasses
     p.zoom_in()
-    p.mount.set_mask_sources({"cell": dataclasses.replace(built.source, pyramid=memory), "nucleus": None})
+    _put(p.mount, {"cell": dataclasses.replace(built.source, pyramid=memory), "nucleus": None})
     out["l1_memory"] = p.binding.l1_reason
     out["shown_l1"] = p.wait(p.shown, 30)
     zstd = _mask(p.work, "k2", shape, compressor=Zstd(level=1))
-    p.mount.set_mask_sources(_source(zstd, shape))
+    _put(p.mount, _source(zstd, shape))
     p.rig.pump(0.5)
     out["l1_format"] = p.binding.l1_reason
     good = _mask(p.work, "k3", shape, base=1000)       # other ids: no stale texture may show
-    p.mount.set_mask_sources(_source(good, shape))
+    _put(p.mount, _source(good, shape))
     out["back_to_core"] = p.binding.l1_reason is None
     out["shown_core"] = p.wait(lambda: p.core_wants() and p.settled(), 60)
     p.mount.gpu_layer.update()
@@ -344,9 +356,9 @@ def s_l1(p, out):
 
 def s_ratio(p, out):
     path = _mask(p.work, "l", (p.h0, p.w0))
-    p.mount.set_mask_style("cell", width=2.0)
     p.zoom_in()
-    p.mount.set_mask_sources(_source(path, (p.h0, p.w0)))
+    _put(p.mount, _source(path, (p.h0, p.w0)))
+    p.mount.set_slot_style("cell", width=2.0)
     p.wait(p.settled, 60)
     layer = p.mount.gpu_layer
     out["radius_1"] = p.core()["radius"][0]
@@ -373,7 +385,7 @@ def s_gl_state(p, out):
             record["diffs"].append({k: [str(v[0]), str(v[1])] for k, v in d.items()})
     layer.paintGL = wrapped
     p.zoom_in()
-    p.mount.set_mask_sources(_source(path, (p.h0, p.w0)))
+    _put(p.mount, _source(path, (p.h0, p.w0)))
     p.wait(p.settled, 60)
     for x in (300, 700, 0):
         p.view(x, x + 500, x, x + 500)
@@ -382,6 +394,127 @@ def s_gl_state(p, out):
     p.wait(p.settled, 30)
     out["paints"], out["diffs"] = record["paints"], record["diffs"][:2]
     out["ok"] = record["paints"] > 5 and not record["diffs"]
+
+
+def _ready(p, path):
+    """A cell mask whose pyramid is built beforehand (no build in the view)."""
+    from block01.core import step3_masks as sm
+    got = sm.ensure_pyramid(_source(path, (p.h0, p.w0))["cell"], p.binding.level_shapes)
+    assert got.status == "ready", got
+    return got.source
+
+
+def _colour_pixels(shot, rgb):
+    import numpy as np
+    img = np.asarray(shot)[..., :3].astype(int)
+    return int((np.abs(img - np.array(rgb)).sum(axis=-1) <= 6).sum())
+
+
+def s_multi(p, out):
+    """Several results at once (Step3 plan §3.3/3.4): two drawn together;
+    a third whose pyramid is still building is withheld while the two keep
+    their tiles, then joins."""
+    import dataclasses
+    from block01.ui.step3_label_binding import DEFAULT_STYLES
+    red = dataclasses.replace(DEFAULT_STYLES["cell"], color=(1.0, 0.0, 0.0), alpha=1.0, width=2.0)
+    blue = dataclasses.replace(DEFAULT_STYLES["cell"], color=(0.0, 0.0, 1.0), alpha=1.0, width=2.0)
+    a = _ready(p, _mask(p.work, "ma", (p.h0, p.w0)))
+    b = _ready(p, _mask(p.work, "mb", (p.h0, p.w0), base=1000, shift=40))   # its own outline
+    p.zoom_in()
+    p.mount.set_mask_slots([("a", a, red), ("b", b, blue)])
+    out["shown"] = p.wait(p.settled, 60)
+    core = p.core()
+    out["stamps"] = core["stamps"]
+    held = {tuple(k) for k in core["held_keys"]}
+    out["held_per_slot"] = sorted({k[0] for k in held})
+    shot = p.mount.gpu_layer.readback_shown_for_test()
+    out["red"], out["blue"] = _colour_pixels(shot, (255, 0, 0)), _colour_pixels(shot, (0, 0, 255))
+    # a third, not yet prepared: the two keep drawing while it builds
+    c = _source(_mask(p.work, "mc", (p.h0, p.w0), base=2000), (p.h0, p.w0))["cell"]
+    p.mount.set_mask_slots([("a", a, red), ("b", b, blue), ("c", c, DEFAULT_STYLES["cell"])])
+    during = p.core()
+    out["stamps_during"] = during["stamps"]
+    out["kept_during"] = held <= {tuple(k) for k in during["held_keys"]}
+    out["built"] = p.wait(lambda: not p.binding.mask_status()["c"]["building"], 60)
+    out["settled_after"] = p.wait(p.settled, 60)
+    after = p.core()
+    out["stamps_after"] = after["stamps"]
+    out["ok"] = (out["shown"] and len(out["stamps"]) == 2 and len(out["held_per_slot"]) == 2
+                 and out["red"] > 50 and out["blue"] > 50
+                 and out["stamps_during"] == out["stamps"] and out["kept_during"]
+                 and out["built"] and out["settled_after"]
+                 and out["stamps_after"][:2] == out["stamps"] and len(out["stamps_after"]) == 3)
+
+
+def s_shared(p, out):
+    """Two slots of one mask (one destination) build its pyramid ONCE and
+    both take it (plan §3.3)."""
+    import dataclasses
+    from block01.ui.step3_label_binding import DEFAULT_STYLES
+    src = _source(_mask(p.work, "sh", (p.h0, p.w0)), (p.h0, p.w0))["cell"]
+    nuc = dataclasses.replace(DEFAULT_STYLES["nucleus"])
+    p.zoom_out()
+    p.mount.set_mask_slots([("x", src, DEFAULT_STYLES["cell"]), ("y", src, nuc)])
+    out["built"] = p.wait(lambda: not any(v.get("building") for v in p.binding.mask_status().values()
+                                          if isinstance(v, dict)), 60)
+    out["builders"] = len(p.binding._builders)
+    srcs = p.binding.sources()
+    out["both_have_pyramid"] = all(srcs[k].pyramid is not None for k in ("x", "y"))
+    out["settled"] = p.wait(p.settled, 60)
+    out["ok"] = out["built"] and out["builders"] == 1 and out["both_have_pyramid"] and out["settled"]
+
+
+def s_l1_builds(p, out):
+    """Codex review 1 (P1): a slot that needs Python (L1) beside one whose
+    pyramid is missing -- the pyramid is built ONCE, by the outer binding,
+    never by the inner one too; and back to the core when the L1 slot goes."""
+    import dataclasses
+    import zarr
+    from block01.core import step3_masks as sm
+    from block01.ui.step3_label_binding import DEFAULT_STYLES
+    shape = (p.h0, p.w0)
+    levels = [p.mount.host.stack.provider.level_shape(l) for l in range(p.mount.host.stack.provider.num_levels)]
+    built = sm.ensure_pyramid(_source(_mask(p.work, "lx", shape), shape)["cell"], levels)
+    memory = built.source.pyramid.__class__(group=zarr.group(), attrs=built.source.pyramid.attrs, where="memory")
+    x = dataclasses.replace(built.source, pyramid=memory)
+    y = _source(_mask(p.work, "ly", shape, base=500), shape)["cell"]
+    real, calls = sm.ensure_pyramid, []
+
+    def counted(source, *a, **k):
+        calls.append(source.mask_path)
+        return real(source, *a, **k)
+    sm.ensure_pyramid = counted
+    try:
+        p.zoom_out()
+        p.mount.set_mask_slots([("x", x, DEFAULT_STYLES["cell"]), ("y", y, DEFAULT_STYLES["nucleus"])])
+        out["l1"] = p.binding.l1_reason
+        out["inner_builds"] = p.binding._l1._builds if p.binding._l1 is not None else None
+        out["built"] = p.wait(lambda: p.binding.sources()["y"].pyramid is not None, 60)
+        p.rig.pump(1.0)
+        out["y_builds"] = calls.count(y.mask_path)
+        p.mount.set_mask_slots([("y", p.binding.sources()["y"], DEFAULT_STYLES["nucleus"])])
+        out["back_to_core"] = p.binding.l1_reason is None
+        out["settled"] = p.wait(p.settled, 60)
+    finally:
+        sm.ensure_pyramid = real
+    out["ok"] = (bool(out["l1"]) and out["inner_builds"] is False and out["built"] and out["y_builds"] == 1
+                 and out["back_to_core"] and out["settled"])
+
+
+def s_pause_add(p, out):
+    """Codex review 2: a mask added while the viewer is paused (Step3 not on
+    screen) has its pyramid built when it is resumed."""
+    from block01.ui.step3_label_binding import DEFAULT_STYLES
+    src = _source(_mask(p.work, "pa", (p.h0, p.w0)), (p.h0, p.w0))["cell"]
+    p.zoom_out()
+    p.mount.pause_requests()
+    p.mount.set_mask_slots([("z", src, DEFAULT_STYLES["cell"])])
+    p.rig.pump(0.5)
+    out["built_while_paused"] = p.binding.sources()["z"].pyramid is not None
+    p.mount.resume_requests()
+    out["built"] = p.wait(lambda: p.binding.sources()["z"].pyramid is not None, 60)
+    out["settled"] = p.wait(p.settled, 60)
+    out["ok"] = not out["built_while_paused"] and out["built"] and out["settled"]
 
 
 SCENARIOS = {n[2:]: f for n, f in globals().items() if n.startswith("s_")}

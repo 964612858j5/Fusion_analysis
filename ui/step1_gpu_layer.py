@@ -223,6 +223,8 @@ class LabelLayer:
     width: float = 1.0
     mode: str = LABEL_OUTLINE
     visible: bool = True
+    #: dashed outline (Step3 multi-result plan §4)
+    dash: bool = False
 
 
 @dataclass(frozen=True)
@@ -2611,6 +2613,14 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                 self._uniform1i("label_draw", "u_radius", label_radius(layer.width, radius_ratio))
                 self._uniform3("label_draw", "u_color", layer.color)
                 self._uniform1f("label_draw", "u_alpha", layer.alpha)
+                # dashed (Step3 multi-result plan §4), as the Rust core draws it
+                from ..core.step3_masks import DASH_DUTY, dash_pattern
+                radius = label_radius(layer.width, radius_ratio)
+                period, phase = (dash_pattern(radius, viewport.world_rect, self._target_size)
+                                 if getattr(layer, "dash", False) else (0.0, (0.0,) * 4))
+                self._uniform1f("label_draw", "u_dash", period)
+                self._uniform1f("label_draw", "u_duty", DASH_DUTY)
+                self._uniform4("label_draw", "u_phase", phase)
                 self._draw()
                 self._label_counts["label_passes"] += 1
                 gl.glUseProgram(0)

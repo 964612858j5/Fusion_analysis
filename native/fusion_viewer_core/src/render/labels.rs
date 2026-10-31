@@ -14,6 +14,32 @@ use crate::label_store::Labels;
 use glow::HasContext;
 use std::collections::HashMap;
 
+/// A dash is 4 line widths drawn, 2 left out (Step1's `Qt.DashLine`).
+pub const DASH_DUTY: f32 = 4.0 / 6.0;
+
+/// A dashed layer's period in screen pixels (0: solid) and its slide phase
+/// per direction the shader cuts along -- x, y, (x - y)/sqrt2, (x + y)/sqrt2
+/// of the screen position of the world origin -- so a point of the slide
+/// keeps its place in the dash pattern whatever the pan. Each is reduced
+/// modulo the period in f64 ON ITS OWN (reducing x and y first and
+/// projecting after would jump the diagonals at every wrap; an f32 offset
+/// of the whole slide in pixels would jitter far from the origin).
+pub fn dash_pattern(dash: bool, radius: i32, view: [f32; 4], (w, h): (i32, i32)) -> (f32, [f32; 4]) {
+    if !dash {
+        return (0.0, [0.0; 4]);
+    }
+    let period = 6.0 * f64::from(radius.max(1));
+    let (vw, vh) = (f64::from(view[1]) - f64::from(view[0]), f64::from(view[3]) - f64::from(view[2]));
+    if vw <= 0.0 || vh <= 0.0 {
+        return (period as f32, [0.0; 4]);
+    }
+    // screen x grows with world x; screen y (GL, bottom up) with -world y
+    let ax = f64::from(view[0]) * f64::from(w) / vw;
+    let ay = -f64::from(view[3]) * f64::from(h) / vh;
+    let r = std::f64::consts::FRAC_1_SQRT_2;
+    let phase = [ax, ay, (ax - ay) * r, (ax + ay) * r].map(|v| v.rem_euclid(period) as f32);
+    (period as f32, phase)
+}
 
 impl Render {
     pub fn label_gpu(&self) -> Option<&LabelGpu> {
@@ -127,6 +153,13 @@ impl Render {
                 gl.uniform_3_f32(l.as_ref(), layer.color[0], layer.color[1], layer.color[2]);
                 let l = self.uloc(gl, draw_prog, "u_alpha");
                 gl.uniform_1_f32(l.as_ref(), layer.alpha);
+                let (period, phase) = dash_pattern(layer.dash, layer.radius, view, (w, h));
+                let l = self.uloc(gl, draw_prog, "u_dash");
+                gl.uniform_1_f32(l.as_ref(), period);
+                let l = self.uloc(gl, draw_prog, "u_duty");
+                gl.uniform_1_f32(l.as_ref(), DASH_DUTY);
+                let l = self.uloc(gl, draw_prog, "u_phase");
+                gl.uniform_4_f32(l.as_ref(), phase[0], phase[1], phase[2], phase[3]);
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
                 passes += 1;
                 gl.bind_texture(glow::TEXTURE_2D, None);

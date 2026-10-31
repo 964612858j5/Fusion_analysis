@@ -1,29 +1,38 @@
 //! What Step3's masks need now (`Step3LabelBinding._plan`, R3b plan §2.2),
 //! step for step: the camera level's visible tiles and one ring around
 //! them, nearest the visible centre first (ties: row, then column -- the
-//! Python binding sorts the same way since R3b), visible-cell, visible-
-//! nucleus, ring-cell, ring-nucleus; other levels' tiles stay while they
+//! Python binding sorts the same way since R3b); the visible tiles before
+//! the ring, and within each TILE-MAJOR: every shown slot gets a tile
+//! before any slot gets the next one, so over the budget all slots lose
+//! their far tiles together (docs/v17_step3_multi_results_plan.md §3.4);
+//! other levels' tiles stay while they
 //! lie under the view; over the budget the farthest old levels go first,
 //! then the ring, then the visible tiles farthest from the centre, with a
 //! note. Pure: the reader (`label_pool`) and the planner's state live
 //! elsewhere; a test drives this and Python's `_plan` with the same events.
 
 use crate::geom::{Pyramid, TILE};
-use crate::label_source::KINDS;
 
-/// (generation, kind, level, tx, ty)
-pub type LKey = (u64, usize, u8, u32, u32);
+/// (stamp, level, tx, ty)
+pub type LKey = (u64, u8, u32, u32);
+
+/// One slot as the planner sees it, in drawing order.
+#[derive(Clone, Copy, Debug)]
+pub struct SlotPlan {
+    pub stamp: u64,
+    /// it is shown
+    pub shown: bool,
+    /// its pyramid is there (coarse levels can be read)
+    pub pyramid: bool,
+}
 
 pub struct PlanIn<'a> {
     pub pyr: &'a Pyramid,
     /// the camera's level and the tiles it shows there (`cover`)
     pub level: u8,
     pub visible: &'a [(u32, u32)],
-    pub generation: u64,
-    /// per kind: it has a source and is shown
-    pub shown: [bool; 2],
-    /// per kind: its pyramid is there (coarse levels can be read)
-    pub pyramid: [bool; 2],
+    /// the slots, in drawing order
+    pub slots: &'a [SlotPlan],
     /// what is held now, in the order it arrived, with its world rect
     pub resident: &'a [(LKey, [f64; 4])],
     pub budget: usize,
@@ -40,7 +49,7 @@ pub struct PlanOut {
 }
 
 pub fn tile_bytes(pyr: &Pyramid, key: &LKey) -> usize {
-    let (rows, cols) = pyr.tile_shape(crate::geom::TileAt { level: key.2, tx: key.3, ty: key.4 });
+    let (rows, cols) = pyr.tile_shape(crate::geom::TileAt { level: key.1, tx: key.2, ty: key.3 });
     rows * cols * 4
 }
 
@@ -98,20 +107,20 @@ pub fn plan(p: &PlanIn) -> Option<PlanOut> {
         v
     };
     let (vis_sorted, ring_sorted) = (sorted(visible.clone()), sorted(ring.into_iter().collect()));
-    let generation = p.generation;
-    let (mut target_vis, mut target_ring) = (Vec::new(), Vec::new());
-    for kind in KINDS {
-        if !p.shown[kind] || (p.level > 0 && !p.pyramid[kind]) {
-            continue;                         // not requested, not drawn (status says why)
-        }
-        target_vis.extend(vis_sorted.iter().map(|&(tx, ty)| (generation, kind, p.level, tx, ty)));
-        target_ring.extend(ring_sorted.iter().map(|&(tx, ty)| (generation, kind, p.level, tx, ty)));
-    }
+    // not requested, not drawn (the status says why): hidden, or a coarse
+    // level without a pyramid
+    let asked: Vec<u64> = p.slots.iter().filter(|s| s.shown && (p.level == 0 || s.pyramid))
+        .map(|s| s.stamp).collect();
+    let shown: std::collections::HashSet<u64> = p.slots.iter().filter(|s| s.shown).map(|s| s.stamp).collect();
+    let tile_major = |tiles: &[(u32, u32)]| -> Vec<LKey> {
+        tiles.iter().flat_map(|&(tx, ty)| asked.iter().map(move |&stamp| (stamp, p.level, tx, ty))).collect()
+    };
+    let (mut target_vis, mut target_ring) = (tile_major(&vis_sorted), tile_major(&ring_sorted));
     let target: std::collections::HashSet<LKey> = target_vis.iter().chain(&target_ring).copied().collect();
     // what stays: the target, and other levels' tiles still under the view
     let mut keep: Vec<LKey> = Vec::new();
     for (key, rect) in p.resident {
-        let under = key.0 == generation && key.2 != p.level && p.shown[key.1]
+        let under = key.1 != p.level && shown.contains(&key.0)
             && view.as_ref().is_some_and(|v| overlaps(rect, v));
         if target.contains(key) || under {
             keep.push(*key);
@@ -119,9 +128,9 @@ pub fn plan(p: &PlanIn) -> Option<PlanOut> {
     }
     // the budget: old levels first, then the ring, then the far visible
     let size = |k: &LKey| tile_bytes(p.pyr, k);
-    let mut old: Vec<LKey> = keep.iter().copied().filter(|k| k.2 != p.level).collect();
-    old.sort_by_key(|k| (k.2 as i64 - p.level as i64).abs());   // stable, as Python's sorted
-    let (mut wanted_vis, mut wanted_ring) = (target_vis, target_ring);
+    let mut old: Vec<LKey> = keep.iter().copied().filter(|k| k.1 != p.level).collect();
+    old.sort_by_key(|k| (k.1 as i64 - p.level as i64).abs());   // stable, as Python's sorted
+    let (mut wanted_vis, mut wanted_ring) = (std::mem::take(&mut target_vis), std::mem::take(&mut target_ring));
     let total = |keep: &Vec<LKey>, wv: &Vec<LKey>, wr: &Vec<LKey>| {
         let held: std::collections::HashSet<&LKey> = keep.iter().collect();
         keep.iter().map(size).sum::<usize>()
@@ -157,3 +166,7 @@ pub fn plan(p: &PlanIn) -> Option<PlanOut> {
     wanted_vis.extend(wanted_ring);
     Some(PlanOut { wanted: wanted_vis, keep, released, note })
 }
+
+#[cfg(test)]
+#[path = "label_plan_tests.rs"]
+mod tests;

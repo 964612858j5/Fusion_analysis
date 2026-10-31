@@ -32,7 +32,7 @@ from block01.core import label_pyramid as lp  # noqa: E402
 from block01.core import step3_masks as sm  # noqa: E402
 from block01.ui.step1_gpu_layer import LabelPlane  # noqa: E402
 from block01.ui.step3_core_labels import describe  # noqa: E402
-from block01.ui.step3_label_binding import Step3LabelBinding  # noqa: E402
+from block01.ui.step3_label_binding import MaskStyle, Step3LabelBinding  # noqa: E402
 
 SHAPES = [(2100, 1700), (1050, 850), (525, 425)]
 T = 512
@@ -128,31 +128,30 @@ def test_b_planning_matches_python_state_for_state(app):
         tx0, ty0 = rng.randrange(-1, nx + 1), rng.randrange(-1, ny + 1)
         visible = {(tx, ty) for tx in range(tx0, tx0 + rng.randrange(0, 4))
                    for ty in range(ty0, ty0 + rng.randrange(0, 4)) if tx >= 0 and ty >= 0}
-        gen = rng.randrange(1, 4)
-        has = [rng.random() < 0.8, rng.random() < 0.6]
-        visible_style = [rng.random() < 0.8, rng.random() < 0.8]
-        pyr = [rng.random() < 0.7, rng.random() < 0.7]
+        # 0..4 slots (several results at once, plan §3.4); stamps unique
+        n = rng.randrange(0, 5)
+        stamps = rng.sample(range(1, 9), n)
+        shown = [rng.random() < 0.8 for _ in range(n)]
+        pyr = [rng.random() < 0.7 for _ in range(n)]
+        known = stamps + [99]                       # 99: a slot that left
         resident = []
         for _ in range(rng.randrange(0, 14)):
             lv = rng.randrange(len(SHAPES))
             gx, gy = _grid(lv)
-            key = (rng.choice([gen, gen, gen - 1]), rng.choice(["cell", "nucleus"]), lv,
-                   rng.randrange(gx), rng.randrange(gy))
+            key = (rng.choice(known), lv, rng.randrange(gx), rng.randrange(gy))
             if key not in [k for k, _ in resident]:
-                resident.append((key, _rect(lv, key[3], key[4])))
+                resident.append((key, _rect(lv, key[2], key[3])))
         budget = rng.choice([1, 2, 3, 6, 12, 256]) * 2 ** 20
         gx, gy = _grid(level)
-        reading = {(gen, rng.choice(["cell", "nucleus"]), level, rng.randrange(gx), rng.randrange(gy))
-                   for _ in range(rng.randrange(0, 4))}
+        reading = {(rng.choice(known), level, rng.randrange(gx), rng.randrange(gy))
+                   for _ in range(rng.randrange(0, 4))} if n else set()
         # Python
         binding.budget_bytes = budget
-        binding._generation = gen
-        binding._sources = {kind: (sm.MaskSource(kind=kind, mask_path="", bbox=(0, 1, 0, 1), pyramid_path="",
-                                                 pyramid_kind=kind, pyramid=pyramid if pyr[i] else None)
-                                   if has[i] else None)
-                            for i, kind in enumerate(("cell", "nucleus"))}
-        binding._styles = {kind: binding._styles[kind].__class__(visible=visible_style[i])
-                           for i, kind in enumerate(("cell", "nucleus"))}
+        binding._slots = [(f"s{st}", st, sm.MaskSource(kind="cell", mask_path=f"m{st}", bbox=(0, 1, 0, 1),
+                                                     pyramid_path=f"p{st}", pyramid_kind="cell",
+                                                     pyramid=pyramid if pyr[i] else None))
+                          for i, st in enumerate(stamps)]
+        binding._styles = {f"s{st}": MaskStyle(visible=shown[i]) for i, st in enumerate(stamps)}
         binding._resident = {key: LabelPlane(identity=key, world_rect=rect,
                                              ids=np.zeros(shape, np.uint32))
                              for key, (rect, shape) in resident}
@@ -165,16 +164,12 @@ def test_b_planning_matches_python_state_for_state(app):
         py_released = [k for k, _r in resident if k not in binding._resident]
         py_jobs = [j["key"] for j in binding._jobs if j["type"] == "tile"]
         # Rust
-        kind_index = {"cell": 0, "nucleus": 1}
-        shown = [has[i] and visible_style[i] for i in range(2)]
-        as_core = lambda k: (k[0], kind_index[k[1]], k[2], k[3], k[4])   # noqa: E731
-        got = fvc.plan_labels_for_test(SHAPES, level, sorted(visible), gen, shown, pyr,
-                                       [(as_core(k), rect) for k, (rect, _s) in resident],
-                                       [as_core(k) for k in reading], budget)
+        got = fvc.plan_labels_for_test(SHAPES, level, sorted(visible),
+                                       [(st, shown[i], pyr[i]) for i, st in enumerate(stamps)],
+                                       [(k, rect) for k, (rect, _s) in resident], sorted(reading), budget)
         assert got is not None
         wanted, keep, released, jobs, note = got
-        name = {0: "cell", 1: "nucleus"}
-        as_py = lambda keys: [(k[0], name[k[1]], k[2], k[3], k[4]) for k in keys]   # noqa: E731
+        as_py = lambda keys: [tuple(k) for k in keys]   # noqa: E731
         assert as_py(wanted) == py_wanted, case
         assert as_py(keep) == py_keep, case
         assert as_py(released) == py_released, case

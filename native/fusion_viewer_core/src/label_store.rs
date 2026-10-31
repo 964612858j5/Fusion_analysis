@@ -37,6 +37,8 @@ pub struct Layer {
     pub alpha: f32,
     pub radius: i32,
     pub fill: bool,
+    /// a dashed outline (plan §4: anchored to the slide, fixed screen length)
+    pub dash: bool,
 }
 
 #[derive(Default)]

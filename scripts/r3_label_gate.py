@@ -27,6 +27,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 CHANNELS = ["DRAG5", "CD3D", "CD8"]
 
 
+
+def _put(mount, sources, styles=None):
+    """One result's cell / nucleus as the mount's slots (Step3 plan §3.3)."""
+    from block01.ui.step3_label_binding import kind_slots
+    return mount.set_mask_slots(kind_slots(sources, styles) if sources else None)
+
 def _pct(values, q):
     if not values:
         return 0.0
@@ -167,7 +173,7 @@ def main():
                     "gaps_over_50": sum(g > 50 for g in rec["gaps"]),
                     "gap_p95": round(_pct(rec["gaps"], 0.95), 3), "gap_max": round(max(rec["gaps"] or [0]), 3)}
 
-        mount.set_mask_sources(sources)                    # warm: the pyramid is built once
+        _put(mount, sources)                    # warm: the pyramid is built once
         box.setRange(xRange=start[:2], yRange=start[2:], padding=0)
         end = time.monotonic() + 60
         while time.monotonic() < end and not layer.label_stats().get("shown"):
@@ -180,7 +186,7 @@ def main():
         phases = {}
         for rnd in (1, 2):
             for name, src in (("no_masks", None), ("masks", sources)):
-                mount.set_mask_sources(src)
+                _put(mount, src)
                 rig.pump(0.5)
                 phases[f"{name}_{rnd}"] = gesture()
         out["phases"] = phases

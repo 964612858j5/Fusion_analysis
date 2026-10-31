@@ -52,21 +52,23 @@ def _row_widgets(page):
     return out
 
 
-def test_one_row_and_the_run_list_beside_the_tab(app, tmp_path, monkeypatch):
+def test_one_row_and_the_results_button_beside_the_tab(app, tmp_path, monkeypatch):
     rig = sv._rig(app, tmp_path, monkeypatch)
     w = rig.w
     try:
-        bar, strip = w._step3_mask_bar, w._step3_patch_strip
+        strip = w._step3_patch_strip
         row = _row_widgets(w._step3)
-        assert row == [strip.holder(), bar.buttons["cell"], bar.buttons["nucleus"], bar.hint,
+        assert row == [strip.holder(),
                        w._btn_tma_cores_step3,                         # F4-3: hidden without cores
                        w._btn_step3_mode_overlay, w._btn_step3_mode_fusion]
         tabs = w._step3._right_tabs
         corner = tabs.cornerWidget()
-        assert corner is bar.corner()                                    # run list + Load… (B3)
-        assert corner.isAncestorOf(bar.run_combo) and corner.isAncestorOf(bar.load_button)
-        assert not tabs.widget(0).isAncestorOf(bar.run_combo)            # not in the tab's content
+        assert corner.isAncestorOf(w._btn_step3_results)                # Results… (plan §3.1)
+        assert not tabs.widget(0).isAncestorOf(w._btn_step3_results)    # not in the tab's content
+        w._btn_step3_results.click()
+        assert w._step3_results.isVisible()                              # the floating window
     finally:
+        w._step3_results.close()
         w.close()
 
 

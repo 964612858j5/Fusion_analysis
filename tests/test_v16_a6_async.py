@@ -799,20 +799,18 @@ def test_r3_a_run_handed_over_mid_extraction_is_opened_afterwards(step4, tmp_pat
 def test_b9_a_rows_tag_is_drawn_right_aligned_and_named_in_its_tooltip(app):
     # Block RM (§5): the tag names the run's upstream (its fuse run); the
     # A6 "unknown" tag is gone with the run model.
-    from PyQt5.QtCore import Qt
-    from block01.ui.step3_mask_bar import TAG_ROLE, Step3MaskBar
+    # (multi-result plan §3.1: the rows of Step3's results window)
+    from block01.ui.step3_results_window import RowInfo, Step3ResultsWindow
     import block01.ui.step3_mask_bar as mb
     assert not hasattr(mb, "PROVENANCE_UNKNOWN")
-    bar = Step3MaskBar()
-    bar.set_runs([("cellpose · 2026-10-02 10:00", "/r/new\x1fFull WSI", ""),
-                  ("cellpose · 2026-09-27 12:00", "/r/old\x1fFull WSI", "10-03 12:00 · fused")])
-    combo = bar.run_combo
-    assert combo.itemData(0, TAG_ROLE) in (None, "")
-    assert combo.itemData(1, TAG_ROLE) == "10-03 12:00 · fused"
-    assert combo.itemText(1) == "cellpose · 2026-09-27 12:00"     # the name is unchanged
-    assert "10-03 12:00 · fused" in combo.itemData(1, Qt.ToolTipRole)
-    bar.set_runs([("x", "/r/x")])                                  # two-field items still work
-    assert combo.itemText(0) == "x"
+    win = Step3ResultsWindow()
+    win.set_rows([RowInfo("/r/new\x1fFull WSI", "/r/new", "cellpose · 2026-10-02 10:00"),
+                  RowInfo("/r/old\x1fFull WSI", "/r/old", "cellpose · 2026-09-27 12:00",
+                          tag="10-03 12:00 · fused")])
+    new, old = win.row("/r/new\x1fFull WSI"), win.row("/r/old\x1fFull WSI")
+    assert new.tag is None
+    assert old.tag.full_text() == "10-03 12:00 · fused" and "10-03 12:00 · fused" in old.tag.toolTip()
+    assert old.title.text() == "cellpose · 2026-09-27 12:00"      # the name is unchanged
 
 
 def test_b9_a_run_is_known_only_with_its_segmentation_run_entry(tmp_path):

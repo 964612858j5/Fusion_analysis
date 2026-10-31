@@ -71,32 +71,42 @@ pub(super) fn stats<'py>(py: Python<'py>, core: &crate::viewer::ViewerCore) -> P
     d.set_item("generation", lab.generation)?;
     d.set_item("thread_alive", lab.pool.as_ref().is_some_and(|p| p.alive()))?;
     d.set_item("note", lab.note.clone())?;
-    d.set_item("last_error", lab.last_error.clone())?;
+    // the newest error of any slot (the viewer-wide line), and each slot's
+    d.set_item("last_error", lab.errors.values().last().cloned())?;
+    let errors = PyDict::new(py);
+    for (stamp, e) in &lab.errors {
+        errors.set_item(stamp, e)?;
+    }
+    d.set_item("errors", errors)?;
     d.set_item("wanted", lab.wanted.len())?;
     d.set_item("split_ms", lab.split_ms.to_vec())?;
-    d.set_item("radius", lab.styles.iter().map(|st| st.radius).collect::<Vec<_>>())?;
-    d.set_item("held_keys", lab.resident.iter().map(|r| (r.0 .0, r.0 .1, r.0 .2, r.0 .3, r.0 .4)).collect::<Vec<_>>())?;
-    d.set_item("wanted_keys", lab.wanted.iter().map(|k| (k.0, k.1, k.2, k.3, k.4)).collect::<Vec<_>>())?;
+    let order: Vec<u64> = lab.sources.as_ref().map_or(Vec::new(), |s| s.iter().map(|slot| slot.stamp).collect());
+    d.set_item("stamps", order.clone())?;
+    d.set_item("radius", order.iter().map(|k| lab.styles.get(k).map_or(0, |st| st.radius)).collect::<Vec<_>>())?;
+    d.set_item("held_keys", lab.resident.iter().map(|r| r.0).collect::<Vec<_>>())?;
+    d.set_item("wanted_keys", lab.wanted.iter().copied().collect::<Vec<_>>())?;
     d.set_item("uploads", core.gpu.as_ref().and_then(|g| g.render.label_gpu()).map_or(0, |l| l.uploads))?;
     Ok(d)
 }
 
 /// The planner alone (tests: parity with `Step3LabelBinding._plan`).
-/// `resident`: [((gen, kind, level, tx, ty), (x0, x1, y0, y1))] in arrival
-/// order; `reading`: keys being read. Returns (wanted, keep, released,
-/// jobs, note).
+/// `slots`: [(stamp, shown, pyramid)] in drawing order; `resident`:
+/// [((stamp, level, tx, ty), (x0, x1, y0, y1))] in arrival order;
+/// `reading`: keys being read. Returns (wanted, keep, released, jobs, note).
 #[pyfunction]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn plan_labels_for_test(shapes: Vec<(usize, usize)>, level: u8, visible: Vec<(u32, u32)>, generation: u64,
-                            shown: [bool; 2], pyramid: [bool; 2],
-                            resident: Vec<((u64, usize, u8, u32, u32), [f64; 4])>,
-                            reading: Vec<(u64, usize, u8, u32, u32)>, budget: usize)
-                            -> Option<(Vec<(u64, usize, u8, u32, u32)>, Vec<(u64, usize, u8, u32, u32)>,
-                                       Vec<(u64, usize, u8, u32, u32)>, Vec<(u64, usize, u8, u32, u32)>,
+pub fn plan_labels_for_test(shapes: Vec<(usize, usize)>, level: u8, visible: Vec<(u32, u32)>,
+                            slots: Vec<(u64, bool, bool)>,
+                            resident: Vec<((u64, u8, u32, u32), [f64; 4])>,
+                            reading: Vec<(u64, u8, u32, u32)>, budget: usize)
+                            -> Option<(Vec<(u64, u8, u32, u32)>, Vec<(u64, u8, u32, u32)>,
+                                       Vec<(u64, u8, u32, u32)>, Vec<(u64, u8, u32, u32)>,
                                        Option<String>)> {
     let pyr = crate::geom::Pyramid { shapes };
+    let slots: Vec<crate::label_plan::SlotPlan> = slots.into_iter()
+        .map(|(stamp, shown, pyramid)| crate::label_plan::SlotPlan { stamp, shown, pyramid }).collect();
     let out = crate::label_plan::plan(&crate::label_plan::PlanIn {
-        pyr: &pyr, level, visible: &visible, generation, shown, pyramid, resident: &resident, budget })?;
+        pyr: &pyr, level, visible: &visible, slots: &slots, resident: &resident, budget })?;
     let jobs = crate::label_plan::jobs(&out, &reading.into_iter().collect());
     Some((out.wanted, out.keep, out.released, jobs, out.note))
 }

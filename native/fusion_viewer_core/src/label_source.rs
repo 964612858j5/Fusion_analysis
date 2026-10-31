@@ -1,16 +1,23 @@
-//! Step3's masks as the core reads them (R3b plan §2.1): per kind (cell,
-//! nucleus) the level-0 mask with its bounding box's origin, and the label
-//! pyramid's levels on disk (`core.label_pyramid`: level number, array,
-//! origin) -- or none, when the pyramid is missing (then only level 0 is
-//! read; Python builds the pyramid and hands it over). Python parsed the
-//! `.zarray`s; `zarr_v2::U32Array` checked them.
+//! Step3's masks as the core reads them (R3b plan §2.1): per mask the
+//! level-0 mask with its bounding box's origin, and the label pyramid's
+//! levels on disk (`core.label_pyramid`: level number, array, origin) -- or
+//! none, when the pyramid is missing (then only level 0 is read; Python
+//! builds the pyramid and hands it over). Python parsed the `.zarray`s;
+//! `zarr_v2::U32Array` checked them.
+//!
+//! Several results at once (docs/v17_step3_multi_results_plan.md §3.3):
+//! each drawn mask is a SLOT, named by its stamp -- a number Python gives
+//! anew for every new source content and never reuses, so a tile, a job or
+//! an error of a slot that changed is recognised by its stamp alone.
 
 use crate::zarr_v2::U32Array;
 
-pub const CELL: usize = 0;
-pub const NUCLEUS: usize = 1;
-/// Drawn in this order: the nucleus lies on top (`step3_label_binding.KINDS`).
-pub const KINDS: [usize; 2] = [CELL, NUCLEUS];
+/// One drawn mask: its stamp and what is read of it.
+#[derive(Clone, Debug)]
+pub struct Slot {
+    pub stamp: u64,
+    pub source: KindSource,
+}
 
 /// One pyramid level: its number in the viewer's levels, its array and
 /// where the array's (0, 0) lies on that level `(row, col)`.

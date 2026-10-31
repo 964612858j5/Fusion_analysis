@@ -309,29 +309,31 @@ impl ViewerCore {
         crate::frame::draw_labels(&mut self.inner.borrow_mut(), fbo, w, h).map_err(PyRuntimeError::new_err)
     }
 
-    /// R3b: the masks the core plans and reads -- `[cell, nucleus]`, each
-    /// a source dict or None; None for no masks. ValueError: a layout the
-    /// core does not read (the binding then keeps the masks with Python).
-    #[pyo3(signature = (kinds=None))]
-    fn set_label_sources(&self, kinds: Option<Vec<Option<Bound<'_, PyDict>>>>) -> PyResult<()> {
-        let parsed = match kinds {
-            None => None,
-            Some(k) => {
-                let mut out: [Option<crate::label_source::KindSource>; 2] = [None, None];
-                for (i, d) in k.iter().enumerate().take(2) {
-                    out[i] = d.as_ref().map(super::label_source::kind).transpose()?;
-                }
-                Some(out)
+    /// The masks the core plans and reads (plan §3.4): the slots in drawing
+    /// order, each `(stamp, source dict, (visible, colour, alpha, radius,
+    /// fill, dashed))`; an empty list for no masks. Stamps are unique and
+    /// never reused (ValueError otherwise, or for a layout the core does not
+    /// read -- the binding then keeps the masks with Python).
+    #[allow(clippy::type_complexity)]
+    fn set_label_slots(&self, slots: Vec<(u64, Bound<'_, PyDict>, (bool, [f32; 3], f32, i32, bool, bool))>)
+                       -> PyResult<()> {
+        let mut seen = std::collections::HashSet::new();
+        let mut parsed = Vec::with_capacity(slots.len());
+        for (stamp, d, st) in slots {
+            if !seen.insert(stamp) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!("label slot stamp {stamp} given twice")));
             }
-        };
-        self.inner.borrow_mut().set_label_sources(parsed);
+            let source = super::label_source::kind(&d)?;
+            parsed.push((crate::label_source::Slot { stamp, source }, style(st)));
+        }
+        self.inner.borrow_mut().set_label_slots(parsed);
         Ok(())
     }
 
-    /// R3b: one mask's style (kind 0 cell, 1 nucleus).
-    fn set_label_style(&self, kind: usize, visible: bool, color: [f32; 3], alpha: f32, radius: i32, fill: bool) {
-        let style = crate::viewer::labels::Style { visible, color, alpha, radius: radius.clamp(0, 8), fill };
-        self.inner.borrow_mut().set_label_style(kind.min(1), style);
+    /// One slot's style; False when no slot has that stamp.
+    fn set_label_slot_style(&self, stamp: u64, visible: bool, color: [f32; 3], alpha: f32, radius: i32,
+                            fill: bool, dash: bool) -> bool {
+        self.inner.borrow_mut().set_label_slot_style(stamp, style((visible, color, alpha, radius, fill, dash)))
     }
 
     fn core_label_stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
@@ -387,3 +389,7 @@ impl ViewerCore {
     }
 }
 
+fn style((visible, color, alpha, radius, fill, dash): (bool, [f32; 3], f32, i32, bool, bool))
+         -> crate::viewer::labels::Style {
+    crate::viewer::labels::Style { visible, color, alpha, radius: radius.clamp(0, 8), fill, dash }
+}

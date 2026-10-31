@@ -1,7 +1,7 @@
 //! Step3's label reader (R3b plan §2.3): ONE thread of the core's own (the
 //! Python binding had one too), never sharing the image readers' pool.
-//! The planner replaces the job list; the thread takes the next job of the
-//! current generation while held + being read + delivered-not-taken stays
+//! The planner replaces the job list; the thread takes the next job of a
+//! current slot (its stamp is in the slot list) while held + being read + delivered-not-taken stays
 //! within the budget (`Step3LabelBinding._next_job_locked`), reads it
 //! (`label_read`) without any lock and queues the result; the paint takes
 //! results without waiting (`take`). One lock and one condition variable
@@ -12,18 +12,20 @@
 use crate::geom::Pyramid;
 use crate::label_plan::LKey;
 use crate::label_read::{read_label_tile, Read};
-use crate::label_source::KindSource;
+use crate::label_source::Slot;
 use crate::notify::Notifier;
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-pub type Sources = Arc<[Option<KindSource>; 2]>;
+/// The slots, in drawing order.
+pub type Sources = Arc<Vec<Slot>>;
 
 #[derive(Default)]
 struct Q {
     jobs: VecDeque<(LKey, usize)>,
-    generation: u64,
+    /// the stamps of `sources`
+    stamps: HashSet<u64>,
     sources: Option<Sources>,
     reading: HashSet<LKey>,
     /// bytes of jobs being read or delivered and not yet taken
@@ -65,14 +67,16 @@ impl LabelPool {
         LabelPool { s, handle: Mutex::new(Some(handle)) }
     }
 
-    /// New sources: a new generation; every job of the old one goes.
-    pub fn set_sources(&self, generation: u64, sources: Option<Sources>) {
+    /// New slots: the jobs of a slot that left go, the others stay.
+    pub fn set_sources(&self, sources: Option<Sources>, held: usize) {
         let mut q = self.s.q.lock().unwrap();
-        self.s.stale.fetch_add(q.jobs.len(), Ordering::Relaxed);
-        q.jobs.clear();
-        q.generation = generation;
+        let stamps: HashSet<u64> = sources.iter().flat_map(|s| s.iter().map(|slot| slot.stamp)).collect();
+        let before = q.jobs.len();
+        q.jobs.retain(|j| stamps.contains(&j.0 .0));
+        self.s.stale.fetch_add(before - q.jobs.len(), Ordering::Relaxed);
+        q.stamps = stamps;
         q.sources = sources;
-        q.held = 0;
+        q.held = held;
         drop(q);
         self.s.cv.notify_all();
     }
@@ -166,9 +170,9 @@ fn worker(s: Arc<Shared>) {
                 if q.closed {
                     return;
                 }
-                // an older generation's job is dropped; a job over the
+                // a job of a slot that left is dropped; a job over the
                 // budget waits until the GUI takes results or plans again
-                while q.jobs.front().is_some_and(|j| j.0 .0 != q.generation) {
+                while q.jobs.front().is_some_and(|j| !q.stamps.contains(&j.0 .0)) {
                     q.jobs.pop_front();
                     s.stale.fetch_add(1, Ordering::Relaxed);
                 }
@@ -187,9 +191,9 @@ fn worker(s: Arc<Shared>) {
         if !s.delay.is_zero() {
             std::thread::sleep(s.delay);
         }
-        let result = match sources.as_ref().and_then(|s| s[key.1].as_ref()) {
+        let result = match sources.as_ref().and_then(|s| s.iter().find(|slot| slot.stamp == key.0)) {
             _ if s.faults.label_fails() => Err("injected label read failure (test)".to_string()),
-            Some(src) => read_label_tile(src, &s.pyr, key.2, key.3, key.4).map_err(|e| e.to_string()),
+            Some(slot) => read_label_tile(&slot.source, &s.pyr, key.1, key.2, key.3).map_err(|e| e.to_string()),
             None => Ok(Read::Unavailable("no source".into())),
         };
         let mut q = s.q.lock().unwrap();

@@ -15,6 +15,14 @@
 //   outside the image (= id 0); or a fill whose colour is the id's
 //   lowbias32 hash. The CPU references are `core/step3_masks.py`
 //   `outline_reference` and `fill_colour`.
+//   Dashed (`u_dash` > 0, docs/v17_step3_multi_results_plan.md §4): the
+//   outline pixel's outward normal is summed from the neighbours that
+//   differ, quantised to 4 directions, and the pixel's position along the
+//   edge -- x, y, (x - y)/sqrt2 or (x + y)/sqrt2 of `gl_FragCoord`, plus
+//   that direction's slide phase `u_phase` (anchored to the slide, reduced
+//   per direction on the CPU so no wrap jumps) -- cut into periods of
+//   `u_dash` screen pixels, the first `u_duty` of each drawn.
+//   Unset (0), the outline is solid as before.
 
 #ifdef PASS_LABEL_IDS
 uniform usampler2D u_labels;
@@ -49,6 +57,9 @@ uniform int u_mode;            // 0 outline, 1 fill
 uniform int u_radius;          // screen pixels, 0..8
 uniform vec3 u_color;
 uniform float u_alpha;
+uniform float u_dash;          // period, screen pixels; 0 = solid
+uniform float u_duty;          // drawn fraction of a period
+uniform vec4 u_phase;          // slide phase per direction: x, y, x-y, x+y (mod the period)
 out vec4 out_rgba;
 
 uint lowbias32(uint x) {
@@ -77,6 +88,7 @@ void main() {
         return;
     }
     bool edge = false;
+    vec2 n = vec2(0.0);
     for (int dy = -8; dy <= 8; ++dy) {
         if (abs(dy) > u_radius) {
             continue;
@@ -92,11 +104,29 @@ void main() {
             }
             if (other != id) {
                 edge = true;
+                n += vec2(float(dx), float(dy));
             }
         }
     }
     if (!edge) {
         discard;
+    }
+    if (u_dash > 0.0) {
+        vec2 w = gl_FragCoord.xy;
+        vec2 a = abs(n);
+        float t;
+        if (a.x > 2.414 * a.y) {
+            t = w.y + u_phase.y;                            // normal ~x: a vertical edge
+        } else if (a.y > 2.414 * a.x) {
+            t = w.x + u_phase.x;                            // normal ~y: a horizontal edge
+        } else if (n.x * n.y > 0.0) {
+            t = (w.x - w.y) * 0.70710678 + u_phase.z;       // normal ~(1, 1)
+        } else {
+            t = (w.x + w.y) * 0.70710678 + u_phase.w;       // normal ~(1, -1)
+        }
+        if (fract(t / u_dash) >= u_duty) {
+            discard;
+        }
     }
     out_rgba = vec4(u_color, u_alpha);
 }

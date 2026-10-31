@@ -3,19 +3,26 @@
 Follows the ONE controller of Step3's viewer (its camera events, the level
 and the visible tiles of its snapshots) and keeps the GPU layer's mask
 layers (`Step1GpuLayer.set_labels`) supplied with the label tiles of
-`core.step3_masks` sources:
+`core.step3_masks` sources -- one SLOT per drawn mask, in drawing order
+(docs/v17_step3_multi_results_plan.md §3.3; the owner names each by a key,
+e.g. a result's cell mask):
 
   * ONE reader thread (the only thread block 4 adds): it first builds the
     pyramid a source lacks (`ensure_pyramid`, cancellable), then reads label
     tiles (`read_label_tile`). While a pyramid is being built no tile is
     read -- level 0 waits as well; the status says so;
   * what is read: the current level's visible tiles and one ring around
-    them, centre first. Jumps are served at once, motion every 33 ms, a
+    them, centre first, TILE-MAJOR: every shown slot gets a tile before any
+    gets the next, so over the budget all slots lose their far tiles
+    together. A new slot list keeps the tiles of the slots still in it
+    (by stamp, `SlotStamps`): adding a result does not blank the others.
+    A slot's pyramid is built once per destination, whichever slots share
+    it. Jumps are served at once, motion every 33 ms, a
     quiet camera catches up once -- the image binding's rhythm;
   * a request that is no longer wanted when the camera moves on is dropped
     from the queue and counted (`stale_dropped`); a result that arrives for
-    an older source generation or a tile no longer wanted is dropped and
-    counted (`late_dropped`);
+    a slot that left or a tile no longer wanted is dropped and counted
+    (`late_dropped`);
   * the TARGET level is drawn last: tiles of other levels stay only where
     they still cover the view, drawn first, farthest level first, so both a
     zoom in and a zoom out keep the screen filled until the target arrives;
@@ -37,6 +44,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import os
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -50,7 +58,7 @@ from .step1_gpu_layer import (LABEL_OUTLINE, LABEL_TEXTURE_BYTES, LabelLayer,
 
 CELL = step3_masks.CELL
 NUCLEUS = step3_masks.NUCLEUS
-#: Drawn in this order: the nucleus lies on top (user ruling 1).
+#: A result's masks, drawn in this order: the nucleus lies on top (user ruling 1).
 KINDS = (CELL, NUCLEUS)
 MOTION_INTERVAL_MS = 33
 
@@ -62,6 +70,7 @@ class MaskStyle:
     alpha: float = 0.75
     width: float = 1.0                  # logical pixels, 0..4
     mode: str = LABEL_OUTLINE
+    dash: bool = False                  # dashed outline (plan §4)
 
 
 DEFAULT_STYLES = {
@@ -70,39 +79,116 @@ DEFAULT_STYLES = {
 }
 
 
+def kind_slots(sources, styles=None, prefix=""):
+    """One result's masks (`resolve_masks`' cell / nucleus) as slots in
+    drawing order -- cells, then the nucleus on top -- keyed `prefix` +
+    kind; `styles` per kind (default `DEFAULT_STYLES`)."""
+    styles = styles or {}
+    return [(prefix + kind, sources[kind], styles.get(kind, DEFAULT_STYLES[kind]))
+            for kind in KINDS if (sources or {}).get(kind) is not None]
+
+
+def same_mask(a, b) -> bool:
+    """The same mask (a pyramid built since does not make it another)."""
+    return (a is not None and b is not None and a.mask_path == b.mask_path
+            and tuple(a.bbox) == tuple(b.bbox) and a.pyramid_path == b.pyramid_path)
+
+
+def destination(source) -> str:
+    """Where `source`'s pyramid is built: one build per destination."""
+    return os.path.realpath(source.pyramid_path)
+
+
+class SlotStamps:
+    """Each slot's stamp: a number given anew when a slot's MASK changes --
+    never reused, unique across slots -- so a tile, job or error of a mask
+    that left is told apart by its stamp alone. A pyramid built for the
+    same mask keeps the stamp: its level 0 is the same, and its coarse
+    levels were never read before."""
+
+    def __init__(self):
+        self._next = 0
+        self.of = {}                    # key -> (stamp, source)
+        #: every source with a pyramid seen by this binding, for its life:
+        #: a mask unticked while it was built and ticked again takes it
+        #: (the owner's source, resolved before, still has none)
+        self._built = []
+
+    def remember(self, source):
+        if source is not None and source.pyramid is not None:
+            self._built = [b for b in self._built if not same_mask(b, source)] + [source]
+
+    def assign(self, slots):
+        """`slots` = [(key, source)]; returns [(key, stamp, source)]. A
+        source without a pyramid takes the one any held slot of the same
+        mask carries (built since): a pyramid is never given up."""
+        for _stamp, src in self.of.values():
+            self.remember(src)
+        out, now = [], {}
+        for key, source in slots:
+            self.remember(source)
+            if source.pyramid is None:
+                source = next((b for b in self._built if same_mask(b, source)), source)
+            held = self.of.get(key)
+            if held is not None and same_mask(held[1], source):
+                stamp = held[0]
+            else:
+                self._next += 1
+                stamp = self._next
+            now[key] = (stamp, source)
+            out.append((key, stamp, source))
+        self.of = now
+        return out
+
+    def take_built(self, slots, dest, built):
+        """Every slot of `dest` with the same mask takes `built` -- unless it
+        has a pyramid already (never downgraded). Returns the new list."""
+        self.remember(built)
+        out = [(key, stamp, built if destination(src) == dest and same_mask(src, built)
+                and src.pyramid is None else src) for key, stamp, src in slots]
+        self.of = {key: (stamp, src) for key, stamp, src in out}
+        return out
+
+
 class Step3LabelBinding(QtCore.QObject):
-    """Label tiles for one viewer's GPU layer."""
+    """Label tiles for one viewer's GPU layer, one slot per drawn mask."""
 
     _delivered = QtCore.pyqtSignal(object)
     status_changed = QtCore.pyqtSignal()
 
     def __init__(self, *, controller, layer, level_shapes, tile_size: int,
                  budget_bytes: int = LABEL_TEXTURE_BYTES,
-                 motion_interval_ms: int = MOTION_INTERVAL_MS, parent=None):
+                 motion_interval_ms: int = MOTION_INTERVAL_MS, builds: bool = True, parent=None):
         super().__init__(parent)
+        #: False: the pyramids are built by the owner (`CoreLabelBinding`,
+        #: one writer per destination across its L1 switches) and handed in
+        #: with the slots
+        self._builds = bool(builds)
         self.controller = controller
         self.layer = layer
         self.level_shapes = [tuple(int(v) for v in s) for s in level_shapes]
         self.tile_size = int(tile_size)
         self.budget_bytes = int(budget_bytes)
-        self._sources: Dict[str, Optional[step3_masks.MaskSource]] = {CELL: None, NUCLEUS: None}
-        self._styles: Dict[str, MaskStyle] = dict(DEFAULT_STYLES)
-        self._generation = 0
+        self._stamps = SlotStamps()
+        self._slots: List[Tuple[str, int, Any]] = []   # (key, stamp, source), drawing order
+        self._styles: Dict[str, MaskStyle] = {}
         self._paused = False
         self._disposed = False
         self._connected = False
         self._latest = None                 # the controller's latest snapshot
-        self._planned_epoch = None          # (generation, epoch) last planned
+        self._planned_epoch = None          # (slot list serial, epoch) last planned
+        self._serial = 0                    # slot lists handed over (stats: generation)
         self._target_level: Optional[int] = None
         self._wanted: Dict[Tuple, int] = {}  # key -> order (lower first)
         self._resident: Dict[Tuple, LabelPlane] = {}
-        self._building: set = set()          # kinds whose pyramid is being built
-        self._retry_build: set = set()       # kinds cancelled by a pause
-        self._reasons: Dict[str, Optional[str]] = {CELL: None, NUCLEUS: None}
+        self._building: set = set()          # destinations whose pyramid is being built
+        self._retry_build: set = set()       # destinations cancelled by a pause
+        self._reasons: Dict[str, Optional[str]] = {}   # per destination
+        self._errors: Dict[int, str] = {}    # per stamp
         self._budget_note: Optional[str] = None
         self.counts = {"requested": 0, "read": 0, "accepted": 0, "stale_dropped": 0,
                        "late_dropped": 0, "pushes": 0, "pyramids_built": 0}
-        self._last_error: Optional[str] = None
+        self._last_error: Optional[str] = None   # drawing errors (not a slot's)
         # the reader thread's shared state, under `_cv`
         self._cv = threading.Condition()
         self._jobs: List[dict] = []
@@ -110,7 +196,9 @@ class Step3LabelBinding(QtCore.QObject):
         self._reading: set = set()           # tile keys taken by the thread, not yet accepted
         self._resident_bytes = 0
         self._stop = False
-        self._cancel_generation = -1         # a build of this generation stops
+        self._live_stamps: set = set()       # the thread drops tile jobs of other stamps
+        self._live_dests: set = set()        # a build of another destination stops
+        self._cancel_all = False             # paused: every build stops
         self._thread = threading.Thread(target=self._run, name="step3-labels", daemon=True)
         self._thread.start()
         self._delivered.connect(self._accept, QtCore.Qt.QueuedConnection)
@@ -121,75 +209,86 @@ class Step3LabelBinding(QtCore.QObject):
         self._connect()
 
     # ── public ────────────────────────────────────────────────────────
-    def set_sources(self, sources) -> None:
-        """New masks (`resolve_masks`' cell / nucleus, None for either):
-        a new generation -- everything of the old one is dropped."""
+    def set_slots(self, slots) -> None:
+        """The masks to draw, in drawing order: [(key, MaskSource, MaskStyle)].
+        A slot whose mask is unchanged keeps its tiles (and a pyramid built
+        for it); the tiles, jobs and builds of slots that left go."""
         if self._disposed:
             return
-        self._generation += 1
+        slots = list(slots or ())
+        self._slots = self._stamps.assign([(key, src) for key, src, _st in slots])
+        self._styles = {key: (st or MaskStyle()) for key, _src, st in slots}
+        self._serial += 1
+        stamps = {stamp for _k, stamp, _s in self._slots}
+        dests = {destination(src) for _k, _st, src in self._slots}
         with self._cv:
-            self._cancel_generation = self._generation - 1
-            self.counts["stale_dropped"] += len(self._jobs)
-            self._jobs = []
-            self._resident_bytes = 0
+            before = sum(1 for j in self._jobs if j["type"] == "tile")
+            self._jobs = [j for j in self._jobs
+                          if (j["type"] == "tile" and j["stamp"] in stamps)
+                          or (j["type"] == "pyramid" and j["dest"] in dests)]
+            self.counts["stale_dropped"] += before - sum(1 for j in self._jobs if j["type"] == "tile")
+            self._live_stamps = stamps
+            self._live_dests = dests
+            for key in [k for k in self._resident if k[0] not in stamps]:
+                del self._resident[key]
+            self._resident_bytes = sum(p.ids.nbytes for p in self._resident.values())
             self._cv.notify_all()
-        self._resident.clear()
-        self._wanted = {}
-        self._building.clear()
-        self._retry_build.clear()
+        self._wanted = {k: i for k, i in self._wanted.items() if k[0] in stamps}
+        self._building &= dests
+        self._retry_build &= dests
+        self._errors = {s: e for s, e in self._errors.items() if s in stamps}
+        self._reasons = {d: r for d, r in self._reasons.items() if d in dests}
         self._planned_epoch = None
-        self._sources = {kind: (sources or {}).get(kind) for kind in KINDS}
-        self._reasons = {kind: None for kind in KINDS}
         self._budget_note = None
-        self._last_error = None             # the old source's error is not this one's
         if not self._paused:
-            self._queue_builds(self._sources)
+            self._queue_builds()
         self._push()
         self.update_viewport()
         self.status_changed.emit()
 
-    def set_style(self, kind: str, **changes) -> None:
-        """Visibility, colour, alpha, width, mode of one mask. Drawing only;
-        a mask turned on is planned for the current view."""
-        before = self._styles[kind]
-        self._styles[kind] = dataclasses.replace(before, **changes)
-        if self._styles[kind].visible and not before.visible:
+    def set_style(self, key: str, **changes) -> None:
+        """Visibility, colour, alpha, width, mode, dash of one slot. Drawing
+        only; a slot turned on is planned for the current view."""
+        if key not in self._styles:
+            return
+        before = self._styles[key]
+        self._styles[key] = dataclasses.replace(before, **changes)
+        if self._styles[key].visible and not before.visible:
             self._planned_epoch = None
             self.update_viewport()
         self._push()
 
-    def style(self, kind: str) -> MaskStyle:
-        return self._styles[kind]
+    def style(self, key: str) -> MaskStyle:
+        return self._styles[key]
 
     def mask_status(self) -> Dict[str, Any]:
-        """Per kind: whether it has a source, the reason coarse levels are
-        not drawn (None when they are), whether its pyramid is being built;
-        and a note when the budget left part of the view without masks."""
+        """Per slot key: whether it has a source, the reason coarse levels
+        are not drawn (None when they are), whether its pyramid is being
+        built, its read error; and the viewer-wide budget note and error."""
         out = {}
         level = self._target_level
-        for kind in KINDS:
-            source = self._sources.get(kind)
+        for key, stamp, source in self._slots:
+            dest = destination(source)
             coarse = None
-            if source is not None and source.pyramid is None:
-                coarse = ("the zoomed-out levels are being prepared" if kind in self._building
-                          else (self._reasons.get(kind) or source.pyramid_reason
+            if source.pyramid is None:
+                coarse = ("the zoomed-out levels are being prepared" if dest in self._building
+                          else (self._reasons.get(dest) or source.pyramid_reason
                                 or "no label pyramid"))
-            out[kind] = {"source": source is not None, "coarse_unavailable": coarse,
-                         "building": kind in self._building,
-                         "unavailable_here": bool(coarse) and bool(level)}
+            out[key] = {"source": True, "coarse_unavailable": coarse,
+                        "building": dest in self._building,
+                        "unavailable_here": bool(coarse) and bool(level),
+                        "error": self._errors.get(stamp)}
         out["budget"] = self._budget_note
         out["error"] = self._last_error
         return out
 
     def stats(self) -> Dict[str, Any]:
         with self._cv:
-            pending, jobs = self._pending_bytes, len(self._jobs)
-        with self._cv:
-            reading = len(self._reading)
+            pending, jobs, reading = self._pending_bytes, len(self._jobs), len(self._reading)
         return dict(self.counts, resident=len(self._resident), reading=reading,
                     queued=jobs, resident_bytes=self._resident_bytes,
                     pending_bytes=pending, budget_bytes=self.budget_bytes,
-                    target_level=self._target_level, generation=self._generation,
+                    target_level=self._target_level, generation=self._serial,
                     thread_alive=self._thread.is_alive())
 
     def update_viewport(self, snapshot=None) -> None:
@@ -197,7 +296,7 @@ class Step3LabelBinding(QtCore.QObject):
             return
         snapshot = self.controller.snapshot() if snapshot is None else snapshot
         self._latest = snapshot
-        token = (self._generation, int(getattr(snapshot, "epoch", -1)))
+        token = (self._serial, int(getattr(snapshot, "epoch", -1)))
         if token == self._planned_epoch:
             return
         self._planned_epoch = token
@@ -213,9 +312,9 @@ class Step3LabelBinding(QtCore.QObject):
         self._disconnect()
         with self._cv:
             self.counts["stale_dropped"] += sum(1 for j in self._jobs if j["type"] == "tile")
-            self._retry_build |= {j["kind"] for j in self._jobs if j["type"] == "pyramid"}
+            self._retry_build |= {j["dest"] for j in self._jobs if j["type"] == "pyramid"}
             self._jobs = []
-            self._cancel_generation = self._generation      # a running build stops
+            self._cancel_all = True                         # a running build stops
             self._cv.notify_all()
         return True
 
@@ -224,10 +323,12 @@ class Step3LabelBinding(QtCore.QObject):
             return False
         self._paused = False
         with self._cv:
-            self._cancel_generation = -1
-        retry = {kind: self._sources.get(kind) for kind in self._retry_build}
+            self._cancel_all = False
+        # the builds the pause dropped start again (a build still running
+        # starts again when its cancelled result lands, `_accept_pyramid`)
+        self._building -= self._retry_build
         self._retry_build.clear()
-        self._queue_builds(retry)
+        self._queue_builds()
         self._connect()
         self._planned_epoch = None
         self.update_viewport()
@@ -238,9 +339,9 @@ class Step3LabelBinding(QtCore.QObject):
         return self._paused
 
     def sources(self) -> Dict[str, Any]:
-        """The masks as this binding knows them now: a pyramid it built is
-        in them (R3: a fallback's new binding starts from these)."""
-        return dict(self._sources)
+        """The masks as this binding knows them now, by slot key: a pyramid
+        it built is in them (R3: a fallback's new binding starts from these)."""
+        return {key: source for key, _stamp, source in self._slots}
 
     def dispose(self, timeout: float = 0.0) -> Dict[str, Any]:
         """Tell the thread to end, let the camera go, clear the layer's
@@ -255,7 +356,7 @@ class Step3LabelBinding(QtCore.QObject):
         self._disconnect()
         with self._cv:
             self._stop = True
-            self._cancel_generation = self._generation
+            self._cancel_all = True
             self._jobs = []
             self._cv.notify_all()
         if timeout > 0:
@@ -359,16 +460,16 @@ class Step3LabelBinding(QtCore.QObject):
         # order, the same as the Rust core's planner)
         order = lambda t: ((t[0] - cx) ** 2 + (t[1] - cy) ** 2, t[1], t[0])   # noqa: E731
 
-        gen = self._generation
-        target_vis, target_ring = [], []
-        for kind in KINDS:
-            source = self._sources.get(kind)
-            if source is None or not self._styles[kind].visible:
-                continue
-            if level > 0 and source.pyramid is None:
-                continue                      # not requested, not drawn (status says why)
-            target_vis += [(gen, kind, level, tx, ty) for tx, ty in sorted(visible, key=order)]
-            target_ring += [(gen, kind, level, tx, ty) for tx, ty in sorted(ring, key=order)]
+        shown = {stamp for key, stamp, _src in self._slots if self._styles[key].visible}
+        # not requested, not drawn (the status says why): hidden, or a coarse
+        # level without a pyramid
+        asked = [(stamp, src) for key, stamp, src in self._slots
+                 if stamp in shown and (level == 0 or src.pyramid is not None)]
+        # TILE-MAJOR (plan §3.4): every slot gets a tile before any gets the next
+        target_vis = [(stamp, level, tx, ty) for tx, ty in sorted(visible, key=order)
+                      for stamp, _src in asked]
+        target_ring = [(stamp, level, tx, ty) for tx, ty in sorted(ring, key=order)
+                       for stamp, _src in asked]
         target = set(target_vis) | set(target_ring)
 
         # what stays: the target, and other levels' tiles still under the view
@@ -376,15 +477,14 @@ class Step3LabelBinding(QtCore.QObject):
         for key, plane in self._resident.items():
             if key in target:
                 keep[key] = plane
-            elif (key[0] == gen and key[2] != level and view is not None
-                  and self._styles[key[1]].visible and self._sources.get(key[1]) is not None
+            elif (key[1] != level and view is not None and key[0] in shown
                   and self._overlaps(plane.world_rect, view)):
                 keep[key] = plane
         # the budget: old levels first, then the ring, then the far visible
-        size = lambda key: self._tile_rect(key[2], key[3], key[4])[1]   # noqa: E731
+        size = lambda key: self._tile_rect(key[1], key[2], key[3])[1]   # noqa: E731
         note = None
         wanted_vis, wanted_ring = list(target_vis), list(target_ring)
-        old = sorted((k for k in keep if k[2] != level), key=lambda k: abs(k[2] - level))
+        old = sorted((k for k in keep if k[1] != level), key=lambda k: abs(k[1] - level))
 
         def total():
             return (sum(size(k) for k in keep)
@@ -416,15 +516,16 @@ class Step3LabelBinding(QtCore.QObject):
         self._wanted = {key: i for i, key in enumerate(wanted_vis + wanted_ring)}
 
         # the queue: exactly the wanted tiles not already here or being read
+        source_of = dict(asked)
         with self._cv:
             reading = set(self._reading)
         jobs = []
         for key in wanted_vis + wanted_ring:
             if key in self._resident or key in reading:
                 continue
-            jobs.append({"type": "tile", "gen": gen, "key": key, "kind": key[1],
+            jobs.append({"type": "tile", "stamp": key[0], "key": key,
                          "epoch": int(getattr(snapshot, "epoch", -1)),
-                         "bytes": size(key), "source": self._sources[key[1]]})
+                         "bytes": size(key), "source": source_of[key[0]]})
         with self._cv:
             builds = [j for j in self._jobs if j["type"] == "pyramid"]
             queued = {j["key"] for j in self._jobs if j["type"] == "tile"}
@@ -436,20 +537,26 @@ class Step3LabelBinding(QtCore.QObject):
         self._push()
         self.status_changed.emit()
 
-    def _queue_builds(self, sources):
-        builds = []
-        for kind in KINDS:
-            source = (sources or {}).get(kind)
-            if source is None or source.pyramid is not None or len(self.level_shapes) < 2:
+    def _queue_builds(self):
+        """A build for every destination a slot needs a pyramid from, once
+        (ensure_pyramid decides what can be done: it never replaces a
+        pyramid `label_pyramid.read` accepts)."""
+        if len(self.level_shapes) < 2 or not self._builds:
+            return
+        builds, seen = [], set()
+        for _key, _stamp, source in self._slots:
+            dest = destination(source)
+            if source.pyramid is not None or dest in seen or dest in self._building:
                 continue
-            # ensure_pyramid decides what can be done (it never replaces a
-            # pyramid `label_pyramid.read` accepts)
-            self._building.add(kind)
-            builds.append({"type": "pyramid", "gen": self._generation, "kind": kind,
-                           "source": source})
+            if self._reasons.get(dest):
+                continue                      # tried: level 0 only, the reason is shown
+            seen.add(dest)
+            self._building.add(dest)
+            builds.append({"type": "pyramid", "dest": dest, "source": source})
         if builds:
             with self._cv:
-                self._jobs = builds + [j for j in self._jobs if j["type"] != "pyramid"]
+                queued = [j for j in self._jobs if j["type"] == "pyramid"]   # never dropped here
+                self._jobs = queued + builds + [j for j in self._jobs if j["type"] != "pyramid"]
                 self._cv.notify_all()
 
     # ── the reader thread ─────────────────────────────────────────────
@@ -468,12 +575,13 @@ class Step3LabelBinding(QtCore.QObject):
                     self._reading.add(job["key"])
             try:
                 if job["type"] == "pyramid":
-                    gen = job["gen"]
+                    dest = job["dest"]
                     result = step3_masks.ensure_pyramid(
                         job["source"], self.level_shapes,
-                        cancel_check=lambda: self._stop or self._cancel_generation >= gen)
+                        cancel_check=lambda: (self._stop or self._cancel_all
+                                              or dest not in self._live_dests))
                 else:
-                    _gen, _kind, level, tx, ty = job["key"]
+                    _stamp, level, tx, ty = job["key"]
                     result = step3_masks.read_label_tile(job["source"], level, tx, ty,
                                                          self.tile_size, self.level_shapes)
             except Exception as exc:  # noqa: BLE001 -- reported, the viewer goes on
@@ -484,7 +592,7 @@ class Step3LabelBinding(QtCore.QObject):
         while self._jobs:
             job = self._jobs[0]
             if job["type"] == "tile":
-                if job["gen"] != self._generation:
+                if job["stamp"] not in self._live_stamps:
                     self._jobs.pop(0)
                     self.counts["stale_dropped"] += 1
                     continue
@@ -508,14 +616,14 @@ class Step3LabelBinding(QtCore.QObject):
             return
         key = job["key"]
         self.counts["read"] += 1
-        # THE GENERATION FIRST: an old source's late result -- an error
-        # included -- is not this source's news.
-        if job["gen"] != self._generation:
+        # THE SLOT FIRST: a late result of a mask that left -- an error
+        # included -- is not this view's news.
+        if job["stamp"] not in self._live_stamps:
             self.counts["late_dropped"] += 1
             return
         if isinstance(result, Exception):
-            self._last_error = f"label tile {key[2:]} could not be read: {result}"
-            print(f"[Step3] {self._last_error}")
+            self._errors[job["stamp"]] = f"label tile {key[1:]} could not be read: {result}"
+            print(f"[Step3] {self._errors[job['stamp']]}")
             self.status_changed.emit()
             return
         if key not in self._wanted:
@@ -531,28 +639,33 @@ class Step3LabelBinding(QtCore.QObject):
         self._push()
 
     def _accept_pyramid(self, job, result):
-        kind = job["kind"]
-        if job["gen"] != self._generation:
-            return
-        self._building.discard(kind)
+        dest = job["dest"]
+        self._building.discard(dest)
+        if dest not in self._live_dests:
+            if not isinstance(result, Exception) and result.status == "ready":
+                self._stamps.remember(result.source)    # for a slot ticked again
+            return                              # no slot needs it any more
         if isinstance(result, Exception):
-            self._reasons[kind] = f"the zoomed-out levels could not be built ({result})"
+            self._reasons[dest] = f"the zoomed-out levels could not be built ({result})"
         elif result.status == "cancelled":
             if self._paused:
-                self._retry_build.add(kind)       # restarted by resume()
+                self._retry_build.add(dest)       # restarted by resume()
             else:                                  # resumed before the cancel landed
-                self._queue_builds({kind: self._sources.get(kind)})
+                self._queue_builds()
                 self.status_changed.emit()
-                return
+            return
         elif result.status == "ready":
-            self._sources[kind] = result.source
-            self._reasons[kind] = None
+            # every slot of this destination takes the built source (same
+            # mask: its stamp stays, `SlotStamps`)
+            self._slots = self._stamps.take_built(self._slots, dest, result.source)
+            self._reasons[dest] = None
             self.counts["pyramids_built"] += 1
-        else:
-            self._sources[kind] = result.source
-            self._reasons[kind] = result.reason
-        if self._reasons[kind]:
-            print(f"[Step3] {kind} mask: zoomed out it cannot be shown: {self._reasons[kind]}")
+        elif not any(destination(src) == dest and src.pyramid is not None
+                     for _k, _s, src in self._slots):
+            self._slots = self._stamps.take_built(self._slots, dest, result.source)
+            self._reasons[dest] = result.reason or "no label pyramid"
+        if self._reasons.get(dest):
+            print(f"[Step3] {dest}: zoomed out it cannot be shown: {self._reasons[dest]}")
         self._planned_epoch = None
         if not self._paused:
             self.update_viewport()
@@ -564,16 +677,14 @@ class Step3LabelBinding(QtCore.QObject):
             return
         target = self._target_level
         layers = []
-        for kind in KINDS:
-            style = self._styles[kind]
-            if self._sources.get(kind) is None:
-                continue
-            mine = [(k, p) for k, p in self._resident.items() if k[1] == kind]
-            mine.sort(key=lambda kp: (kp[0][2] == target,
-                                      -abs(kp[0][2] - (target or 0)), kp[0][4], kp[0][3]))
-            layers.append(LabelLayer(kind, tuple(p for _k, p in mine), color=style.color,
+        for key, stamp, _src in self._slots:
+            style = self._styles[key]
+            mine = [(k, p) for k, p in self._resident.items() if k[0] == stamp]
+            mine.sort(key=lambda kp: (kp[0][1] == target,
+                                      -abs(kp[0][1] - (target or 0)), kp[0][3], kp[0][2]))
+            layers.append(LabelLayer(key, tuple(p for _k, p in mine), color=style.color,
                                      alpha=style.alpha, width=style.width, mode=style.mode,
-                                     visible=style.visible))
+                                     visible=style.visible, dash=style.dash))
         try:
             self.layer.set_labels(LabelSnapshot(tuple(layers)))
             self.counts["pushes"] += 1

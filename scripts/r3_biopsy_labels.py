@@ -20,6 +20,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 CHANNELS = ["DRAG5", "CD3D", "CD8"]
 
 
+
+def _put(mount, sources, styles=None):
+    """One result's cell / nucleus as the mount's slots (Step3 plan §3.3)."""
+    from block01.ui.step3_label_binding import kind_slots
+    return mount.set_mask_slots(kind_slots(sources, styles) if sources else None)
+
 def _settled(rig, timeout=90.0):
     """Stable picture, then the label binding idle and its masks shown."""
     from sraw_rig import stable
@@ -50,7 +56,7 @@ def run(args):
     out = {"backend": args.backend, "binding": type(rig.mount.gpu_binding).__name__}
     mask = os.path.realpath(args.mask)
     h, w = zarr.open(mask, mode="r").shape
-    rig.mount.set_mask_sources({
+    _put(rig.mount, {
         "cell": sm.MaskSource(kind="cell", mask_path=mask, bbox=(0, h, 0, w),
                               pyramid_path=lp.pyramid_path_for(mask), pyramid_kind="cell",
                               pyramid=None, pyramid_reason="no label pyramid"),

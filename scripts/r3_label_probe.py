@@ -87,6 +87,9 @@ def main():
             for width in (0, 1, 2, 4):
                 draw(f"outline{width}", snap(planes, color=(1.0, 0.0, 1.0), alpha=1.0, width=width,
                                              mode=LABEL_OUTLINE))
+            for width in (1, 2):                             # dashed (multi-result plan §4)
+                draw(f"dash{width}", snap(planes, color=(1.0, 0.0, 1.0), alpha=1.0, width=width,
+                                          mode=LABEL_OUTLINE, dash=True))
             draw("fill", snap(planes, alpha=1.0, mode=LABEL_FILL))
             draw("fill_half", snap(planes, alpha=0.5, mode=LABEL_FILL))
             draw("nucleus", LabelSnapshot((

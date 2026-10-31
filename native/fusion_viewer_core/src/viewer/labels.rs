@@ -1,18 +1,21 @@
 //! Step3's masks planned and read by the core (R3b plan §2): the binding's
-//! state (`Step3LabelBinding`) on the GUI thread -- sources and their
-//! generation, styles, what is held (in arrival order), what is wanted --
-//! planned at every camera change (`label_plan`), read by the label thread
+//! state (`Step3LabelBinding`) on the GUI thread -- the slots (one per
+//! drawn mask, docs/v17_step3_multi_results_plan.md §3.3) with their
+//! styles, what is held (in arrival order), what is wanted -- planned at
+//! every camera change (`label_plan`), read by the label thread
 //! (`label_pool`), taken without waiting by the paint and handed to the
 //! drawing in `_push`'s order. Held tiles ARE the drawing's copies
-//! (`label_store`): released, they go at once.
+//! (`label_store`): released, they go at once. A new slot list keeps the
+//! tiles of every slot still in it (by stamp): adding or removing one
+//! result does not blank the others.
 
 use super::ViewerCore;
-use crate::label_plan::{plan, tile_bytes, LKey, PlanIn};
+use crate::label_plan::{plan, tile_bytes, LKey, PlanIn, SlotPlan};
 use crate::label_pool::{LabelPool, Sources};
 use crate::label_read::Read;
-use crate::label_source::{KindSource, KINDS};
+use crate::label_source::Slot;
 use crate::label_store::{Layer, Plane};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub const LABEL_BUDGET: usize = crate::label_store::LABEL_BUDGET;
 /// The core numbers its own planes from here: never one of the numbers the
@@ -27,26 +30,32 @@ pub struct Style {
     pub alpha: f32,
     pub radius: i32,
     pub fill: bool,
+    /// dashed outline (the trial of plan §4)
+    pub dash: bool,
 }
 
 impl Default for Style {
     fn default() -> Self {
-        Style { visible: true, color: [0.0, 1.0, 0.0], alpha: 0.75, radius: 1, fill: false }
+        Style { visible: true, color: [0.0, 1.0, 0.0], alpha: 0.75, radius: 1, fill: false, dash: false }
     }
 }
 
 #[derive(Default)]
 pub struct LabelState {
     pub pool: Option<LabelPool>,
+    /// slot lists handed over so far (stats)
     pub generation: u64,
+    /// the slots in drawing order (None: none)
     pub sources: Option<Sources>,
-    pub styles: [Style; 2],
+    /// per stamp
+    pub styles: HashMap<u64, Style>,
     /// held: key, world rect, the drawing copy's id -- in arrival order
     pub resident: Vec<(LKey, [f64; 4], u64)>,
     pub wanted: HashSet<LKey>,
     pub target: Option<u8>,
     pub note: Option<String>,
-    pub last_error: Option<String>,
+    /// per stamp: the last read error of that slot (gone with the slot)
+    pub errors: BTreeMap<u64, String>,
     /// requested, read, accepted, late_dropped, pushes
     pub counts: [u64; 5],
     /// GUI-thread time spent on the masks since the last paint report
@@ -62,43 +71,57 @@ pub struct LabelState {
 }
 
 impl ViewerCore {
-    fn has_source(&self, kind: usize) -> bool {
-        self.lab.sources.as_ref().is_some_and(|s| s[kind].is_some())
+    fn has_slot(&self, stamp: u64) -> bool {
+        self.lab.sources.as_ref().is_some_and(|s| s.iter().any(|slot| slot.stamp == stamp))
     }
 
-    /// New masks (None for none): a new generation, the old one's tiles go.
-    pub fn set_label_sources(&mut self, sources: Option<[Option<KindSource>; 2]>) {
+    fn release_label_tile(&mut self, key: LKey, id: u64) {
+        self.labels.remove(id);
+        let (rows, cols) = self.pyr.tile_shape(crate::geom::TileAt { level: key.1, tx: key.2, ty: key.3 });
+        if let Some(g) = self.gpu.as_mut() {
+            g.render.release_label(id, cols, rows);   // its texture is reused
+        }
+    }
+
+    /// New slots, in drawing order, each with its style (empty: none). The
+    /// tiles, jobs and errors of a stamp still listed stay; the others go.
+    pub fn set_label_slots(&mut self, slots: Vec<(Slot, Style)>) {
         if self.lab.pool.is_none() {
             self.lab.pool = Some(LabelPool::start(self.pyr.clone(), LABEL_BUDGET, self.notifier.clone(),
                                                   std::sync::Arc::clone(&self.faults)));
         }
         self.lab.generation += 1;
-        for (key, _, id) in std::mem::take(&mut self.lab.resident) {
-            self.labels.remove(id);
-            let (rows, cols) = self.pyr.tile_shape(crate::geom::TileAt { level: key.2, tx: key.3, ty: key.4 });
-            if let Some(g) = self.gpu.as_mut() {
-                g.render.release_label(id, cols, rows);
-            }
+        let stamps: HashSet<u64> = slots.iter().map(|(slot, _)| slot.stamp).collect();
+        let (stay, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut self.lab.resident).into_iter()
+            .partition(|r| stamps.contains(&r.0 .0));
+        self.lab.resident = stay;
+        for (key, _, id) in gone {
+            self.release_label_tile(key, id);
         }
-        self.lab.wanted.clear();
+        self.lab.wanted.retain(|k| stamps.contains(&k.0));
+        self.lab.errors.retain(|stamp, _| stamps.contains(stamp));
         self.lab.note = None;
-        self.lab.last_error = None;
-        self.lab.sources = sources.map(std::sync::Arc::new);
+        self.lab.styles = slots.iter().map(|(slot, style)| (slot.stamp, *style)).collect();
+        let list: Vec<Slot> = slots.into_iter().map(|(slot, _)| slot).collect();
+        self.lab.sources = (!list.is_empty()).then(|| std::sync::Arc::new(list));
         self.lab.read_bound_seen = self.lab.read_bound_seen.max(self.sources_read_bound());
+        let held = self.held_label_bytes();
         let pool = self.lab.pool.as_ref().unwrap();
-        pool.set_sources(self.lab.generation, self.lab.sources.clone());
+        pool.set_sources(self.lab.sources.clone(), held);
         self.plan_labels();
         self.push_labels();
     }
 
-    /// One mask's style; showing a hidden mask plans again (it may need tiles).
-    pub fn set_label_style(&mut self, kind: usize, style: Style) {
-        let shown_now = style.visible && !self.lab.styles[kind].visible;
-        self.lab.styles[kind] = style;
-        if shown_now {
+    /// One slot's style; showing a hidden slot plans again (it may need
+    /// tiles). False: no such slot.
+    pub fn set_label_slot_style(&mut self, stamp: u64, style: Style) -> bool {
+        let Some(before) = self.lab.styles.get(&stamp).copied() else { return false };
+        self.lab.styles.insert(stamp, style);
+        if style.visible && !before.visible {
             self.plan_labels();
         }
         self.push_labels();
+        true
     }
 
     /// `_plan` for the camera now; jobs to the label thread.
@@ -109,18 +132,20 @@ impl ViewerCore {
         }
         let started = std::time::Instant::now();
         let visible = self.pyr.cover(view.bbox_l0, view.level);
-        let shown = KINDS.map(|k| self.has_source(k) && self.lab.styles[k].visible);
-        let pyramid = KINDS.map(|k| self.lab.sources.as_ref().and_then(|s| s[k].as_ref()).is_some_and(|s| s.has_pyramid()));
+        let slots: Vec<SlotPlan> = self.lab.sources.as_ref().map_or(Vec::new(), |s| s.iter().map(|slot| SlotPlan {
+            stamp: slot.stamp,
+            shown: self.lab.styles.get(&slot.stamp).is_some_and(|st| st.visible),
+            pyramid: slot.source.has_pyramid(),
+        }).collect());
         let resident: Vec<(LKey, [f64; 4])> = self.lab.resident.iter().map(|(k, r, _)| (*k, *r)).collect();
-        let Some(out) = plan(&PlanIn { pyr: &self.pyr, level: view.level, visible: &visible,
-                                       generation: self.lab.generation, shown, pyramid, resident: &resident,
-                                       budget: LABEL_BUDGET }) else { return };
+        let Some(out) = plan(&PlanIn { pyr: &self.pyr, level: view.level, visible: &visible, slots: &slots,
+                                       resident: &resident, budget: LABEL_BUDGET }) else { return };
         let kept: HashSet<LKey> = out.keep.iter().copied().collect();
         let gone: Vec<(LKey, u64)> = self.lab.resident.iter().filter(|r| !kept.contains(&r.0)).map(|r| (r.0, r.2)).collect();
         self.lab.resident.retain(|r| kept.contains(&r.0));
         for (key, id) in gone {
             self.labels.remove(id);
-            let (rows, cols) = self.pyr.tile_shape(crate::geom::TileAt { level: key.2, tx: key.3, ty: key.4 });
+            let (rows, cols) = self.pyr.tile_shape(crate::geom::TileAt { level: key.1, tx: key.2, ty: key.3 });
             if let Some(g) = self.gpu.as_mut() {
                 g.render.release_label(id, cols, rows);   // its texture is reused
             }
@@ -155,14 +180,14 @@ impl ViewerCore {
         let mut changed = false;
         for (key, result) in results {
             self.lab.counts[1] += 1;
-            if key.0 != self.lab.generation {             // the generation first, errors too
+            if !self.has_slot(key.0) {                   // a slot that left: errors too
                 self.lab.counts[3] += 1;
                 continue;
             }
             let tile = match result {
                 Err(e) => {
-                    self.lab.last_error = Some(format!("label tile ({}, {}, {}) could not be read: {e}",
-                                                      key.2, key.3, key.4));
+                    self.lab.errors.insert(key.0, format!("label tile ({}, {}, {}) could not be read: {e}",
+                                                          key.1, key.2, key.3));
                     continue;
                 }
                 Ok(_) if !self.lab.wanted.contains(&key) || self.lab.resident.iter().any(|r| r.0 == key) => {
@@ -191,24 +216,21 @@ impl ViewerCore {
         self.lab.split_ms[1] += ms;
     }
 
-    /// `_push`: per kind with a source, its held tiles -- other levels
-    /// first, farthest level first, the target last; by row, column.
+    /// `_push`: per shown slot, in drawing order, its held tiles -- other
+    /// levels first, farthest level first, the target last; by row, column.
     pub fn push_labels(&mut self) {
         if self.lab.pool.is_none() {
             return;
         }
         let target = self.lab.target;
+        let t = target.unwrap_or(0) as i64;
         let mut layers = Vec::new();
-        for kind in KINDS {
-            if !self.has_source(kind) || !self.lab.styles[kind].visible {
-                continue;
-            }
-            let t = target.unwrap_or(0) as i64;
-            let mut mine: Vec<&(LKey, [f64; 4], u64)> = self.lab.resident.iter().filter(|r| r.0 .1 == kind).collect();
-            mine.sort_by_key(|r| (Some(r.0 .2) == target, -(r.0 .2 as i64 - t).abs(), r.0 .4, r.0 .3));
-            let st = self.lab.styles[kind];
+        for slot in self.lab.sources.iter().flat_map(|s| s.iter()) {
+            let Some(st) = self.lab.styles.get(&slot.stamp).copied().filter(|st| st.visible) else { continue };
+            let mut mine: Vec<&(LKey, [f64; 4], u64)> = self.lab.resident.iter().filter(|r| r.0 .0 == slot.stamp).collect();
+            mine.sort_by_key(|r| (Some(r.0 .1) == target, -(r.0 .1 as i64 - t).abs(), r.0 .3, r.0 .2));
             layers.push(Layer { planes: mine.iter().map(|r| (r.2, r.1)).collect(), color: st.color,
-                                alpha: st.alpha, radius: st.radius, fill: st.fill });
+                                alpha: st.alpha, radius: st.radius, fill: st.fill, dash: st.dash });
         }
         self.labels.set(layers);
     }
@@ -220,8 +242,8 @@ impl ViewerCore {
     }
 
     fn sources_read_bound(&self) -> usize {
-        self.lab.sources.as_ref().map_or(0, |s| s.iter().flatten()
-            .map(|k| k.read_bytes_bound(crate::geom::TILE)).max().unwrap_or(0))
+        self.lab.sources.as_ref().map_or(0, |s| s.iter()
+            .map(|slot| slot.source.read_bytes_bound(crate::geom::TILE)).max().unwrap_or(0))
     }
 
     /// Temporary bytes the label reader may hold (the memory bound): the

@@ -112,7 +112,8 @@ class CoreLabelSurface:
                 rows.append((number, tuple(float(v) for v in plane.world_rect), data,
                              int(ids.shape[0]), int(ids.shape[1])))
             sent.append((rows, tuple(float(c) for c in layer.color), float(layer.alpha),
-                         label_radius(layer.width, ratio), layer.mode == LABEL_FILL))
+                         label_radius(layer.width, ratio), layer.mode == LABEL_FILL,
+                         bool(getattr(layer, "dash", False))))
         self.core.set_labels(sent)
 
     def _labels_follow_ratio(self) -> None:

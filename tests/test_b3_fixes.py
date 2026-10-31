@@ -149,29 +149,32 @@ def test_step3_lists_earlier_sessions_and_loads_another_project(app, tmp_path, m
     alien = _workspace(tmp_path / "r", "roi_alien", "2026-09-20T09:00:00", slide="/y/other.tif")
     alien_run = _run(alien, "seg_alien", "2026-09-20T09:05:00", "roi_alien")
     rig = _rig_with(app, tmp_path, monkeypatch, cur)
-    w, bar = rig.w, rig.w._step3_mask_bar
+    w = rig.w
+    win = w._step3_results
+    drawn = lambda: [src.mask_path for _k, src, _st in w._step3_mount.mask_slots() or []]   # noqa: E731
     try:
         sv._enter(rig, 3)
-        assert bar.run_combo.count() == 1 and "[Full WSI · 2026-09-26 09:00]" in bar.run_combo.itemText(0)
-        assert w._step3_mount.mask_sources()["cell"] is not None
-        # Load… another project's run of this slide
+        assert len(win.keys()) == 1
+        assert "[Full WSI · 2026-09-26 09:00]" in win.row(win.keys()[0]).title.text()
+        assert drawn(), "the active record's cells are drawn"
+        # Load… another project's run of this slide: listed, ticked, drawn
         w._step3_pick_run_folder = lambda: far_run.dir
-        bar.load_button.click()
-        assert bar.run_combo.count() == 2
-        assert bar.current_run_dir() == os.path.realpath(far_run.dir)
-        assert w._step3_mount.mask_sources()["cell"].mask_path == os.path.realpath(far_run.mask)
+        win.load_button.click()
+        assert len(win.keys()) == 2
+        assert os.path.realpath(far_run.mask) in drawn()
         # Load… a run of another slide: refused, said, list unchanged
         w._step3_pick_run_folder = lambda: alien_run.dir
-        bar.load_button.click()
-        assert bar.run_combo.count() == 2
-        assert bar.hint.full_text().startswith("Not loaded: this result was made on another slide")
+        win.load_button.click()
+        assert len(win.keys()) == 2
+        assert win.hint.full_text().startswith("Not loaded: this result was made on another slide")
         # Load… a folder that is no run
         w._step3_pick_run_folder = lambda: str(tmp_path)
-        bar.load_button.click()
-        assert bar.hint.full_text().startswith("Not loaded: no segmentation_meta.json")
+        win.load_button.click()
+        assert win.hint.full_text().startswith("Not loaded: no segmentation_meta.json")
         # choosing again clears the refusal
-        bar.run_chosen.emit(bar.run_combo.itemData(0))
-        assert not bar.hint.full_text().startswith("Not loaded")
+        other = next(k for k in win.keys() if win.row(k).btn_use.isEnabled())
+        win.row(other).btn_use.click()
+        assert not win.hint.full_text().startswith("Not loaded")
     finally:
         w.close()
 
@@ -180,12 +183,14 @@ def test_a_region_outside_the_current_roi_is_said(app, tmp_path, monkeypatch):
     cur = _workspace(tmp_path / "p", "roi_now", "2026-09-27T10:00:00")
     _run(cur, "seg_c", "2026-09-27T10:05:00", "roi_now")
     rig = _rig_with(app, tmp_path, monkeypatch, cur)
-    w, bar = rig.w, rig.w._step3_mask_bar
+    w = rig.w
     try:
         w._active_roi = {"name": "ROI_1", "bbox_fullres": [600, 900, 600, 900]}   # smaller
         sv._enter(rig, 3)
-        assert w._step3_mount.mask_sources()["cell"] is not None
-        assert w._step3_mask_note.startswith("Part of this result lies outside the current ROI")
+        assert w._step3_mount.mask_slots()
+        win = w._step3_results
+        status = win.row(win.keys()[0]).status.text()           # said on its own row
+        assert status.startswith("Part of this result lies outside the current ROI")
     finally:
         w.close()
 

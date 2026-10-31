@@ -173,8 +173,9 @@ class Step1WholeSlideMount(QtCore.QObject):
         #: label targets and no label binding is made.
         self._labels_wanted = bool(labels)
         self.label_binding = None
-        self._mask_sources = None
-        self._mask_styles = {}
+        #: Step3's slots (plan §3.3): [(key, MaskSource, MaskStyle)] in
+        #: drawing order, kept so a rebuilt GPU backend draws them again
+        self._mask_slots = None
         #: The prefix of the reasons this viewer publishes its camera with
         #: ("step1", "step1-patch", ...); a second viewer names itself.
         self._camera_reason = str(camera_reason)
@@ -643,12 +644,10 @@ class Step1WholeSlideMount(QtCore.QObject):
             level_shapes=[provider.level_shape(level) for level in range(provider.num_levels)],
             tile_size=controller.grid.tile_size, parent=self)
         self.label_binding.status_changed.connect(self.mask_status_changed.emit)
-        for kind, style in self._mask_styles.items():
-            self.label_binding.set_style(kind, **style)
         if self._paused:
             self.label_binding.pause()
-        if self._mask_sources is not None:
-            self.label_binding.set_sources(self._mask_sources)
+        if self._mask_slots:
+            self.label_binding.set_slots(self._mask_slots)
         self.mask_status_changed.emit()
         return True
 
@@ -664,14 +663,15 @@ class Step1WholeSlideMount(QtCore.QObject):
             self.mask_status_changed.emit()
         return binding is not None
 
-    def set_mask_sources(self, sources):
-        """The masks to draw: `core.step3_masks.resolve_masks`' cell and
-        nucleus (None for either, or None for none). Kept, so a rebuilt GPU
-        backend draws them again."""
-        self._mask_sources = dict(sources) if sources else None
+    def set_mask_slots(self, slots):
+        """The masks to draw, in drawing order: [(key, MaskSource,
+        MaskStyle)] (Step3 plan §3.3: one slot per drawn mask; the style
+        comes with its source). None or empty for none. Kept, so a rebuilt
+        GPU backend draws them again."""
+        self._mask_slots = list(slots) if slots else None
         if self.label_binding is not None:
-            self.label_binding.set_sources(self._mask_sources or {})
-        elif self._labels_wanted and sources:
+            self.label_binding.set_slots(self._mask_slots or [])
+        elif self._labels_wanted and slots:
             print(f"[Step3] masks not drawn: {self.mask_status()['reason']}")
         self.mask_status_changed.emit()
         return self.label_binding is not None
@@ -681,32 +681,34 @@ class Step1WholeSlideMount(QtCore.QObject):
         them -- a zoomed-out pyramid it built is in them -- so the next
         binding uses that pyramid instead of refusing an unknown one."""
         binding = self.label_binding
-        if binding is None or not self._mask_sources:
+        if binding is None or not self._mask_slots:
             return
         latest = binding.sources()
-        for kind, source in list(self._mask_sources.items()):
-            now = latest.get(kind)
-            if source is not None and now is not None and now.mask_path == source.mask_path:
-                self._mask_sources[kind] = now
+        adopted = []
+        for key, source, style in self._mask_slots:
+            now = latest.get(key)
+            if now is not None and now.mask_path == source.mask_path:
+                source = now
+            adopted.append((key, source, style))
+        self._mask_slots = adopted
 
-    def mask_sources(self):
-        """The masks last set (None for none): what the owner compares a
-        refresh against, so an unchanged selection is not set again."""
-        return dict(self._mask_sources) if self._mask_sources else None
+    def mask_slots(self):
+        """The slots last set (None for none): what the owner compares a
+        refresh against."""
+        return list(self._mask_slots) if self._mask_slots else None
 
-    def mask_styles(self):
-        """The display settings this mount keeps and re-applies to every new
-        label binding, as {kind: {field: value}}."""
-        return {kind: dict(style) for kind, style in self._mask_styles.items()}
-
-    def set_mask_style(self, kind, **style):
-        """Visibility, colour, alpha, width (logical px) or mode of one mask."""
-        self._mask_styles.setdefault(kind, {}).update(style)
+    def set_slot_style(self, key, **style):
+        """Visibility, colour, alpha, width (logical px), mode or dash of
+        one slot."""
+        import dataclasses
+        if self._mask_slots:
+            self._mask_slots = [(k, src, dataclasses.replace(st, **style) if k == key else st)
+                                for k, src, st in self._mask_slots]
         if self.label_binding is not None:
-            self.label_binding.set_style(kind, **style)
+            self.label_binding.set_style(key, **style)
 
     def mask_status(self):
-        """{"available", "reason", and the label binding's per-mask status}."""
+        """{"available", "reason", and the label binding's per-slot status}."""
         if not self._labels_wanted:
             return {"available": False, "reason": "this viewer draws no masks"}
         if self.label_binding is None:
@@ -1266,7 +1268,7 @@ class Step1WholeSlideMount(QtCore.QObject):
         self._rust_refused = ""
         # Masks belong to the source they were resolved for: a new source
         # starts without them until its owner (block 4c) sets them again.
-        self._mask_sources = None
+        self._mask_slots = None
         stack = self.viewer.open(self._open_channel if self._display_filter is not None else "")
         if stack is None:
             self._backend = BACKEND_LEGACY

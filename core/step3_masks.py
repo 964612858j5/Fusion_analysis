@@ -758,13 +758,45 @@ def read_label_tile(source, level, tx, ty, tile_size, view_level_shapes):
 
 MAX_OUTLINE_RADIUS = 8
 
-def outline_reference(ids, width):
+#: A dash is 4 line widths drawn, 2 left out (Step1's `Qt.DashLine`);
+#: the Rust core's `render::labels::DASH_DUTY`.
+DASH_DUTY = 4.0 / 6.0
+
+
+def dash_pattern(radius, view_rect, size):
+    """(period, (phase x, y, x-y, x+y)) of a dashed outline of screen
+    `radius` drawn over `view_rect` (x0, x1, y0, y1, level-0 world) on a
+    target of `size` (w, h) -- the Rust core's `render::labels::dash_pattern`,
+    step for step: the period is 6 * max(radius, 1) screen pixels; each
+    phase is the screen position of the world origin along that direction,
+    reduced modulo the period on its own (Step3 multi-result plan §4)."""
+    period = 6.0 * max(int(radius), 1)
+    x0, x1, y0, y1 = (float(np.float32(v)) for v in view_rect)
+    w, h = size
+    vw, vh = x1 - x0, y1 - y0
+    if vw <= 0 or vh <= 0:
+        return period, (0.0, 0.0, 0.0, 0.0)
+    ax = x0 * w / vw
+    ay = -y1 * h / vh                      # GL screen y grows up, world y down
+    r = 0.7071067811865476
+    return period, tuple(float(np.float32(v % period))
+                         for v in (ax, ay, (ax - ay) * r, (ax + ay) * r))
+
+
+def outline_reference(ids, width, dash=None):
     """Outline pixels of a SCREEN id image (one label per screen pixel): a
     pixel whose id is not 0 and whose (2*width+1)-square neighbourhood
     (Chebyshev distance <= width) holds a different id. Outside the image
     counts as id 0, so a mask's edge is drawn. `width` is the SCREEN radius,
     0..8 (a logical width 0..4 times the device pixel ratio, block 4b); 0
-    draws none."""
+    draws none.
+
+    `dash` = (period, duty, phases) (`dash_pattern`, `DASH_DUTY`): the
+    shader's dashed outline (Step3 multi-result plan §4) -- rows of `ids`
+    top first, as the read-back images are; the outward normal is summed
+    from the differing neighbours in GL's y-up screen, quantised to 4
+    directions, and a pixel is kept when its position along that direction
+    plus the direction's phase falls in the first `duty` of a period."""
     ids = np.asarray(ids, dtype=np.uint32)
     width = int(width)
     if not 0 <= width <= MAX_OUTLINE_RADIUS:
@@ -775,11 +807,32 @@ def outline_reference(ids, width):
     h, w = ids.shape
     pad = np.zeros((h + 2 * width, w + 2 * width), np.uint32)
     pad[width:width + h, width:width + w] = ids
-    for dy in range(-width, width + 1):
+    nx = np.zeros(ids.shape, np.float64)
+    ny = np.zeros(ids.shape, np.float64)
+    for dy in range(-width, width + 1):          # GL's dy: screen y up = one row up
         for dx in range(-width, width + 1):
             if dy or dx:
-                out |= pad[width + dy:width + dy + h, width + dx:width + dx + w] != ids
-    return out & (ids != 0)
+                diff = pad[width - dy:width - dy + h, width + dx:width + dx + w] != ids
+                out |= diff
+                nx += diff * dx
+                ny += diff * dy
+    out &= ids != 0
+    if dash is None:
+        return out
+    period, duty, phase = dash
+    if period <= 0:
+        return out
+    f32 = np.float32
+    gx = (np.arange(w, dtype=f32) + f32(0.5))[None, :].repeat(h, 0)
+    gy = (np.arange(h - 1, -1, -1, dtype=f32) + f32(0.5))[:, None].repeat(w, 1)
+    ax, ay = np.abs(nx), np.abs(ny)
+    r = f32(0.70710678)
+    t = np.where(ax > 2.414 * ay, gy + f32(phase[1]),
+                 np.where(ay > 2.414 * ax, gx + f32(phase[0]),
+                          np.where(nx * ny > 0, (gx - gy) * r + f32(phase[2]),
+                                   (gx + gy) * r + f32(phase[3])))).astype(f32)
+    q = t / f32(period)
+    return out & ((q - np.floor(q)) < f32(duty))
 
 
 def _hash(ids):

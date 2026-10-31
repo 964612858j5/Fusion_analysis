@@ -113,6 +113,26 @@ def test_c_rust_outlines_equal_the_reference(runs, width):
         assert edge.any()
 
 
+@pytest.mark.parametrize("backend", ["rust", "python"])
+@pytest.mark.parametrize("width", [1, 2])
+def test_c2_dashed_outlines_equal_the_reference(runs, backend, width):
+    """Multi-result plan §4: the dashed outline on both backends is the CPU
+    reference's (`outline_reference(..., dash=)`), up to the pixels a float
+    rounding puts on the other side of a dash end."""
+    from block01.core.step3_masks import DASH_DUTY, dash_pattern
+    result, saved = runs[backend]
+    vp, size = _vp(result, saved["picture"])
+    ids = reference_ids(_tiles(), vp, size)
+    period, phase = dash_pattern(width, vp.world_rect, size)
+    want = outline_reference(ids, width, dash=(period, DASH_DUTY, phase))
+    solid = outline_reference(ids, width)
+    got = np.all(saved[f"dash{width}_shown"][..., :3] == [255, 0, 255], axis=-1) & solid
+    assert want.sum() > 0.3 * solid.sum() and want.sum() < 0.9 * solid.sum(), "not dashed"
+    assert (got != want).sum() <= max(3, 0.01 * solid.sum()), (got != want).sum()
+    picture = saved["picture"]
+    np.testing.assert_array_equal(saved[f"dash{width}_shown"][~solid], picture[~solid])
+
+
 def test_d_rust_fills_blend_and_the_nucleus_lies_on_top(runs):
     result, saved = runs["rust"]
     vp, size = _vp(result, saved["picture"])

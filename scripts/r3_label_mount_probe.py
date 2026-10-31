@@ -21,6 +21,12 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
+
+def _put(mount, sources, styles=None):
+    """One result's cell / nucleus as the mount's slots (Step3 plan §3.3)."""
+    from block01.ui.step3_label_binding import kind_slots
+    return mount.set_mask_slots(kind_slots(sources, styles) if sources else None)
+
 def _wait(rig, cond, timeout=20.0):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
@@ -63,7 +69,7 @@ def s_lifecycle(rig, out, mask_dir):
     binding = mount.label_binding
     out["binding_made"] = binding is not None
     out["label_binding"] = type(binding).__name__
-    mount.set_mask_sources(_source(mask_dir, rig.shape))
+    _put(mount, _source(mask_dir, rig.shape))
     out["shown"] = _wait(rig, lambda: _shown(rig))
     out["l1_reason"] = getattr(binding, "l1_reason", None)
     out["core_read"] = binding.stats().get("accepted", 0)
@@ -89,7 +95,7 @@ def s_lifecycle(rig, out, mask_dir):
 def s_fallback(rig, out, mask_dir):
     mount = rig.mount
     sources = _source(mask_dir, rig.shape)
-    mount.set_mask_sources(sources)
+    _put(mount, sources)
     out["handed_over"] = _wait(rig, lambda: type(mount.gpu_binding).__name__ == "Step1GpuBinding", 60.0)
     out["rust_refused"] = mount._rust_refused
     # nobody sets the masks again: the mount carries them over (Step3's page

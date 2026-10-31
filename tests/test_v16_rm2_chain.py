@@ -600,12 +600,17 @@ def test_a_reopened_step1_gets_its_pre_segmentation_back(app, tmp_path, monkeypa
 
 
 def test_run_lists_are_as_wide_as_their_rows(app):
-    from block01.ui.step3_mask_bar import Step3MaskBar
-    bar = Step3MaskBar()
+    # the shared list helpers (Step0's and Step2's run lists)
+    from block01.ui.step3_mask_bar import CLOSE_ROLE, TAG_ROLE, TaggedItemDelegate, fit_popup
+    combo = QtWidgets.QComboBox()
+    combo.setItemDelegate(TaggedItemDelegate(combo))
     long = "10-03 12:00 · stardist_nuclei_expansion · a long region name"
-    bar.set_runs([(long, "/r/a\x1fR", "10-03 11:59 · fused · CD3 1, CD8 0.5", True)])
-    fm = bar.run_combo.fontMetrics()
-    assert bar.run_combo.view().minimumWidth() > fm.horizontalAdvance(long)
+    combo.addItem(long, "/r/a\x1fR")
+    combo.setItemData(0, "10-03 11:59 · fused · CD3 1, CD8 0.5", TAG_ROLE)
+    combo.setItemData(0, True, CLOSE_ROLE)
+    fit_popup(combo)
+    fm = combo.fontMetrics()
+    assert combo.view().minimumWidth() > fm.horizontalAdvance(long)
 
 
 def test_closing_saves_the_step1_draft_with_its_pre_segmentation(app, tmp_path,
@@ -768,25 +773,22 @@ def _click_close(combo, row):
     return view
 
 
-def test_the_x_in_step3s_run_list_deletes_that_run(app):
-    """#6: in a drop-down the popup takes the mouse release, so the x acts on
-    the press -- once, for its own row, without choosing the current row."""
-    from block01.ui.step3_mask_bar import Step3MaskBar
-    bar = Step3MaskBar()
-    wanted, chosen = [], []
-    bar.delete_requested.connect(wanted.append)
-    bar.run_chosen.connect(chosen.append)
-    bar.set_runs([("a", "/r/a", "f1", True), ("b", "/r/b", "f1", True)])
-    host = QtWidgets.QWidget()
-    QtWidgets.QHBoxLayout(host).addWidget(bar.corner())
-    host.show()
+def test_the_x_in_step3s_results_window_deletes_that_run(app):
+    """#6, results window (multi-result plan §3.1): a row's x deletes its own
+    run -- once, without `Use` and without ticking anything."""
+    from block01.ui.step3_results_window import RowInfo, Step3ResultsWindow
+    win = Step3ResultsWindow()
+    wanted, used, ticks = [], [], []
+    win.delete_requested.connect(wanted.append)
+    win.use_requested.connect(used.append)
+    win.ticks_changed.connect(lambda: ticks.append(1))
+    win.set_rows([RowInfo("a\x1fR", "/r/a", "a", "f1", True), RowInfo("b\x1fR", "/r/b", "b", "f1", True)])
+    win.show()
     try:
-        view = _click_close(bar.run_combo, 1)
-        assert wanted == ["/r/b"]
-        assert chosen == []
-        assert not view.isVisible()
+        win.row("b\x1fR").btn_delete.click()
+        assert wanted == ["/r/b"] and used == [] and ticks == []
     finally:
-        host.close()
+        win.close()
 
 
 def test_the_x_in_step2s_input_list_deletes_that_run(app, tmp_path):

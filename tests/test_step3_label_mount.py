@@ -109,6 +109,11 @@ def _source(tmp_path, mount):
             "nucleus": None}
 
 
+def _slots(sources):
+    from block01.ui.step3_label_binding import DEFAULT_STYLES
+    return [(kind, src, DEFAULT_STYLES[kind]) for kind, src in sources.items() if src is not None]
+
+
 def test_without_a_gpu_masks_are_not_drawn_and_the_status_says_why(app, tmp_path, capsys):
     mount = _mount(app, labels=True, gpu=False)
     try:
@@ -116,7 +121,7 @@ def test_without_a_gpu_masks_are_not_drawn_and_the_status_says_why(app, tmp_path
         assert mount.label_binding is None
         status = mount.mask_status()
         assert status["available"] is False and "Masks need the GPU display" in status["reason"]
-        assert mount.set_mask_sources(_source(tmp_path, mount)) is False
+        assert mount.set_mask_slots(_slots(_source(tmp_path, mount))) is False
         assert "masks not drawn" in capsys.readouterr().out
     finally:
         mount.close()
@@ -143,7 +148,7 @@ def test_step3s_viewer_draws_masks_and_follows_its_lifecycle(app, tmp_path):
         assert binding.level_shapes == [tuple(provider.level_shape(l))
                                         for l in range(provider.num_levels)]
         assert binding.tile_size == mount.host.stack.controller.grid.tile_size
-        mount.set_mask_sources(_source(tmp_path, mount))
+        mount.set_mask_slots(_slots(_source(tmp_path, mount)))
         assert _wait(app, lambda: layer.label_stats()["shown"])
         assert mount.mask_status()["available"] is True
         # pause / resume reach the label binding
@@ -159,7 +164,7 @@ def test_step3s_viewer_draws_masks_and_follows_its_lifecycle(app, tmp_path):
         closing_threads.wait_all(5.0)
         assert binding.stats()["thread_alive"] is False
         if mount.label_binding is not None:
-            assert mount.label_binding.mask_status()["cell"]["source"] is False
+            assert "cell" not in mount.label_binding.mask_status()     # no slots
         # close ends the thread
         last = mount.label_binding
         mount.close()

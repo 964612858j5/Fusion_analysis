@@ -104,6 +104,11 @@ def test_c4_an_outside_result_is_current_but_not_recorded(chain, tmp_path, monke
     import block01.core.step3_masks as sm
     monkeypatch.setattr(sm, "same_slide", lambda p, q: True)
     assert w._step3_load_run() is True
+    # multi-result plan §3.1: Load… ticks it; `Use` makes it current
+    assert _current_run_dir(w) == os.path.realpath(a)
+    key = next(k for k, e in w._step3_entries.items()
+               if os.path.realpath(e.run.run_dir) == os.path.realpath(x))
+    w._step3_on_run_chosen(key)
     assert _current_run_dir(w) == os.path.realpath(x)
     assert _viewing(ws) == _rel(ws, a)            # the outside run is not recorded
 

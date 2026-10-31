@@ -2,6 +2,7 @@
 block01/ui/main_window.py — MainWindow.
 """
 
+import dataclasses
 import os
 import gc
 import hashlib
@@ -82,6 +83,7 @@ from .step0.roi_context_model import (
 from .block01_display import (
     Block01DisplayServices, STEP0 as _CTX_STEP0, STEP1 as _CTX_STEP1,
     STEP2 as _CTX_STEP2, STEP3 as _CTX_STEP3, REGIONS as _CTX_REGIONS,
+    _bring_to_front,
 )
 from .step0.config_panel import ConfigPanel
 from .step_frame import FRAME_TAB_QSS, StepFrame, StepFrameMetrics, free_tab_bar
@@ -113,7 +115,8 @@ from .shared_camera import snapshot_from
 from .step1_viewer_mount import Step1WholeSlideMount
 from .step2_page import Step2Page
 from .step3_page import Step3Page
-from .step3_mask_bar import Step3MaskBar
+from .step3_label_binding import CELL, KINDS, NUCLEUS
+from .step3_results_window import RowInfo, Step3ResultsWindow
 from ..core import step3_masks
 from .step4_page import Step4Page
 from .regions.core_outlines import CoreOutlines
@@ -1583,6 +1586,9 @@ class MainWindow(QMainWindow):
         self._build_step3_page(self._step3)
         self._step3.go_back.connect(self._go_to_step2)
         self._stack.addWidget(self._step3)
+        # The results window belongs to Step3: hidden when another step is
+        # shown, back when Step3 is (only if it was open when left).
+        self._stack.currentChanged.connect(lambda _i: self._step3_follow_page())
         # ONE share, four places to grab it (Step0, Step1, Step2's controls
         # column, block L2, and Step3's column, block 2c-1): a drag on any
         # page writes the shared share and the others follow. Wired ONCE,
@@ -1771,16 +1777,22 @@ class MainWindow(QMainWindow):
         self._btn_step3_mode_fusion.setChecked(mode == STEP1_PREVIEW_FUSION)
         self._step3_cb_all = show_all
 
-        # ONE ROW (plan step 3, user ruling): the shared patch strip, the two
-        # mask buttons, the hint, then the pair. The run drop-down (block 4c)
-        # sits at the right of the tab bar's row -- beside the `Viewer` tab,
-        # not inside it.
-        bar = Step3MaskBar(self)
-        bar.run_chosen.connect(self._step3_on_run_chosen)
-        bar.delete_requested.connect(lambda run_dir: self._rm_delete_run(run_dir))
-        bar.style_changed.connect(self._step3_on_mask_style)
-        bar.load_requested.connect(lambda: self._step3_load_run())
-        self._step3_mask_bar = bar
+        # ONE ROW (plan step 3, user ruling): the shared patch strip, then
+        # the pair. `Results…` (multi-result plan §3.1) sits at the right of
+        # the tab bar's row -- beside the `Viewer` tab, not inside it -- and
+        # opens the floating results window: the records, their ticks and
+        # styles, `Use`, `Load…` and the hint.
+        self._step3_results_window()
+        results = QPushButton("Results…")
+        results.setStyleSheet(MODE_BUTTON_QSS)
+        results.setToolTip("The segmentation results: tick the cell and nucleus masks to "
+                           "draw, choose the one Step4 uses")
+        results.clicked.connect(lambda _c=False: self._step3_show_results())
+        corner = QtWidgets.QWidget()
+        corner_lay = QHBoxLayout(corner)
+        corner_lay.setContentsMargins(0, 0, 4, 0)
+        corner_lay.addWidget(results)
+        self._btn_step3_results = results
         strip = PatchStrip(self)
         strip.chosen.connect(lambda idx: self._select_step3_patch(idx))
         self._step3_patch_strip = strip
@@ -1792,8 +1804,7 @@ class MainWindow(QMainWindow):
             header_spacing=header_spacing, weight_widgets=(reset, load),
             mode_widgets=(self._tma_cores_button("step3"), self._btn_step3_mode_overlay,
                           self._btn_step3_mode_fusion),
-            mask_widgets=(strip.holder(), bar.buttons["cell"], bar.buttons["nucleus"]),
-            mask_hint=bar.hint, corner_widget=bar.corner())
+            mask_widgets=(strip.holder(),), mask_hint=None, corner_widget=corner)
         self._rebuild_step3_patch_strip()
 
     def _load_weights_dialog(self, parent):
@@ -2446,27 +2457,81 @@ class MainWindow(QMainWindow):
                 known.add(run.run_dir)
         return known
 
-    @staticmethod
-    def _step3_source_key(sources):
-        """What makes two mask selections the same: per kind, the mask, its
-        region and its pyramid's place."""
-        sources = sources or {}
-        return tuple((kind, None if src is None else
-                      (src.mask_path, tuple(src.bbox), src.pyramid_path))
-                     for kind, src in sorted(sources.items()))
-
     def _step3_slide_path(self):
         return str(getattr(getattr(self, "loader", None), "filepath", "") or "")
+
+    # ── Step3's results window (multi-result plan §3.1) ───────────────
+    def _step3_results_window(self):
+        """THE floating results window, made once; hidden until asked for."""
+        win = self.__dict__.get("_step3_results")
+        if win is None:
+            win = Step3ResultsWindow(self)
+            win.ticks_changed.connect(self._step3_apply_masks)
+            win.style_changed.connect(self._step3_on_mask_style)
+            win.use_requested.connect(self._step3_on_run_chosen)
+            win.delete_requested.connect(lambda run_dir: self._rm_delete_run(run_dir, parent=win))
+            win.load_requested.connect(lambda: self._step3_load_run())
+            self._step3_results = win
+        return win
+
+    def _step3_show_results(self):
+        win = self._step3_results_window()
+        _bring_to_front(win)                       # also out of the minimized state
+        return win
+
+    def _step3_follow_page(self):
+        win = self.__dict__.get("_step3_results")
+        if win is None:
+            return
+        on_step3 = self._stack.currentWidget() is self._step3
+        if not on_step3 and win.isVisible():
+            self._step3_results_away = True
+            win.hide()
+        elif on_step3 and self.__dict__.pop("_step3_results_away", False):
+            win.show()
+
+    @staticmethod
+    def _step3_slot_key(key, kind):
+        return f"{key}\x1e{kind}"
+
+    def _step3_resolved(self, entry, shapes):
+        """`resolve_masks` of one entry, once per entry and viewer levels."""
+        cache = self.__dict__.setdefault("_step3_resolve_cache", {})
+        token = (entry.key, tuple(tuple(s) for s in shapes))
+        found, stamp = cache.get(token, (None, None))
+
+        def pyramids_now(resolved):
+            # the pyramid places of masks resolved without one, as they are on
+            # disk now: one built since (by a binding gone with a rebuilt
+            # viewer) is resolved again (codex review 2)
+            out = []
+            for src in (resolved.get(CELL), resolved.get(NUCLEUS)):
+                if src is not None and src.pyramid is None:
+                    try:
+                        out.append(os.stat(src.pyramid_path).st_mtime_ns)
+                    except OSError:
+                        out.append(None)
+            return tuple(out)
+        if found is not None and pyramids_now(found) != stamp:
+            found = None
+        if found is None:
+            try:
+                found = step3_masks.resolve_masks(entry.run, entry.roi_name, entry.bbox, shapes)
+            except Exception as exc:                        # noqa: BLE001
+                found = {"cell": None, "nucleus": None,
+                         "reasons": {"cell": str(exc), "nucleus": str(exc)}}
+            cache[token] = (found, pyramids_now(found))
+        return found
 
     @_perf("switch.step3_refresh_masks")
     def _step3_refresh_masks(self, requested_dir=None):
         """Step3 as a general result viewer (block B3): the runs of EVERY ROI
         workspace of the project made on the open slide, plus the ones loaded
-        with `Load…`; each shown on its own region. Choose one, resolve its
-        masks and hand them to the viewer -- only when they differ from the
-        ones it draws, so a refresh that keeps the choice clears nothing."""
-        bar = self.__dict__.get("_step3_mask_bar")
-        if bar is None:
+        with `Load…`, each shown on its own region, as rows of the results
+        window. One of them is the active record (`Use`; Step4 quantifies
+        it); every ticked mask of every row is drawn (plan §3)."""
+        win = self.__dict__.get("_step3_results")
+        if win is None:
             return None
         roi_dir, roi_name, roi_bbox = self._step3_mask_context()
         current_ws = os.path.realpath(roi_dir) if roi_dir else ""
@@ -2497,10 +2562,16 @@ class MainWindow(QMainWindow):
                 current_key = f"{current.run_dir}\x1f{current.region}"
             else:
                 requested_dir = current.run_dir
-        entry = step3_masks.choose_entry(items, requested_dir=requested_dir,
+        # a run only LOADED becomes the active record by `Use` alone (plan
+        # §3.1; codex review 2): without a current choice it is not a candidate
+        loaded_dirs = {r.run_dir for r in self.__dict__.get("_step3_loaded_runs") or []} - listed
+        pool = (items if requested_dir is not None or current_key is not None
+                else [e for e in items if e.run.run_dir not in loaded_dirs])
+        entry = step3_masks.choose_entry(pool, requested_dir=requested_dir,
                                          current_key=current_key,
                                          workspace=current_ws, roi_name=roi_name)
         self._step3_mask_runs = runs
+        self._step3_entries = {e.key: e for e in items}
         if entry is not None:
             now = self._project_state.active_segmentation_run
             if now is None or now.origin != "step3" or (now.run_dir, now.region) != (
@@ -2516,50 +2587,76 @@ class MainWindow(QMainWindow):
         project = run_store.project_dir_of(roi_dir) if roi_dir else None
         if entry is not None and run_store.kind_of(entry.run.run_dir) == "segment":
             self._rm_note_viewing(entry.run.run_dir)        # §6: what is viewed
-        if entry is not None:
-            # `(active)` is the chosen run now, not the one viewed before
-            import dataclasses
-            items = [dataclasses.replace(e, run=dataclasses.replace(
-                e.run, active=(e.run.run_dir == entry.run.run_dir))) for e in items]
-        bar.set_runs([(self._step3_run_label(e, current_ws, several[e.run.run_dir]), e.key,
-                       self._step3_run_tag(e.run),
-                       bool(project) and run_store.kind_of(e.run.run_dir) == "segment"
-                       and run_store.project_dir_of(e.run.run_dir) == project)
-                      for e in items], entry.key if entry is not None else None)
         mount = self.__dict__.get("_step3_mount")
         stack = getattr(getattr(mount, "host", None), "stack", None) if mount else None
-        resolved = {"cell": None, "nucleus": None, "reasons": {}}
         self._step3_mask_problem = None
-        self._step3_mask_note = None
-        if entry is not None and stack is None:
+        if items and stack is None:
             self._step3_mask_problem = "Masks need the whole-slide viewer"
-        elif entry is not None:
+        shapes = None
+        if stack is not None:
             provider = stack.provider
             shapes = [provider.level_shape(level) for level in range(provider.num_levels)]
-            try:
-                resolved = step3_masks.resolve_masks(entry.run, entry.roi_name, entry.bbox, shapes)
-            except Exception as exc:                        # noqa: BLE001
-                resolved = {"cell": None, "nucleus": None,
-                            "reasons": {"cell": str(exc), "nucleus": str(exc)}}
-            if resolved["cell"] is None and resolved["nucleus"] is None:
-                why = resolved["reasons"].get("cell") or resolved["reasons"].get("nucleus") or ""
-                self._step3_mask_problem = f"Mask not shown: {why} — re-run Step2"
-            elif not step3_masks.inside(entry.bbox, step3_masks._bbox(roi_bbox)):
-                self._step3_mask_note = ("Part of this result lies outside the current ROI; "
-                                         "it is not shown there")
-        sources = {kind: resolved.get(kind) for kind in ("cell", "nucleus")}
-        for kind in ("cell", "nucleus"):
-            bar.set_mask_available(kind, sources[kind] is not None)
-        if mount is not None:
-            wanted = sources if any(sources.values()) else None
-            if self._step3_source_key(wanted) != self._step3_source_key(mount.mask_sources()):
-                mount.set_mask_sources(wanted)
-        self._step3_update_mask_hint()
+        rows = []
+        for e in items:
+            resolved = self._step3_resolved(e, shapes) if shapes is not None else None
+            has = (tuple(k for k in KINDS if resolved.get(k) is not None) if resolved is not None
+                   else KINDS)
+            # `(active)` is the chosen run now, not the one viewed before
+            active = entry is not None and e.run.run_dir == entry.run.run_dir
+            rows.append(RowInfo(
+                key=e.key, run_dir=e.run.run_dir,
+                title=self._step3_run_label(dataclasses.replace(e, run=dataclasses.replace(
+                    e.run, active=active)), current_ws, several[e.run.run_dir]),
+                tag=self._step3_run_tag(e.run),
+                deletable=(bool(project) and run_store.kind_of(e.run.run_dir) == "segment"
+                           and run_store.project_dir_of(e.run.run_dir) == project),
+                has=has, reasons=tuple(sorted(((resolved or {}).get("reasons") or {}).items()))))
+        win.set_rows(rows, entry.key if entry is not None else None)
+        # the default (plan §3.1, ruling 8): once, at scene start -- the
+        # active record's cells, or its nuclei when it has no cell mask
+        # (`Use` ends the wait for it first: it never ticks, codex review 3)
+        if entry is not None and shapes is not None and not self.__dict__.get("_step3_ticks_started"):
+            self._step3_ticks_started = True
+            win.tick_default(entry.key)
+        self._step3_roi_bbox = roi_bbox
+        self._step3_apply_masks()
         return entry
 
+    def _step3_apply_masks(self):
+        """Every ticked mask of every row to the viewer, in drawing order
+        (plan §3.2): rows from the bottom of the list up -- the top row lies
+        on top -- and within a row cells, then nuclei. Set only when the
+        slots differ from the ones drawn, so a refresh clears nothing."""
+        win = self.__dict__.get("_step3_results")
+        mount = self.__dict__.get("_step3_mount")
+        stack = getattr(getattr(mount, "host", None), "stack", None) if mount else None
+        slots = []
+        if win is not None and stack is not None:
+            provider = stack.provider
+            shapes = [provider.level_shape(level) for level in range(provider.num_levels)]
+            ticked = set(win.ticked())
+            entries = self.__dict__.get("_step3_entries") or {}
+            for key in reversed(win.keys()):
+                entry = entries.get(key)
+                if entry is None:
+                    continue
+                resolved = self._step3_resolved(entry, shapes)
+                for kind in KINDS:
+                    if (key, kind) in ticked and resolved.get(kind) is not None:
+                        slots.append((self._step3_slot_key(key, kind), resolved[kind],
+                                      win.style(key, kind)))
+        if mount is not None:
+            def ident(items):
+                return [(k, src.mask_path, tuple(src.bbox), src.pyramid_path) for k, src, _st in items or []]
+            if ident(slots) != ident(mount.mask_slots()):
+                mount.set_mask_slots(slots or None)
+        self._step3_update_mask_hint()
+
     def _step3_on_run_chosen(self, key):
-        """A list choice: the entry's key (a plain run folder is taken too)."""
+        """`Use`: the record Step4 quantifies (one at a time); the ticks are
+        not touched (a plain run folder is taken too)."""
         run_dir, _sep, roi = str(key).partition("\x1f")
+        self._step3_ticks_started = True        # the scene default is not `Use`'s to give
         if roi:
             self._project_state.choose_segmentation_run(run_dir, roi, origin="step3")
             self._step3_refresh_masks()
@@ -2576,7 +2673,9 @@ class MainWindow(QMainWindow):
 
     def _step3_load_run(self):
         """`Load…`: any Step2 run folder -- another workspace, another
-        project -- as long as it was made on the open slide."""
+        project -- as long as it was made on the open slide. It joins the
+        list with its cells ticked (its nuclei when it has no cell mask);
+        it does not become the active record (that is `Use`)."""
         path = self._step3_pick_run_folder()
         if not path:
             return False
@@ -2588,11 +2687,19 @@ class MainWindow(QMainWindow):
             self._step3_mask_refusal = (f"Not loaded: this result was made on another slide "
                                         f"({os.path.basename(made_on)})")
         else:
-            self._step3_mask_refusal = None
             loaded = [r for r in self.__dict__.get("_step3_loaded_runs") or []
                       if r.run_dir != run.run_dir]
             self._step3_loaded_runs = loaded + [run]
-            self._step3_refresh_masks(requested_dir=run.run_dir)
+            self._step3_refresh_masks()
+            self._step3_mask_refusal = None
+            _roi_dir, roi_name, _bbox = self._step3_mask_context()
+            mine = [e for e in (self.__dict__.get("_step3_entries") or {}).values()
+                    if os.path.realpath(e.run.run_dir) == os.path.realpath(run.run_dir)]
+            pick = next((e for e in mine if e.roi_name == roi_name), mine[0] if mine else None)
+            win = self.__dict__.get("_step3_results")
+            if pick is not None and win is not None:
+                win.tick_default(pick.key)
+            self._step3_update_mask_hint()
             return True
         print(f"[Step3] {self._step3_mask_refusal}")
         self._step3_update_mask_hint()
@@ -2604,35 +2711,58 @@ class MainWindow(QMainWindow):
         if self.__dict__.get("_current_step") == 3:
             self._step3_refresh_masks()
 
-    def _step3_on_mask_style(self, kind, change):
+    def _step3_on_mask_style(self, key, kind, change):
         mount = self.__dict__.get("_step3_mount")
         if mount is not None:
-            mount.set_mask_style(kind, **change)
+            mount.set_slot_style(self._step3_slot_key(key, kind), **change)
+
+    def _step3_release_runs(self, inside):
+        """Block RM §9, several results (plan §3.1): the runs `inside` the
+        paths about to be deleted leave the list and the picture at once;
+        the other records, loaded runs and ticks stay; the active record is
+        cleared only when it is one of them."""
+        win = self.__dict__.get("_step3_results")
+        entries = self.__dict__.get("_step3_entries") or {}
+        gone = [k for k, e in entries.items() if inside(e.run.run_dir)]
+        self._step3_loaded_runs = [r for r in self.__dict__.get("_step3_loaded_runs") or []
+                                   if not inside(r.run_dir)]
+        self._step3_mask_runs = [r for r in self.__dict__.get("_step3_mask_runs") or []
+                                 if not inside(r.run_dir)]
+        self._step3_entries = {k: e for k, e in entries.items() if k not in gone}
+        current = self._project_state.active_segmentation_run
+        if current is not None and inside(current.run_dir):
+            self._project_state.clear_segmentation_run()
+            self._step3_mask_key = None
+        if win is not None:
+            win.forget(gone)
+        self._step3_apply_masks()        # their reads and builds are told to stop before the move
 
     def _step3_clear_masks(self):
-        """The dataset moved: no list, no choice, no hint."""
+        """The dataset moved: no list, no choice, no ticks, no hint."""
         self._step3_mask_runs = []
+        self._step3_entries = {}
         self._step3_mask_key = None
         self._project_state.clear_segmentation_run()      # block A8
         self._step3_loaded_runs = []            # loaded for the old dataset's slide
         self._step3_mask_roi_dir = None
         self._step3_mask_problem = None
-        self._step3_mask_note = None
         self._step3_mask_refusal = None
+        self._step3_resolve_cache = {}
+        self._step3_ticks_started = False       # the next scene starts with the default again
         mount = self.__dict__.get("_step3_mount")
         if mount is not None:
             # the mount keeps its masks across a close; these are the old
             # dataset's and must not come back when it reopens
-            mount.set_mask_sources(None)
-        bar = self.__dict__.get("_step3_mask_bar")
-        if bar is not None:
-            bar.set_runs([])
-            for kind in ("cell", "nucleus"):
-                bar.set_mask_available(kind, False)
+            mount.set_mask_slots(None)
+        win = self.__dict__.get("_step3_results")
+        if win is not None:
+            win.forget(win.keys())
+            win.set_rows([])
             self._step3_update_mask_hint()
 
     def _step3_mask_hint_text(self):
-        """The one line the hint shows, most important first."""
+        """The window's one viewer-wide line, most important first; what is
+        one record's goes on its own row (`_step3_row_statuses`)."""
         refusal = self.__dict__.get("_step3_mask_refusal")
         if refusal:
             return refusal
@@ -2645,29 +2775,66 @@ class MainWindow(QMainWindow):
         if mount is None:
             return ""
         status = mount.mask_status()
-        if status.get("error"):
-            return f"Masks: {status['error']}"
         if not status.get("available"):
             return status.get("reason") or ""
-        kinds = [status.get(kind) or {} for kind in ("cell", "nucleus")]
-        if any(k.get("building") for k in kinds):
-            return "Preparing zoomed-out masks…"
-        here = [k.get("coarse_unavailable") for k in kinds if k.get("unavailable_here")]
-        if here:
-            return f"Zoomed out, masks cannot be shown: {here[0]}"
+        if status.get("error"):
+            return f"Masks: {status['error']}"
         if status.get("budget"):
             return "Mask memory is full: part of the view has no mask"
-        return self.__dict__.get("_step3_mask_note") or ""
+        return ""
+
+    def _step3_row_statuses(self):
+        """Each record's own line (plan §3.1): why its masks cannot be shown,
+        that its zoomed-out masks are being prepared, a read error, or that
+        part of it lies outside the current ROI."""
+        win = self.__dict__.get("_step3_results")
+        if win is None:
+            return {}
+        mount = self.__dict__.get("_step3_mount")
+        stack = getattr(getattr(mount, "host", None), "stack", None) if mount else None
+        status = mount.mask_status() if mount is not None else {}
+        entries = self.__dict__.get("_step3_entries") or {}
+        roi_bbox = step3_masks._bbox(self.__dict__.get("_step3_roi_bbox"))
+        shapes = None
+        if stack is not None:
+            provider = stack.provider
+            shapes = [provider.level_shape(level) for level in range(provider.num_levels)]
+        out = {}
+        for key in win.keys():
+            entry = entries.get(key)
+            text, warn = "", False
+            if entry is not None and shapes is not None:
+                resolved = self._step3_resolved(entry, shapes)
+                if resolved["cell"] is None and resolved["nucleus"] is None:
+                    why = resolved["reasons"].get("cell") or resolved["reasons"].get("nucleus") or ""
+                    text, warn = f"Mask not shown: {why} — re-run Step2", True
+            slots = [status.get(self._step3_slot_key(key, kind)) or {} for kind in KINDS]
+            if not text:
+                errors = [s.get("error") for s in slots if s.get("error")]
+                if errors:
+                    text, warn = f"Masks: {errors[0]}", True
+                elif any(s.get("building") for s in slots):
+                    text = "Preparing zoomed-out masks…"
+                else:
+                    here = [s.get("coarse_unavailable") for s in slots if s.get("unavailable_here")]
+                    if here:
+                        text, warn = f"Zoomed out, masks cannot be shown: {here[0]}", True
+            if not text and entry is not None and not step3_masks.inside(entry.bbox, roi_bbox):
+                text = "Part of this result lies outside the current ROI; it is not shown there"
+            out[key] = (text, warn)
+            win.set_row_status(key, text, warn)
+        return out
 
     def _step3_update_mask_hint(self):
-        bar = self.__dict__.get("_step3_mask_bar")
-        if bar is None:
+        win = self.__dict__.get("_step3_results")
+        if win is None:
             return ""
         text = self._step3_mask_hint_text()
-        if text != bar.hint.full_text():
-            bar.set_hint(text)
+        if text != win.hint.full_text():
+            win.set_hint(text)
             if text:
                 print(f"[Step3] mask: {text}")            # once per change, not per frame
+        self._step3_row_statuses()
         return text
 
     def _close_step3_viewer(self):
@@ -11305,7 +11472,8 @@ class MainWindow(QMainWindow):
         runs = {r.run_dir for r in self.__dict__.get("_step3_mask_runs") or []}
         current = self._project_state.active_segmentation_run      # block A8 (C-a)
         if (current is not None and _inside(current.run_dir)) or any(_inside(r) for r in runs):
-            self._step3_clear_masks()
+            # multi-result plan §3.1: only those runs leave Step3
+            self._step3_release_runs(_inside)
         step4 = self.__dict__.get("_step4")
         if step4 is not None and _inside(getattr(getattr(step4, "_job", None), "run_dir", "")):
             step4.set_run("")

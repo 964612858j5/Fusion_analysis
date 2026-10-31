@@ -10,14 +10,14 @@ use pyo3::types::{PyBytes, PyDict};
 
 /// (id, world rect x0 x1 y0 y1, ids as native u32 bytes or None, rows, cols)
 pub type PlaneIn<'py> = (u64, [f64; 4], Option<Bound<'py, PyBytes>>, usize, usize);
-/// (planes, colour, alpha, outline radius in screen pixels, fill)
-pub type LayerIn<'py> = (Vec<PlaneIn<'py>>, [f32; 3], f32, i32, bool);
+/// (planes, colour, alpha, outline radius in screen pixels, fill, dashed)
+pub type LayerIn<'py> = (Vec<PlaneIn<'py>>, [f32; 3], f32, i32, bool, bool);
 
 pub(super) fn set(core: &mut crate::viewer::ViewerCore, layers: Vec<LayerIn<'_>>) -> PyResult<()> {
     let keep: std::collections::HashSet<u64> = layers.iter().flat_map(|l| l.0.iter().map(|p| p.0)).collect();
     let mut total = 0usize;
     let mut out = Vec::with_capacity(layers.len());
-    for (planes, color, alpha, radius, fill) in layers {
+    for (planes, color, alpha, radius, fill, dash) in layers {
         let mut kept = Vec::with_capacity(planes.len());
         for (id, rect, data, rows, cols) in planes {
             if !(rect[1] > rect[0] && rect[3] > rect[2]) || rows == 0 || cols == 0 {
@@ -39,7 +39,7 @@ pub(super) fn set(core: &mut crate::viewer::ViewerCore, layers: Vec<LayerIn<'_>>
             }
             kept.push((id, rect));
         }
-        out.push(Layer { planes: kept, color, alpha, radius: radius.clamp(0, 8), fill });
+        out.push(Layer { planes: kept, color, alpha, radius: radius.clamp(0, 8), fill, dash });
     }
     if total > LABEL_BUDGET {
         return Err(PyValueError::new_err(format!(

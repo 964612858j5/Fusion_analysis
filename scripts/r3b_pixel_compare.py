@@ -29,15 +29,17 @@ def run(args):
     h0, w0 = rig.shape
     out = {"backend": args.backend, "binding": type(mount.gpu_binding).__name__,
            "label_binding": type(mount.label_binding).__name__}
-    mount.set_mask_style("cell", width=2.0)
-    mount.set_mask_style("nucleus", mode="fill", alpha=0.5)
     cell = _mask(args.work, "cell", (h0, w0))
     nuc = _mask(args.work, "nucleus", (h0, w0))
     sources = _source(cell, (h0, w0))
     sources["nucleus"] = _source(nuc, (h0, w0))["cell"].__class__(
         **{**sources["cell"].__dict__, "kind": "nucleus", "mask_path": nuc,
            "pyramid_path": sources["cell"].pyramid_path.replace("cell", "nucleus")})
-    mount.set_mask_sources(sources)
+    import dataclasses
+    from block01.ui.step3_label_binding import DEFAULT_STYLES, kind_slots
+    styles = {"cell": dataclasses.replace(DEFAULT_STYLES["cell"], width=2.0),
+              "nucleus": dataclasses.replace(DEFAULT_STYLES["nucleus"], mode="fill", alpha=0.5)}
+    mount.set_mask_slots(kind_slots(sources, styles))
     box = mount.host.stack.view.view_box
     cameras = {"whole": (0, w0, 0, h0), "middle": (60, 960, 40, 840), "fine": (250, 450, 250, 450)}
     saved = {}

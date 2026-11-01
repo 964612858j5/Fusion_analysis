@@ -1,0 +1,79 @@
+# docs/v17_ci_plan.md 2.2: the Python lane -- the modules named in
+# tests/ci_cpu_modules.txt, each in its own pytest process, on a CPU-only
+# runner (offscreen Qt, no GPU, no engines, no real data). GL / GPU /
+# engine tests and real-machine acceptance stay local.
+name: block01_cpu_tests
+
+on:
+  push:
+    branches: [v17]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  pull_request:
+    branches: [v17]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+      - name: System libraries for offscreen Qt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libxkbcommon0 libgl1 \
+            libfontconfig1 libdbus-1-3 libglib2.0-0 libx11-6 libxext6
+      - name: Test environment (pinned) and the viewer core built from this checkout
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          PY="$RUNNER_TEMP/venv/bin/python"
+          "$PY" -m pip install --upgrade "pip<27"
+          "$PY" -m pip install -r envs/ci/requirements-cpu.txt
+          "$PY" -m pip install "maturin>=1.15,<2"
+          "$RUNNER_TEMP/venv/bin/maturin" build --release -m native/fusion_viewer_core/Cargo.toml -o "$RUNNER_TEMP/dist"
+          "$PY" -m pip install --no-deps "$RUNNER_TEMP"/dist/*.whl
+          echo "CI_PY=$PY" >> "$GITHUB_ENV"
+      - name: The checkout as the package block01
+        run: |
+          mkdir -p "$RUNNER_TEMP/pkg"
+          ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/pkg/block01"
+          echo "PYTHONPATH=$RUNNER_TEMP/pkg" >> "$GITHUB_ENV"
+      - name: Offscreen Qt starts
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          "$CI_PY" - <<'PY'
+          from PyQt5.QtCore import QT_VERSION_STR
+          from PyQt5.QtGui import QFontDatabase
+          from PyQt5.QtWidgets import QApplication
+          app = QApplication([])
+          print("Qt", QT_VERSION_STR, "fonts:", QFontDatabase().families()[:12])
+          import block01, fusion_viewer_core
+          print("block01 from", block01.__path__[0])
+          PY
+      - name: Test modules
+        run: |
+          bash scripts/ci_run_modules.sh "$CI_PY" tests/ci_cpu_modules.txt \
+            "$RUNNER_TEMP/pkg/block01/tests" "$RUNNER_TEMP/logs" 4
+      - name: Upload the module logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: block01-cpu-test-logs
+          path: ${{ runner.temp }}/logs
+          if-no-files-found: warn

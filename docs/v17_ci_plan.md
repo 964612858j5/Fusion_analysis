@@ -229,3 +229,9 @@ with the final runner and requirements file is part of §4 before commit.)
 * Local: `test_f5_rust_fusion.py` passes with the variable set (no AVX512
   here, so no change); the faulthandler option dumps on a sleeping test.
 * Codex code review round 1: PASS (P3: keep the AVX512 cause provisional — applied).
+* Second GitHub run (230302d): `block01_cpu_tests` green, all 289 modules,
+  job 11 min. Its runner was an AMD EPYC 7763 without AVX512, so the cause
+  of the first run's fusion mismatch is still unconfirmed (GitHub's Linux
+  runners are a mix of CPUs; the first run's CPU was not logged). The
+  startup step now logs it, so a later run on an AVX512 machine will show
+  whether the setting holds.

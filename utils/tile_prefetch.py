@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
+
+#: how long `close()` waits for a read under way (a cleanup budget, not a
+#: bound on Stop: docs/v17_step2_prefetch_cleanup_plan.md §1.1)
+CLOSE_WAIT_S = 30.0
 
 
 class TilePrefetcher:
@@ -19,6 +23,7 @@ class TilePrefetcher:
         self._futures = {}
         self._next_submit = 0
         self._closed = False
+        self._settled = None
         self.metrics = {
             "prefetch_wait_seconds": 0.0,
             "prefetch_hit": 0,
@@ -29,10 +34,30 @@ class TilePrefetcher:
             self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="step2-tile-prefetch")
             self._fill()
 
-    def close(self):
+    def close(self, wait_s=None):
+        """Cancel the queued reads and wait -- here, on the calling worker
+        thread -- for the one under way, at most `wait_s` (default
+        `CLOSE_WAIT_S`). True when nothing is left running; a second call
+        gives the first answer at once."""
+        if self._settled is not None:
+            return self._settled
         self._closed = True
-        if self._executor is not None:
-            self._executor.shutdown(wait=False, cancel_futures=True)
+        if self._executor is None:
+            self._settled = True
+            return True
+        self._executor.shutdown(wait=False, cancel_futures=True)   # queued reads never start
+        running = [f for f in self._futures.values() if not f.done()]
+        budget = CLOSE_WAIT_S if wait_s is None else float(wait_s)
+        _done, still = wait(running, timeout=budget) if running else ((), ())
+        self._futures.clear()
+        if still:
+            self._warn(f"[TilePrefetch] a tile read was still running after {budget:g} s; "
+                       "the run ends without waiting for it")
+            self._settled = False
+        else:
+            self._executor.shutdown(wait=True)      # the thread has nothing left: it exits now
+            self._settled = True
+        return self._settled
 
     def get(self, index, sync_load_fn=None):
         if self.prefetch_queue_size <= 0 or self._executor is None:
@@ -89,6 +114,18 @@ class TilePrefetcher:
                 continue
             self._futures[idx] = self._executor.submit(self.load_fn, idx, self.tiles[idx])
         self.metrics["prefetch_queue_depth"] = len(self._futures)
+
+    def _warn(self, msg):
+        if self.logger:
+            try:
+                self.logger.warning(msg)
+            except Exception:
+                pass
+        else:
+            try:
+                print(msg)
+            except Exception:
+                pass
 
     def _log(self, msg):
         if self.logger:

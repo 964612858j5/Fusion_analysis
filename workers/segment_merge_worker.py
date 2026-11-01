@@ -1886,6 +1886,14 @@ class SegmentMergeWorker(QThread):
         except Exception:
             pass
 
+    def _close_active_tile_scheduler(self):
+        """Close the scheduler a tile loop left open (an exception, a
+        return): its prefetch reads are settled before the run answers
+        (Step2 prefetch cleanup plan §1.2). Idempotent."""
+        scheduler = self.__dict__.get("_active_tile_scheduler")
+        self._active_tile_scheduler = None
+        self._close_tile_scheduler(scheduler)
+
     def _merge_policy_shadow_compare(
         self,
         scheduler,
@@ -2948,6 +2956,7 @@ class SegmentMergeWorker(QThread):
         global_id_offset = 0
         tile_stats = []
         prefetcher = None
+        self._active_tile_scheduler = scheduler    # closed before the run answers
         scheduler.attach_payload_loader(
             lambda idx, t, profile_tile_base=None: self._prepare_tile_payload(
                 zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
@@ -3557,6 +3566,7 @@ class SegmentMergeWorker(QThread):
     # ── main run ──────────────────────────────────────────────────────
 
     def run(self):
+        self._active_tile_scheduler = None
         try:
             self._logger, log_path = self._setup_logger()
             log = self._logger
@@ -3762,6 +3772,7 @@ class SegmentMergeWorker(QThread):
                 self._profile_summary(profile_summary)
                 if getattr(self, "_channel_store", None) is not None:
                     self._channel_store.close()
+                self._close_active_tile_scheduler()
                 self.finished.emit(self.output_dir, total_cells_all)
                 return
 
@@ -3861,6 +3872,7 @@ class SegmentMergeWorker(QThread):
             global_id_offset = 0
             tile_stats = []
             prefetcher = None
+            self._active_tile_scheduler = scheduler    # closed before the run answers
             scheduler.attach_payload_loader(
                 lambda idx, t, profile_tile_base=None: self._prepare_tile_payload(
                     self.zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
@@ -3881,8 +3893,8 @@ class SegmentMergeWorker(QThread):
             with self.step2_profiler.time_stage("run_all_tiles", method=self.method, input_source=self._abs(self.zarr_path)):
               for i, tile in enumerate(tiles):
                 if self._stop:
+                    self._close_tile_scheduler(scheduler)     # settled before the answer
                     self.error.emit('Stopped by user.')
-                    self._close_tile_scheduler(scheduler)
                     return
 
                 row, col            = tile.row, tile.col
@@ -4463,9 +4475,11 @@ class SegmentMergeWorker(QThread):
             self._profile_summary(profile_summary)
             if getattr(self, "_channel_store", None) is not None:
                 self._channel_store.close()
+            self._close_active_tile_scheduler()
             self.finished.emit(self.output_dir, total_cells)
 
         except Exception as exc:
+            self._close_active_tile_scheduler()     # its reads settle before the answer
             self._finish_runtime_monitor()
             self._record_engine_metrics()
             profile_summary = self.step2_profiler.finalize()
@@ -4488,5 +4502,6 @@ class SegmentMergeWorker(QThread):
                     pass
             self.error.emit(tb)
         finally:
+            self._close_active_tile_scheduler()
             self._cleanup_nuclei_partials()
             self._close_contract_engine()

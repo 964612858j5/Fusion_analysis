@@ -64,9 +64,9 @@ def test_b_lifecycle(scenario, slide):
 @pytest.mark.parametrize("scenario", ["repeated_source_change_python", "repeated_rebuild_python"])
 def test_e_repeated_rebuilds_release_the_python_gpu_binding(scenario, slide):
     """Viewer release plan §3: the core refused (test fault), the Python GPU
-    path draws. After three changes to a new source no retired binding is
-    alive; after three rebuilds on the same stack they do not pile up (at
-    most one, kept by an idle scheduler thread until its next read)."""
+    path draws. After three changes to a new source, and after three
+    rebuilds on the same stack (its scheduler's idle threads keep nothing),
+    no retired binding is alive."""
     pytest.importorskip("fusion_viewer_core")
     env = dict(os.environ, BLOCK01_RUST_TEST_FAULT="init")
     proc = subprocess.run([sys.executable, str(PROBE), scenario, "--slide", slide],

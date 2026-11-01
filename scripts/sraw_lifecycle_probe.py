@@ -32,8 +32,7 @@ One scenario per process (one GL widget per process):
                   as above, and each retired core held label copies before
                   and none after
   repeated_rebuild_python  (fault init) the same on the Python GPU path:
-                  retired bindings do not pile up (at most the one an idle
-                  scheduler thread last served stays until its next read)
+                  no retired binding (idle scheduler threads keep nothing)
 (R2 migration, user-authorised 2026-10-12: fusion_fallback and partial_roi
 asserted the hand-over the thin slice needed.)
 """
@@ -286,14 +285,10 @@ def _repeated_source_change(rig, out, expect, masks, new_source):
         out["after_close"] = [(c.stats()["held_tiles"], c.stats()["label_copy_bytes"]) for c in cores]
         out["readers"] = os_readers()
         out["stacks_replaced"] = replaced
-        # same stack, Python path: its scheduler stays, and an idle reader
-        # thread keeps the last entry it served in a loop local
-        # (`_raw_worker`'s `entry`), so the binding whose reads were served
-        # last may stay until that thread's next read -- never one per
-        # change (`viewer/scheduler.py` is out of this plan's scope). A new
-        # source shuts that scheduler down: none stays.
-        allowed = 1 if (expect == "Step1GpuBinding" and not new_source) else 0
-        ok = (all(stable_after) and out["retired_alive"] <= allowed and out["drawing_bindings"] == 1
+        # same stack, Python path: the scheduler stays; its idle threads
+        # keep nothing from the last entry they served (`viewer/scheduler.py`
+        # clears its loop locals before waiting), so none stays there either
+        ok = (all(stable_after) and out["retired_alive"] == 0 and out["drawing_bindings"] == 1
               and replaced == [new_source] * 3)
         if expect == "Step1CoreBinding":
             ok = (ok and out["readers"] <= 6 and len(before) == 3

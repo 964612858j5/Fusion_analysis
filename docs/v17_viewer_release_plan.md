@@ -197,6 +197,12 @@ source never retired anything and is not part of this check.)
     until its next read. Never one per change; that scenario asserts
     ≤ 1. Clearing those loop locals is outside this whitelist — a separate
     small item for the user to decide.
+  * Follow-up (user-authorized 2026-11-01, codex 2 rounds): the
+    `viewer/scheduler.py` workers clear their loop locals (`entry`,
+    snapshots, `req`/`cb`) before waiting and drop the warm-up's idle
+    callbacks; `repeated_rebuild_python` now asserts 0;
+    `tests/test_scheduler_keeps_no_callbacks.py` (4 tests, all fail
+    against the old scheduler).
 * Mutation checks: without the detach every scenario keeps 3 retired
   bindings (same stack: 4 children; new source: 3 alive on both paths);
   without the Rust clear the retired cores keep 6 tiles.

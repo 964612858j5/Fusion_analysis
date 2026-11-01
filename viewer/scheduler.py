@@ -495,6 +495,7 @@ class TileScheduler:
                 self._warming_workers -= 1
                 idle_callbacks = self._take_idle_callbacks_locked()
             self._run_idle_callbacks(idle_callbacks)
+            idle_callbacks = None             # not kept for this thread's life
         if warmed:
             with self._warmed_workers_lock:
                 self.warmed_workers += 1
@@ -506,6 +507,10 @@ class TileScheduler:
                 return
 
         while True:
+            # nothing from the last entry is kept while this thread waits:
+            # its waiters' callbacks reference their consumer (a retired
+            # viewer binding would stay alive until the next read)
+            entry = waiters_snapshot = live_external = to_cancel = req = cb = None
             with self._cv:
                 while not self._raw_heap and not self._shutdown:
                     self._cv.wait()
@@ -617,6 +622,9 @@ class TileScheduler:
 
     def _compute_worker(self):
         while True:
+            # as in `_raw_worker`: nothing from the last entry is kept while
+            # this thread waits
+            entry = waiters_snapshot = live = to_cancel = req = cb = None
             with self._cv:
                 while not self._heap and not self._shutdown:
                     self._cv.wait()

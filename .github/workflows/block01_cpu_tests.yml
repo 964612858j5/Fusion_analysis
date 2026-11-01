@@ -65,8 +65,17 @@ jobs:
           print("Qt", QT_VERSION_STR, "fonts:", QFontDatabase().families()[:12])
           import block01, fusion_viewer_core
           print("block01 from", block01.__path__[0])
+          import numpy, platform
+          from numpy.core._multiarray_umath import __cpu_features__ as f
+          print("CPU", platform.processor() or "?", open("/proc/cpuinfo").read().split("model name")[1].split("\n")[0])
+          print("numpy", numpy.__version__, "AVX512 on this machine:", sorted(k for k, v in f.items() if k.startswith("AVX512") and v))
           PY
       - name: Test modules
+        env:
+          # numpy picks a different float32 power on AVX512 machines (1 ulp off
+          # the SSE/AVX2 result the Rust fusion is checked against, and what
+          # this lane was measured with): keep it on the measured code path.
+          NPY_DISABLE_CPU_FEATURES: "AVX512F AVX512CD AVX512_KNL AVX512_KNM AVX512_SKX AVX512_CLX AVX512_CNL AVX512_ICL"
         run: |
           bash scripts/ci_run_modules.sh "$CI_PY" tests/ci_cpu_modules.txt \
             "$RUNNER_TEMP/pkg/block01/tests" "$RUNNER_TEMP/logs" 4

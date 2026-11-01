@@ -30,6 +30,7 @@ one() {
     m=$1
     t0=$(date +%s)
     timeout -k 30 "$LIMIT" "$PY" -m pytest -q -p no:cacheprovider --confcutdir=/ --rootdir="$TESTS" \
+        -o faulthandler_timeout=300 \
         --junitxml="$LOGS/$m.xml" "$TESTS/$m" > "$LOGS/$m.log" 2>&1
     rc=$?
     if [ "$rc" -eq 0 ]; then

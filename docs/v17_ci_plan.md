@@ -199,3 +199,33 @@ with the final runner and requirements file is part of §4 before commit.)
 * Final local check (§4): fresh venv from `requirements-cpu.txt` + the
   wheel, the final runner, 4 jobs, the package through the
   `/sda1/Fusion/a9_bench` symlink: **all 291 modules passed, 7 min wall**.
+
+## 9. First GitHub run (47f06d6, 2026-11-01) and the follow-up (authorized)
+
+* `fusion_viewer_core`: Linux + Windows wheels and `cargo test` green, 3 min.
+* `block01_cpu_tests`: 288 / 291 passed, job 14.5 min (sum of module times
+  2225 s). Three did not:
+  * `test_f5_rust_fusion.py` (16 cases): the Rust power step's bits differ
+    from numpy's on many inputs. Likely cause, to be confirmed by the next
+    run (codex: plausible, provisional): this machine (EPYC 7R32) has no
+    AVX512; numpy 1.26 dispatches float32 `power` to an AVX512 (SVML) loop where the
+    CPU has it, which is not the SSE/AVX2 result the Rust fusion was made to
+    match. Fix in CI: the test step sets `NPY_DISABLE_CPU_FEATURES` to the
+    AVX512 entries of numpy's dispatch list, i.e. the measured code path.
+    The startup step prints the CPU and the AVX512 features numpy sees, to
+    confirm the cause on the next run. Product note (backlog, no change
+    here): on an AVX512 machine the Python fusion fallback can differ from
+    the Rust fusion by 1 grey level in some pixels.
+  * `test_step1_channel_panel.py`: a button 19 px high, not 20 (the runner's
+    fonts) — left out, like `test_global_channel_dock.py`.
+  * `test_step0_channel_conditioning.py`: `test_unloaded_channel_lazy_loads_on_switch`
+    counted the sync's background DAPI read (`['DAPI', 'M0']`) — reproduced
+    here on one core (`taskset -c 0`), a test race; the module then hung
+    until the 600 s limit, not reproduced here (14 runs, 1 and 4 cores).
+    Left out; backlog (test race + the hang).
+* The runner passes `-o faulthandler_timeout=300`, so a test hanging past
+  300 s dumps every thread's stack into its log before the module limit.
+* `tests/ci_cpu_modules.txt`: 289 modules, the two named in the header.
+* Local: `test_f5_rust_fusion.py` passes with the variable set (no AVX512
+  here, so no change); the faulthandler option dumps on a sleeping test.
+* Codex code review round 1: PASS (P3: keep the AVX512 cause provisional — applied).

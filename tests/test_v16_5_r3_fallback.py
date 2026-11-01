@@ -55,13 +55,15 @@ def _run(scenario, fault, slide):
     return result
 
 
-@pytest.mark.parametrize("fault", ["tile:2", "all:7"])
+# `panic:N` (error guard §3): a read that PANICS is that read's error -- the
+# reader thread lives on and the same counting decides
+@pytest.mark.parametrize("fault", ["tile:2", "all:7", "panic:2"])
 def test_a_just_under_a_limit_the_picture_stays_rust(fault, slide):
     _run("stays", fault, slide)
 
 
 @pytest.mark.parametrize("fault, why", [("tile:3", "failed 3 times"), ("all:8", "8 reads in a row"),
-                                        ("paint:5", "paint failed")])
+                                        ("panic:8", "8 reads in a row"), ("paint:5", "paint failed")])
 def test_b_at_a_limit_python_takes_over(fault, why, slide):
     result = _run("falls_back", fault, slide)
     assert why in result["rust_refused"], result
@@ -69,6 +71,17 @@ def test_b_at_a_limit_python_takes_over(fault, why, slide):
 
 def test_c_a_failed_gl_reinitialisation_falls_back(slide):
     _run("reinit", "reinit", slide)
+
+
+def test_f_a_rust_panic_building_the_core_starts_on_python(slide):
+    """Error guard §2: a panic is a BaseException; the mount's fallback
+    catches it like any engine error."""
+    _run("core_panics", "", slide)
+
+
+def test_g_a_rust_panic_in_a_paint_falls_back(slide):
+    """Error guard §2.3: the shared paint boundary."""
+    _run("paint_panics", "", slide)
 
 
 def test_d_a_failed_first_gl_initialisation_starts_on_python(slide):

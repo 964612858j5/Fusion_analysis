@@ -20,6 +20,7 @@ from PyQt5 import QtCore
 
 from ..core import resource_tiers as _tiers
 from . import step1_core_adapter as adapter
+from .step1_core_adapter import CORE_ERRORS
 from .step1_gpu_layer import MODE_FUSION, MODE_OVERLAY, sanitize_roi_polygon
 
 #: the Python binding's timings (step1_gpu_binding: INPUT_HOT_MS,
@@ -405,7 +406,7 @@ def build(mount, stack, budgets, *, legacy_order=None):
         core = fvc.ViewerCore(manifest, config,
                               tuple(int(v) for v in roi) if roi else None,
                               sockets[1].fileno(), bool(tile_trace.ON), sources)
-    except Exception:
+    except CORE_ERRORS:
         for end in sockets:
             end.close()
         raise

@@ -634,7 +634,14 @@ def test_a_failing_current_core_never_publishes_a_ready_candidate(app, tab, monk
     assert tab.engine.picture == em.PYTHON
 
 
-def test_a_candidate_that_cannot_attach_hands_over(app, tab, monkeypatch):
+def _panic(message):
+    import fusion_viewer_core as fvc
+    return fvc.PanicException(message)
+
+
+@pytest.mark.parametrize("error", [lambda: RuntimeError("no GL names"),
+                                   lambda: _panic("no GL names")])   # error guard §2
+def test_a_candidate_that_cannot_attach_hands_over(app, tab, monkeypatch, error):
     _show(tab, "CD3", None)
     assert _wait(app, lambda: _engine_on(tab, ORIGINAL))
     host = tab.engine.host
@@ -647,7 +654,7 @@ def test_a_candidate_that_cannot_attach_hands_over(app, tab, monkeypatch):
         made.append(self)
 
     def broken(self, _context):
-        raise RuntimeError("no GL names")
+        raise error()
     monkeypatch.setattr(CoreGlSession, "__init__", track)
     monkeypatch.setattr(CoreGlSession, "attach_gl", broken)
     _show(tab, "CD3", "tophat", (15,))
@@ -657,6 +664,44 @@ def test_a_candidate_that_cannot_attach_hands_over(app, tab, monkeypatch):
     assert made and made[-1]._closed and made[-1]._sockets is None
     assert host.candidate is None
     assert tab.engine.picture == em.PYTHON and tab.stack.controller.viewport_requests_enabled
+
+
+def test_a_core_that_panics_while_built_hands_over(app, tab, monkeypatch):
+    """Error guard §2: a Rust panic (a BaseException) building the core is
+    refused like any engine error: the Python picture."""
+    import fusion_viewer_core as fvc
+
+    def panicking(*a, **k):
+        raise fvc.PanicException("building broke (test)")
+    monkeypatch.setattr(fvc, "ViewerCore", panicking)
+    _show(tab, "CD3", None)
+    assert _wait(app, lambda: bool(tab.engine.refused))
+    assert "could not open this source" in tab.engine.refused
+    assert "PanicException" in tab.engine.refused
+    assert tab.engine.picture == em.PYTHON
+
+
+def test_a_paint_that_panics_hands_over(app, tab):
+    """Error guard §2.3: the shared paint boundary turns a panicking paint
+    into the frame's failure; the host falls back to the Python picture."""
+    import fusion_viewer_core as fvc
+    _show(tab, "CD3", None)
+    assert _wait(app, lambda: _engine_on(tab, ORIGINAL))
+    session = tab.engine.host.current.session
+
+    class Panicking:
+        def __init__(self, core):
+            self._core = core
+
+        def __getattr__(self, name):
+            return getattr(self._core, name)
+
+        def paint(self, *a, **k):
+            raise fvc.PanicException("paint broke (test)")
+    session.core = Panicking(session.core)
+    tab.engine.host.request_frame()
+    assert _wait(app, lambda: tab.engine.picture == em.PYTHON, 30)
+    assert "PanicException" in str(tab.engine.refused)
 
 
 def test_a_channel_whose_coarse_never_fits_hands_over(app, tab, monkeypatch):

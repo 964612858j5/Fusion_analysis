@@ -44,6 +44,7 @@ from ...core import resource_tiers as _tiers
 from ...utils import perf_trace
 from ...utils import tile_trace
 from .. import step1_core_adapter as adapter
+from ..step1_core_adapter import CORE_ERRORS
 
 _log = logging.getLogger(__name__)
 
@@ -172,7 +173,7 @@ class Step0EngineMount(QtCore.QObject):
             host.hide()
             if not host.initialized:
                 raise host.init_error or RuntimeError("the GL host did not initialize")
-        except Exception as exc:                            # noqa: BLE001 -- reported, Python picture
+        except CORE_ERRORS as exc:                            # noqa: BLE001 -- reported, Python picture
             self.refused = f"{type(exc).__name__}: {exc}"
             _log.warning("Step0 engine not used: %s", self.refused)
             print(f"[explore] engine not used: {self.refused}", flush=True)
@@ -209,7 +210,7 @@ class Step0EngineMount(QtCore.QObject):
         cannot be used."""
         try:
             self._source_setup(offers)
-        except Exception as exc:                            # noqa: BLE001 -- reported, Python picture
+        except CORE_ERRORS as exc:                            # noqa: BLE001 -- reported, Python picture
             self.refused = f"{type(exc).__name__}: {exc}"
             return False
         self.host, self.panel, self._owns_host = host, panel, False
@@ -393,14 +394,14 @@ class Step0EngineMount(QtCore.QObject):
         try:
             core = fvc.ViewerCore(self._raw_manifest, config, None, sockets[1].fileno(),
                                   bool(tile_trace.ON), sources)
-        except Exception as exc:                            # noqa: BLE001
+        except CORE_ERRORS as exc:                            # noqa: BLE001
             for end in sockets:
                 end.close()
             self.fail(f"the engine could not open this source: {type(exc).__name__}: {exc}")
             return
         try:
             slot = self.panel.add_candidate(core, sockets, identity)
-        except Exception as exc:                            # noqa: BLE001
+        except CORE_ERRORS as exc:                            # noqa: BLE001
             self.fail(f"the engine could not start drawing: {type(exc).__name__}: {exc}")
             return
         perf_trace.mark("step0.engine_candidate", source=str(identity)[:120].replace(" ", "_"))

@@ -19,6 +19,9 @@ use pyo3::prelude::*;
 #[pymodule]
 fn fusion_viewer_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    // what a Rust panic is raised as (a BaseException): the Python engine
+    // fallbacks catch it with Exception (docs/v17_error_guard_plan.md §2)
+    m.add("PanicException", m.py().get_type::<pyo3::panic::PanicException>())?;
     m.add_function(wrap_pyfunction!(monotonic, m)?)?;
     m.add_function(wrap_pyfunction!(wait_closing, m)?)?;
     m.add_function(wrap_pyfunction!(label_source::plan_labels_for_test, m)?)?;

@@ -19,6 +19,7 @@ from PyQt5 import QtCore
 from ..utils import perf_trace
 from ..utils import tile_trace
 from ..viewer import read_ledger
+from .step1_core_adapter import CORE_ERRORS
 
 #: Block A9-O2: a frame slot (~60 Hz) for work the last paint left over
 FRAME_MS = 16
@@ -85,16 +86,29 @@ class CoreGlSession(QtCore.QObject):
         alone (docs/v17_step0_engine_plan.md §11.5), optionally with a third
         element, the gate level (§14.6: the report's `trial_exact`); None for
         a normal paint."""
-        if trial is None:
-            report = self.core.paint(int(fbo), max(1, int(width)), max(1, int(height)), view)
-        else:
-            level = trial[2] if len(trial) > 2 else None
-            report = self.core.paint(int(fbo), max(1, int(width)), max(1, int(height)), view,
-                                     (list(trial[0]), list(trial[1])),
-                                     None if level is None else int(level))
+        try:
+            if trial is None:
+                report = self.core.paint(int(fbo), max(1, int(width)), max(1, int(height)), view)
+            else:
+                level = trial[2] if len(trial) > 2 else None
+                report = self.core.paint(int(fbo), max(1, int(width)), max(1, int(height)), view,
+                                         (list(trial[0]), list(trial[1])),
+                                         None if level is None else int(level))
+        except CORE_ERRORS as exc:
+            # the shared paint boundary (docs/v17_error_guard_plan.md §2.3): a
+            # raised error -- a Rust panic too -- is this frame's failure, so
+            # the callers' `failure_of` route falls back to the Python picture
+            report = {"error": f"{type(exc).__name__}: {exc}"}
         if report.get("error"):
             perf_trace.mark("gpu.core_error", error=str(report["error"])[:160].replace(" ", "_"))
         return report
+
+    def _note_reporting_failure(self, call, exc) -> None:
+        """A reporting call after a paint raised: said once per session."""
+        if self.__dict__.get("_reporting_failed"):
+            return
+        self._reporting_failed = True
+        print(f"[core] {call}() failed and is skipped: {type(exc).__name__}: {exc}", flush=True)
 
     @staticmethod
     def failure_of(report) -> str:
@@ -118,7 +132,11 @@ class CoreGlSession(QtCore.QObject):
     # ── measurement (A9 tools read these; default off) ────────────────
     def note_reads(self) -> None:
         """The core's reads into `read_ledger`, which the A9 driver watches."""
-        reads = int(self.core.stats().get("reads", 0))
+        try:
+            reads = int(self.core.stats().get("reads", 0))
+        except CORE_ERRORS as exc:                       # measurement only: skipped
+            self._note_reporting_failure("stats", exc)
+            return
         for _ in range(max(0, reads - self._reads_seen)):
             read_ledger.note("raw", -1, 0)
         self._reads_seen = reads
@@ -143,7 +161,12 @@ class CoreGlSession(QtCore.QObject):
             self._traced_coverage = state
             tile_trace.stamp("cov", level=None if state[0] < 0 else state[0], wanted=state[1],
                              shown=state[2], vp=state[3], viewer=self._tag())
-        growths = self.core.drain_growths()
+        try:
+            growths = self.core.drain_growths()
+        except CORE_ERRORS as exc:
+            # skipped; a later paint failure takes the usual fallback (§2.3)
+            self._note_reporting_failure("drain_growths", exc)
+            growths = []
         if growths and not self._pressure_pending:
             # A9 §36 / R3 plan §2.2: the viewers grew -- hidden ones give
             # back if over target. Not here: releasing another viewer makes

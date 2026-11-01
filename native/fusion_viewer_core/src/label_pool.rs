@@ -193,7 +193,14 @@ fn worker(s: Arc<Shared>) {
         }
         let result = match sources.as_ref().and_then(|s| s.iter().find(|slot| slot.stamp == key.0)) {
             _ if s.faults.label_fails() => Err("injected label read failure (test)".to_string()),
-            Some(slot) => read_label_tile(&slot.source, &s.pyr, key.1, key.2, key.3).map_err(|e| e.to_string()),
+            // a panic in the read is that slot's error (error guard §3)
+            Some(slot) => crate::panic_guard::run(|| {
+                if s.faults.label_panics() {
+                    panic!("injected label reader panic (test)");
+                }
+                read_label_tile(&slot.source, &s.pyr, key.1, key.2, key.3).map_err(|e| e.to_string())
+            })
+            .unwrap_or_else(|m| Err(format!("label reader panicked: {m}"))),
             None => Ok(Read::Unavailable("no source".into())),
         };
         let mut q = s.q.lock().unwrap();

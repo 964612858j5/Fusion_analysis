@@ -33,6 +33,10 @@ def main():
     from .utils import perf_dispatch
     app = perf_dispatch.make_application(sys.argv)
     app.setStyle("Fusion")
+    # An unexpected error is logged and said, not the end of the program
+    # (docs/v17_error_guard_plan.md §1); before any worker starts.
+    from .utils import error_hook
+    error_hook.install(app)
 
     pal = QtGui.QPalette()
     pal.setColor(QtGui.QPalette.Window,          QtGui.QColor(28, 28, 28))

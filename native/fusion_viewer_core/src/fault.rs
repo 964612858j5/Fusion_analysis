@@ -10,6 +10,8 @@
 //!   reinit   every GL initialisation after the first fails
 //!   init     the first GL initialisation fails (the mount falls back at start)
 //!   label:N  the first N label tile reads fail (Step3's masks, R3b)
+//!   panic:N  the first N tile reads PANIC inside the read (error guard §3)
+//!   labelpanic:N  the first N label tile reads panic inside the read
 
 use crate::cache::Key;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -25,6 +27,8 @@ enum Kind {
     Reinit,
     Init,
     Label(u32),
+    Panic(u32),
+    LabelPanic(u32),
 }
 
 #[derive(Debug)]
@@ -46,6 +50,8 @@ impl Faults {
             "reinit" => Kind::Reinit,
             "init" => Kind::Init,
             "label" => Kind::Label(n as u32),
+            "panic" => Kind::Panic(n as u32),
+            "labelpanic" => Kind::LabelPanic(n as u32),
             _ => Kind::None,
         };
         Faults { kind, failed: AtomicU32::new(0), victim: Mutex::new(None) }
@@ -82,6 +88,16 @@ impl Faults {
     /// Does this label tile read fail?
     pub fn label_fails(&self) -> bool {
         matches!(self.kind, Kind::Label(n) if self.take_one(n))
+    }
+
+    /// Does this tile read panic? (Asked inside the read's guard.)
+    pub fn read_panics(&self) -> bool {
+        matches!(self.kind, Kind::Panic(n) if self.take_one(n))
+    }
+
+    /// Does this label tile read panic? (Asked inside the read's guard.)
+    pub fn label_panics(&self) -> bool {
+        matches!(self.kind, Kind::LabelPanic(n) if self.take_one(n))
     }
 
     /// One more failure while fewer than `n` have happened.
@@ -132,5 +148,14 @@ mod tests {
         assert!(!none.read_fails(key(1)) && !none.paint_fails(1) && !none.reinit_fails(2));
         assert!(Faults::parse("paint:3").paint_fails(3) && Faults::parse("reinit").reinit_fails(2));
         assert!(Faults::parse("init").reinit_fails(1) && !Faults::parse("init").reinit_fails(2));
+    }
+
+    #[test]
+    fn panic_kinds_count_their_own_reads_only() {
+        let f = Faults::parse("panic:2");
+        assert!(!f.read_fails(key(1)) && !f.label_panics());
+        assert!(f.read_panics() && f.read_panics() && !f.read_panics());
+        let l = Faults::parse("labelpanic:1");
+        assert!(!l.read_panics() && l.label_panics() && !l.label_panics());
     }
 }

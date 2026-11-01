@@ -17,6 +17,8 @@ from typing import Any, Dict
 import numpy as np
 from PyQt5 import QtGui
 
+from .step1_core_adapter import CORE_ERRORS
+
 from .step1_gpu_layer import (LABEL_FILL, LABEL_OUTLINE, LabelSnapshot, _LabelTextureLru,
                               label_radius)
 
@@ -87,7 +89,7 @@ class CoreLabelSurface:
                 ratio = float(self.devicePixelRatioF()) or 1.0
                 self.core.draw_labels(self.defaultFramebufferObject(), max(1, int(round(self.width() * ratio))),
                                       max(1, int(round(self.height() * ratio))))
-            except Exception as exc:                        # noqa: BLE001 -- a GL failure: fall back
+            except CORE_ERRORS as exc:                        # noqa: BLE001 -- a GL failure: fall back
                 self._fail(f"label draw failed: {exc}")
                 return self.label_stats()
             finally:

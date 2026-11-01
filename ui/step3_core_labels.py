@@ -15,6 +15,7 @@ from PyQt5 import QtCore
 
 from ..core import step3_masks
 from ..utils import closing_threads
+from .step1_core_adapter import CORE_ERRORS
 from .step1_gpu_layer import LABEL_FILL, LABEL_TEXTURE_BYTES, label_radius
 from .step3_core_label_source import CoreLabelsRefused, check, describe  # noqa: F401 -- re-exported
 from .step3_label_binding import MaskStyle, SlotStamps, Step3LabelBinding, destination
@@ -363,7 +364,7 @@ class CoreLabelBinding(QtCore.QObject):
             self._l1.dispose(timeout)
         try:
             self.core.set_label_slots([])
-        except Exception:                               # noqa: BLE001 -- a closed core
+        except CORE_ERRORS:                               # noqa: BLE001 -- a closed core
             pass
         for thread in self._builders:
             if timeout > 0:

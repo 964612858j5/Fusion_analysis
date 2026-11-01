@@ -27,6 +27,23 @@ RUST_COMPRESSIONS = (1, 5, 8, 32946, 50000)
 _DECODER_CODES = {None: 1, "lzw_decode": 5, "zlib_decode": 8, "zstd_decode": 50000}
 
 
+def _core_errors():
+    """`(Exception, PanicException)`: what a call into the Rust core can
+    raise. PyO3 raises a Rust panic as `PanicException`, a BaseException that
+    `except Exception` misses (docs/v17_error_guard_plan.md §2). An older
+    wheel without the attribute: `(Exception,)`."""
+    try:
+        import fusion_viewer_core as core
+    except Exception:                                   # noqa: BLE001 -- no core: nothing to panic
+        return (Exception,)
+    panic = getattr(core, "PanicException", None)
+    return (Exception, panic) if isinstance(panic, type) else (Exception,)
+
+
+#: catch this, not `Exception`, around a call into the Rust core
+CORE_ERRORS = _core_errors()
+
+
 def requested_backend() -> str:
     """What the user or a test asked for; unset means "rust" (the default),
     unknown values mean "python"."""

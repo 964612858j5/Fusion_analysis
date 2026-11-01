@@ -50,6 +50,7 @@ from PyQt5 import QtCore, QtWidgets
 from ..utils import perf_trace
 from ..viewer import step1_compose as compose_core
 from . import step1_draft_spec as draft_spec
+from .step1_core_adapter import CORE_ERRORS
 from .step1_compose_binding import Step1ComposeBinding
 from .step1_compose_coordinator import Step1ComposeCoordinator
 from .step1_composed_layer import Step1ComposedLayer
@@ -421,7 +422,7 @@ class Step1WholeSlideMount(QtCore.QObject):
             if not layer.initialized:
                 raise layer.init_error or RuntimeError("the Rust layer did not initialize")
             binding = step1_core_binding.Step1CoreBinding(parent=self, **args)
-        except Exception as exc:                            # noqa: BLE001
+        except CORE_ERRORS as exc:                            # noqa: BLE001
             self._rust_refused = f"{type(exc).__name__}: {exc}"
             _log.warning("Step1 Rust backend unavailable, using the Python GPU path: %s",
                          self._rust_refused)
@@ -590,7 +591,7 @@ class Step1WholeSlideMount(QtCore.QObject):
             if not layer.initialized:
                 raise layer.init_error or RuntimeError(
                     "the Step1 GPU layer did not initialize")
-        except Exception as exc:                            # noqa: BLE001
+        except CORE_ERRORS as exc:                            # noqa: BLE001
             self._gpu_reason = f"{type(exc).__name__}: {exc}"
             _log.warning("Step1 GPU backend unavailable, using the CPU "
                          "composition instead: %s", self._gpu_reason)

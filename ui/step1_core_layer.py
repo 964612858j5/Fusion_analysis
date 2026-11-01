@@ -24,6 +24,7 @@ from ..utils import tile_trace
 from ..viewer import coverage_probe
 from .core_gl_session import FRAME_MS, CoreGlSession  # noqa: F401 -- FRAME_MS kept importable here
 from .step1_core_labels import CoreLabelSurface
+from .step1_core_adapter import CORE_ERRORS
 
 
 class Step1CoreLayerError(RuntimeError):
@@ -199,7 +200,7 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
             self._capabilities = {"backend": "rust", "gl_version": f"{fmt.majorVersion()}.{fmt.minorVersion()}",
                                   "core": dict(self.core.stats())}
             self._initialized = True
-        except Exception as exc:                            # noqa: BLE001 -- reported, fallback
+        except CORE_ERRORS as exc:                            # noqa: BLE001 -- reported, fallback
             self._init_error = exc
             if self._ever_initialized:                      # a reparent's new context failed
                 self._fail(f"GL re-initialisation failed: {exc}")

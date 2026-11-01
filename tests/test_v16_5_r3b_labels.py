@@ -83,6 +83,14 @@ def test_a_behaviour(scenario, slide, tmp_path):
     _run(PROBE, [scenario, "--slide", slide, "--work", tmp_path], CASES[scenario])
 
 
+def test_a_label_read_that_panics_is_that_slots_error(slide, tmp_path):
+    """Error guard §3: `labelpanic:2` -- the read panics; the slot reports
+    it at once (the message says so), new sources clear it and the masks
+    are then read and shown: the label reader lived on."""
+    _run(PROBE, ["errors", "--slide", slide, "--work", tmp_path],
+         {"BLOCK01_RUST_TEST_FAULT": "labelpanic:2"})
+
+
 @pytest.mark.parametrize("clip", ["", "--clip"])
 def test_b_pixels_equal_python_through_each_label_path(clip, slide, tmp_path):
     for backend in ("rust", "python"):

@@ -41,6 +41,7 @@ pub mod gl;
 pub mod lz4;
 pub mod manifest;
 pub mod notify;
+pub mod panic_guard;
 pub mod plan;
 pub mod pool;
 pub mod python_source;

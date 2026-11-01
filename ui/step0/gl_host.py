@@ -50,6 +50,7 @@ from ...utils import perf_trace
 from ...utils import tile_trace
 from ...viewer import coverage_probe
 from ..core_gl_session import CoreGlSession
+from ..step1_core_adapter import CORE_ERRORS
 
 GL_COLOR_BUFFER_BIT = 0x00004000
 GL_LINEAR = 0x2601
@@ -248,7 +249,7 @@ class Panel:
         try:
             slot.session.attach_gl(host.context())
             slot.attached = True
-        except Exception:
+        except CORE_ERRORS:
             slot.session.close()
             slot.session.forget_gl()
             slot.session.close_sockets()
@@ -819,7 +820,7 @@ class Step0GlHost(QtWidgets.QOpenGLWidget):
                 slot.attached = True
             self._ever_initialized = True
             self._initialized = True
-        except Exception as exc:                            # noqa: BLE001 -- reported, fallback
+        except CORE_ERRORS as exc:                            # noqa: BLE001 -- reported, fallback
             self._init_error = exc
             if self._ever_initialized:
                 self._fail(f"GL re-initialisation failed: {exc}")

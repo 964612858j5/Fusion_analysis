@@ -141,6 +141,44 @@ def s_not_in_slide(rig, out):
                  and _after_fallback(rig, out, scheduler))
 
 
+def s_core_panics(rig, out):
+    """(error guard §2) building the core raises a Rust panic
+    (`PanicException`, a BaseException): the mount still starts on the
+    Python GPU path and says why. `main` makes `ViewerCore` panic."""
+    from sraw_rig import stable
+    out["binding"] = type(rig.mount.gpu_binding).__name__
+    out["rust_refused"] = rig.mount._rust_refused
+    _shot, out["stable"] = stable(rig)
+    out["ok"] = (out["binding"] == "Step1GpuBinding" and "PanicException" in str(out["rust_refused"])
+                 and out["stable"])
+
+
+def s_paint_panics(rig, out):
+    """(error guard §2.3) a paint raises a Rust panic: the shared paint
+    boundary makes it the frame's failure and the Python GPU path takes
+    over on the same camera."""
+    import fusion_viewer_core as fvc
+    from sraw_rig import stable
+    scheduler = rig.mount.host.stack.scheduler
+    _shot, out["stable_rust"] = stable(rig)
+    session = rig.mount.gpu_layer._session
+
+    class Panicking:
+        def __init__(self, core):
+            self._core = core
+
+        def __getattr__(self, name):
+            return getattr(self._core, name)
+
+        def paint(self, *a, **k):
+            raise fvc.PanicException("paint broke (test)")
+    session.core = Panicking(session.core)
+    out["handed_over"] = wait_for(rig, lambda: _python_now(rig), 30.0)
+    out["ok"] = (out["stable_rust"] and out["handed_over"]
+                 and "PanicException" in str(rig.mount._rust_refused)
+                 and _after_fallback(rig, out, scheduler))
+
+
 SCENARIOS = {n[2:]: f for n, f in globals().items() if n.startswith("s_")}
 
 
@@ -152,9 +190,15 @@ def main():
     from sraw_rig import open_rig
     out = {"scenario": args.scenario, "fault": os.environ.get("BLOCK01_RUST_TEST_FAULT", "")}
     try:
+        if args.scenario == "core_panics":
+            import fusion_viewer_core as fvc
+
+            def panicking(*a, **k):
+                raise fvc.PanicException("building the core broke (test)")
+            fvc.ViewerCore = panicking
         rig = open_rig("rust", args.slide)
         out["binding_at_start"] = type(rig.mount.gpu_binding).__name__
-        if out["binding_at_start"] != "Step1CoreBinding" and args.scenario != "init":
+        if out["binding_at_start"] != "Step1CoreBinding" and args.scenario not in ("init", "core_panics"):
             raise RuntimeError(f"not the Rust viewer: {out['binding_at_start']}")
         SCENARIOS[args.scenario](rig, out)
         rig.mount.close()

@@ -48,7 +48,15 @@ pub(super) fn worker(s: Arc<Shared>) {
                 let got = if fails {
                     Err(crate::error::CoreError::Io("injected read failure (test)".into()))
                 } else {
-                    read_tile(&s, key, &still)
+                    // a panic in the read is this read's error (error guard
+                    // §3): the key is released below and read again
+                    crate::panic_guard::run(|| {
+                        if s.faults.read_panics() {
+                            panic!("injected reader panic (test)");
+                        }
+                        read_tile(&s, key, &still)
+                    })
+                    .unwrap_or_else(|m| Err(crate::error::CoreError::Io(format!("reader panicked: {m}"))))
                 };
                 // R7a: the read's own stages, taken as the read returns
                 // (`read_split`; empty when off); `rest_ms` is against the

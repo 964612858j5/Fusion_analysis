@@ -112,6 +112,15 @@ impl Labels {
         Some(Arc::clone(&entry.0))
     }
 
+    /// Everything goes: the layers and every plane copy (the core closes).
+    pub fn clear(&mut self) {
+        self.layers.clear();
+        self.copies.clear();
+        self.order.clear();
+        self.bytes = 0;
+        self.dirty = true;
+    }
+
     /// A new snapshot (only visible layers with planes are kept).
     pub fn set(&mut self, layers: Vec<Layer>) {
         self.layers = layers.into_iter().filter(|l| !l.planes.is_empty()).collect();
@@ -125,6 +134,20 @@ mod tests {
 
     fn plane(n: usize) -> Plane {
         Plane { rows: 1, cols: n, ids: vec![1; n] }
+    }
+
+    #[test]
+    fn clear_drops_every_copy_and_its_bytes() {
+        let mut l = Labels::default();
+        let keep = std::collections::HashSet::new();
+        l.insert(1, plane(64), &keep);
+        l.insert(2, plane(32), &keep);
+        assert!(l.copy_bytes() > 0 && l.has(1));
+        l.clear();
+        assert_eq!(l.copy_bytes(), 0);
+        assert!(!l.has(1) && !l.has(2) && l.plane(1).is_none() && l.layers.is_empty());
+        l.clear();                                       // twice is harmless
+        assert_eq!(l.copy_bytes(), 0);
     }
 
     #[test]

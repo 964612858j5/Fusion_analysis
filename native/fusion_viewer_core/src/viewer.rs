@@ -266,8 +266,10 @@ impl ViewerCore {
         self.plan_labels();
     }
 
-    /// Stop: no notice, no read after this (the Python side then closes
-    /// the socket pair). Never waits for a read under way.
+    /// Stop: no notice, no new read after this (the Python side then
+    /// closes the socket pair). Never waits for a read under way. The tiles
+    /// and label planes held in host memory go too (a retired core may be
+    /// kept a while longer by its Python owner: viewer release plan §2).
     pub fn close(&mut self) {
         self.pool.close();
         if let Some(c) = &self.chunk_cache {
@@ -277,5 +279,7 @@ impl ViewerCore {
         if let Some(n) = &self.notifier {
             n.close();
         }
+        self.held.clear();
+        self.labels.clear();
     }
 }

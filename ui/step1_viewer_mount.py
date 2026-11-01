@@ -749,6 +749,14 @@ class Step1WholeSlideMount(QtCore.QObject):
             return False
         if binding is not None:
             binding.dispose()
+            # the mount no longer owns it: a retired binding (its stack, its
+            # core) is not kept for the mount's life (viewer release plan §1)
+            scheduler = getattr(self.host.stack, "scheduler", None)
+            probe = getattr(scheduler, "idle_probe", None)
+            if getattr(probe, "__self__", None) is binding:
+                scheduler.idle_probe = None
+            binding.on_status_changed = None
+            binding.setParent(None)
         self._release_gpu_layer(layer)
         # whatever comes next draws through the scene again
         self._release_scene_repaint()

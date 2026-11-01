@@ -47,13 +47,32 @@ def slide(tmp_path_factory):
 @pytest.mark.skipif(os.environ.get("BLOCK01_REQUIRE_STEP1_GPU") != "1",
                     reason="GPU tests require BLOCK01_REQUIRE_STEP1_GPU=1")
 @pytest.mark.parametrize("scenario", ["pause_resume", "fusion_stays_rust", "source_change",
-                                      "partial_roi_stays_rust", "close"])
+                                      "partial_roi_stays_rust", "close", "repeated_source_change",
+                                      "repeated_rebuild"])
 def test_b_lifecycle(scenario, slide):
     pytest.importorskip("fusion_viewer_core")
     proc = subprocess.run([sys.executable, str(PROBE), scenario, "--slide", slide],
                           capture_output=True, text=True, timeout=300, env=dict(os.environ))
     lines = [l for l in proc.stdout.splitlines() if l.startswith("{")]
     assert lines, f"{scenario}: no result\n{proc.stdout[-2000:]}\n{proc.stderr[-3000:]}"
+    result = json.loads(lines[-1])
+    assert result.get("ok") is True and proc.returncode == 0, result
+
+
+@pytest.mark.skipif(os.environ.get("BLOCK01_REQUIRE_STEP1_GPU") != "1",
+                    reason="GPU tests require BLOCK01_REQUIRE_STEP1_GPU=1")
+@pytest.mark.parametrize("scenario", ["repeated_source_change_python", "repeated_rebuild_python"])
+def test_e_repeated_rebuilds_release_the_python_gpu_binding(scenario, slide):
+    """Viewer release plan §3: the core refused (test fault), the Python GPU
+    path draws. After three changes to a new source no retired binding is
+    alive; after three rebuilds on the same stack they do not pile up (at
+    most one, kept by an idle scheduler thread until its next read)."""
+    pytest.importorskip("fusion_viewer_core")
+    env = dict(os.environ, BLOCK01_RUST_TEST_FAULT="init")
+    proc = subprocess.run([sys.executable, str(PROBE), scenario, "--slide", slide],
+                          capture_output=True, text=True, timeout=300, env=env)
+    lines = [l for l in proc.stdout.splitlines() if l.startswith("{")]
+    assert lines, f"no result\n{proc.stdout[-2000:]}\n{proc.stderr[-3000:]}"
     result = json.loads(lines[-1])
     assert result.get("ok") is True and proc.returncode == 0, result
 

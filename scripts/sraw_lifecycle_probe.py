@@ -20,6 +20,20 @@ One scenario per process (one GL widget per process):
                   to the float family; the picture stays Rust, no core
                   error (codex R2 review: reclaim, split change)
   close           closing ends the Rust reader threads and leaves no layer
+  repeated_source_change  three changes to another region (new bbox)
+                  through `sync_source()`: each replaces the stack; no retired
+                  binding stays alive, the mount owns one drawing binding,
+                  each retired core held tiles before and none after its
+                  close, every picture is stable (viewer release plan §3)
+  repeated_source_change_python  (the caller sets BLOCK01_RUST_TEST_FAULT=init:
+                  the Python GPU path draws) the same: no retired binding
+  repeated_rebuild  (a Step3-kind viewer drawing masks) three backend
+                  rebuilds on the same stack (same bbox, `source_changed()`):
+                  as above, and each retired core held label copies before
+                  and none after
+  repeated_rebuild_python  (fault init) the same on the Python GPU path:
+                  retired bindings do not pile up (at most the one an idle
+                  scheduler thread last served stays until its next read)
 (R2 migration, user-authorised 2026-10-12: fusion_fallback and partial_roi
 asserted the hand-over the thin slice needed.)
 """
@@ -205,6 +219,110 @@ def s_close(rig, out):
                  and out["layer_after"] is None)
 
 
+def _repeated_source_change(rig, out, expect, masks, new_source):
+    """Three rebuilds; the retired bindings (weakrefs) and cores (kept here
+    on purpose) are looked at once events have run.
+
+    `new_source`: each change is another region (a new bbox, so a new
+    source identity) through the product's gate, `sync_source()`: the
+    stack, its scheduler and caches are replaced. Otherwise the region keeps
+    its bbox and `source_changed()` rebuilds only the drawing backend on
+    the same stack."""
+    import gc
+    import tempfile
+    import weakref
+    from sraw_rig import stable
+    work = tempfile.mkdtemp(prefix="release_probe_")
+    h0, w0 = rig.shape
+    if masks:
+        from r3b_label_probe import _mask, _put, _source
+        path = _mask(work, "res", (h0, w0))
+        source = _source(path, (h0, w0))
+    bindings, cores, before, stable_after, replaced = [], [], [], [], []
+    try:
+        for i in range(4):
+            if masks:
+                _put(rig.mount, source)
+            _shot, ok = stable(rig)
+            stable_after.append(ok)
+            binding = rig.mount.gpu_binding
+            if type(binding).__name__ != expect:
+                raise RuntimeError(f"drawn by {type(binding).__name__}, not {expect}")
+            if i == 3:
+                break
+            bindings.append(weakref.ref(binding))
+            old_stack = rig.mount.host.stack       # held across this change only
+            if expect == "Step1CoreBinding":
+                core = rig.mount.gpu_layer.core
+                if masks:
+                    # drawn, and the zoomed-out pyramid built: the next viewer
+                    # is given that pyramid, as the product's owner does
+                    def built():
+                        cell = rig.mount.label_binding.sources().get("cell")
+                        return cell is not None and cell.pyramid is not None
+                    wait_for(rig, lambda: core.stats()["label_copy_bytes"] > 0 and built(), 20.0)
+                    source = {"cell": rig.mount.label_binding.sources()["cell"], "nucleus": None}
+                stats = core.stats()
+                before.append((stats["held_tiles"], stats["label_copy_bytes"]))
+                cores.append(core)
+            del binding
+            if new_source:
+                m = 16 * (i + 1)
+                rig.window._active_roi = {"name": f"ROI_r{i}", "bbox_fullres": [m, h0 - m, m, w0 - m]}
+                if not rig.mount.sync_source("roi"):
+                    raise RuntimeError("sync_source() saw no new source")
+            else:
+                rig.window._active_roi = {"name": f"ROI_r{i}", "bbox_fullres": [0, h0, 0, w0]}
+                rig.mount.source_changed("roi")
+            replaced.append(rig.mount.host.stack is not old_stack)
+            del old_stack
+            rig.pump(0.5)
+        rig.pump(0.5)                         # queued callbacks run first
+        gc.collect()
+        out["stable"] = stable_after
+        out["retired_alive"] = sum(ref() is not None for ref in bindings)
+        out["drawing_bindings"] = sum(type(c).__name__ == expect for c in rig.mount.children())
+        out["before_close"] = before
+        out["after_close"] = [(c.stats()["held_tiles"], c.stats()["label_copy_bytes"]) for c in cores]
+        out["readers"] = os_readers()
+        out["stacks_replaced"] = replaced
+        # same stack, Python path: its scheduler stays, and an idle reader
+        # thread keeps the last entry it served in a loop local
+        # (`_raw_worker`'s `entry`), so the binding whose reads were served
+        # last may stay until that thread's next read -- never one per
+        # change (`viewer/scheduler.py` is out of this plan's scope). A new
+        # source shuts that scheduler down: none stays.
+        allowed = 1 if (expect == "Step1GpuBinding" and not new_source) else 0
+        ok = (all(stable_after) and out["retired_alive"] <= allowed and out["drawing_bindings"] == 1
+              and replaced == [new_source] * 3)
+        if expect == "Step1CoreBinding":
+            ok = (ok and out["readers"] <= 6 and len(before) == 3
+                  and all(held > 0 and (copies > 0 or not masks) for held, copies in before)
+                  and all(after == (0, 0) for after in out["after_close"]))
+        out["ok"] = ok
+    finally:
+        import shutil
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def s_repeated_source_change(rig, out):
+    _repeated_source_change(rig, out, "Step1CoreBinding", masks=False, new_source=True)
+
+
+def s_repeated_source_change_python(rig, out):
+    _repeated_source_change(rig, out, "Step1GpuBinding", masks=False, new_source=True)
+
+
+def s_repeated_rebuild(rig, out):
+    _repeated_source_change(rig, out, "Step1CoreBinding", masks=True, new_source=False)
+
+
+def s_repeated_rebuild_python(rig, out):
+    _repeated_source_change(rig, out, "Step1GpuBinding", masks=False, new_source=False)
+
+
+LABEL_SCENARIOS = {"repeated_rebuild"}
+
 SCENARIOS = {n[2:]: f for n, f in globals().items() if n.startswith("s_")}
 
 
@@ -226,7 +344,7 @@ def main():
                            gpu_bytes=args.gpu_bytes or None)
             rig.decisions = project["decisions"]
         else:
-            rig = open_rig("rust", args.slide)
+            rig = open_rig("rust", args.slide, labels=args.scenario in LABEL_SCENARIOS)
         out["binding_at_start"] = type(rig.mount.gpu_binding).__name__
         SCENARIOS[args.scenario](rig, out)
         if args.scenario != "close":

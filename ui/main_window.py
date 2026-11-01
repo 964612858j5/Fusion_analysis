@@ -2238,7 +2238,9 @@ class MainWindow(QMainWindow):
         chosen fused input's own region and fusion settings.
 
         Returns ``(request, refusal)``: ``(None, "")`` for a project without
-        a TMA study (the old run, unchanged); ``(None, text)`` refused;
+        a TMA study whose Save holds no exclusion (the old run, unchanged);
+        such a project with exclusions gets an ``"roi"`` snapshot of them
+        (docs/v17_step2_exclusions_plan.md); ``(None, text)`` refused;
         ``(None, None)`` the user said No; else the request for the worker.
         With no Run tick at all, `ask(text)` decides whether every eligible
         core runs (the same Save, read once)."""
@@ -2259,17 +2261,26 @@ class MainWindow(QMainWindow):
             return None, f"the TMA study cannot be read ({exc})"
         if study is not None and not sid:        # a TMA project whose slide cannot be told
             return None, "the slide cannot be identified, so its TMA cores cannot be applied"
-        if study is None or study.get("slide_id") not in (None, sid):
-            return None, ""                      # not a TMA project on this slide: the old run
+        tma = study is not None and study.get("slide_id") in (None, sid)
+        if not tma and not sid:
+            return None, ""                      # not a TMA project, slide unknown: the old run
         try:
             saved = RK.load_saved(pd, sid)
         except (RegionsError, ValueError, OSError) as exc:
             return None, f"the Regions result cannot be read ({exc}): Save again in Regions"
-        if saved is None:
+        if not tma:
+            # docs/v17_step2_exclusions_plan.md: a slide without TMA cores
+            # still follows the exclusions of its Save; no Save, a map sheet
+            # without this slide's study, or no exclusion -> the old run
+            doc = (saved or {}).get("document") or {}
+            if saved is None or doc.get("map_sha256") or not doc.get("exclusions"):
+                return None, ""
+        elif saved is None:
             return None, "this TMA project has no saved Regions result: Save in Regions first"
         kind = preseg_input.INPUT_KIND.get(method)
         if kind is None:
-            return None, (f"{method} cannot follow the TMA cores (it has no per-cell core rules): "
+            what = "the TMA cores" if tma else "the Regions exclusions"
+            return None, (f"{method} cannot follow {what} (it has no per-cell rules): "
                           "choose another method")
         try:
             bbox = fused_region(fused_path)[0]
@@ -2284,6 +2295,17 @@ class MainWindow(QMainWindow):
         poly = (rois[0].get("polygon_fullres") if rois else None) or None
         parent = {"region_id": None, "bbox_fullres": [int(v) for v in bbox], "polygon_fullres": poly}
         seg = preseg_input.seg_channels(method, fcfg)
+        if not tma:
+            try:
+                snap = RA.build_snapshot(pd, sid, seg, study=None, parent=parent, saved=saved)
+            except RegionsError as exc:
+                return None, str(exc)
+            stop = sum(1 for e in snap["exclusions"] if e["seg_invalid"])
+            print(f"[Step2] Regions exclusions frozen for this run: {len(snap['exclusions'])} "
+                  f"exclusions ({stop} stop segmentation), {(time.perf_counter() - t0) * 1000:.0f} ms")
+            return {"snapshot": snap, "identity": snap["identity"], "input_kind": kind,
+                    "selection_mode": snap["selection_mode"],
+                    "fusion_settings_hash": fusion.get("hash")}, ""
         try:
             try:
                 snap = RA.build_snapshot(pd, sid, seg, study=study, parent=parent, saved=saved)

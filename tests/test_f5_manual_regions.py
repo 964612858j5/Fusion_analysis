@@ -273,3 +273,159 @@ def test_an_index_hand_over_starts_with_the_cores_frozen_at_run(tmp_path, monkey
     reg = W._regions_begin(worker)
     assert reg["source"] == "step2" and reg["snapshot"] is not None
     assert os.path.exists(os.path.join(worker.output_dir, "regions_snapshot.json"))
+
+
+# ── a slide without TMA cores follows its exclusions (docs/v17_step2_exclusions_plan.md) ──
+
+def _no_map_save(project, *exclusions):
+    """A Regions Save without a map sheet, holding `exclusions`
+    ((polygon, reasons, channels) each); no study."""
+    from block01.core.regions import geometry as G
+    d = D.new_document(SID, SHAPE)
+    for cy, cx, reasons, channels in exclusions:
+        D.add_exclusion(d, G.circle_polygon(cy, cx, 50, SHAPE), reasons, channels=channels)
+    K.save(project, d, None)
+    return d
+
+
+def test_a_slide_without_cores_freezes_its_exclusions_without_a_question(project, monkeypatch, tmp_path):
+    _no_map_save(project, (400, 400, ["blur"], "all"), (900, 700, ["other"], ["CD3"]))
+    freeze, _f = _window(project, monkeypatch, tmp_path, None)
+    asked = []
+    req, why = freeze(ask=lambda t: asked.append(t) or True)
+    assert why == "" and not asked
+    snap = req["snapshot"]
+    assert snap["mode"] == "roi" and snap["cores"] == [] and snap["map_sheet"] is None
+    assert sorted(e["seg_invalid"] for e in snap["exclusions"]) == [False, True]
+    assert req["identity"] == snap["identity"] and req["input_kind"] == "nucleus"
+    assert req["fusion_settings_hash"] == "fh" and req["selection_mode"] == snap["selection_mode"]
+
+
+def test_a_slide_without_cores_keeps_the_old_run_without_exclusions_or_a_save(project, monkeypatch, tmp_path):
+    freeze, _f = _window(project, monkeypatch, tmp_path, None)
+    assert freeze() == (None, "")                                   # no Save at all
+    _no_map_save(project)                                           # a Save, no exclusion
+    assert freeze() == (None, "")
+    s, d = _finished()                                              # a map sheet but no study: unchanged
+    K.save(project, d, s)
+    assert freeze() == (None, "")
+
+
+def test_a_slide_without_cores_refuses_what_cannot_follow_its_exclusions(project, monkeypatch, tmp_path):
+    _no_map_save(project, (400, 400, ["blur"], "all"))
+    freeze, _f = _window(project, monkeypatch, tmp_path, None)
+    req, why = freeze(method="cellpose_nuclei_hq2")
+    assert req is None and "cannot follow the Regions exclusions" in why and "TMA" not in why
+    freeze2, _f = _window(project, monkeypatch, tmp_path, None, fusion=None)
+    assert "no fusion settings" in freeze2()[1]
+
+    def broken(*a, **k):
+        raise A.AnalysisError("the last Regions Save was interrupted: Save again in Regions")
+    freeze, _f = _window(project, monkeypatch, tmp_path, None)     # the fused input's settings back
+    monkeypatch.setattr(A, "build_snapshot", broken)                # refusal propagation only
+    assert "interrupted" in freeze()[1]
+    monkeypatch.undo()
+    with open(K.saved_path(project), "w", encoding="utf-8") as f:   # an unreadable Save
+        f.write("{not json")
+    freeze3, _f = _window(project, monkeypatch, tmp_path, None)
+    req, why = freeze3()
+    assert req is None and "cannot be read" in why
+
+
+def _roi_snapshot(h, w, box, channels):
+    from test_f4_step2 import _identified, _snapshot
+    snap = _snapshot(h, w, excl_box=box, channels=channels)
+    snap.update(mode="roi", cores=[])
+    return _identified(snap)
+
+
+def _roi_run(tmp_path, monkeypatch, loop, snap, name):
+    from test_step2_skip_empty_tiles import _run, _worker
+    from block01.workers.segment_merge_worker import SegmentMergeWorker as W
+    from test_step2_ownership_move import _labels
+    worker, zp = _worker(tmp_path, monkeypatch, _labels(3), 3, 4, 8, name=name)
+    if snap is not None:
+        worker._regions_request = {"snapshot": snap, "identity": snap["identity"],
+                                   "input_kind": "fusion_fusion_nucleus",
+                                   "selection_mode": snap.get("selection_mode", "ticked"),
+                                   "fusion_settings_hash": "fh"}
+        monkeypatch.setattr(W, "_workspace_slide_id", lambda self: snap["slide_id"])
+        if loop == "segment_one_zarr":
+            worker._regions = W._regions_begin(worker)
+    n = _run(worker, zp, loop)
+    return worker, n
+
+
+def _dropped(out_dir):
+    """The Regions drop record the run wrote into its segmentation metadata."""
+    def find(o):
+        if isinstance(o, dict):
+            if isinstance(o.get("dropped"), dict) and "exclusion" in o["dropped"]:
+                return o["dropped"]
+            o = list(o.values())
+        if isinstance(o, list):
+            for v in o:
+                got = find(v)
+                if got is not None:
+                    return got
+        return None
+    for name in sorted(os.listdir(out_dir)):
+        if name.startswith("segmentation_meta") and name.endswith(".json"):
+            with open(os.path.join(out_dir, name), encoding="utf-8") as f:
+                got = find(json.load(f))
+            if got is not None:
+                return got
+    raise AssertionError(f"no Regions drop record in {out_dir}")
+
+
+BOX = (30, 50, 80, 100)                     # in the tissue (columns 60..112)
+
+
+@pytest.mark.parametrize("loop", LOOPS)
+def test_an_object_touching_a_blur_exclusion_is_dropped_whole(tmp_path, monkeypatch, loop):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PyQt5")
+    import numpy as np
+    from test_f4_step2 import _cells
+    plain, _n = _roi_run(tmp_path, monkeypatch, loop, None, "plain")
+    before = _cells(plain, loop)
+    y0, y1, x0, x1 = BOX
+    inside = np.zeros_like(before, bool)
+    inside[y0:y1, x0:x1] = True
+    touching = {int(i) for i in np.unique(before[inside]) if i}
+    mostly_out = [i for i in touching if inside[before == i].mean() < 0.5]
+    assert mostly_out                       # the case the rule is about exists here
+    h, w = before.shape
+    on, n = _roi_run(tmp_path, monkeypatch, loop, _roi_snapshot(h, w, BOX, "all"), "on")
+    after = _cells(on, loop)
+    gone = np.isin(before, list(touching))
+    np.testing.assert_array_equal(after > 0, (before > 0) & ~gone)   # touching: gone whole; rest kept
+    assert n == int(np.unique(after[after > 0]).size)
+    assert _dropped(on.output_dir)["exclusion"] == len(touching)     # the run's own drop record
+    meta = on._regions_run_meta()
+    assert meta["source"] == "step2" and meta["position_keys"] == []
+    assert os.path.exists(os.path.join(on.output_dir, "regions_snapshot.json"))
+
+
+@pytest.mark.parametrize("loop", LOOPS)
+def test_a_measurement_only_exclusion_keeps_the_cells_and_marks_them(tmp_path, monkeypatch, loop):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PyQt5")
+    import numpy as np
+    from test_f4_step2 import _cells
+    plain, _n = _roi_run(tmp_path, monkeypatch, loop, None, "plain")
+    before = _cells(plain, loop)
+    h, w = before.shape
+    on, n = _roi_run(tmp_path, monkeypatch, loop, _roi_snapshot(h, w, BOX, ["CD3"]), "on")
+    after = _cells(on, loop)
+    np.testing.assert_array_equal(after > 0, before > 0)             # nothing dropped
+    prefix = "_t" if loop == "segment_one_zarr" else ""
+    facts = np.load(os.path.join(on.output_dir, f"global_cell_regions{prefix}.npz"), allow_pickle=False)
+    y0, y1, x0, x1 = BOX
+    marked = {int(i) for i in np.unique(after[y0:y1, x0:x1]) if i}
+    assert marked
+    bits = facts["meas_bits"]
+    assert bits.shape == (n,)
+    assert all(bits[i - 1] == 1 for i in marked)
+    assert all(bits[i - 1] == 0 for i in range(1, n + 1) if i not in marked)
+    assert list(facts["measurement_exclusions"]) == ["excl_a"]

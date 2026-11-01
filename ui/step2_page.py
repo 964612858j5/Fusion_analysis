@@ -3456,7 +3456,7 @@ class Step2Page(QWidget):
             if why is None:
                 return                                    # the user said No
             if why:
-                QMessageBox.warning(self, "TMA cores", f"This run cannot follow the TMA cores: {why}.")
+                QMessageBox.warning(self, "Regions", f"This run cannot follow the Regions result: {why}.")
                 return
 
         self._begin_run_progress(nr, nc)

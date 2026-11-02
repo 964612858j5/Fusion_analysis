@@ -7,8 +7,10 @@ name = "fusion_viewer_core"
 requires-python = ">=3.10"
 description = "Block01 Step1 viewer performance core (Rust, v16_5)"
 dynamic = ["version"]
-# the translated ARM powf (src/fuse_powf.rs) ships its MIT notice in the wheel
-license-files = ["THIRD_PARTY_NOTICES.md"]
+license = "PolyForm-Noncommercial-1.0.0"
+# the package's own terms and Required Notice, and the translated ARM powf's
+# MIT notice (src/fuse_powf.rs), ship in the wheel
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

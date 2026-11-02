@@ -1,0 +1,41 @@
+Block01 (Fusion analysis pipeline)
+
+Required Notice: Copyright (c) 2026 Mingyuan Luan (mingyuanluan1@gmail.com)
+
+LICENCE
+Block01 is licensed under the PolyForm Noncommercial License 1.0.0
+(the file LICENSE, https://polyformproject.org/licenses/noncommercial/1.0.0).
+Any noncommercial use is free -- research, teaching, personal use, and use by
+charitable, educational, public research and government organisations, as
+that licence defines. This is source-available software, not "open source"
+in the OSI sense: commercial use is not granted by the public licence.
+
+COMMERCIAL USE
+Commercial use needs a separate written commercial licence, granted by the
+licensor company by company. Enquiries: mingyuanluan1@gmail.com
+
+THIRD-PARTY PARTS WITH THEIR OWN TERMS
+These are not licensed by Block01's licensor and keep their own terms; a
+commercial licence for Block01 does not cover them.
+
+* seg_runner/mesmer_torch/ -- code adapted from deepcell-tf 0.12.10
+  (Copyright The Van Valen Lab, Caltech), modified Apache License 2.0:
+  NON-COMMERCIAL ACADEMIC PURPOSES ONLY. See seg_runner/mesmer_torch/NOTICE
+  and LICENSE-deepcell. Commercial use: contact vanvalenlab@gmail.com.
+* Segmentation model weights are not part of this repository; the installer
+  downloads them after showing each licence (envs/fusion_mesmer/models.json).
+  The DeepCell Mesmer weights may be used for NON-COMMERCIAL ACADEMIC
+  PURPOSES ONLY (narrower than Block01's own noncommercial grant); Cellpose
+  and StarDist and their models have their own licences, which a user
+  must check for their use.
+* Python and system packages installed by scripts/install_block01.sh keep
+  their own licences. PyQt5 is licensed under the GPL v3 or a commercial
+  licence from Riverbank Computing, and the GPL's conditions turn on
+  licence compatibility, not on whether money is made: PolyForm
+  Noncommercial is not GPL-compatible. This repository distributes Block01's
+  own source only and does not include PyQt5 (the installer fetches it from
+  PyPI onto the user's machine); whether that arrangement is sufficient has
+  not been settled. A planned move of the interface to PySide6 (LGPL) would
+  remove the question. Until then, anyone distributing Block01 together with
+  PyQt5 -- in particular a commercial licensee -- needs appropriate PyQt
+  rights of their own.

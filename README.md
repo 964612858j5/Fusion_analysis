@@ -115,3 +115,20 @@ block01/
 ├── tests/             # pytest suite
 └── docs/              # user manuals (EN + 中文) + figures
 ```
+
+## Licence
+
+Block01 is **free for any noncommercial use** under the
+[PolyForm Noncommercial License 1.0.0](LICENSE) — research, teaching,
+personal use, and use by charitable, educational, public research and
+government organisations. It is source-available, not OSI open source.
+
+**Commercial use** needs a separate written commercial licence, granted
+company by company: mingyuanluan1@gmail.com.
+
+Some parts keep their own terms: the DeepCell-derived `seg_runner/mesmer_torch/`
+and the Mesmer weights are for non-commercial **academic** use only; PyQt5 is
+GPL v3 or commercial, and its GPL terms do not fit a noncommercial licence
+(a move to PySide6 is planned) — see [NOTICE](NOTICE).
+
+Required Notice: Copyright (c) 2026 Mingyuan Luan (mingyuanluan1@gmail.com)

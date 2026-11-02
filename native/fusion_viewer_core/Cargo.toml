@@ -3,7 +3,7 @@ name = "fusion_viewer_core"
 version = "0.2.1"
 edition = "2024"
 publish = false
-license = "Proprietary"
+license = "PolyForm-Noncommercial-1.0.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

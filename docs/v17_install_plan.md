@@ -1,6 +1,9 @@
 # v17 One-command install, versioned viewer core, launcher — plan v2.2 (2026-11-01) — codex round 4: READY
 
 v2.2: codex round 3 (3 P2 + 1 P3, no P1) — see §9.
+
+Later addition (2026-11-02): step 3b, the SpatialData export environment —
+`docs/v17_spatialdata_env_install_plan.md`.
 v2.1: codex round 2 (4 P2 + P3, no P1; user choices kept) — see §8.
 
 v2: codex plan review round 1 (8 P2 + P3 fact corrections, no P1) and the

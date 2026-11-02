@@ -77,7 +77,7 @@ Step-by-step user manuals (written to onboard non-specialists):
 Linux x86_64 with an NVIDIA GPU:
 
 ```bash
-bash scripts/install_block01.sh     # once: environment, viewer core, models (licence shown first), self-test
+bash scripts/install_block01.sh     # once: environment, viewer core, SpatialData environment, models (licence shown first), self-test
 scripts/block01                     # start
 ```
 

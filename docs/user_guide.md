@@ -64,7 +64,8 @@ bash scripts/install_block01.sh
 ```
 
 It checks the computer, installs the Python environment and the prebuilt
-viewer core, shows each segmentation model's licence and downloads it after
+viewer core, a second small environment for Step 4's SpatialData export
+(`--no-spatialdata` skips it), shows each segmentation model's licence and downloads it after
 you type `yes` (Mesmer needs a free DeepCell token in `DEEPCELL_ACCESS_TOKEN`),
 tests the three engines and prints the start command. Everything goes under
 `~/.local/share/block01` (`--root DIR` to choose another place); nothing
@@ -248,7 +249,7 @@ Time to **produce the table.** Step 4 goes through every cell of one Step 2 resu
    - **Statistics**: Mean, Sum, Std dev, Min, Max (all ticked by default). Under them, **Distribution (slow)**: Median, P90, P95, Gini — unticked; ticking one shows a list of markers, tick the few you need (e.g. FOXP3, Ki67). They need every pixel value of each cell, so they take a further pass per marker; `▶ Extract Features` stays disabled until at least one marker is ticked.
    - **Expression regions** (for the expression values): Whole cell (always), **Nucleus**, **Cytoplasm**. Nucleus = the pixels of the cell's own nuclei; cytoplasm = the rest of the cell. They are available (and ticked) when the result kept nuclei beside its cells (the expansion and nuclear-guided methods). Useful e.g. for transcription factors (FOXP3, Ki67 → nucleus) next to membrane markers (CD3 → whole cell / cytoplasm).
    - **Features**: Expression (always), Morphology (ticked), Nuclear summary (per cell: number of nuclei, their area in the cell, mean / largest nucleus, nuclear fraction, cytoplasm area).
-   - **Outputs**: h5ad (always), **CSV** (only when you tick it), **SpatialData** (only when you tick it). SpatialData is written by a Python that has the `spatialdata` package (e.g. Step5's environment, `…/envs/fusion_test2/bin/python`): the first time you tick it, choose that Python in the file dialog; Block01 remembers it.
+   - **Outputs**: h5ad (always), **CSV** (only when you tick it), **SpatialData** (only when you tick it). SpatialData is written by a Python that has the `spatialdata` package: the installer sets one up, so it just works. Only a checkout not installed with `scripts/install_block01.sh` (or installed with `--no-spatialdata`) asks, the first time you tick it, for such a Python (e.g. Step5's environment, `…/envs/fusion_test2/bin/python`) and remembers it.
    - An orange **Risk** line appears for a result made before Step 2's tile-seam fix (2026-09-27) when you measure nuclei / cytoplasm: a few nuclei on tile seams may lie partly outside their cell, so those cells' nucleus / cytoplasm values carry that error; the numbers are still produced and the provenance file counts the affected pixels. Re-run Step 2 to remove it.
 3. **Output dir** defaults to `<workspace>/step4/quantification_runs/<run>/<region>/`; you can change it. The line under it names the files and what `X` holds (e.g. `X = cell mean`). Click `▶ Extract Features`.
    - While it computes, the page is frozen: only **⏹ Stop** works. Closing the **Batch** window during a run stops the current sample first, then closes. A run you choose in Step 3 meanwhile is opened when the extraction ends (a line says so).

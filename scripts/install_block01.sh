@@ -3,6 +3,7 @@
 #
 #   bash scripts/install_block01.sh [--root DIR] [--check-only] [--build-core]
 #                                   [--models DIR] [--accept-model-licences]
+#                                   [--no-spatialdata]
 #
 # Linux x86_64 + NVIDIA. Everything goes under the install root (default
 # ~/.local/share/block01): the environment, the models, the tools it
@@ -17,6 +18,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SPEC="$REPO/envs/fusion_mesmer"
+SD_SPEC="$REPO/envs/block01_spatialdata"      # Step4's SpatialData export (its own NumPy 2 stack)
 MANIFEST="$SPEC/models.json"
 WHEELS_LOCK="$REPO/native/fusion_viewer_core/wheels.lock"
 CARGO_TOML="$REPO/native/fusion_viewer_core/Cargo.toml"
@@ -47,6 +49,7 @@ ORIGINAL_MODELS=(cellpose_cpsam stardist_2D_versatile_fluo mesmer_multiplex_segm
 ROOT="${HOME}/.local/share/block01"
 CHECK_ONLY=0
 BUILD_CORE=0
+NO_SPATIALDATA=0
 MODELS_IN=""
 ACCEPT_LICENCES=0
 STEP="start"
@@ -188,9 +191,20 @@ preflight() {
             need_env=$(( need_env - ${reclaim:-0} )); [ "$need_env" -ge 1 ] || need_env=1 ;;
     esac
     if [ -f "$(model_dir cellpose_cpsam)/cpsam" ]; then need_models=0; fi
+    # the SpatialData environment: 1.2 GB + caches (docs/v17_spatialdata_env_install_plan.md)
+    local need_sd=0
+    if [ "$NO_SPATIALDATA" = 0 ]; then
+        case "$(prefix_state "$(sd_env_prefix)")" in
+            absent) need_sd=2 ;;
+            interrupted)
+                local sd_reclaim; sd_reclaim=$(du -sk "$(sd_env_prefix)" 2>/dev/null | awk '{print int($1 / 1048576)}')
+                need_sd=$(( 2 - ${sd_reclaim:-0} )); [ "$need_sd" -ge 0 ] || need_sd=0 ;;
+        esac
+    fi
+    local need=$((need_env + need_models + need_sd))
     g=$(free_gb "$ROOT")
-    say "  space:    ${g} GB free at $ROOT (about $((need_env + need_models)) GB needed for what is left to do)"
-    [ "$g" -ge $((need_env + need_models)) ] || { say "  space:    NOT ENOUGH"; hard=1; }
+    say "  space:    ${g} GB free at $ROOT (about $need GB needed for what is left to do)"
+    [ "$g" -ge "$need" ] || { say "  space:    NOT ENOUGH"; hard=1; }
     local url
     command -v curl >/dev/null || { say "  network:  not checked (needs curl)"; [ "$hard" = 0 ] || fail "this computer does not meet the requirements listed above." "fix the items marked above and run the installer again"; }
     for url in https://conda.anaconda.org https://pypi.org https://download.pytorch.org/whl/cu121/ \
@@ -230,6 +244,8 @@ ensure_micromamba() {
 # ── 3. the environment ────────────────────────────────────────────────────
 lock_id() { cat "$SPEC/conda-linux-64.lock" "$SPEC/requirements-pip.txt" | sha256sum | cut -c1-8; }
 env_prefix() { echo "$ROOT/envs/fusion_mesmer-$(lock_id)"; }
+sd_lock_id() { cat "$SD_SPEC/conda-linux-64.lock" "$SD_SPEC/requirements-pip.txt" | sha256sum | cut -c1-8; }
+sd_env_prefix() { echo "$ROOT/envs/block01_spatialdata-$(sd_lock_id)"; }
 core_version() { awk -F'"' '/^version = /{print $2; exit}' "$CARGO_TOML"; }
 
 # prefix_state PREFIX -> absent | complete | built | interrupted | foreign
@@ -288,6 +304,51 @@ ensure_environment() {
     run "$PY" -m pip install -q --no-deps -r "$SPEC/requirements-pip.txt"
     RUN_HINT="report this output: the pinned packages do not fit together on this machine" run "$PY" -m pip check
     date -Is > "$ENV_PREFIX/.block01_env_ok"
+}
+
+# ── 3b. the SpatialData environment ───────────────────────────────────────
+# Step4's SpatialData export runs in a Python of its own: spatialdata needs
+# NumPy 2, the main environment stays on 1.26 for TensorFlow
+# (docs/v17_spatialdata_env_install_plan.md). Same states as step 3.
+SD_PREFIX=""
+ensure_spatialdata_environment() {
+    STEP="3b. the SpatialData environment"
+    SD_PREFIX=""
+    if [ "$NO_SPATIALDATA" = 1 ]; then
+        say "SpatialData environment skipped (--no-spatialdata): Step4 asks for a Python with spatialdata if its export is ticked"
+        return
+    fi
+    local prefix; prefix=$(sd_env_prefix)
+    local state; state=$(prefix_state "$prefix")
+    case "$state" in
+        complete|built)
+            say "SpatialData environment already installed: $prefix" ;;
+        foreign)
+            fail "$prefix exists but was not created by this installer; it is left untouched." \
+                 "install into a new location (--root NEW_DIR), or skip it with --no-spatialdata" ;;
+        absent|interrupted)
+            if [ "$state" = interrupted ]; then
+                say "an earlier install into $prefix stopped half-way: removing it and starting again"
+                case "$prefix" in "$ROOT"/envs/block01_spatialdata-????????) ;; *) fail "refusing to remove $prefix (unexpected path)" "" ;; esac
+                rm -rf -- "$prefix"
+            fi
+            mkdir -p "$ROOT/envs" "$ROOT/mamba/home"
+            printf 'created by %s\npid %s\ntime %s\ncheckout %s\n' "$0" "$$" "$(date -Is)" "$REPO" > "$prefix.owner"
+            say "creating the SpatialData environment (Step4's SpatialData export, about 1.2 GB): $prefix"
+            HOME="$ROOT/mamba/home" MAMBA_ROOT_PREFIX="$ROOT/mamba" CONDA_PKGS_DIRS="$ROOT/mamba/pkgs" \
+                run "$MAMBA" create -y -q -p "$prefix" --file "$SD_SPEC/conda-linux-64.lock"
+            run "$prefix/bin/python" -m pip install -q --no-deps -r "$SD_SPEC/requirements-pip.txt"
+            RUN_HINT="report this output: the pinned SpatialData packages do not fit together on this machine" \
+                run "$prefix/bin/python" -m pip check
+            date -Is > "$prefix/.block01_env_ok" ;;
+    esac
+    local version
+    version=$(cd "$STATE_DIR/run" 2>/dev/null || cd /; "$prefix/bin/python" -I -c 'import spatialdata; print(spatialdata.__version__)' 2>"$STATE_DIR/run/spatialdata.err" | tail -n1) \
+        || fail "spatialdata does not import in $prefix (its error: $STATE_DIR/run/spatialdata.err)." \
+                "run the installer again; if it repeats, report that file (or install with --no-spatialdata)"
+    say "  spatialdata $version ready"
+    date -Is > "$prefix/.block01_install_ok"
+    SD_PREFIX="$prefix"
 }
 
 # ── 4. the viewer core ────────────────────────────────────────────────────
@@ -606,12 +667,13 @@ write_record() {
         printf 'export MPLCONFIGDIR=%q\n' "$ROOT/cache/matplotlib"
         for key in "${!MODEL_VAR[@]}"; do printf 'export %s=%q\n' "${MODEL_VAR[$key]}" "$(model_dir "$key")"; done
         [ -n "$CUDA_DIR" ] && printf 'export CUDA_PATH=%q\n' "$CUDA_DIR"
+        if [ -n "$SD_PREFIX" ]; then printf 'export BLOCK01_SPATIALDATA_PYTHON=%q\n' "$SD_PREFIX/bin/python"; fi
     } > "$rec.tmp"
     mv -f "$rec.tmp" "$rec"
     printf 'core %s\ntime %s\n' "$(core_version)" "$(date -Is)" > "$ENV_PREFIX/.block01_install_ok"
 }
 
-usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
 
 main() {
     while [ $# -gt 0 ]; do
@@ -621,6 +683,7 @@ main() {
             --build-core) BUILD_CORE=1; shift ;;
             --models) MODELS_IN=$(realpath -m "$2"); shift 2 ;;
             --accept-model-licences) ACCEPT_LICENCES=1; shift ;;
+            --no-spatialdata) NO_SPATIALDATA=1; shift ;;
             -h|--help) usage; exit 0 ;;
             *) usage; exit 2 ;;
         esac
@@ -638,6 +701,8 @@ main() {
     export PIP_CACHE_DIR="$ROOT/cache/pip"           # pip's downloads, not ~/.cache/pip
     ensure_micromamba
     ensure_environment
+    mkdir -p "$STATE_DIR/run"
+    ensure_spatialdata_environment
     ensure_core
     ensure_models
     ensure_alias

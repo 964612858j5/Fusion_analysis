@@ -44,7 +44,9 @@ user's consent. (docs/v17_install_plan.md §4.)
    https://users.deepcell.org and gives the token for the run, or points
    `--models FOLDER` at an existing copy (`FOLDER/<models.json entry>/…`).
 4. Run `bash scripts/install_block01.sh` (with `--root`, `--models` as
-   agreed), in a terminal so the licences can be answered.
+   agreed), in a terminal so the licences can be answered. It also builds a
+   second small environment for Step 4's SpatialData export (about 1.2 GB);
+   add `--no-spatialdata` only if the user says they do not need it.
 5. If it stops: it prints `STOPPED at: <step>`, the failing command and
    `what to do`. Do that (rules above), then run the same command again —
    finished steps are skipped, a half-finished environment is redone.

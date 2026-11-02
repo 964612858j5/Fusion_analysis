@@ -306,8 +306,8 @@ preflight'''
 
 
 def test_the_space_check_counts_only_the_work_left(tmp_path):
-    r = _preflight(tmp_path, 5)
-    assert r.returncode == 1 and "NOT ENOUGH" in r.stdout and "about 16 GB" in r.stdout
+    r = _preflight(tmp_path, 5)                    # 14 env + 2 models + 2 SpatialData env
+    assert r.returncode == 1 and "NOT ENOUGH" in r.stdout and "about 18 GB" in r.stdout
     prefix = tmp_path / "envs" / "fusion_mesmer-abcdef12"
     prefix.mkdir(parents=True)
     (tmp_path / "envs" / "fusion_mesmer-abcdef12.owner").write_text("ours")
@@ -315,12 +315,14 @@ def test_the_space_check_counts_only_the_work_left(tmp_path):
     (tmp_path / "models" / "cellpose_cpsam").mkdir(parents=True)
     (tmp_path / "models" / "cellpose_cpsam" / "cpsam").write_bytes(b"x")
     r = _preflight(tmp_path, 5)
-    assert r.returncode == 0 and "about 1 GB" in r.stdout and "NOT ENOUGH" not in r.stdout
+    assert r.returncode == 0 and "about 3 GB" in r.stdout and "NOT ENOUGH" not in r.stdout
+    r = _preflight(tmp_path, 5, "NO_SPATIALDATA=1")
+    assert r.returncode == 0 and "about 1 GB" in r.stdout
     # an interrupted (ours, unfinished) environment is removed first: its size counts as free
     (prefix / ".block01_env_ok").unlink()
     stub_du = 'du() { echo "12582912 $2"; }'                       # 12 GB in KiB
     r = _preflight(tmp_path, 5, stub_du)
-    assert r.returncode == 0 and "about 2 GB" in r.stdout and "NOT ENOUGH" not in r.stdout
+    assert r.returncode == 0 and "about 4 GB" in r.stdout and "NOT ENOUGH" not in r.stdout
     r = _preflight(tmp_path, 1, stub_du)
     assert r.returncode == 1 and "NOT ENOUGH" in r.stdout
 
@@ -443,3 +445,114 @@ def test_the_launcher_refuses_an_incompatible_core(tmp_path):
     _record(state, co, prefix)
     r = _check(co)
     assert r.returncode == 1 and "does not fit this code" in r.stderr and "has no CORE_API" in r.stderr
+
+
+# ── the SpatialData environment (docs/v17_spatialdata_env_install_plan.md) ──
+def _ensure_sd(root, extra="", python_ok=True):
+    """`ensure_spatialdata_environment` with micromamba / pip stubbed; the
+    created prefix gets a stand-in python answering the import check."""
+    answer = 'echo 0.5.0' if python_ok else 'echo "No module named spatialdata" >&2; exit 1'
+    body = f'''
+ROOT="{root}"
+STATE_DIR="{root}/state"; mkdir -p "$STATE_DIR/run"
+MAMBA=stub_mamba
+sd_lock_id() {{ echo 5d5d5d5d; }}
+make_python() {{ mkdir -p "$1/bin"; printf '#!/bin/sh\\n{answer}\\n' > "$1/bin/python"; chmod +x "$1/bin/python"; }}
+run() {{ echo "run $*" >> "{root}/calls"; [ "$1" = stub_mamba ] && make_python "$(sd_env_prefix)"; return 0; }}
+{extra}
+ensure_spatialdata_environment
+echo "SD=$SD_PREFIX"
+'''
+    return _bash(INSTALL, body)
+
+
+def test_the_spatialdata_environment_is_created_owned_and_checked(tmp_path):
+    r = _ensure_sd(tmp_path)
+    assert r.returncode == 0, r.stderr
+    prefix = tmp_path / "envs" / "block01_spatialdata-5d5d5d5d"
+    assert (tmp_path / "envs" / "block01_spatialdata-5d5d5d5d.owner").read_text(encoding="utf-8").startswith("created by")
+    calls = (tmp_path / "calls").read_text(encoding="utf-8")
+    assert "block01_spatialdata/conda-linux-64.lock" in calls
+    assert "pip install -q --no-deps -r" in calls and "block01_spatialdata/requirements-pip.txt" in calls
+    assert "pip check" in calls
+    assert (prefix / ".block01_env_ok").exists() and (prefix / ".block01_install_ok").exists()
+    assert "spatialdata 0.5.0 ready" in r.stdout and f"SD={prefix}" in r.stdout
+
+
+def test_the_spatialdata_environment_states(tmp_path):
+    envs = tmp_path / "envs"
+    prefix = envs / "block01_spatialdata-5d5d5d5d"
+    # interrupted: removed and redone
+    (prefix / "half").mkdir(parents=True)
+    (envs / "block01_spatialdata-5d5d5d5d.owner").write_text("old")
+    r = _ensure_sd(tmp_path)
+    assert r.returncode == 0 and "stopped half-way" in r.stdout and not (prefix / "half").exists()
+    # built (environment done, a later step stopped): kept, checked, completed
+    (prefix / ".block01_install_ok").unlink()
+    (tmp_path / "calls").unlink()
+    r = _ensure_sd(tmp_path)
+    assert r.returncode == 0 and "already installed" in r.stdout and not (tmp_path / "calls").exists()
+    assert (prefix / ".block01_install_ok").exists()
+    # complete: kept, only checked again
+    r = _ensure_sd(tmp_path)
+    assert r.returncode == 0 and "already installed" in r.stdout and not (tmp_path / "calls").exists()
+    # foreign: refused, untouched
+    shutil.rmtree(envs)
+    (prefix / "lib").mkdir(parents=True)
+    before = _tree(envs)
+    r = _ensure_sd(tmp_path)
+    assert r.returncode == 1 and "was not created by this installer" in r.stderr and "--no-spatialdata" in r.stderr
+    assert _tree(envs) == before
+
+
+def test_a_spatialdata_environment_that_does_not_import_stops_the_install(tmp_path):
+    r = _ensure_sd(tmp_path, python_ok=False)
+    assert r.returncode == 1 and "spatialdata does not import" in r.stderr
+    prefix = tmp_path / "envs" / "block01_spatialdata-5d5d5d5d"
+    assert not (prefix / ".block01_install_ok").exists()
+
+
+def test_no_spatialdata_skips_it(tmp_path):
+    r = _ensure_sd(tmp_path, "NO_SPATIALDATA=1")
+    assert r.returncode == 0 and "skipped (--no-spatialdata)" in r.stdout and "SD=\n" in r.stdout + "\n"
+    assert not (tmp_path / "envs").exists() and not (tmp_path / "calls").exists()
+
+
+@pytest.mark.parametrize("sd", ["", "/x/envs/block01_spatialdata-5d5d5d5d"])
+def test_the_record_names_the_spatialdata_python_only_when_installed(tmp_path, sd):
+    state = tmp_path / "state"
+    prefix = tmp_path / "envs" / "fusion_mesmer-abcdef12"
+    prefix.mkdir(parents=True)
+    body = f'''
+ROOT="{tmp_path}"; STATE_DIR="{state}"; mkdir -p "$STATE_DIR"
+ENV_PREFIX="{prefix}"; CUDA_DIR=""; SD_PREFIX="{sd}"
+model_dir() {{ echo "{tmp_path}/models/$1"; }}
+write_record
+'''
+    r = _bash(INSTALL, body)
+    assert r.returncode == 0, r.stderr
+    rec = (state / "install.env").read_text(encoding="utf-8")
+    if sd:
+        assert f"export BLOCK01_SPATIALDATA_PYTHON={sd}/bin/python" in rec
+    else:
+        assert "BLOCK01_SPATIALDATA_PYTHON" not in rec
+
+
+def test_the_space_check_counts_the_spatialdata_environment_left(tmp_path):
+    prefix = tmp_path / "envs" / "fusion_mesmer-abcdef12"
+    prefix.mkdir(parents=True)
+    (tmp_path / "envs" / "fusion_mesmer-abcdef12.owner").write_text("ours")
+    (prefix / ".block01_env_ok").write_text("t")
+    (tmp_path / "models" / "cellpose_cpsam").mkdir(parents=True)
+    (tmp_path / "models" / "cellpose_cpsam" / "cpsam").write_bytes(b"x")
+    stub = "sd_lock_id() { echo 5d5d5d5d; }"
+    r = _preflight(tmp_path, 5, stub)
+    assert r.returncode == 0 and "about 3 GB" in r.stdout                  # absent: 2
+    sd = tmp_path / "envs" / "block01_spatialdata-5d5d5d5d"
+    sd.mkdir()
+    (tmp_path / "envs" / "block01_spatialdata-5d5d5d5d.owner").write_text("ours")
+    r = _preflight(tmp_path, 5, stub + '\ndu() { echo "1048576 $2"; }')   # interrupted, 1 GB back
+    assert r.returncode == 0 and "about 2 GB" in r.stdout
+    (sd / ".block01_env_ok").write_text("t")
+    r = _preflight(tmp_path, 5, stub)
+    assert r.returncode == 0 and "about 1 GB" in r.stdout                  # built: 0

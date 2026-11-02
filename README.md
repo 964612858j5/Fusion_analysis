@@ -74,21 +74,19 @@ Step-by-step user manuals (written to onboard non-specialists):
 
 ## Quick start
 
-```bash
-# 1. Create the environment (once)
-conda env create -f ../environment.yml      # env: fusion
-#   or: bash ../setup_env.sh                 # env: fusion_test2
+Linux x86_64 with an NVIDIA GPU:
 
-# 2. Launch (run from the PARENT directory, as a module)
-conda activate fusion
-cd /sda1/Fusion/analysis_pipline
-python -m block01.main
+```bash
+bash scripts/install_block01.sh     # once: environment, viewer core, models (licence shown first), self-test
+scripts/block01                     # start
 ```
+
+`bash scripts/install_block01.sh --check-only` only checks the computer.
+Installer details and the manual steps: [`envs/fusion_mesmer/README.md`](envs/fusion_mesmer/README.md).
+Installing with a coding agent: [`docs/install_with_an_ai_agent.md`](docs/install_with_an_ai_agent.md).
 
 The application opens on Step 0 (`CODEX Pipeline | Fusion + Segmentation`); proceed Step 0 → 4 in the UI.
 Default input/output paths can be preset in [`config.py`](config.py) (`OME_TIFF_FILE`, `OUTPUT_DIR`).
-
-**Requirements:** NVIDIA GPU recommended (CUDA 12.x), Python 3.10. Full dependency list in `../environment.yml`.
 
 ---
 

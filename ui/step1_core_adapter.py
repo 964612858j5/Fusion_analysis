@@ -1,11 +1,12 @@
-"""v16_5 (R0): the shape of the Rust viewer core's Python boundary.
+"""The Rust viewer core's Python boundary.
 
-DEFINITIONS ONLY. Nothing in the product imports this module yet; Step1
-still mounts `Step1GpuLayer`. The full contract -- every member below, the
-manifest fields, the notice socket and the switch -- is written out in
-`docs/v16_5_r0_interfaces.md`, which is the authority; this file is the
-same contract as code, plus the one piece R0 really runs: building the raw
-manifest the Rust reader opens (`build_raw_manifest`).
+The backend switch (`requested_backend`, default "rust"), THE core
+compatibility check (`core_unavailable_reason`: `CORE_API` and minimum
+version, docs/v17_install_plan.md §1.1), `CORE_ERRORS`, the raw manifest
+the Rust reader opens (`build_raw_manifest`) and the backend protocol.
+Used by every Step1 / Step2 / Step3 / Regions mount, Step0's engine and GL
+host and fusion; `main.py` passes the check to the exit wait. Contract
+history: `docs/v16_5_r0_interfaces.md`.
 """
 
 import os
@@ -51,17 +52,38 @@ def requested_backend() -> str:
     return value if value in (BACKEND_PYTHON, BACKEND_RUST) else BACKEND_PYTHON
 
 
-def core_unavailable_reason(minimum_version: str = "0.1.0") -> str:
-    """"" when `fusion_viewer_core` imports at `minimum_version` or later,
-    else why not -- the reason a "rust" request falls back."""
+#: the core's interface number this code is written for (docs/v17_install_plan.md
+#: §1.1): a core with another `CORE_API` is refused, whatever its version
+REQUIRED_CORE_API = 1
+#: the oldest core build this code accepts; a newer compatible one is fine
+MIN_CORE_VERSION = "0.2.0"
+#: what to do about a refused core: the installer puts the checkout's core
+#: into its own environment, or makes one (never edits another environment)
+REINSTALL_HINT = "run scripts/install_block01.sh"
+
+
+def core_unavailable_reason(minimum_version: str = MIN_CORE_VERSION) -> str:
+    """"" when `fusion_viewer_core` imports with `CORE_API ==
+    REQUIRED_CORE_API` at `minimum_version` or later, else why not -- the
+    reason a "rust" request falls back. Every independent user of the core
+    (viewers, Step0's engine, fusion, the exit wait) asks this one check."""
     try:
         import fusion_viewer_core as core
     except ImportError as exc:
         return f"fusion_viewer_core is not installed: {exc}"
-    have = tuple(int(p) for p in core.__version__.split(".")[:3])
+    api = getattr(core, "CORE_API", None)
+    if api != REQUIRED_CORE_API:
+        what = "has no CORE_API" if api is None else f"has CORE_API {api}"
+        return (f"fusion_viewer_core {getattr(core, '__version__', '?')} {what}, "
+                f"this code needs {REQUIRED_CORE_API} ({REINSTALL_HINT})")
+    try:
+        have = tuple(int(p) for p in core.__version__.split(".")[:3])
+    except (AttributeError, ValueError):
+        return f"fusion_viewer_core has no readable version ({REINSTALL_HINT})"
     want = tuple(int(p) for p in minimum_version.split(".")[:3])
     if have < want:
-        return f"fusion_viewer_core {core.__version__} is older than {minimum_version}"
+        return (f"fusion_viewer_core {core.__version__} is older than {minimum_version} "
+                f"({REINSTALL_HINT})")
     return ""
 
 

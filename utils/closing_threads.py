@@ -23,9 +23,12 @@ def register(thread: threading.Thread) -> None:
         _threads.append(thread)
 
 
-def wait_all(timeout_s: float = EXIT_WAIT_S) -> dict:
+def wait_all(timeout_s: float = EXIT_WAIT_S, rust_ok=None) -> dict:
     """Join every listed thread, then the Rust readers, until `timeout_s`
-    has passed in all. Returns what is still running."""
+    has passed in all. Returns what is still running. `rust_ok()` false:
+    the Rust core was refused (docs/v17_install_plan.md §1.1), it ran no
+    reader, and is not called (the caller passes the check: utils does not
+    import ui)."""
     deadline = time.monotonic() + max(0.0, float(timeout_s))
     with _lock:
         threads, _threads[:] = list(_threads), []
@@ -36,8 +39,9 @@ def wait_all(timeout_s: float = EXIT_WAIT_S) -> dict:
             left.append(thread.name)
     rust_left = 0
     try:
-        import fusion_viewer_core
-        rust_left = int(fusion_viewer_core.wait_closing(max(0.0, deadline - time.monotonic())))
+        if rust_ok is None or rust_ok():
+            import fusion_viewer_core
+            rust_left = int(fusion_viewer_core.wait_closing(max(0.0, deadline - time.monotonic())))
     except (ImportError, AttributeError):
         pass
     with _lock:

@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Start Block01 (docs/v17_install_plan.md §3).
+#
+#   scripts/block01 [app arguments]      start the app
+#   scripts/block01 --desktop            also add a desktop menu entry
+#
+# Runs THIS checkout with the install scripts/install_block01.sh recorded for
+# it in <repo>/.block01/install.env; refuses clearly when that record is
+# missing, belongs to another checkout, or its viewer core does not fit this
+# code. CUDA's cufile.log and other run files land in <repo>/.block01/run.
+#
+# Sourced with BLOCK01_LAUNCH_SOURCED=1 it only defines its functions
+# (tests/test_install_scripts.py).
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+STATE_DIR="$REPO/.block01"
+INSTALL_HINT="bash $REPO/scripts/install_block01.sh"
+
+refuse() {
+    printf '[block01] cannot start: %s\n[block01] what to do: %s\n' "$1" "$2" >&2
+    exit 1
+}
+
+# check_install -> returns only when this checkout's record, link and
+# environment agree; else refuses with the reason
+check_install() {
+    local rec="$STATE_DIR/install.env"
+    [ -f "$rec" ] || refuse "Block01 is not installed for this checkout ($rec is missing)." "$INSTALL_HINT"
+    # shellcheck disable=SC1090
+    . "$rec"
+    [ "${BLOCK01_CHECKOUT:-}" = "$REPO" ] || refuse "the install record names another checkout (${BLOCK01_CHECKOUT:-none})." "$INSTALL_HINT"
+    local link="$STATE_DIR/pkg/block01"
+    { [ -L "$link" ] && [ "$(readlink -f "$link")" = "$REPO" ]; } \
+        || refuse "$link does not point at this checkout." "$INSTALL_HINT"
+    [ -x "${BLOCK01_PREFIX:-}/bin/python" ] || refuse "the environment ${BLOCK01_PREFIX:-?} is gone." "$INSTALL_HINT"
+    [ -f "$BLOCK01_PREFIX/.block01_install_ok" ] || refuse "the install into $BLOCK01_PREFIX never finished." "$INSTALL_HINT"
+    local why
+    why=$(cd "$STATE_DIR/run" && PYTHONPATH="$STATE_DIR/pkg" "$BLOCK01_PREFIX/bin/python" -c \
+        'from block01.ui.step1_core_adapter import core_unavailable_reason as r; print(r())' 2>&1 | tail -n1) \
+        || refuse "the environment cannot load Block01: $why" "$INSTALL_HINT"
+    [ -z "$why" ] || refuse "its viewer core does not fit this code: $why" "$INSTALL_HINT"
+}
+
+write_desktop_entry() {
+    local dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    mkdir -p "$dir"
+    printf '[Desktop Entry]\nType=Application\nName=Block01\nComment=Multiplex imaging analysis\nExec="%s"\nTerminal=false\nCategories=Science;\n' \
+        "$REPO/scripts/block01" > "$dir/block01.desktop"
+    echo "[block01] desktop entry written: $dir/block01.desktop"
+}
+
+main() {
+    mkdir -p "$STATE_DIR/run"
+    check_install
+    if [ "${1:-}" = "--desktop" ]; then write_desktop_entry; shift; fi
+    export PYTHONPATH="$STATE_DIR/pkg"
+    cd "$STATE_DIR/run"
+    exec "$BLOCK01_PREFIX/bin/python" -m block01.main "$@"
+}
+
+if [ -z "${BLOCK01_LAUNCH_SOURCED:-}" ]; then
+    main "$@"
+fi

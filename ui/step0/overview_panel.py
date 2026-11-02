@@ -591,6 +591,10 @@ class FullFusionWorker(QThread):
             import fusion_viewer_core as _core
         except Exception as exc:                       # noqa: BLE001 -- any import failure
             return python(f"fusion_viewer_core not importable: {exc}")
+        from ..step1_core_adapter import core_unavailable_reason
+        why = core_unavailable_reason()
+        if why:
+            return python(why)
         if not hasattr(_core, "FuseJob"):
             return python("this fusion_viewer_core has no FuseJob")
         used = {nucleus_ch} | {ch for cw in (groups or {}).values() for ch in cw}

@@ -2,7 +2,8 @@
 
 Block C4 of `docs/step1_rework_plan.md`. B built the host, C1-C3 the
 composition, its planning and its wiring to the owners; this is the object
-that puts all of it on the existing Viewer tab and takes it down again.
+that puts all of it on the existing Viewer tab and takes it down again. The
+same mount also serves Step2's DAPI view, Step3 and Regions.
 
 NO NEW SURFACE (UI_SURFACE_RULES §4). The Viewer tab, the Overlay and Fusion
 buttons, the patch buttons and the shared Tissue Preview are the ones that
@@ -22,8 +23,11 @@ otherwise drive a background recomposition of a picture nobody is looking at.
 Leaving Step1 disconnects the owners; coming back connects them and composes
 ONCE, which is what picks up everything that moved while it was away.
 
-WHICH RENDERER DRAWS IT (G3, `docs/step1_gpu_demo_plan.md`). The picture is
-composed on the GPU when this machine can: `Step1GpuLayer` is a sibling
+WHICH RENDERER DRAWS IT. First choice (the default, `BLOCK01_STEP1_BACKEND`
+unset): the Rust core's `Step1CoreLayer` (`_decide_rust` /
+`_start_rust_backend`, docs/v16_5_sraw_plan.md). Otherwise (G3,
+`docs/step1_gpu_demo_plan.md`) the picture is composed on the GPU when this
+machine can: `Step1GpuLayer` is a sibling
 overlay on the EXISTING ViewBox's own viewport, with the mouse passing
 through it, fed by `Step1GpuBinding` from the EXISTING provider, scheduler
 and raw cache. Nothing new owns a camera, a queue or a cache, and no control
@@ -203,6 +207,7 @@ class Step1WholeSlideMount(QtCore.QObject):
         #: v16_5 S-Raw: the Rust core draws Step1 when asked for
         #: (`BLOCK01_STEP1_BACKEND=rust`) and able to; "" or why not
         self._rust_refused = ""
+        self._rust_core_refused = ""
         self._rust_wanted = self._decide_rust(gpu_layer_factory)
         if self._rust_wanted:
             self._defer_scheduler_for_rust()
@@ -374,6 +379,8 @@ class Step1WholeSlideMount(QtCore.QObject):
         if adapter.requested_backend() != adapter.BACKEND_RUST:
             return False
         why = adapter.core_unavailable_reason()
+        # a missing or incompatible core is the user's to fix: the notice says so
+        self._rust_core_refused = why
         if not why and (not self._gpu_wanted or gpu_layer_factory is not None):
             why = "this viewer does not take the GPU path"
         if why:
@@ -1579,6 +1586,9 @@ class Step1WholeSlideMount(QtCore.QObject):
         refused = self._gpu_refusals()
         if refused:
             lines.append(refused)
+        core_refused = getattr(self, "_rust_core_refused", "")
+        if core_refused:
+            lines.append(f"The fast viewer is not used: {core_refused}.")
         return "\n".join(lines)
 
     def _gpu_refusals(self):

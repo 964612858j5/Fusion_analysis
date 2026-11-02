@@ -44,6 +44,7 @@ test_channel_workbench.py
 test_channel_workbench_source_identity.py
 test_compare_contract.py
 test_controller_trajectory.py
+test_core_api_check.py
 test_core_gl_session.py
 test_corrected_zarr_identity_metadata.py
 test_correction_plan.py
@@ -81,6 +82,7 @@ test_hq2_runtime.py
 test_hq_marker_segmentation.py
 test_hq_remap.py
 test_hq_source_resolver.py
+test_install_scripts.py
 test_io_loader_lowres.py
 test_label_ownership.py
 test_label_pyramid.py

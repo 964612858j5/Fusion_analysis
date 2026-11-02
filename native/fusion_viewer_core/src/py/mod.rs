@@ -19,6 +19,9 @@ use pyo3::prelude::*;
 #[pymodule]
 fn fusion_viewer_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    // the Python-visible interface number: raised on any incompatible change
+    // (docs/v17_install_plan.md §1.1; the rule is in this crate's README)
+    m.add("CORE_API", 1)?;
     // what a Rust panic is raised as (a BaseException): the Python engine
     // fallbacks catch it with Exception (docs/v17_error_guard_plan.md §2)
     m.add("PanicException", m.py().get_type::<pyo3::panic::PanicException>())?;

@@ -1,0 +1,118 @@
+# docs/v17_install_plan.md 1.2: the prebuilt viewer core. A tag
+# core-v<version> builds the Linux (manylinux_2_28) and Windows abi3 wheels
+# from the committed Cargo.lock, tests each one INSTALLED in a clean venv,
+# and publishes both with SHA256SUMS as the GitHub Release core-v<version>.
+# workflow_dispatch is a dry run on any branch: build and test, never publish.
+# The installer trusts only the digests later committed to
+# native/fusion_viewer_core/wheels.lock, not this release's SHA256SUMS.
+name: fusion_viewer_core_release
+
+on:
+  push:
+    tags: ["core-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Version from Cargo.toml (a tag must name the same one)
+        run: |
+          V=$(awk -F'"' '/^version = /{print $2; exit}' native/fusion_viewer_core/Cargo.toml)
+          [ -n "$V" ] || { echo "no version in Cargo.toml"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            T="${GITHUB_REF_NAME#core-v}"
+            [ "$T" = "$V" ] || { echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $V"; exit 1; }
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: version
+    runs-on: ubuntu-24.04
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    env:
+      PY: /opt/python/cp310-cp310/bin/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+      - name: Build the manylinux_2_28 abi3 wheel
+        run: |
+          "$PY" -m pip install "maturin>=1.15,<2"
+          "$PY" -m maturin build --release --locked -i "$PY" --compatibility manylinux_2_28 \
+            -m native/fusion_viewer_core/Cargo.toml -o dist
+          ls dist
+      - name: Test the installed wheel in a clean venv
+        run: |
+          "$PY" -m venv /tmp/clean
+          /tmp/clean/bin/python -m pip install dist/*.whl numpy tifffile imagecodecs "numcodecs<0.16" pytest
+          /tmp/clean/bin/python -c "import fusion_viewer_core as c; v='${{ needs.version.outputs.version }}'; assert c.__version__ == v and c.CORE_API == 1, (c.__version__, c.CORE_API); print(c.__version__, c.CORE_API)"
+          cd tests && /tmp/clean/bin/python -m pytest -q -p no:cacheprovider --noconftest --rootdir=. test_v16_5_r1_ci.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-linux
+          path: dist/*.whl
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+      - name: Build the abi3 wheel
+        shell: bash
+        run: |
+          python -m pip install "maturin>=1.15,<2"
+          maturin build --release --locked -m native/fusion_viewer_core/Cargo.toml -o dist
+          ls dist
+      - name: Test the installed wheel in a clean venv
+        shell: bash
+        run: |
+          python -m venv clean
+          PY=clean/Scripts/python.exe
+          "$PY" -m pip install dist/*.whl numpy tifffile imagecodecs "numcodecs<0.16" pytest
+          "$PY" -c "import fusion_viewer_core as c; v='${{ needs.version.outputs.version }}'; assert c.__version__ == v and c.CORE_API == 1, (c.__version__, c.CORE_API); print(c.__version__, c.CORE_API)"
+          cd tests && "../$PY" -m pytest -q -p no:cacheprovider --noconftest --rootdir=. test_v16_5_r1_ci.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-windows
+          path: dist/*.whl
+
+  publish:
+    needs: [version, linux, windows]
+    # only a pushed core-v* tag publishes; a manual run never does, even on a tag
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ needs.version.outputs.version }}
+        run: |
+          cd dist
+          [ "$(ls *.whl | wc -l)" -eq 2 ] || { echo "expected 2 wheels"; ls; exit 1; }
+          sha256sum *.whl > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "core-v$V" *.whl SHA256SUMS --repo "$GITHUB_REPOSITORY" \
+            --title "fusion_viewer_core $V" \
+            --notes "Prebuilt viewer core $V (CORE_API 1): Linux manylinux_2_28 x86_64 and Windows x86_64 abi3 wheels for CPython 3.10+. Installed by scripts/install_block01.sh only when the digest matches native/fusion_viewer_core/wheels.lock."

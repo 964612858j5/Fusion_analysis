@@ -70,6 +70,12 @@ jobs:
           print("CPU", platform.processor() or "?", open("/proc/cpuinfo").read().split("model name")[1].split("\n")[0])
           print("numpy", numpy.__version__, "AVX512 on this machine:", sorted(k for k, v in f.items() if k.startswith("AVX512") and v))
           PY
+      - name: Install scripts (syntax and shellcheck)
+        run: |
+          bash -n scripts/install_block01.sh
+          bash -n scripts/block01
+          "$CI_PY" -m pip install -q "shellcheck-py==0.11.0.1"
+          "$RUNNER_TEMP/venv/bin/shellcheck" -x scripts/install_block01.sh scripts/block01
       - name: Test modules
         env:
           # numpy picks a different float32 power on AVX512 machines (1 ulp off

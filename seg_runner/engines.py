@@ -210,6 +210,11 @@ class CellposeEngine:
         return masks
 
 
+#: the directory of an installed StarDist model (config.json,
+#: thresholds.json, weights_best.h5); unset -> `from_pretrained` (~/.keras)
+STARDIST_DIR_ENV = "BLOCK01_STARDIST_MODEL_PATH"
+
+
 class StardistEngine:
     name = "stardist"
 
@@ -217,7 +222,15 @@ class StardistEngine:
         os.environ.setdefault("KERAS_BACKEND", "tensorflow")
         n = _tf_gpu_count()
         from stardist.models import StarDist2D
-        self._model = StarDist2D.from_pretrained(model_name)
+        folder = os.environ.get(STARDIST_DIR_ENV)
+        if folder:
+            # an installed model folder (docs/v17_install_plan.md §2.5): the
+            # instance `from_pretrained` builds, without its download / unzip
+            folder = os.path.abspath(os.path.expanduser(folder))
+            self._model = StarDist2D(None, name=os.path.basename(folder),
+                                     basedir=os.path.dirname(folder))
+        else:
+            self._model = StarDist2D.from_pretrained(model_name)
         self.device = "gpu" if n else "cpu"
 
     def lib_versions(self):

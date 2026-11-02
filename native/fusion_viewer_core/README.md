@@ -1,15 +1,37 @@
 # fusion_viewer_core
 
-The Step1 viewer's performance core in Rust (branch v16_5). The contract is in
-`docs/v16_5_rust_viewer_plan.md` (plan) and `docs/v16_5_r0_interfaces.md`
-(interfaces). Status: R0 (skeleton and probes); nothing in the product imports
-it yet.
+The viewers' performance core in Rust: Step0's full-image engine, the Step1 /
+Step3 / Regions viewers, the Rust fusion job and the exit wait use it
+(`ui/step1_core_adapter.py` is the one compatibility check). Contract history:
+`docs/v16_5_rust_viewer_plan.md`, `docs/v16_5_r0_interfaces.md`.
+
+## Version and interface number (docs/v17_install_plan.md §1.1)
+
+* `CORE_API` (`src/py/mod.rs`): raise it on ANY incompatible change of what
+  Python sees (a removed or renamed class, function or argument, a changed
+  meaning); `REQUIRED_CORE_API` in `ui/step1_core_adapter.py` moves with it.
+* `version` (`Cargo.toml`, and `Cargo.lock` by `cargo update -p
+  fusion_viewer_core --offline`): bump it for EVERY released binary, also for
+  fixes that leave the interface alone; raise `MIN_CORE_VERSION` in the
+  adapter when the Python side needs that build.
+* A core with another `CORE_API`, without one, or older than
+  `MIN_CORE_VERSION` is refused everywhere; the app then uses its Python
+  paths and says why.
+
+## Releases (prebuilt wheels)
+
+`.github/workflows/fusion_viewer_core_release.yml` builds the Linux
+(manylinux_2_28) and Windows abi3 wheels for a tag `core-v<version>`, tests
+them installed, and publishes them with `SHA256SUMS` as a GitHub Release
+(each release only with the owner's go). The digests are then committed to
+`wheels.lock` here; `scripts/install_block01.sh` installs only a wheel whose
+digest matches the checkout's `wheels.lock`.
 
 ## Build and install (server)
 
     export PATH=/root/.cargo/bin:$PATH
     cd native/fusion_viewer_core
-    /root/.venvs/maturin/bin/maturin build --release -i /root/micromamba/envs/fusion_mesmer/bin/python
+    /root/.venvs/maturin/bin/maturin build --release --locked -i /root/micromamba/envs/fusion_mesmer/bin/python
     /root/micromamba/envs/fusion_mesmer/bin/python -m pip install --no-deps --force-reinstall \
         target/wheels/fusion_viewer_core-*-cp310-abi3-*.whl
 

@@ -22,6 +22,10 @@ import pytest
 from block01.seg_runner import protocol, synthetic
 from block01.seg_runner.client import EngineProcess
 
+#: the deployed StarDist model, read from the real HOME at import (the tests
+#: themselves run with a temporary HOME holding a copy of its zip)
+DEPLOYED_STARDIST = os.path.expanduser("~/.keras/models/StarDist2D/2D_versatile_fluo")
+
 
 # ── protocol, no engine ─────────────────────────────────────────────────────
 def test_messages_round_trip_and_carry_the_version():
@@ -84,8 +88,9 @@ def _mask(record_path, kind):
 
 
 @pytest.fixture
-def stardist_ok():
+def stardist_ok(tmp_path, monkeypatch):
     pytest.importorskip("stardist")
+    _temporary_keras_home(tmp_path, monkeypatch)
 
 
 def test_stardist_prints_do_not_reach_the_protocol(tmp_path, stardist_ok):
@@ -98,7 +103,20 @@ def test_stardist_prints_do_not_reach_the_protocol(tmp_path, stardist_ok):
     assert "Found model" in (tmp_path / "e.log").read_text()
 
 
-def test_stardist_in_subprocess_equals_direct_call(tmp_path, stardist_ok):
+def _temporary_keras_home(tmp_path, monkeypatch):
+    """A temporary HOME holding a copy of the deployed StarDist zip: what
+    `from_pretrained` unpacks then lands there, not in the real ~/.keras."""
+    import shutil
+    src = os.path.join(DEPLOYED_STARDIST, "2D_versatile_fluo.zip")
+    if not os.path.isfile(src):
+        pytest.skip("no deployed StarDist model")
+    cache = tmp_path / "home" / ".keras" / "models" / "StarDist2D" / "2D_versatile_fluo"
+    cache.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, cache)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+
+def test_stardist_in_subprocess_equals_direct_call(tmp_path, monkeypatch, stardist_ok):
     from csbdeep.utils import normalize
     from stardist.models import StarDist2D
     img = synthetic.nuclei()
@@ -112,6 +130,34 @@ def test_stardist_in_subprocess_equals_direct_call(tmp_path, stardist_ok):
     mask, rec = _mask(ep.states["s1"]["detail"], "nucleus")
     assert np.array_equal(mask, direct.astype(np.uint32))
     assert rec["cell"] == {"status": "not_produced"}
+
+
+def test_stardist_from_an_installed_folder_equals_from_pretrained(tmp_path, monkeypatch, stardist_ok):
+    """docs/v17_install_plan.md §2.5: with BLOCK01_STARDIST_MODEL_PATH the
+    engine loads the installer's folder (no download, no unzip) and gives the
+    labels `from_pretrained` gives. Both read copies of the deployed files;
+    HOME is temporary, so neither touches ~/.keras."""
+    import shutil
+    from csbdeep.utils import normalize
+    from stardist.models import StarDist2D
+    from block01.seg_runner.engines import STARDIST_DIR_ENV
+    src = DEPLOYED_STARDIST
+    folder = tmp_path / "models" / "stardist_2D_versatile_fluo"
+    folder.mkdir(parents=True)
+    for name in ("config.json", "thresholds.json", "weights_best.h5"):
+        shutil.copy2(os.path.join(src, name), folder)
+    img = synthetic.nuclei()
+    direct, _ = StarDist2D.from_pretrained("2D_versatile_fluo").predict_instances(
+        normalize(img, 1, 99.8, axis=(0, 1)))
+    monkeypatch.setenv(STARDIST_DIR_ENV, str(folder))
+    ep = EngineProcess("stardist", log_path=str(tmp_path / "e.log"))
+    ep.start()
+    states = ep.run([_task(tmp_path, "s1", img, "stardist_nuclei_dapi")])
+    ep.close()
+    assert states == {"s1": "ok"}
+    mask, _ = _mask(ep.states["s1"]["detail"], "nucleus")
+    assert np.array_equal(mask, direct.astype(np.uint32))
+    assert sorted(os.listdir(folder)) == ["config.json", "thresholds.json", "weights_best.h5"]
 
 
 def test_cellpose_in_subprocess_equals_direct_call(tmp_path):

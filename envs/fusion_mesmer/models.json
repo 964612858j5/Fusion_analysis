@@ -4,6 +4,7 @@
     "cellpose_cpsam": {
       "engine": "cellpose",
       "root": "~/.cellpose/models",
+      "env_override": "CELLPOSE_LOCAL_MODELS_PATH",
       "files": [
         {
           "path": "cpsam",
@@ -15,6 +16,7 @@
     "stardist_2D_versatile_fluo": {
       "engine": "stardist",
       "root": "~/.keras/models/StarDist2D/2D_versatile_fluo",
+      "env_override": "BLOCK01_STARDIST_MODEL_PATH",
       "files": [
         {
           "path": "2D_versatile_fluo.zip",

@@ -28,14 +28,19 @@ from seg_runner.engines import model_root  # noqa: E402  (the one path rule)
 
 # Where each engine loads its weights from today. `~` is the running user's
 # home. The Mesmer path is the one hard-coded in
-# utils/mesmer_utils.py:_default_mesmer_model_path (DEEPCELL_MESMER_MODEL_PATH
-# overrides it).
+# utils/mesmer_utils.py:_default_mesmer_model_path. Every entry's
+# `env_override` names the directory instead when set -- what an install by
+# scripts/install_block01.sh exports (docs/v17_install_plan.md §2.5):
+# CELLPOSE_LOCAL_MODELS_PATH is Cellpose's own variable; StarDist loads from
+# BLOCK01_STARDIST_MODEL_PATH (seg_runner/engines.py:StardistEngine).
 MODELS = {
     "cellpose_cpsam": {"engine": "cellpose", "root": "~/.cellpose/models",
+                       "env_override": "CELLPOSE_LOCAL_MODELS_PATH",
                        "files": ["cpsam"]},
     # Listed, not globbed: StarDist unpacks its zip into a `_extracted`
     # folder beside it at first use, which is not part of the deployment.
     "stardist_2D_versatile_fluo": {"engine": "stardist", "root": "~/.keras/models/StarDist2D/2D_versatile_fluo",
+                                   "env_override": "BLOCK01_STARDIST_MODEL_PATH",
                                    "files": ["2D_versatile_fluo.zip", "config.json", "thresholds.json",
                                              "weights_best.h5"]},
     "mesmer_multiplex_segmentation": {"engine": "mesmer",

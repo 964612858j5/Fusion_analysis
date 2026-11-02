@@ -44,6 +44,21 @@ licence: never commit or redistribute them.
 
 ## Install
 
+**Use `bash scripts/install_block01.sh`** (docs/v17_install_plan.md): it does
+the steps below plus the viewer core, the models (licence first) and the
+checks, into its own root (`~/.local/share/block01`, or `--root DIR`):
+
+| what | where |
+|---|---|
+| environment | `<root>/envs/fusion_mesmer-<8 hex of lock + pip file>` (+ `.owner` beside it, `.block01_install_ok` in it when finished) |
+| viewer core | the prebuilt wheel whose SHA-256 is in `native/fusion_viewer_core/wheels.lock`, or `--build-core` |
+| models | `<root>/models/<models.json entry>/`, found through each entry's `env_override` variable |
+| per checkout | `<repo>/.block01/install.env`, `pkg/block01` link, `run/` (working directory) |
+
+`scripts/block01` starts the app from that record. The manual steps, for
+reference (they do NOT install the viewer core, which neither manifest
+lists):
+
 ```bash
 micromamba create -y -p <prefix> --file envs/fusion_mesmer/conda-linux-64.lock
 <prefix>/bin/python -m pip install --no-deps -r envs/fusion_mesmer/requirements-pip.txt

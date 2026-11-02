@@ -72,7 +72,8 @@ def main():
         # R3 plan §2.5: reader threads told to stop (closed or fallen-back
         # viewers) get one shared second in all, then are left to the OS
         from .utils import closing_threads
-        left = closing_threads.wait_all()
+        from .ui.step1_core_adapter import core_unavailable_reason
+        left = closing_threads.wait_all(rust_ok=lambda: not core_unavailable_reason())
         if left["python_left"] or left["rust_left"]:
             print(f"[Block01] at exit, reader threads still running (left to the OS): "
                   f"{left['python_left']} + {left['rust_left']} Rust")

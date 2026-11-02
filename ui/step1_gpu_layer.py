@@ -1,7 +1,9 @@
-"""Step1 G1 test-only GPU composition layer.
+"""The Python GPU composition layer.
 
-This is an isolated validation renderer, not a production display path.  It
-owns only Qt-context-local GL names and a bounded GPU texture cache.  Callers
+The renderer of `Step1WholeSlideMount` (Step1, Step2, Step3, Regions) when the
+Rust core is not used; its label and texture parts are also shared with the
+Rust path (`step1_core_labels`, `step1_core_binding`, `step3_label_binding`).
+It owns only Qt-context-local GL names and a bounded GPU texture cache.  Callers
 supply immutable source/display/viewport snapshots; this module never imports
 or queries the Step1 coordinator, provider, scheduler, ViewBox controller,
 shared display state, MainWindow, or the C1 CPU composer.

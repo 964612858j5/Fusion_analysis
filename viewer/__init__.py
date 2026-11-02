@@ -1,4 +1,4 @@
-"""v15 viewer-foundation prototype.
+"""The viewer foundation behind every whole-slide view (Python side).
 
 Pure-Python tile identity types, a raw pyramid tile provider, a GPU/CPU
 background-correction compute step, byte-bounded LRU caches, and a

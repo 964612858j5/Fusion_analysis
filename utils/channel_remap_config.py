@@ -17,8 +17,8 @@ import json
 import os
 
 # v14.5a: source-aware schema primitives (pure-Python, no runtime coupling). Used
-# only by the Step2 validation guard below to hard-reject a source-aware config
-# that claims step2_ready before runtime support exists.
+# by the Step2 validation guard below and by the promoted-candidate and v14.5d
+# runtime-config validators.
 from .source_identity import (
     config_is_source_aware, SOURCE_MIXTURE_MODES,
     SOURCE_MIXTURE_HOMOGENEOUS_RAW, SOURCE_MIXTURE_HOMOGENEOUS_CORRECTED)

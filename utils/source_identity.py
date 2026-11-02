@@ -1,10 +1,11 @@
 """
 block01/utils/source_identity.py — v14.5a source-aware schema primitives.
 
-Pure-Python, dependency-light schema/validation layer for FUTURE source-aware
-Channel Conditioning. v14.5a adds these primitives ONLY — nothing here changes
-runtime behavior. There is no resolver, promotion, Step2, or camp/Gi code in this
-module, and it is not consumed by any runtime path yet.
+Pure-Python, dependency-light schema/validation layer for source-aware
+Channel Conditioning. Used by Step0's calibration record, remap promotion,
+config validation, the HQ source resolver and Step2's v14.5d per-channel
+runtime. There is no resolver, promotion, Step2, or camp/Gi code in this
+module itself.
 
 Two distinct concepts (never conflate them):
 
@@ -20,7 +21,7 @@ Plus:
 camp_source_policy defaults to raw_gi_only because background correction is a
 NONLINEAR transform (white-tophat + clip) and local-z (Gi*) statistics are not
 comparable across raw vs corrected channels; corrected channels must not silently
-enter camp/Gi. Wiring this into Step2 is a later phase (v14.5d).
+enter camp/Gi. Step2 uses it since v14.5d.
 """
 
 from __future__ import annotations

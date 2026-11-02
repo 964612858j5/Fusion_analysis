@@ -6,5 +6,5 @@ GPU memory. The child side (`runner`, `engines`) imports only numpy and the
 engine library -- never Qt or the rest of the application -- so it can be
 started with `python -m seg_runner.runner` from the repository root.
 
-Prototype for block V0: nothing in the application calls this yet.
+Used by Step1's pre-segmentation runs and Step2's segment / merge worker.
 """

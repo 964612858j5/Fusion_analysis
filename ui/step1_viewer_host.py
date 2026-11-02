@@ -10,12 +10,11 @@ Block B2 of `docs/step1_rework_plan.md`. What is here:
 * `Step1ViewerHost` -- the widget that owns the stack: one `ExploreView`, one
   `ExploreController`, built lazily and torn down completely.
 
-WHAT IS DELIBERATELY NOT HERE. Step0's own stack, its preview methods and its
-GPU hand-off are untouched (`ui/step0/step0_explore_tab.py` is not imported).
-There is no Overlay or Fusion composition either: block B draws ONE channel --
-the selected one -- as the载体 for the real-pixel gates, and the host is not
-reachable from the interface (B.5, re-ruled 2026-09-17). C puts the多通道
-composition on this same host, this same viewport and this same cache.
+It reuses Step0's `ExploreStack` container but builds its own stack; Step0's
+preview methods and GPU hand-off are not touched. It is reached through
+`Step1WholeSlideMount` (Step1, Step2's DAPI view, Step3, Regions); the
+multi-channel composition is the mount's (blocks C1-C4), on this same host,
+viewport and cache.
 
 NO PIXELS IS NOT BLACK. Outside the analysis region, and for a channel whose
 corrected product is missing, the provider yields NaN rather than zeros: a

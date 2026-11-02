@@ -852,8 +852,10 @@ class MainWindow(QMainWindow):
         # v14.1: top-nav Skip → Step2/3/4 buttons and the Step 1.5 workflow entry
         # were removed. Direct navigation is still available via the step labels
         # above. The Step15BackgroundCorrectionPage widget and its set_context
-        # injection path remain intact internally (stack index 5, reached only
-        # programmatically) for the v14.1b migration into Step0.
+        # injection path are still built at startup (stack index 5), but no UI
+        # entry reaches the page (`_go_to_step1_5` is called only by tests):
+        # background correction and Channel Remap moved into Step0, and
+        # step1_5/ configs are read only as a legacy fallback.
 
         # (#11) The redundant "Next" button was removed — navigation is entirely
         # via clicking the step names in the top nav. The button object is kept
@@ -1082,7 +1084,7 @@ class MainWindow(QMainWindow):
         self._display.state.visibility_changed.connect(
             self._on_channel_visibility_changed)
         # ONE refresh owner for the science, wherever the command came from:
-        # a row here, the shared Weights window in Step3, a restore. The
+        # a row here, Step3's rows, a restore. The
         # per-field signals are for the ROWS to follow; this window follows
         # the draft itself, so one logical command leaves one repaint, one
         # frame request, one dirty recompute and one session save -- even

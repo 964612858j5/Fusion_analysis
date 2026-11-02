@@ -1014,10 +1014,11 @@ class GlobalChannelDock(QtWidgets.QWidget):
     def _on_row_weight(self, cid, value):
         """The scientific edit, and only from the step that shows it.
 
-        Step1 is where a weight is edited (the shared Weights window is the
-        other entry, and it writes the same model). Step0, Step2 and Step3 do
-        not show the editor at all, so a value arriving from one of them came
-        from a control the user cannot see.
+        Step1 is where a weight is edited, and Step3, whose rows are Step1's
+        (block 2b; the separate Weights window was removed, user ruling
+        2026-09-15). Step0, Step2 and Regions do not show the editor at all,
+        so a value arriving from one of them came from a control the user
+        cannot see.
 
         GIVING A CHANNEL A WEIGHT ENLISTS IT (user ruling, 2026-09-16). Asking
         for a weight on a channel that is not in the fusion used to write a

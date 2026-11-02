@@ -1,8 +1,8 @@
 """Adapter: Step0 background correction ↔ the ONE public channel dock.
 
 Step0 no longer builds a channel list. It BINDS to the public dock that
-`Block01DisplayServices` owns and the main window mounts outside the stacked
-pages, and it keeps doing the two things that are Step0's:
+`Block01DisplayServices` owns and the main window mounts into Step0's
+Channels panel, and it keeps doing the two things that are Step0's:
 
 - installing the slide's channel order, capabilities and display visibility
   into `ChannelDisplayState` (one atomic install, unchanged from B4-A);

@@ -30,12 +30,12 @@ the active render context, the frame clock, the compose worker and the
 publish/reject rule. Steps register a CONTEXT and submit INPUTS; they never
 push pixels and never reach into each other.
 
-WHAT IS NOT HERE. Widgets. The popup and the Intensity window are still
-constructed where they are (see `TissuePreviewCoordinator.attach_navigator`):
-their construction is entangled with the ROI/patch toolbar and the Channel
-Remap inspector, and reparenting those in the same change as the state
-contract would have made both unreviewable. What has moved is everything that
-decides: ownership, lifetime, the active context, who may publish a frame,
+WIDGETS IT OWNS. It constructs and holds the one Tissue Preview popup
+(`ensure_navigator`), the Intensity window frame (`ensure_intensity`) and the
+public channel dock (`ensure_channel_dock`); their contents (the ROI/patch
+toolbar, the Channel Remap inspector) come through content ports
+(`set_navigator_content`, the intensity port). What it holds is everything
+that decides: ownership, lifetime, the active context, who may publish a frame,
 and which results are refused. A step no longer answers any of those.
 """
 

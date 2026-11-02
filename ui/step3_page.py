@@ -24,7 +24,8 @@ from PyQt5.QtWidgets import (
 
 from .step_frame import StepFrame
 
-#: What the viewer slot says until block 2c-2 connects the viewer.
+#: The viewer slot's fallback notice, shown when the whole-slide viewer
+#: cannot draw (its text predates block 2c-2; changing it is a UI change).
 VIEWER_PENDING_TEXT = ("The whole-slide view is not connected yet.\n"
                        "Channels, weights and the Overlay / Fusion mode already "
                        "act on Step1's picture and the Tissue Preview.")

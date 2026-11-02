@@ -36,10 +36,9 @@ nothing is torn down, the pixels stay on screen and the camera is locked),
 `resume_from_production` puts it back when the run ends, and a build is
 refused while such a run is going (`busy_probe`).
 
-Still NOT here (later phases): HOT/COVERAGE prefetch, a multi-channel
-overlay, a channel control inside this view and the reverse sync that
-would need, and the viewport mapping that would open the full image on the
-region the compare panels are showing. Nothing here writes to Save, to any
+Not here: COVERAGE prefetch, a channel control inside this view and the
+reverse sync that would need. (HOT prefetch, the nucleus overlay and
+opening the full image on the region the compare panels show are here.) Nothing here writes to Save, to any
 config, or to the correction numerics, and nothing here touches the
 existing patch preview.
 """

@@ -1,6 +1,6 @@
 """The Regions page's whole-slide viewer (docs/region_qc_module_plan.md §2):
 a third resident `Step1WholeSlideMount`, built with the real window like
-Step3's (`MainWindow._step3_whole_slide`, ui/main_window.py:1931-1954), so
+Step3's (`MainWindow._step3_whole_slide`), so
 it shows Step1's data (raw or corrected channels by the Step0 decisions,
 clipped to the ROI) in Regions' OWN display-only scope (user ruling
 2026-10-20, docs/f5_tma_display_plan.md §13: ticks here only show; they never

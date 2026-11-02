@@ -9,10 +9,11 @@ preview — those belong to the Step0 main viewers.
 
 ROI draw / edit / delete and Full-WSI / ROI mode are REUSED from the existing
 OverviewPanel (ui/step0/overview_panel.py); this popup hosts an OverviewPanel
-instance as its body rather than reimplementing any ROI logic. v14.2a is a SHELL:
-window behavior + the viewer-compatible viewport-rect API are wired and testable;
-full live viewport sync and the image-local→whole-tissue rectangle overlay are
-deferred to v14.2b (storing the rect now, drawing later — no guessed transforms).
+instance as its body rather than reimplementing any ROI logic. It is the one
+Tissue Preview / ROI navigator, owned by `Block01DisplayServices`
+(`ensure_navigator`); the steps draw the live current-view rectangle on its
+overview (`set_current_view_rect`). `set_viewport_rect` below only stores an
+image-local rect (Step0 may set one); it draws nothing.
 
 Viewport rectangle uses the EXACT v14.3 HighQualityImageViewer representation:
 
@@ -38,7 +39,7 @@ VIEWPORT_COORDINATE_SPACE = "image_local_pixels"
 
 
 class TissueNavigatorPopup(QtWidgets.QWidget):
-    """Floating Tissue Preview / ROI Navigator shell (v14.2a).
+    """Floating Tissue Preview / ROI Navigator (owned by Block01DisplayServices).
 
     Hosts a reused OverviewPanel for whole-tissue thumbnail + ROI draw/edit/delete
     and Full-WSI/ROI mode. Stores a viewer-compatible viewport rect (overlay

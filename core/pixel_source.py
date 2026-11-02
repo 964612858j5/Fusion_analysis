@@ -1,9 +1,9 @@
 """The `PixelSource` read contract (block A2a; plan v2.2 §5.1, v2.3 E1).
 
-ONE explicit contract for image data. Consumers (viewer, Step1 fusion,
-Step4) are migrated onto it one at a time in A2c; A2a only defines it and
-provides adapters for today's sources (`sources/`), with no consumer using
-them yet.
+ONE explicit contract for image data, with adapters for today's sources
+(`sources/`). The viewers (through `open_viewer_source`), quantification,
+tissue tiling, project identity, TMA dearraying and Step0's overview read
+through it.
 
 This module depends on numpy only -- never on `viewer/`, `ui/` or Qt
 (`tests/test_v16_pixel_source.py` checks it): the data layer's contract

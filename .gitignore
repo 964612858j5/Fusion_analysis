@@ -19,3 +19,13 @@ scripts/probe_step4_rust/target/
 
 # v16_5 Rust viewer core build output
 native/fusion_viewer_core/target/
+
+# per-checkout install record and run directory (scripts/install_block01.sh)
+.block01/
+# CUDA writes it into the working directory (scripts/block01 runs in .block01/run)
+cufile.log
+
+# review outputs of codex / mythos runs at the repo root (kept locally, not part of the code)
+/codex_*.out
+/codex_*.done
+/mythos_*.out

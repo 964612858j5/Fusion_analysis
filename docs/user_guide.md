@@ -54,33 +54,29 @@ Step 0          Step 1          Step 2          Step 3        Step 4
 
 ## 3. Installation and launch
 
-### 1. Prepare the runtime environment (only needed once)
+### 1. Install (only needed once)
 
-This project relies on a GPU (NVIDIA card recommended) and a Python environment. The environment is defined in files one directory up:
-
-- `environment.yml` (a conda environment named `fusion`)
-- or `setup_env.sh` (a one-shot script that builds an environment named `fusion_test2`)
-
-For the first install, run one of these in a terminal:
+Linux x86_64 with an NVIDIA card. In a terminal, from the Block01 folder:
 
 ```bash
-# Option A: use the ready-made environment.yml
-conda env create -f /sda1/Fusion/analysis_pipline/environment.yml
-
-# Option B: use the one-shot script
-bash /sda1/Fusion/analysis_pipline/setup_env.sh
+bash scripts/install_block01.sh --check-only   # optional: only check this computer
+bash scripts/install_block01.sh
 ```
 
-> If you need to run a login-type or interactive command yourself, you can type `! your-command` in this session's input box to run it directly.
+It checks the computer, installs the Python environment and the prebuilt
+viewer core, shows each segmentation model's licence and downloads it after
+you type `yes` (Mesmer needs a free DeepCell token in `DEEPCELL_ACCESS_TOKEN`),
+tests the three engines and prints the start command. Everything goes under
+`~/.local/share/block01` (`--root DIR` to choose another place); nothing
+already on the computer is changed. If it stops, it says which step failed
+and what to do; running it again continues. Details:
+`envs/fusion_mesmer/README.md`. A coding agent (Claude Code, Codex) can do it
+for you with `docs/install_with_an_ai_agent.md`.
 
 ### 2. Launch the software
 
-After activating the environment, **go to the parent directory of the project** and start block01 as a Python module:
-
 ```bash
-conda activate fusion          # or: micromamba activate fusion_test2
-cd /sda1/Fusion/analysis_pipline
-python -m block01.main
+scripts/block01
 ```
 
 On success, a **dark-themed window** pops up titled `CODEX Pipeline | Fusion + Segmentation`, defaulting to Step 0.
@@ -132,20 +128,15 @@ Read in the raw big image, **circle the region you actually care about (ROI)**, 
 - **Save ▾ › Save as new workspace** always starts a new workspace; the old one is left as it is and the next steps use the new one.
 - If you redrew the analysis region, Save asks first: *Save as new workspace* (recommended) or *Overwrite this workspace*.
 
-**Data versions:** every successful Step 1 **Generate** keeps the Step 0 + Step 1 parameters of that moment and the corrected / fused products they made as a **data version** (`v001`, `v002`, … under `<workspace>/versions/`). A version is never rewritten afterwards; Generate with nothing changed goes back to the existing version.
-- The chooser at Load has one row per workspace and version, the version right-aligned at the end (`(current)` marks the current one; a workspace without versions shows `unknown`). Pick an older version and Step 0 comes back with its region, parameters and corrected product; entering Step 1 restores its fusion settings by itself, without *Load Previous Step1 Session*.
-- With parameters changed but not yet generated, Step 2 cannot start a new run; the line under Progress says why.
-- In Step 3's run list each run ends with the data version it used; older runs without one show `unknown`.
-- A workspace made before data versions is registered as `v1` the first time it is opened (its files stay where they are).
+**Results (runs):** every button that computes something keeps what it made as a **result** of its own, with the parameters of that moment and the result it was made from: **Step 0 Save** (a Step 0 result, only when the corrected pixels change), Step 1 pre-segmentation, **Save Config & Generate fused.zarr**, **Step 2 Run** and **Step 4 Extract**. A result's science (pixels, labels, the parameters it used) is never rewritten afterwards; only display helpers such as zoomed-out mask levels may be added to it later. Choosing a result in Step 3 (`Use`) brings the chain it was made from with it.
+- With parameters changed but not yet generated, Step 2 can still run on an existing fused image; it records the parameters it actually used.
+- An output folder written by an earlier version of this program (before results) is not opened; choose another output folder. Nothing in it is changed.
 
-**Deleting (into the trash):** in the chooser at Load each row is a workspace + data version + one segmentation (a version without one shows *(not segmented)*; unsaved-to-version changes show `draft`). Opening a row shows that segmentation in Step 3. The red **×** at a row's start deletes that row:
-- a confirmation lists what moves first. It deletes that segmentation and its Step 4 results; other segmentations of the same version stay.
-- for a version's last segmentation the box has a checkbox *Also delete data version …*; unchecked keeps the version so you can segment it again.
-- deleting the current version asks whether to load another version first; *None* deletes it and the window starts over empty — load data again yourself.
-- deleting a workspace's last version asks whether the whole workspace goes too (default: keep).
-- deleted things move to `<output>/.trash/` and are removed after 30 days; *Empty trash…* at the bottom removes them now. There is no Restore: moving a folder back by hand does not bring its version record back.
-- nothing can be deleted while a Step 0 Save, a Generate, Step 2 or Step 4 is running.
-- deleting a segmentation moves its Step 4 results inside the workspace and those A3 records as its own; files you put outside the workspace that the program has no record of are left alone.
+**Deleting (into the trash):** the chooser at Load lists each workspace (newest first) and under it its Step 0 results. The red **×** at a Step 0 result's start deletes it **and every result made from it** (Step 1, Step 2, Step 4); a Step 2 result can also be deleted with the **×** of its row in Step 3's *Segmentation results* window, together with its Step 4 results.
+- a confirmation lists everything that moves first; deleting the Step 0 result you are editing says that Step 1 and Step 2 cannot be used until Step 0 is saved again.
+- deleted results move to `<output>/.trash/` and are removed automatically 30 days later (checked each time a project is opened). There is no Restore.
+- nothing can be deleted while a Step 0 Save, a pre-segmentation, a Generate, Step 2 or Step 4 is running.
+- if a move fails half-way, the deletion stops there: the message says what was moved and what is still in place, and what stays is whole.
 
 <!-- image placeholder: images/03_step0_overview_and_roi.png — the overview in Step 0 with an ROI box already drawn -->
 <!-- image placeholder: images/04_step0_channel_groups.png — the Channels / Nucleus Channel grouping and weights panel -->
@@ -230,10 +221,12 @@ Check the Step 2 result against the tissue: the whole slide with the cell mask o
 4. The right side shows the **whole slide**, like Step 1: drag to pan, scroll to zoom, click in the Tissue Navigator to jump there. Step 0, Step 1 and Step 3 show the same place on the slide at the same zoom when you switch between them (2026-09-30); Step 0, Step 1 and Step 3 also share one page layout, so the picture, the channel panel and the tabs stay exactly where they are on screen. In Step 0 the work area has two tabs, **Background Correction** (the channels) and **Viewer**; Per-Channel Decision and **Save** are the row at the bottom. The channel column has the same width in all three pages; dragged very narrow, the right end of each channel row (the weight box, or Step 0's method box) is hidden under the column's edge until you widen it again. Resizing the window keeps the zoom in Step 1 and Step 3; you just see more or less of the slide.
 5. In the Tissue Navigator opened from Step 3, **ROIs are locked** (they come from Step 0 / Step 1 and cannot be drawn, deleted or changed here), while **patches can be added, moved, renamed and deleted** — patch changes are saved and show up in Step 0 and Step 1 too.
 6. **Patches**: the row above the picture starts with Step 1's patch buttons (`Patch ▾` lists them all). Click one and the picture jumps there. The chosen patch is the same in Step 1 and Step 3.
-7. **The cell mask on the whole slide.**
-   - the **run** drop-down, at the right of the `Viewer` tab's row: the Step 2 results of **every earlier session of this project on this slide** (method, date and time; the current session's first, the active one marked; results of earlier sessions say which session in `[ ]`). Each result is shown on its own region. **`Load…`** next to it opens a result folder from anywhere else (another project), as long as it was made on this same slide — otherwise the hint says why it was not loaded. Step 3 shows the run you opened from Step 2's finished dialog or with `Load…`; otherwise the one you chose last, the current session's active one, or the newest. If a result lies partly outside the current ROI, the hint says so — Step 3 shows only the current ROI;
-   - **`Cell mask ▾`** and **`Nucleus mask ▾`**: click to set `Show`, the colour (a preset or `Custom…`), `Opacity`, `Width` (1–4) and `Outline` / `Fill`. The colour is the outline's; `Fill` gives every cell its own colour. A button is greyed out when the run has no such mask (e.g. a nuclei-only method has no cell mask, a whole-cell method no nucleus mask, and an expansion result from before nuclei were kept says to re-run Step 2);
-   - after them, on the same row, a **hint** says why a mask is not shown, e.g. no Step 2 result yet, a result that does not belong to this ROI (re-run Step 2), `Masks need the GPU display`, `Preparing zoomed-out masks…` (an older result is being prepared, once), or that masks cannot be shown zoomed out. Hover over it for the whole text.
+7. **Segmentation results on the whole slide.** **`Results…`**, at the right of the `Viewer` tab's row, opens one floating **Segmentation results** window (it stays above the main window; closing it only hides it, what is ticked stays drawn):
+   - **one row per result**: the Step 2 results of every workspace of this project on this slide (date, time and a summary of the parameters; the current workspace's first; results of other workspaces say which in `[ ]`), each on its own region, plus any result brought in with **`Load…`** (a result folder from anywhere, accepted only if it was made on this slide — otherwise the hint says why);
+   - in each row, **`Cells`** and **`Nuclei`** ticks: every ticked mask of every row is drawn, outlines only, the top row on top. A tick is greyed out when the result has no such mask (a nuclei-only method has no cell mask, a whole-cell method no nucleus mask). The swatch after each tick opens its settings: a preset colour or `Custom…`, `Opacity`, `Width` (1–4) and `Solid` / `Dashed`. Each result gets its own colours, kept for the session;
+   - **`Use`** marks the one result Step 4 measures (framed green, `In use`); it does not change what is drawn. The first time Step 3 opens, only the `Use` result's cells are ticked (its nuclei if it has no cell mask); coming back keeps your ticks. A result brought in with `Load…` is ticked the same way;
+   - at the top, "all Cells" / "all Nuclei" ticks and a hint for the whole viewer (e.g. no Step 2 result yet, `Masks need the GPU display`); each row has its own status line (zoomed-out masks being prepared, cannot be shown zoomed out, part of the result outside the current ROI — Step 3 shows only the current ROI);
+   - the red **×** of a row deletes that result (see *Deleting* in Step 0).
    Masks follow pan, zoom and every jump. Your mask settings are kept while the program runs; nothing is written to your project, except that an older result without zoomed-out levels gets them the first time (in its own run folder).
 
 **Output:** no new files (except the zoomed-out mask levels of an older Step 2 result, once, in its run folder).
@@ -282,7 +275,7 @@ Time to **produce the table.** Step 4 goes through every cell of one Step 2 resu
 ## 5. Quickest path to get started (read this if you're in a hurry)
 
 ```
-1. python -m block01.main              # launch
+1. scripts/block01                     # launch
 2. Step 0: pick image → draw ROI → set DAPI as nucleus → remove background → pick a few preview patches → Process
 3. Step 1: adjust channel weights for clear outlines → choose method → try params with Phase1+Phase2 → save
 4. Step 2: confirm params → set tile size → Run, let it finish
@@ -298,7 +291,7 @@ Time to **produce the table.** Step 4 goes through every cell of one Step 2 resu
 
 | Problem | Likely cause / fix |
 |---------|--------------------|
-| Launch error `No module named block01` | Not run from the **parent directory** `analysis_pipline`, or not using `python -m block01.main` |
+| `scripts/block01` says *cannot start* | It names the reason and the fix; usually: run `bash scripts/install_block01.sh` (again) |
 | Cells circled fuzzily / fused | Go back to Step 1 and tune channel weights and segmentation params; background may be under- or over-subtracted (Step 0) |
 | Out of GPU memory midway through Step 2 | Make the tiles smaller; confirm you're using the GPU, not the CPU |
 | Step 2 got interrupted — re-run? | Use Step 2's **Recovery Mode** to resume merging from saved intermediate files |

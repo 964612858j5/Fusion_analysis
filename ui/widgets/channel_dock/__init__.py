@@ -1,8 +1,9 @@
 """Block01's ONE public channel dock, and the template every row is built from.
 
 `GlobalChannelDock` is the public channel editor for Step0, Step1, Step2 and
-Step3: one instance, owned by `Block01DisplayServices`, mounted outside the
-stacked pages, projecting `ChannelDisplayState` and `FusionDomainModel`.
+Step3: one instance, built by `Block01DisplayServices` and moved into the
+Channels panel of the step on screen (`MainWindow._mount_channels_dock`),
+projecting `ChannelDisplayState` and `FusionDomainModel`.
 
 WHAT USED TO BE HERE. A reusable `ChannelDock` shell with a per-page row
 factory (`Step0ChannelRow`, `WeightChannelRow`, `DisplayChannelRow`) over a

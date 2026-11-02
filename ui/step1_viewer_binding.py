@@ -4,8 +4,9 @@ Block B3 of `docs/step1_rework_plan.md`. B1 decided which pixels may be drawn
 and B2 built the host; this is the wiring between the host and the window's
 own answers -- the handoff, the shared display state, and the navigation.
 
-WHAT IT DOES NOT DO. It mounts nothing: the host stays unreachable from the
-interface (B.5, re-ruled 2026-09-17), and Overlay/Fusion composition is C's.
+WHAT IT DOES NOT DO. It mounts nothing itself: `Step1WholeSlideMount` owns it
+and puts the host on screen, and the Overlay/Fusion composition is the
+mount's.
 It also writes nothing to either owner: every value here is READ from the
 handoff or from `ChannelDisplayState`.
 

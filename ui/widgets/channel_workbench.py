@@ -10,13 +10,11 @@ docs/v13_1_channel_conditioning/04_UI_REDESIGN_SPEC.md):
              Contrast/Gamma + Auto/Reset/Save)
     Bottom : preview load / save config
 
-This is the Phase 2 prototype. It is intentionally self-contained and
-host-agnostic: feed it channel arrays via set_channel_images(); it produces and
+Step0's Channel Remap workbench (`Step0Page` builds it; its inspector is the
+panel inside the shared Intensity window, `intensity_panel_widget`); the
+legacy Step1.5 page also builds one. It is self-contained and host-agnostic: feed it channel arrays via set_channel_images(); it produces and
 saves a segmentation_preprocess_config via utils.channel_remap_config. It does
 NOT run segmentation, touch Step2, or write h5ad.
-
-Phase 3 will extract the right-hand inspector into its own widget; for now it
-lives here to keep the prototype in one place.
 """
 
 from __future__ import annotations

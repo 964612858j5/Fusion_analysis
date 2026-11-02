@@ -1,8 +1,8 @@
-"""G2 test-only adapter from public Step1 tile supply to G1 GPU snapshots.
+"""The Python GPU path's binding: public Step1 tile supply to `Step1GpuLayer`.
 
 The binding consumes only injected public provider/scheduler/controller ports and
-caller-built Display/Viewport snapshots.  It is deliberately not imported by a
-production mount.  It owns no scheduler, raw cache, source authority, camera,
+caller-built Display/Viewport snapshots. `Step1WholeSlideMount` uses it when
+the Rust core is not used or hands over (`_start_gpu_backend`). It owns no scheduler, raw cache, source authority, camera,
 or display state: its bounded state is only the current source revision's
 complete coarse transaction and the fine planes that still cover the
 current viewport.

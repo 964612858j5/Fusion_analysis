@@ -10,8 +10,9 @@ Step1 row; a weight asked for before Step1 was ever opened had nobody to ask.
 
 This module is the answer instead. It is owned by `Block01DisplayServices`, so
 it exists before the first page does and outlives every one of them, and it
-has no QWidget in it: the panel, the rows and the shared Weights window are
-editors and projections of it.
+has no QWidget in it: the channel dock's rows and Step1 / Step3's weight
+editors are editors and projections of it (the separate Weights window was
+removed, user ruling 2026-09-15).
 
 THREE COMMANDS, THREE FIELDS. They are separate on purpose, and the separation
 is the point of this module:
@@ -283,8 +284,7 @@ class FusionDomainModel(QObject):
         tick of each marker still answers 1.0.
 
         The exception is a PENDING answer: a weight named for this slide
-        before Step1 built any group to hold it, in Step0 or through the
-        shared Weights window. Those are this dataset's, they are adopted by
+        before Step1 built any group to hold it, in Step0 or in Step3's rows. Those are this dataset's, they are adopted by
         the groups being built, and `0.0` is one of them.
         """
         nuc = str(nucleus_channel or "")

@@ -279,31 +279,40 @@ row, and the duplicate Tissue Preview button in the step bar.
   SAME component, `ui/patch_strip.py`: `Patch ▾` listing every patch, at
   most seven inline buttons in the patches' own colours, no load glyphs; a
   click lands Step3's viewer on the patch and is THE patch selection, the one
-  Step1's strip marks and its session keeps), then the mask controls (block
-  4c, user rulings 2026-09-26/27), then the `Overlay` / `Fusion` pair (the
-  SAME mode as Step1's pair) at its right end. The run drop-down and
-  `Load…` sit at the right of the TAB BAR's row, beside the `Viewer` tab
-  and outside its content. Step3 is a GENERAL RESULT VIEWER (block B3, user
-  rulings 2026-09-27): the run drop-down lists the finished Step2 runs of
-  EVERY ROI workspace of the project made on the open slide -- the current
-  workspace's first, the others newest first and labelled `[workspace ·
-  time]` -- plus any run brought in with `Load…` (a run folder from any
-  project, accepted only when it was made on the open slide; otherwise the
-  hint says `Not loaded: …` and why); each run is shown on ITS OWN region
-  (a run of several ROIs is one item per ROI), and a region reaching outside
-  the current ROI is said in the hint. Items read `method · date time`,
-  `(active)` for the current workspace's active run; one disabled `No
-  segmentation results for this ROI` when there are none; the choice: the
-  run named by Step2's finished dialog or by `Load…`, else the current
-  choice, else the current workspace's active run, else its newest, else
-  the newest of the rest. `Cell mask ▾` and `Nucleus mask ▾`
-  in the mode buttons' look, each with a swatch of its colour and a
-  drop-down panel -- `Show` (both on by default), a row of preset colours
-  and `Custom…` (the colour is the OUTLINE's; `Fill uses one colour per
-  cell`), `Opacity` (75 %), `Width` 1-4 (1; outline only) and `Outline` /
-  `Fill` (Outline) -- disabled when the run has no such mask; then one hint
-  line, cut to fit with its whole text on hover and printed to the terminal
-  once per change. The viewer is Step3's own (block 2c-2): a
+  Step1's strip marks and its session keeps), then the `Overlay` / `Fusion` pair (the
+  SAME mode as Step1's pair) at its right end. `Results…` sits at the right
+  of the TAB BAR's row, beside the `Viewer` tab and outside its content
+  (block S3M, docs/v17_step3_multi_results_plan.md, user rulings
+  2026-10-30; it replaced the run drop-down and the `Cell mask ▾` /
+  `Nucleus mask ▾` buttons). It opens ONE non-modal floating tool window,
+  `Segmentation results`, above the main window; closing it only hides it.
+  Step3 is a GENERAL RESULT VIEWER (block B3): the window has one row per
+  entry -- the finished Step2 runs of EVERY ROI workspace of the project
+  made on the open slide (the current workspace's first, the others newest
+  first, labelled `[workspace · time]`; a run of several ROIs is one row per
+  ROI, each shown on ITS OWN region) plus any run brought in with `Load…`
+  at the window's top (accepted only when made on the open slide, else the
+  hint says `Not loaded: …` and why). Each row, as Step1's Results rows: its
+  title (the run's display name `MM-DD HH:MM · <summary>`, or `method ·
+  date time` when it has none) and upstream tag, a red `×` where the run may
+  be deleted, `Use` (THE record Step4 quantifies and the TMA cores follow;
+  the `In use` row has Step1's green frame; `Use` ticks nothing), a `Cells`
+  and a `Nuclei` tick (greyed when the record has no such mask), each
+  followed by a swatch opening that mask's panel -- 7 preset colours and
+  `Custom…`, `Opacity`, `Width` 1-4, `Solid` / `Dashed` (outline only; no
+  fill) -- and a status line of its own (zoomed-out masks being prepared,
+  cannot be shown zoomed out, not readable, part outside the current ROI).
+  At the top: `Load…`, the "all Cells" / "all Nuclei" tri-state ticks and
+  one viewer-wide hint (cut to fit, whole on hover, printed to the terminal
+  once per change). Every ticked mask of every row is drawn, rows from the
+  bottom of the list up (the top row on top), cells then nuclei within a
+  row; no limit on how many. Default colours are given once per entry in
+  the order first seen (Step1's palette); ticks and styles are kept per
+  entry for the session. Once, when Step3's scene first starts, only the
+  `Use` record's cells are ticked (its nuclei if it has no cell mask);
+  coming back to Step3 keeps the ticks as they were. `Load…` ticks the
+  loaded run's cells (its nuclei if it has no cell mask) and does not `Use`
+  it. The viewer is Step3's own (block 2c-2): a
   second Step1 viewer, resident, paused while Step3 is not on screen (and
   Step1's paused while Step3 is), sharing Step1's camera; a navigator click
   moves the viewer of the step on screen. Block A1 (user ruling 2026-09-30):
@@ -376,7 +385,7 @@ row, and the duplicate Tissue Preview button in the step bar.
   page frame's wide slot, block A1b S4).
   `Input Files`: `Run:` (a Step2 run folder + Browse) and `Region:` (the
   run's regions; disabled when it has one), both handed over from Step3's
-  choice when Step4 opens; `Slide:` read-only (the run's own slide -- there
+  `Use` record when Step4 opens; `Slide:` read-only (the run's own slide -- there
   is no OME-TIFF field any more), a one-line source summary (`N labelled
   cells · C channels: R raw, K from Step 0's correction`, or `nuclei (this
   result has no cell mask)`), and a red reason line when the run cannot be
@@ -451,30 +460,23 @@ row, and the duplicate Tissue Preview button in the step bar.
   -- `▶ Load` into a project that already has workspaces of the same slide
   (A3 `slide_id`, not the path) opens one: the only one directly, several
   through an `Open a workspace` chooser (with `Start a new workspace (open
-  none)`). Block DV: the chooser has one row per workspace AND data version
-  (its newest version first), the version right-aligned at the row's end in
-  Step3's run-list style (`v002  (current)`; `unknown` for a workspace with
-  no versions yet); the current version is preselected, and a single row
-  opens directly. Loading an older version restores ITS region, parameters,
-  Intensity file and corrected product, republishes Step0's handoff for it
-  and makes it current; entering Step1 then restores its fusion settings and
-  session once, by itself. A workspace made before data versions is
-  registered as `v1` the first time it is opened (its products referenced
-  where they are). Block DV-D (user rulings 2026-10-03): each row is a
-  workspace + data version + ONE segmentation run made from it
-  (`<workspace>  ·  <method> · <MM-DD HH:MM>`; a version without runs is
-  one row `(not segmented)`; a dirty draft is a first row tagged `draft`,
-  preselected). Opening a run's row shows that run in Step3. Every row
-  starts with a red `×`: it deletes that row into `<project>/.trash/`
-  (removed 30 days after the deletion, or by `Empty trash… (<size>)` at
-  the dialog's bottom) after a confirmation that lists what moves; the
-  last run of a version asks, in the same box, whether its version goes
-  too (unchecked: kept); the current version asks `Load another
-  version?` (`None` default: delete, then a new empty window); the last
-  version asks whether the whole workspace goes too (default No). Nothing
-  is deleted while a Step0 Save, a Generate, a Step2 run or a Step4
-  extraction runs. The chooser is shown even for a single row (ruling
-  2026-10-03), that row preselected so Enter opens it. Its region, patches, channel decisions, parameters and Intensity
+  none)`). Block RM (docs/v16_run_model_application.md, user rulings
+  2026-10-03; it replaced data versions): one row per workspace, newest
+  first, each followed by a row per Step0 result (correct run) of it,
+  newest first (`      Step0 result  <MM-DD HH:MM · …>`, the one being
+  edited tagged `editing`). Every Step0 result row starts with a red `×`:
+  it moves that result AND every run made from it (pre-segmentations,
+  fused images, Step2 runs, Step4 results) into `<project>/.trash/` after
+  one confirmation listing all of them, downstream first (deleting the
+  result being edited says Step1 and Step2 cannot be used until Step0 is
+  saved again); trash entries are removed 30 days after the deletion, when
+  a project is opened. There is no `Empty trash` button and no Restore.
+  Nothing is deleted while a Step0 Save, a pre-segmentation, a Generate, a
+  Step2 run or a Step4 extraction runs; a move that fails stops the deletion
+  there and says what moved and what stays. A project written before block
+  RM is not opened (`Not a project of this version`) and not written. The
+  chooser is shown even for a single workspace (ruling 2026-10-03), the
+  newest preselected so Enter opens it. Its region, patches, channel decisions, parameters and Intensity
   come back, so an unchanged Save says `No changes`. `Save` writes the open
   workspace; the `▾` joined to its right holds one item, `Save as new
   workspace`. A Save whose analysis region differs from the open workspace's
@@ -491,11 +493,9 @@ row, and the duplicate Tissue Preview button in the step bar.
 * **Step4's hand-over line** (block A6) -- a run chosen in Step3 while Step4
   computes is announced in one amber line under the progress and opened when
   the extraction ends.
-* **Step3's run list** (block A6 W4, user ruling 2026-10-02; block DV
-  ruling 5a) -- each run ends its row with the data version it was made
-  from (`v002`); a run that records none ends it with `unknown`,
-  right-aligned (it may cover the right end of the name); also in the
-  tooltip.
+* **Step3's result rows** (block A6 W4; block RM) -- each row's title is
+  followed by its upstream tag (the fused image it was made from);
+  whole in the tooltip.
 * **Step1's fusion Cancel** (block A6 G1) -- the progress dialog stays, says
   `Stopping…` with Cancel disabled, and the page unlocks only when the job's
   thread has ended.

@@ -1,5 +1,6 @@
 """Step3's masks: which run, which mask where, and its labels by viewer tile
--- block 4a (the data layer; no Qt, not wired into Step3 yet).
+-- block 4a: the data layer behind Step3's mask display (`step3_label_binding`,
+`step3_core_labels`); no Qt.
 
   * `list_runs` / `choose_run`: the finished runs of the current ROI
     workspace, and which one Step3 shows;

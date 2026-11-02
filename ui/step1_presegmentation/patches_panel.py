@@ -9,7 +9,8 @@ back as a new `set_patches` call.
 
 What is ticked is remembered by patch id (ids are stable, plan block P), so
 adding, deleting or moving other patches never changes it; a new patch comes
-in ticked. The ticks are not persisted and feed nothing yet (block C).
+in ticked. The ticks select the patches for Run, the montage and Save plan; they are
+kept in the session and in saved plans.
 
 User rulings 2026-09-24: no hover text; a ticked tile has a `×` in its top
 right corner that deletes the patch; double-clicking a tile renames it.

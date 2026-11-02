@@ -36,8 +36,8 @@ from .step0.roi_context_model import patch_color, patch_name
 from .step0.search_ctrl import (
     BatchProcessWorker, WsiCorrectionWorker, _WsiCorrectionProgressDialog,
 )
-# v13.1 Phase 5f-a — Channel Conditioning / Remap now lives in Step1.5 (the
-# pre-segmentation conditioning stage), reusing the shared ChannelWorkbench.
+# v13.1 Phase 5f-a: this legacy page's copy of Channel Conditioning / Remap
+# (the shared ChannelWorkbench); the live one is Step0's workbench.
 from .widgets.channel_workbench import ChannelWorkbench
 from ..utils.channel_remap_config import save_channel_remap_config
 

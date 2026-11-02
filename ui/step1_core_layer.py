@@ -4,7 +4,8 @@ A QOpenGLWidget laid over the SAME ViewBox as `Step1GpuLayer` (mouse passes
 through; it follows the ViewBox's geometry) whose paintGL hands Qt's
 framebuffer to `ViewerCore.paint`. Python passes snapshots only; planning,
 reading, caching, uploads and drawing are the core's
-(docs/v16_5_sraw_plan.md). Only the Rust-mode Step1 mount builds it.
+(docs/v16_5_sraw_plan.md). Only `Step1WholeSlideMount` in Rust mode builds it (Step1, Step2, Step3,
+Regions).
 
 GL contract (plan v2.1 §3): the core is loaded through Qt's own
 `getProcAddress`, draws into `defaultFramebufferObject()`, and releases its

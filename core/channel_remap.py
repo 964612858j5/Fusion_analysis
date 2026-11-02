@@ -1,15 +1,15 @@
 """
 block01/core/channel_remap.py — v13.1 manual channel remap operator.
 
-Segmentation-conditioning transform that replaces the top-hat / cuCIM
-preprocessing path in the v13.1 experimental pipeline. See
+The channel remap (Intensity) operator used by fusion, Step0's previews and
+overview, the Intensity workbench and Step2's segmentation workers. Origin:
 docs/v13_1_channel_conditioning/03_CHANNEL_REMAP_SPEC.md.
 
 Design constraints (do not violate):
   - Backend-agnostic. NumPy first; the same code runs on CuPy arrays because
     every array op is dispatched through the array's own module (`_xp`).
-  - No Qt and no I/O in this module. It must stay importable by headless Step2
-    later and by the Step3 UI prototype now.
+  - No Qt and no I/O in this module. It must stay importable by headless
+    workers (Step2) as well as by the UI.
   - Output is always float32 in [0, 1].
   - Auto (QuPath-style percentile window) is provided as a *function* only.
     It is NEVER applied per-tile automatically — callers compute it once on a

@@ -19,8 +19,8 @@ from PyQt5 import QtGui
 
 from .step1_core_adapter import CORE_ERRORS
 
-from .step1_gpu_layer import (LABEL_FILL, LABEL_OUTLINE, LabelSnapshot, _LabelTextureLru,
-                              label_radius)
+from .step1_display_types import (LABEL_FILL, LABEL_OUTLINE, LabelSnapshot, _LabelTextureLru,
+                                  label_radius)
 
 #: plane identities remembered (their numbers); the oldest are forgotten
 IDENTITIES_KEPT = 100_000

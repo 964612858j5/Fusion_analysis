@@ -59,8 +59,9 @@ from .step1_compose_binding import Step1ComposeBinding
 from .step1_compose_coordinator import Step1ComposeCoordinator
 from .step1_composed_layer import Step1ComposedLayer
 from .step1_draft_spec import MODE_FUSION, MODE_OVERLAY, STEP1_SCOPE
-from .step1_gpu_binding import BindingBudgets, Step1GpuBinding
-from .step1_gpu_layer import DisplaySnapshot, Step1GpuLayer, ViewportSnapshot
+from .step1_display_types import BindingBudgets, DisplaySnapshot, ViewportSnapshot
+from .step1_gpu_binding import Step1GpuBinding
+from .step1_gpu_layer import Step1GpuLayer
 from .step1_viewer_binding import Step1ViewerBinding
 from .step3_label_binding import Step3LabelBinding
 

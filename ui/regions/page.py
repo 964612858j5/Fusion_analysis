@@ -578,8 +578,8 @@ class RegionsPage(QWidget, VersionsMixin, ShapesMixin):
         self.commit_transform()                   # leaving Regions applies a pending transform
         super().hideEvent(event)
 
-    def shutdown(self):
+    def shutdown(self, timeout_ms=15000):
         from ..tma import workers
         self.commit_transform()
         self.flush_draft()
-        return workers.shutdown()
+        return workers.shutdown(timeout_ms)

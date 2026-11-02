@@ -53,8 +53,8 @@ from PyQt5 import QtCore
 
 from ..core import step3_masks
 from ..utils import closing_threads
-from .step1_gpu_layer import (LABEL_OUTLINE, LABEL_TEXTURE_BYTES, LabelLayer,
-                              LabelPlane, LabelSnapshot, Step1GpuLayerError)
+from .step1_display_types import (LABEL_OUTLINE, LABEL_TEXTURE_BYTES, LabelLayer,
+                                  LabelPlane, LabelSnapshot, Step1GpuLayerError)
 
 CELL = step3_masks.CELL
 NUCLEUS = step3_masks.NUCLEUS

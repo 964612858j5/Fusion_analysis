@@ -27,7 +27,7 @@ from ..core import (label_ownership, label_pyramid, nuclei_pairing, preseg_contr
                     preseg_input, seam_merge)
 from ..core.io_loader import OMETIFFLoader
 from ..core.provenance import register_segmentation_run, write_json_atomic
-from ..utils import run_store
+from ..utils import error_hook, run_store
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
@@ -389,7 +389,7 @@ class SegmentMergeWorker(QThread):
         try:
             self._write_remap_provenance(cfg)
         except Exception as exc:  # provenance is best-effort, never fail the run
-            print(f"[Step2] remap provenance write failed: {exc}")
+            error_hook.report(exc, "Step2: remap provenance not written")
 
     def _accept_source_aware_runtime_descriptor(self, raw_cfg):
         """v14.5d B3b (construction stage): flag-gate + validate + stash a source-aware
@@ -594,7 +594,7 @@ class SegmentMergeWorker(QThread):
         try:
             self._write_remap_provenance(raw_cfg)
         except Exception as exc:
-            print(f"[Step2] remap provenance write failed: {exc}")
+            error_hook.report(exc, "Step2: remap provenance not written")
         print(f"[Step2] source-aware runtime remap prepared: {len(channels)} markers, "
               f"mixture={raw_cfg.get('source_mixture_mode')}")
 

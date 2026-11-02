@@ -20,7 +20,9 @@ def keep(worker):
 
 
 def shutdown(timeout_ms: int = 15000) -> bool:
-    """Wait for every running TMA job; True when all finished in time."""
+    """Wait for every running TMA job; True when all finished in time.
+    0 only asks them to stop and answers at once (the main window's close
+    retries instead of blocking)."""
     ok = True
     for w in list(LIVE):
         req = getattr(w, "requestInterruption", None)

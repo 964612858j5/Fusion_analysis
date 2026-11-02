@@ -224,12 +224,19 @@ def register(project_dir, kind: str, loc: Dict, token, *, depends_on: Iterable =
         return aid
 
 
+def _report(exc, what):
+    """A registration that failed is logged and noticed (the product stays
+    as it is); lazily imported, so this module stays free of Qt."""
+    from ..utils import error_hook
+    error_hook.report(exc, what)
+
+
 def safe_register(project_dir, kind, loc, token, **kw) -> Optional[str]:
     """`register` for producers: never raises, logs a failure, returns None."""
     try:
         return register(project_dir, kind, loc, token, **kw)
     except Exception as exc:                # auxiliary: the product stays as it is
-        print(f"[Provenance] {kind} not registered ({type(exc).__name__}: {exc})")
+        _report(exc, f"provenance: {kind} not registered")
         return None
 
 
@@ -383,7 +390,7 @@ def register_corrected_channels(project_dir, workspace_dir, zarr_path, raw_path)
                     parameters=params, software={"git_commit": git_commit()}))
         return out
     except Exception as exc:
-        print(f"[Provenance] corrected channels not registered ({type(exc).__name__}: {exc})")
+        _report(exc, "provenance: corrected channels not registered")
         return []
 
 
@@ -436,7 +443,7 @@ def register_fused(zarr_path, raw_path, region, corrected_path="", corrected_use
                         "corrected_read_without_window": sorted(corrected_unused)},
             software={"git_commit": git_commit()})
     except Exception as exc:
-        print(f"[Provenance] fused not registered ({type(exc).__name__}: {exc})")
+        _report(exc, "provenance: fused not registered")
         return None
 
 
@@ -532,7 +539,7 @@ def register_segmentation_run(run_dir, meta):
                                   "label_store": meta.get("label_store")}},
             software={"git_commit": git_commit(), "engine_provenance": engine.get("provenance")})
     except Exception as exc:
-        print(f"[Provenance] segmentation run not registered ({type(exc).__name__}: {exc})")
+        _report(exc, "provenance: segmentation run not registered")
         return None
 
 
@@ -595,7 +602,7 @@ def register_step4(h5ad_path, job, provenance_record):
                                   + "_provenance.json"}},
             software={"git_commit": provenance_record.get("git_commit", "")})
     except Exception as exc:
-        print(f"[Provenance] Step4 result not registered ({type(exc).__name__}: {exc})")
+        _report(exc, "provenance: Step4 result not registered")
         return None
 
 

@@ -26,6 +26,19 @@ is fixed.
   pixels (suspected from CI, not yet confirmed).
 * GPU background correction needs a CUDA toolkit (CuPy compiles against it);
   without one the CPU is used.
+* Waits still blocking the window (`docs/v17_small_review_items_plan.md`
+  §3, deferred): Step1 patch loaders wait up to 3 s each on a switch,
+  because every loader shares one slide reader whose corrected images a
+  Step0 Save swaps in place (its own plan next, §13); Step0's release of a
+  finished background process; the pre-segmentation job's close on a
+  dataset switch; the montage's close; stopping background workers when a
+  dataset is loaded.
+* Step0's preload cache can admit a read that started before a Save after
+  the Save dropped that channel (it checks only the dataset generation,
+  `workers/preload_scheduler.py` ~385). No visible failure found (the
+  preload result does not repaint; Intensity uses the whole-slide
+  provider). Fix idea: reject at admission by the loader's binding snapshot
+  (`docs/v17_patch_reader_versions_plan.md` §6.3); not authorized yet.
 
 ## Tests
 

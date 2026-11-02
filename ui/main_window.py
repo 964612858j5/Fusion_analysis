@@ -48,7 +48,7 @@ from ..core.channel_remap import (
 from ..core.io_loader import OMETIFFLoader
 from ..core.provenance import write_json_atomic
 from ..core import config_hash as _config_hash
-from ..utils import perf_trace
+from ..utils import error_hook, perf_trace
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
@@ -1280,7 +1280,7 @@ class MainWindow(QMainWindow):
             "border:1px solid #555;border-radius:3px;padding:2px 8px;}"
             "QPushButton:hover{background:#222;}"
         )
-        btn_save_session.clicked.connect(self._save_step1_session)
+        btn_save_session.clicked.connect(lambda _checked=False: self._save_step1_session())
         status_row.addWidget(btn_save_session)
 
         btn_update = QPushButton("⟳ Update")
@@ -4747,17 +4747,25 @@ class MainWindow(QMainWindow):
             return
         self._step1_session_timer.start(500)
 
-    def _save_step1_session(self):
+    def _save_step1_session(self, failures=None):
+        """Never raises (`_on_fusion_done` relies on it): a failure is
+        reported and named in `failures` (a list, when given)."""
         if self._step1_restore_active:
             return
         if self.__dict__.get("_rm_auto_step1"):
             # Block RM (§6): an opened workspace's Step1 draft is restored on
             # entering Step1; until then nothing may overwrite it.
             return
-        payload = self._step1_session_payload()
+        try:
+            payload = self._step1_session_payload()
+            roi = self._rm_roi_dir()
+        except Exception as exc:                            # noqa: BLE001 -- never raises
+            error_hook.report(exc, "Step1 session not saved")
+            if failures is not None:
+                failures.append("the Step1 draft")
+            return
         if not payload:
             return
-        roi = self._rm_roi_dir()
         if roi:
             try:
                 sess = run_store.load_session(roi)
@@ -4771,18 +4779,22 @@ class MainWindow(QMainWindow):
                 sess = run_store.put_draft(sess, "step1", draft)
                 if run_store.save_session(roi, sess):
                     print("[Step1] session autosaved")
-            except Exception:
-                print(f"[Step1] failed to autosave session:\n{traceback.format_exc()}")
+            except Exception as exc:                        # noqa: BLE001 -- never raises
+                error_hook.report(exc, "Step1 session not saved")
+                if failures is not None:
+                    failures.append("the Step1 draft")
             return
-        out_dir = payload.get("output_dir") or OUTPUT_DIR
         try:
+            out_dir = payload.get("output_dir") or OUTPUT_DIR
             os.makedirs(out_dir, exist_ok=True)
             path = self._step1_session_path(out_dir)
             # atomic (review fixes §4): an autosave never truncates the session
             write_json_atomic(path, payload)
             print("[Step1] session autosaved")
-        except Exception:
-            print(f"[Step1] failed to autosave session:\n{traceback.format_exc()}")
+        except Exception as exc:                            # noqa: BLE001 -- never raises
+            error_hook.report(exc, "Step1 session not saved")
+            if failures is not None:
+                failures.append("the Step1 draft")
 
     @_perf("restore.scientific_state")
     def _restore_step1_scientific_state(self, sess, source_path=""):
@@ -5738,11 +5750,21 @@ class MainWindow(QMainWindow):
         state = self._handoff_ready(self._go_to_regions, self._regions_refused)
         if state != "ready":
             return
+        # The handoff is checked BEFORE the page changes: Regions records
+        # every edit against its hash, and an empty one would register an
+        # input nobody can verify (docs/v17_small_review_items_plan.md §4.1).
+        context = self._regions_context()
+        if not context.get("handoff_path") or not context.get("handoff_sha256"):
+            self._regions_refused(
+                "Step0's handoff file could not be read"
+                + (f" ({context['handoff_path']})" if context.get("handoff_path") else "")
+                + ". Save Step0 again, then open Regions.")
+            return
         if self._current_step == 1:
             self._stop_all_loaders()
         self._stack.setCurrentWidget(self._regions)
         self._set_step_active(self.REGIONS_STEP)
-        self._regions.set_context(self._regions_context())
+        self._regions.set_context(context)
 
     def _regions_refused(self, text):
         QMessageBox.information(self, "Step 0.5: Regions", text.replace("Step1", "Regions"))
@@ -8244,21 +8266,35 @@ class MainWindow(QMainWindow):
     def _rm_save_view(self, step):
         """Block RM (§6): on a step change and on close, the Step0, Step2 and
         Step4 drafts and the step being shown go into the workspace's
-        session.json."""
+        session.json. Each write on its own, so one failure does not skip the
+        rest; returns what could not be written (a caught failure -- "nothing
+        to write" is not one)."""
         page = self.__dict__.get("_step0")
-        try:
-            if page is not None and hasattr(page, "rm_save_draft"):
-                page.rm_save_draft()
-            # The SHARED window table, whatever Step1's own draft is doing
-            # (its restore may still be pending): windows set in Regions or
-            # Step1 and never committed survive a restart (ruling 2026-10-27).
-            if page is not None and hasattr(page, "rm_save_shared_windows"):
-                page.rm_save_shared_windows()
-            # Step1's draft too, at once: its autosave timer does not outlive
-            # a close (acceptance 2026-10-03 #6)
-            if self.loader is not None and self._rm_roi_dir():
-                self._save_step1_session()
-            self._rm_save_page_drafts()
+        failures = []
+
+        def write(what, fn):
+            try:
+                fn()
+            except Exception as exc:                        # noqa: BLE001
+                error_hook.report(exc, f"session: {what} not saved")
+                failures.append(what)
+
+        if page is not None and hasattr(page, "rm_save_draft"):
+            write("the Step0 draft", lambda: page.rm_save_draft(failures))
+        # The SHARED window table, whatever Step1's own draft is doing
+        # (its restore may still be pending): windows set in Regions or
+        # Step1 and never committed survive a restart (ruling 2026-10-27).
+        if page is not None and hasattr(page, "rm_save_shared_windows"):
+            write("the shared Intensity windows",
+                  lambda: page.rm_save_shared_windows(failures))
+        # Step1's draft too, at once: its autosave timer does not outlive
+        # a close (acceptance 2026-10-03 #6)
+        write("the Step1 draft", lambda: (self._save_step1_session(failures)
+                                          if self.loader is not None and self._rm_roi_dir()
+                                          else None))
+        write("the Step2 / Step4 drafts", self._rm_save_page_drafts)
+
+        def current_step():
             roi = self._rm_roi_dir() or ((getattr(page, "_roi_context", None) or {})
                                          .get("roi_dir") or "")
             if roi and os.path.isfile(os.path.join(roi, "roi_manifest.json")):
@@ -8266,8 +8302,8 @@ class MainWindow(QMainWindow):
                 view = dict(sess.get("view") or {})
                 view["current_step"] = step
                 run_store.update_session(roi, view=view)
-        except Exception as exc:                            # noqa: BLE001
-            print(f"[Session] not saved ({type(exc).__name__}: {exc})")
+        write("the current step", current_step)
+        return failures
 
     def _rm_save_page_drafts(self):
         """drafts.step2 / drafts.step4 -- not while an opened workspace's
@@ -8314,14 +8350,19 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         # Regions, FIRST (before anything is stopped): the page's draft is
-        # written and its job (finding cores) waited for, a few seconds at
-        # most; one still running refuses the close with nothing stopped yet.
+        # written and its job (finding cores) asked to stop, not waited for;
+        # one still running refuses this close with nothing stopped yet, and
+        # the window tries again by itself until it has ended.
         regions = self.__dict__.get("_regions")
-        if regions is not None and not regions.shutdown():
+        if regions is not None and not regions.shutdown(timeout_ms=0):
             event.ignore()
-            print("[Regions] a Regions job is still running; close again in a moment")
+            self.prev_status.setText("Waiting for Regions to finish its job…")
+            print("[Regions] a Regions job is still running; closing when it ends")
+            QtCore.QTimer.singleShot(500, self.close)
             return
-        self._rm_save_view(self.__dict__.get("_current_step"))
+        # Saved on every attempt (a retry writes the newest state); a
+        # failure is asked about only once the close is otherwise certain.
+        save_failures = self._rm_save_view(self.__dict__.get("_current_step"))
         if self._perf_heartbeat is not None:
             self._perf_heartbeat.stop()
             self._perf_heartbeat = None
@@ -8359,8 +8400,6 @@ class MainWindow(QMainWindow):
         # "QThread: Destroyed while thread is still running".
         self._retire_fusion_worker("the main window is closing")
         for worker in list(self._retired_fusion_workers):
-            if worker.isRunning():
-                worker.wait(3000)
             self._drop_retired_fusion_worker(worker)
         if any(w.isRunning() for w in self._retired_fusion_workers):
             # Closing now would destroy a QThread that is still running. Hold
@@ -8414,6 +8453,31 @@ class MainWindow(QMainWindow):
             self.prev_status.setText("Waiting for Step4 feature extraction to stop…")
             QtCore.QTimer.singleShot(500, self.close)
             return
+        # Every gate that retries has passed: the one question about a
+        # session that could not be fully saved comes here, at most once per
+        # close the user started (docs/v17_small_review_items_plan.md §4.2).
+        if save_failures:
+            what = ", ".join(dict.fromkeys(save_failures))
+            answer = QtWidgets.QMessageBox.question(
+                self, "Close Block01",
+                f"The session could not be fully saved ({what}).\n\n"
+                "Close anyway? What could not be saved will be lost.",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No)
+            if answer != QtWidgets.QMessageBox.Yes:
+                event.ignore()
+                self._display.resume()
+                # This close retired a running fusion job (it has ended by
+                # now: the gate above waited for it); its own completion can
+                # no longer unlock Step1, so the window that stays does.
+                # Only `_lock_ui` disables `config`.
+                if self.__dict__.get("_fusion_worker") is None and not self.config.isEnabled():
+                    self._unlock_ui()
+                    self._fusion_lbl.setText("Fusion was stopped when the window was closing")
+                return
+        # Accepted: no error notice may pop up behind the closing window,
+        # and one already open goes with it.
+        error_hook.set_closing(True)
         # The close is CERTAIN from here: nothing above can refuse it any
         # more. Now the irreversible half -- the compose thread is retired and
         # the two shared windows are closed, once.
@@ -9710,12 +9774,9 @@ class MainWindow(QMainWindow):
                 self.proc.kill()
                 self.proc.join(timeout=1.0)
             self._cleanup_cellpose_process()
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
+            # No `torch.cuda.empty_cache()` here: the trial runs in its own
+            # process, this one holds no CUDA cache, and importing torch on
+            # the GUI thread cost seconds (docs/v17_small_review_items_plan.md §3).
             gc.collect()
             self.search.set_running(False)
             self.search.update_progress(0, 100, "Stopped")
@@ -10415,8 +10476,8 @@ class MainWindow(QMainWindow):
         if self.step1_output.get("roi_id") and self.step0_output.get("project_output_dir"):
             try:
                 mark_roi_step(self.step0_output["project_output_dir"], self.step1_output["roi_id"], "step1", "done")
-            except Exception:
-                print(f"[Step1] failed to update ROI step1 status:\n{traceback.format_exc()}")
+            except Exception as exc:                        # noqa: BLE001
+                error_hook.report(exc, "Step1: the ROI's step status not updated")
         self.step1_done = True
         self._update_next_button()
         # Block RM: a fuse run carries its identity in its own params.json.
@@ -10819,8 +10880,8 @@ class MainWindow(QMainWindow):
         # is told Step1 is not done, with the result sitting right there.
         try:
             FullFusionWorker._recover_interrupted_publish(path)
-        except Exception as exc:
-            print(f"[Step1] could not recover an interrupted publish: {exc}")
+        except Exception as exc:                            # noqa: BLE001
+            error_hook.report(exc, "Step1: an interrupted publish could not be recovered")
         if not os.path.isdir(path) or not self._is_valid_existing_fused_zarr(path):
             print(f"[Step1] session fused zarr missing or unreadable: {path}")
             return ""
@@ -11509,7 +11570,7 @@ class MainWindow(QMainWindow):
             run_store.update_session(
                 roi, viewing=run_store.rel(run_store.project_dir_of(roi), run_dir))
         except (OSError, ValueError) as exc:
-            print(f"[Step1] session.json not updated ({exc})")
+            error_hook.report(exc, "Step1: session.json not updated")
 
     # ── block RM §9: deleting a run and everything made from it ─────────
 
@@ -11764,8 +11825,8 @@ class MainWindow(QMainWindow):
             worker.stop()
         except Exception as exc:
             print(f"[Step1] fusion stop() failed: {exc}")
-        if worker.isRunning():
-            worker.wait(2000)
+        # Not waited for on the GUI thread: the token is gone, so nothing it
+        # sends is used; the reference is kept until it physically ends.
         if worker.isRunning():
             self._retired_fusion_workers.append(worker)
             try:
@@ -11775,6 +11836,8 @@ class MainWindow(QMainWindow):
                     lambda w=worker: self._drop_retired_fusion_worker(w))
             except Exception as exc:
                 print(f"[Step1] could not watch fusion thread exit: {exc}")
+            # it may have ended between the check and the connect
+            self._drop_retired_fusion_worker(worker)
         return True
 
     def _drop_retired_fusion_worker(self, worker):

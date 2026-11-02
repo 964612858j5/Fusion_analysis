@@ -91,9 +91,10 @@ def set_session(d: Dict, workspace_id: str, handoff_path: str, handoff_sha256: s
     step). Every later operation records it; the lock lists all of them."""
     d["session"] = {"workspace_id": workspace_id or "", "handoff_path": handoff_path or "",
                     "handoff_sha256": handoff_sha256 or ""}
-    if workspace_id:
+    if workspace_id and handoff_sha256:
         # keyed by workspace AND content: a Step0 saved again in between is
-        # another input, not a replacement of the first
+        # another input, not a replacement of the first. No hash, no entry:
+        # an input nobody can verify is not recorded as one.
         d["handoffs"][f"{workspace_id}|{handoff_sha256 or ''}"] = {
             "workspace_id": workspace_id, "path": handoff_path or "", "sha256": handoff_sha256 or ""}
 

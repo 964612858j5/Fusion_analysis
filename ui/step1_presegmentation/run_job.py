@@ -26,7 +26,7 @@ import numpy as np
 from ...core import label_ownership, preseg_input, preseg_run
 from ...seg_runner import engines as seg_engines
 from ...seg_runner.client import EngineProcess, EngineStartError
-from ...utils import run_store
+from ...utils import error_hook, run_store
 
 ENGINE_ORDER = ("cellpose", "stardist", "mesmer")
 
@@ -139,7 +139,7 @@ class PresegRunJob:
                 try:
                     run_store.publish(self.rdir)
                 except OSError as exc:
-                    print(f"[Preseg] .done not written ({exc})")
+                    error_hook.report(exc, "pre-segmentation: the run's .done not written")
             if self.on_finished is not None:
                 self.on_finished(dict(self.records))
 

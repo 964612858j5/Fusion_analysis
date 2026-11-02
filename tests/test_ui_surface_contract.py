@@ -23,7 +23,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt5")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from PyQt5 import QtCore, QtWidgets  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -352,9 +352,10 @@ def test_regions_shares_step1s_channels_and_needs_a_saved_step0(app, monkeypatch
         assert dock.parentWidget() is w._regions.channels_host().parentWidget()
         stopped = []
         monkeypatch.setattr(w._step0, "stop_background_jobs", lambda: stopped.append(1), raising=False)
-        monkeypatch.setattr(w._regions, "shutdown", lambda: False)
+        monkeypatch.setattr(w._regions, "shutdown", lambda timeout_ms=15000: False)
         from PyQt5 import QtGui
         ev = QtGui.QCloseEvent()
+        monkeypatch.setattr(QtCore.QTimer, "singleShot", staticmethod(lambda ms, fn: None))
         w.closeEvent(ev)
         assert not ev.isAccepted() and stopped == []
         monkeypatch.undo()

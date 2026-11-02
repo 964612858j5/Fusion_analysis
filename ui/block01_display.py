@@ -54,7 +54,7 @@ from PyQt5.QtWidgets import QVBoxLayout, QWidget
 from ..core import display_identity as _identity
 from ..core import tissue_compose
 from ..core.fusion_domain import FusionDomainModel
-from ..utils import perf_trace
+from ..utils import error_hook, perf_trace
 from ..utils import tissue_log
 from ..workers.display_seed_worker import (
     DisplaySeedWorker, LowresReadWorker,
@@ -2654,8 +2654,11 @@ class Block01DisplayServices(QObject):
         if applier is not None:
             try:
                 applier(bool(policy["editable"]))
-            except Exception:                               # noqa: BLE001
-                pass
+            except RuntimeError:
+                pass                                        # its widget is gone
+            except Exception as exc:                        # noqa: BLE001
+                # the lock may not hold: said, not hidden
+                error_hook.report(exc, "Intensity lock not applied")
         return policy
 
     # ── the render spec every step draws from ─────────────────────────

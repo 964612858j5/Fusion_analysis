@@ -15,6 +15,11 @@ this hook it is logged and the process keeps running:
   * `KeyboardInterrupt` / `SystemExit`: Python's default.
 
 Installed once by `main.py`'s `main()`; tests and scripts keep the default.
+
+`report(exc, where)` is for errors a protected path CATCHES and goes on
+from (docs/v17_small_review_items_plan.md §4): the same log and notice as
+an unhandled one. `set_closing(on)`: while the main window's close is being
+accepted no notice is shown (it is still logged and printed).
 """
 
 import os
@@ -30,7 +35,7 @@ from PyQt5.QtCore import Qt
 #: past this size the log is rotated (one old file kept)
 LOG_LIMIT_BYTES = 5 * 1024 * 1024
 
-_state = {"installed": False, "notifier": None}
+_state = {"installed": False, "notifier": None, "log": None, "closing": False}
 
 
 def log_path():
@@ -91,6 +96,15 @@ class Notifier(QtCore.QObject):
         return True
 
     def _show(self, sig, text, logged):
+        if _state["closing"]:
+            # dropped AT DELIVERY: queued before the close was accepted. The
+            # reservation is released and the signature forgotten, so a close
+            # refused afterwards still shows this error the next time.
+            with self._guard:
+                if self._box == "pending":
+                    self._box = None
+                self._seen.discard(sig)
+            return
         try:
             where = (f"Details: {log_path()}" if logged
                      else "Details were printed in the terminal.")
@@ -120,6 +134,14 @@ class Notifier(QtCore.QObject):
     def _release(self):
         self._closing = None
 
+    def dismiss(self):
+        """GUI thread: close the notice that is open, if any. A reservation
+        still pending is released by its own delivery (`_show`)."""
+        with self._guard:
+            box = self._box
+        if box is not None and box != "pending":
+            box.done(0)                 # `finished` -> `_closed` releases it
+
 
 def handle(exc_type, exc, tb, *, log=None, notifier=None, thread_name=None):
     """Log one unhandled exception and ask for its notice. Never raises."""
@@ -140,6 +162,42 @@ def handle(exc_type, exc, tb, *, log=None, notifier=None, thread_name=None):
             sys.__excepthook__(exc_type, exc, tb)
         except Exception:                                   # noqa: BLE001
             pass
+
+
+def report(exc, where="", *, log=None, notifier=None):
+    """Log an exception a protected path caught and goes on from, and ask
+    for its notice -- the installed hook's log (its lock) and notifier;
+    before `install`, the log file and stderr only. Never raises."""
+    try:
+        tb = getattr(exc, "__traceback__", None)
+        text = "".join(traceback.format_exception(type(exc), exc, tb))
+        head = f"{where}: " if where else ""
+        sys.stderr.write(f"[Block01] {head}caught:\n{text}")
+        stamp = datetime.now().isoformat(timespec="seconds")
+        log = log if log is not None else (_state["log"] or ErrorLog(log_path()))
+        logged = log.write(f"--- {stamp} caught{' in ' + where if where else ''}\n{text}\n")
+        notifier = notifier if notifier is not None else _state["notifier"]
+        if notifier is not None:
+            notifier.ask(signature(type(exc), tb), f"{head}{type(exc).__name__}: {exc}", logged)
+    except Exception:                                       # noqa: BLE001 -- never raises
+        try:
+            traceback.print_exc()
+        except Exception:                                   # noqa: BLE001
+            pass
+
+
+def set_closing(on, *, notifier=None):
+    """GUI thread. On: the close is being accepted -- notices are dropped at
+    delivery and an open one is closed (it has no parent and would outlive
+    the window, holding the application open). Off (a refused close):
+    notices as before. Never raises."""
+    try:
+        _state["closing"] = bool(on)
+        notifier = notifier if notifier is not None else _state["notifier"]
+        if on and notifier is not None:
+            notifier.dismiss()
+    except Exception:                                       # noqa: BLE001 -- never raises
+        traceback.print_exc()
 
 
 def install(app):

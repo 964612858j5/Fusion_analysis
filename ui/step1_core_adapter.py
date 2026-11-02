@@ -45,11 +45,22 @@ def _core_errors():
 CORE_ERRORS = _core_errors()
 
 
+#: unknown backend values already warned about (one warning each, block A6)
+_WARNED_BACKENDS = set()
+
+
 def requested_backend() -> str:
-    """What the user or a test asked for; unset means "rust" (the default),
-    unknown values mean "python"."""
+    """What the user or a test asked for; unset (or empty) means "rust" (the
+    default), "python" the Python GPU path; any other value means "rust",
+    with one printed warning (block A6: it used to mean "python" silently)."""
     value = os.environ.get(BACKEND_ENV, BACKEND_RUST).strip().lower()
-    return value if value in (BACKEND_PYTHON, BACKEND_RUST) else BACKEND_PYTHON
+    if value in (BACKEND_PYTHON, BACKEND_RUST):
+        return value
+    if value and value not in _WARNED_BACKENDS:
+        _WARNED_BACKENDS.add(value)
+        print(f"[backend] {BACKEND_ENV}={value!r} is not {BACKEND_RUST!r} or "
+              f"{BACKEND_PYTHON!r}; using {BACKEND_RUST!r}", flush=True)
+    return BACKEND_RUST
 
 
 #: the core's interface number this code is written for (docs/v17_install_plan.md

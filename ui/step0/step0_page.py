@@ -82,7 +82,7 @@ from ...utils.roi_project import (
     mark_roi_step,
     roi_shape_from_bbox,
 )
-from ...utils import workspace_session
+from ...utils import error_hook, workspace_session
 from ...utils import run_store
 # Step0 keeps the shared ChannelWorkbench as an internal lifecycle/config owner.
 # Its Intensity inspector is exposed from Background Correction; the former
@@ -11847,7 +11847,7 @@ class Step0Page(QWidget):
                   if isinstance(p, dict)}
         return params, set(str(c) for c in (record.get("user_adjusted") or ()))
 
-    def rm_save_shared_windows(self):
+    def rm_save_shared_windows(self, failures=None):
         """Write the SHARED table -- every window, automatic or typed -- as
         the session's `drafts.shared_windows`, bound to the correct run.
 
@@ -11861,7 +11861,13 @@ class Step0Page(QWidget):
             return False
         if self._shared_pending is not None:
             return False        # not applied yet: the session still holds it
-        records = self._records(SHARED_TABLE)
+        try:
+            records = self._records(SHARED_TABLE)
+        except Exception as exc:                            # noqa: BLE001 -- never raises
+            error_hook.report(exc, "shared Intensity not saved")
+            if failures is not None:
+                failures.append("the shared Intensity windows")
+            return False
         if not records["params"]:
             return False
         try:
@@ -11872,8 +11878,10 @@ class Step0Page(QWidget):
                 "params": window_tables.export(records),
                 "user_adjusted": sorted(records["user_adjusted"])})
             run_store.save_session(ws, sess)
-        except (OSError, ValueError) as exc:
-            print(f"[Step0] shared Intensity not saved ({exc})")
+        except Exception as exc:                            # noqa: BLE001 -- never raises
+            error_hook.report(exc, "shared Intensity not saved")
+            if failures is not None:
+                failures.append("the shared Intensity windows")
             return False
         return True
 
@@ -12238,24 +12246,62 @@ class Step0Page(QWidget):
             },
             "algorithm": {"bg_correction_algo_version": BG_CORRECTION_ALGO_VERSION},
         }
-        slide_id = ""
+        # The slide id (docs/v17_small_review_items_plan.md §4.3). An
+        # unreadable manifest only loses its cache -- the id is still computed
+        # from the slide -- and is reported; the id is UNAVAILABLE only when
+        # the slide itself cannot be identified. Either way the run is
+        # published (user 2026-11-02: report, do not refuse).
+        slide_id, unavailable = "", ""
+        project = (self._roi_context or {}).get("project_dir") or ""
+        manifest_path = os.path.join(project, "project_manifest.json")
+        manifest = workspace_session._load(manifest_path)
+        if not isinstance(manifest, dict):
+            if os.path.isfile(manifest_path):
+                error_hook.report(ValueError(f"{manifest_path} could not be read"),
+                                  "Step0 Save: project manifest")
+            manifest = {}
         try:
-            project = (self._roi_context or {}).get("project_dir") or ""
-            manifest = workspace_session._load(
-                os.path.join(project, "project_manifest.json")) or {}
             slide_id = workspace_session.slide_id_of(spec["raw_path"],
                                                      manifest.get("sources")) or ""
+            if not slide_id:
+                unavailable = (f"the slide {spec['raw_path']} could not be identified "
+                               f"(missing or unreadable)")
         except Exception as exc:                            # noqa: BLE001
-            print(f"[Step0] slide id not recorded ({type(exc).__name__}: {exc})")
+            unavailable = f"{type(exc).__name__}: {exc}"
+            error_hook.report(exc, "Step0 Save: slide identity")
         # (acceptance 2026-10-04: the frozen geometry names its ROI folders
         # project-relative, like every other record)
         params["geometry"] = run_store.to_records(params["geometry"],
                                                   run_store.project_dir_of(run_dir))
         run_store.write_params(run_dir, params)
-        run_store.write_inputs(run_dir, None, slide_id=slide_id)
+        run_store.write_inputs(run_dir, None, slide_id=slide_id,
+                               slide_id_unavailable=unavailable)
         run_store.publish(run_dir)
         self._rm_pending_run = None
         print(f"[Step0] correct run published: {os.path.basename(run_dir)} ({summary})")
+        if unavailable:
+            print(f"[Step0] slide id not recorded: {unavailable}")
+            # after the Save has finished, not inside it
+            QtCore.QTimer.singleShot(0, lambda why=unavailable, run=os.path.basename(run_dir):
+                                     self._warn_slide_id_unavailable(run, why))
+
+    def _warn_slide_id_unavailable(self, run, why):
+        """Non-modal (a modal box here would hold a nested event loop inside
+        whatever runs next), and not for a page already gone."""
+        from PyQt5 import sip
+        if sip.isdeleted(self):
+            return
+        box = QtWidgets.QMessageBox(
+            QtWidgets.QMessageBox.Warning, "Step0 — slide not identified",
+            f"The correction was saved ({run}), but the slide it belongs to "
+            f"could not be identified:\n\n{why}\n\n"
+            "Opening this project later may not find the right slide. To repair: "
+            "make the slide file (and the project's project_manifest.json) "
+            "available at their original place again, then Save Step0 once more.",
+            QtWidgets.QMessageBox.Ok, self)
+        box.setAttribute(Qt.WA_DeleteOnClose)
+        box.setWindowModality(Qt.NonModal)
+        box.show()
 
     def _rm_step0_draft(self, ws):
         """The workspace's Step0 draft (session.json drafts.step0) when it was
@@ -12273,26 +12319,29 @@ class Step0Page(QWidget):
         print("[Workspace] the unsaved Step0 draft is restored")
         return draft
 
-    def rm_save_draft(self):
+    def rm_save_draft(self, failures=None):
         """Write what Step0 shows -- decisions, parameters, Intensity -- as
         the workspace's Step0 draft (block RM §6). Called when the window
-        changes step or closes; a Save clears it."""
+        changes step or closes; a Save clears it. Never raises: a failure is
+        reported and named in `failures` (a list, when given)."""
         ws = (self._roi_context or {}).get("roi_dir")
         if not ws or not os.path.isfile(os.path.join(ws, "roi_manifest.json")):
             return False
         try:
             config = self._clean_correction_config(self._build_config())
-        except Exception as exc:                            # noqa: BLE001
-            print(f"[Step0] draft not saved ({exc})")
+            # STEP0's own windows, whatever the Intensity window is showing.
+            intensity = window_tables.export(self._records(STEP0_TABLE),
+                                             keys=self._INTENSITY_KEYS) or None
+            sess = run_store.load_session(ws)
+            sess = run_store.put_draft(sess, "step0", {
+                "correction_config": config, "intensity": intensity,
+                "edited_against": sess.get("editing")})
+            run_store.save_session(ws, sess)
+        except Exception as exc:                            # noqa: BLE001 -- never raises
+            error_hook.report(exc, "Step0 draft not saved")
+            if failures is not None:
+                failures.append("the Step0 draft")
             return False
-        # STEP0's own windows, whatever the Intensity window is showing.
-        intensity = window_tables.export(self._records(STEP0_TABLE),
-                                         keys=self._INTENSITY_KEYS) or None
-        sess = run_store.load_session(ws)
-        sess = run_store.put_draft(sess, "step0", {
-            "correction_config": config, "intensity": intensity,
-            "edited_against": sess.get("editing")})
-        run_store.save_session(ws, sess)
         return True
 
     def _rm_note_editing(self, manifest):
@@ -12323,6 +12372,11 @@ class Step0Page(QWidget):
             run_store.save_session(ws, sess)
         except (OSError, ValueError) as exc:
             print(f"[Step0] session.json not updated ({exc})")
+            QtWidgets.QMessageBox.warning(
+                self, "Step0 — session not updated",
+                f"The correction was saved, but the workspace's session.json "
+                f"could not be updated:\n\n{exc}\n\nThe next start may not "
+                "open this correction as the one being edited.")
         self._last_handoff_run = self._current_correct_run()
         return changed
 

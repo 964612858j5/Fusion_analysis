@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -62,6 +62,7 @@ class RegionsInput:
     pixel_um: Optional[tuple]   # (y, x) micrometres per pixel, or None
     channel_names: List[str] = field(default_factory=list)
     areas_px: Dict[str, int] = field(default_factory=dict)   # position_key -> core area
+    pixel_size_unknown: str = ""  # why pixel_um is None ("" when known)
 
     @property
     def tma(self) -> bool:
@@ -91,6 +92,12 @@ def _project_dir(run_dir):
 def _pixel_size(job) -> Optional[tuple]:
     """The slide's physical pixel size from the project's recorded
     description of it (opened only when that record is missing)."""
+    return _pixel_size_and_why(job)[0]
+
+
+def _pixel_size_and_why(job) -> Tuple[Optional[tuple], str]:
+    """(`_pixel_size`, why it is None): the reason goes into the provenance
+    instead of a silent None."""
     try:
         from ..project_identity import describe_slide
         project = _project_dir(job.run_dir)
@@ -101,10 +108,10 @@ def _pixel_size(job) -> Optional[tuple]:
         _sid, desc = describe_slide(job.slide, manifest.get("sources"))
         phys = desc.get("physical_size_yx_um")
         if phys and float(phys[0]) > 0 and float(phys[1]) > 0:
-            return float(phys[0]), float(phys[1])
-    except Exception:                                       # noqa: BLE001
-        pass
-    return None
+            return (float(phys[0]), float(phys[1])), ""
+        return None, "the slide records no physical pixel size"
+    except Exception as exc:                                # noqa: BLE001
+        return None, f"{type(exc).__name__}: {exc}"
 
 
 def outline_area_px(polygons, shape) -> int:
@@ -200,11 +207,15 @@ def load_regions(job) -> Optional[RegionsInput]:
         if unknown:
             raise RegionsInputError(f"exclusion {uid} names channels the slide does not have: {unknown}")
         masks[k, [names.index(c) for c in chans]] = True
+    pixel_um = _pixel_size(job)
+    pixel_unknown = "" if pixel_um is not None else (_pixel_size_and_why(job)[1]
+                                                    or "unknown")
     return RegionsInput(record=dict(rec), snapshot=snap, snapshot_path=snap_path,
                         facts_path=facts_path, core=core, core_fraction=arrays["core_fraction"],
                         flags=arrays["flags"], meas_bits=bits, uids=uids, channel_masks=masks,
-                        pixel_um=_pixel_size(job), channel_names=names,
-                        areas_px=core_areas(snap) if snap.get("mode") == "tma" else {})
+                        pixel_um=pixel_um, channel_names=names,
+                        areas_px=core_areas(snap) if snap.get("mode") == "tma" else {},
+                        pixel_size_unknown=pixel_unknown)
 
 
 def _rows(result) -> np.ndarray:
@@ -372,4 +383,6 @@ def provenance_summary(rin, qc_stats) -> Dict:
                 for k, uid in enumerate(rin.uids)],
             "measurement_rule": QC_RULE, "measurement_qc": dict(qc_stats),
             "dropped_by_step2": regions_dropped(rin),
-            "pixel_size_um": u["pixel_size_um"]}
+            "pixel_size_um": u["pixel_size_um"],
+            **({"pixel_size_unknown": rin.pixel_size_unknown}
+               if rin.pixel_size_unknown else {})}

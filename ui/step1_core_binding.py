@@ -21,7 +21,7 @@ from PyQt5 import QtCore
 from ..core import resource_tiers as _tiers
 from . import step1_core_adapter as adapter
 from .step1_core_adapter import CORE_ERRORS
-from .step1_gpu_layer import MODE_FUSION, MODE_OVERLAY, sanitize_roi_polygon
+from .step1_display_types import MODE_FUSION, MODE_OVERLAY, sanitize_roi_polygon
 
 #: the Python binding's timings (step1_gpu_binding: INPUT_HOT_MS,
 #: HOT_UPLOAD_BUDGET_MS, GROWTH_QUIET_MS) and the whole-frame budget

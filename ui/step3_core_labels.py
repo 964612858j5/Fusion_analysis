@@ -16,7 +16,7 @@ from PyQt5 import QtCore
 from ..core import step3_masks
 from ..utils import closing_threads
 from .step1_core_adapter import CORE_ERRORS
-from .step1_gpu_layer import LABEL_FILL, LABEL_TEXTURE_BYTES, label_radius
+from .step1_display_types import LABEL_FILL, LABEL_TEXTURE_BYTES, label_radius
 from .step3_core_label_source import CoreLabelsRefused, check, describe  # noqa: F401 -- re-exported
 from .step3_label_binding import MaskStyle, SlotStamps, Step3LabelBinding, destination
 

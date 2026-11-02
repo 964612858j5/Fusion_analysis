@@ -40,6 +40,7 @@ project state.
   Rust fusion job. Small single-purpose modules; `src/py/` is a thin binding
   layer. `ui/step1_core_adapter.py` is the one compatibility check
   (`CORE_API`, minimum version) every user of the core asks.
+* **Three viewer paths** — the Rust core (default), the Python GPU path (`ui/step1_gpu_layer.py`, `ui/step1_gpu_binding.py`: the fallback for what the core refuses, and the montage's picture) and the CPU composer; the display types they share are in `ui/step1_display_types.py`; removing the Python GPU path waits for a Rust montage.
 
 ## Data on disk: runs (block RM)
 

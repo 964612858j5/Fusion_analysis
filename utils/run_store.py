@@ -163,11 +163,14 @@ def read_params(run_dir) -> Dict:
     return data if isinstance(data, dict) else {}
 
 
-def write_inputs(run_dir, upstream=None, slide_id=""):
+def write_inputs(run_dir, upstream=None, slide_id="", slide_id_unavailable=""):
     """``inputs.json``: the one pixel upstream, as a project-relative path,
-    or ``raw`` plus the slide id for a correct run."""
+    or ``raw`` plus the slide id for a correct run (and, when the slide could
+    not be identified, why: ``slide_id_unavailable``)."""
     if upstream is None:
         payload = {"upstream": RAW, "slide_id": str(slide_id or "")}
+        if slide_id_unavailable:
+            payload["slide_id_unavailable"] = str(slide_id_unavailable)
     else:
         project = project_dir_of(run_dir)
         if project is None:

@@ -44,6 +44,8 @@ from PyQt5 import QtCore
 from ..viewer.tile_types import RawKey, TileAddress, TileRequest
 from ..utils import perf_trace
 from ..utils import tile_trace
+#: moved to `step1_display_types` (block A6); imported back, the same object
+from .step1_display_types import BindingBudgets  # noqa: F401 -- re-exported
 from .step1_gpu_layer import (
     ARRAY_TILE,
     MODE_FUSION,
@@ -129,22 +131,6 @@ class _Plan:
     @property
     def complete(self) -> bool:
         return not self.failed and set(self.planes) == self.expected
-
-
-@dataclass(frozen=True)
-class BindingBudgets:
-    """Explicit G2 retention/request limits; no production default is implied."""
-
-    max_coarse_tiles_per_channel: int
-    max_coarse_plane_bytes_per_channel: int
-    max_fine_tiles_per_viewport: int
-    max_fine_plane_bytes_per_channel: int
-    motion_interval_ms: int = 33
-    #: Block A9 S2b: the GPU layer's total raw-texture budget. When set,
-    #: every plan is ADMITTED against it (complete coarse of every active
-    #: channel + the admitted target + carried stand-ins), so a submission
-    #: never exceeds it. None keeps the per-channel limits alone.
-    max_raw_texture_bytes: Optional[int] = None
 
 
 class _LazyKeys(collections.abc.Mapping):

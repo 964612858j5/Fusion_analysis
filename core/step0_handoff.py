@@ -399,8 +399,9 @@ def write_handoff(spec, *, superseded=None, tag="0", publication_lock=None):
     if roi_id and project_dir:
         try:
             mark_roi_step(project_dir, roi_id, "step0", "done")
-        except Exception as e:
-            print(f"[Step0] failed to update ROI index: {e}")
+        except Exception as e:                              # noqa: BLE001
+            from ..utils import error_hook       # lazily: core imports no Qt
+            error_hook.report(e, "Step0: the ROI index not updated")
             # The manifest above is the authoritative handoff commit marker.
             # ROI index bookkeeping is auxiliary; a stale index must not turn
             # a durable handoff into a reported save failure.

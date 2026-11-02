@@ -2,6 +2,7 @@
 
 mod config;
 pub(crate) mod corrected;
+mod csv;
 mod fuse;
 mod fuse_job;
 mod gil;
@@ -41,6 +42,7 @@ fn fusion_viewer_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     gil::register(m)?;
     testing::register(m)?;
     fuse::register(m)?;
+    csv::register(m)?;
     Ok(())
 }
 

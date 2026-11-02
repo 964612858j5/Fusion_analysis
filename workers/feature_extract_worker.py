@@ -40,6 +40,22 @@ INTEGER_COLUMNS = qe.INTEGER_COLUMNS
 EMPTY_IDS_LISTED_UP_TO = 1000
 CSV_BLOCK_ROWS = 65536
 H5AD_BLOCK_ROWS = 65536
+#: threads of the Rust CSV formatter (it gains little beyond ~16) and the
+#: rows it formats at once (a part of a sink block: their text is in memory)
+CSV_THREADS = max(1, min(16, os.cpu_count() or 1))
+CSV_RUST_BLOCK_ROWS = 16384
+
+
+def _csv_formatter():
+    """The viewer core's `format_csv_rows` (plan docs/v17_step4_x_stream_plan.md
+    §1 B), or None: an older or missing core keeps NumPy's `savetxt`, the
+    same characters, slower."""
+    try:
+        import fusion_viewer_core
+        return getattr(fusion_viewer_core, "format_csv_rows", None)
+    except Exception as exc:                   # noqa: BLE001 -- any import failure: savetxt
+        print(f"[Step4] CSV written by NumPy (viewer core unavailable: {exc})")
+        return None
 
 
 def output_base(file_prefix=None):
@@ -126,8 +142,15 @@ def _write_csv(path, result, regions_frame=None):
     fmt = ["%d" if c in INTEGER_COLUMNS else "%.17g" for c in names]
     n = int(result.ids.size)
     extra = _region_csv_columns(regions_frame) if regions_frame is not None else []
+    rust = _csv_formatter()
+    integer = [c in INTEGER_COLUMNS for c in names]
     with open(path, "w", encoding="utf-8") as f:
         f.write(",".join([names[0]] + [e[0] for e in extra] + names[1:]) + "\n")
+        if rust is not None:
+            f.flush()                          # the header, before the bytes below
+            _write_csv_rows_rust(f.buffer, result, n, len(names), integer, extra,
+                                 regions_frame, rust)
+            return
         for r0 in range(0, n, CSV_BLOCK_ROWS):
             r1 = min(n, r0 + CSV_BLOCK_ROWS)
             block = result.block(r0, r1)
@@ -145,11 +168,55 @@ def _write_csv(path, result, regions_frame=None):
                 f.write(",".join(cells) + "\n")
 
 
+def _write_rows(group, name, n, c, dtype, read):
+    """`group[name]`: an (n, c) `dtype` array filled a row block at a time
+    from `read(r0, r1)` -- the on-disk layout anndata reads (encoding-type
+    array, version 0.2.0). A zero-row array has no chunks (F4-4)."""
+    ds = group.create_dataset(name, shape=(n, c), dtype=dtype,
+                              chunks=(max(1, min(n, H5AD_BLOCK_ROWS)), max(1, c)) if n else None)
+    ds.attrs["encoding-type"] = "array"
+    ds.attrs["encoding-version"] = "0.2.0"
+    for r0 in range(0, n, H5AD_BLOCK_ROWS):
+        r1 = min(n, r0 + H5AD_BLOCK_ROWS)
+        ds[r0:r1] = read(r0, r1).astype(dtype)
+
+
+def _write_csv_rows_rust(out, result, n, cols, integer, extra, regions_frame, rust):
+    """The rows as savetxt would write them (`_write_csv`'s NumPy branch),
+    formatted by the viewer core on `CSV_THREADS` threads. The sink is read
+    by `CSV_BLOCK_ROWS` (its chunk rows); each block is formatted and
+    written in parts of `CSV_RUST_BLOCK_ROWS` by one helper thread while the
+    next block is read -- at most two blocks and one part's text in memory.
+    Line ends as the text file would write "\n" (`os.linesep`)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def emit(block, texts):
+        out.write(rust(np.ascontiguousarray(block, np.float64).tobytes(), cols, integer, texts,
+                       CSV_THREADS, os.linesep))
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="step4-csv") as pool:
+        pending = None
+        for r0 in range(0, n, CSV_BLOCK_ROWS):            # the sink's own chunk rows
+            r1 = min(n, r0 + CSV_BLOCK_ROWS)
+            block = result.block(r0, r1)
+            # every "\n" of the text as the text file would write it (a
+            # Regions field may hold a line break), record ends included
+            texts = [[str(t).replace("\n", os.linesep) for t in fn(regions_frame[name].to_numpy()[r0:r1])]
+                     for name, fn in extra]
+            for s0 in range(0, r1 - r0, CSV_RUST_BLOCK_ROWS):
+                s1 = min(r1 - r0, s0 + CSV_RUST_BLOCK_ROWS)
+                if pending is not None:
+                    pending.result()           # its error, if any, is this write's
+                pending = pool.submit(emit, block[s0:s1], [t[s0:s1] for t in texts])
+            del block, texts
+        if pending is not None:
+            pending.result()
+
+
 def _write_h5ad(path, job, result, prov, regions=None):
-    """ONE AnnData: a skeleton (X, obs, var, uns) written by anndata, then
-    every layer appended with h5py a row block at a time from the sink (the
-    on-disk layout anndata reads: encoding-type array, version 0.2.0) -- no
-    step holds all layers in memory."""
+    """ONE AnnData: a skeleton (obs, var, uns) written by anndata, then X and
+    every layer appended with h5py a row block at a time from the sink
+    (`_write_rows`) -- no step holds X or the layers whole in memory
+    (docs/v17_step4_x_stream_plan.md)."""
     import anndata as ad
     import h5py
     import pandas as pd
@@ -172,7 +239,7 @@ def _write_h5ad(path, job, result, prov, regions=None):
                                 for c in job.channels]
     var["correction_param"] = [str((c.identity or {}).get("correction_param_value") or "")
                                for c in job.channels]
-    adata = ad.AnnData(X=result.sink.read(result.x_layer).astype(np.float32), obs=obs, var=var)
+    adata = ad.AnnData(X=None, obs=obs, var=var)       # X: appended below, by row blocks
     adata.uns["primary_object"] = result.regions[0]
     adata.uns["primary_compartment"] = result.regions[0]
     adata.uns["X_statistic"] = result.stats[0]
@@ -197,19 +264,15 @@ def _write_h5ad(path, job, result, prov, regions=None):
     del adata
     n, c = int(result.ids.size), len(job.channels)
     with h5py.File(path, "a") as f:
+        _write_rows(f, "X", n, c, np.float32,
+                    lambda r0, r1: result.sink.read(result.x_layer, r0, r1))
         group = f.require_group("layers")
         written = [(name, "f4") for name in result.layers]
         if regions is not None:
             written.append((qa.QC_LAYER, "u1"))          # F4-4: uint8 codes, uns measurement_qc_codes
         for name, dtype in written:
-            # a zero-object result has no rows to chunk (F4-4)
-            ds = group.create_dataset(name, shape=(n, c), dtype=dtype,
-                                      chunks=(max(1, min(n, H5AD_BLOCK_ROWS)), max(1, c)) if n else None)
-            ds.attrs["encoding-type"] = "array"
-            ds.attrs["encoding-version"] = "0.2.0"
-            for r0 in range(0, n, H5AD_BLOCK_ROWS):
-                r1 = min(n, r0 + H5AD_BLOCK_ROWS)
-                ds[r0:r1] = result.sink.read(name, r0, r1).astype(dtype)
+            _write_rows(group, name, n, c, dtype,
+                        lambda r0, r1, name=name: result.sink.read(name, r0, r1))
         # block S4-3: distribution statistics of the chosen markers, one
         # DataFrame per region x statistic (columns = the markers), written
         # one at a time

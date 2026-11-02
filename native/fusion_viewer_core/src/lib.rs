@@ -12,6 +12,7 @@ pub mod cancel;
 pub mod chunk_cache;
 pub mod clock;
 pub mod corrected;
+pub mod csv_text;
 pub mod decode;
 pub mod error;
 pub mod fileid;

@@ -77,8 +77,8 @@ def test_an_absent_prefix_is_created_with_its_owner_file_first(tmp_path):
     r = _ensure_env(tmp_path)
     assert r.returncode == 0, r.stderr
     prefix = tmp_path / "envs" / "fusion_mesmer-abcdef12"
-    assert (tmp_path / "envs" / "fusion_mesmer-abcdef12.owner").read_text().startswith("created by")
-    calls = (tmp_path / "calls").read_text()
+    assert (tmp_path / "envs" / "fusion_mesmer-abcdef12.owner").read_text(encoding="utf-8").startswith("created by")
+    calls = (tmp_path / "calls").read_text(encoding="utf-8")
     assert "create -y -q -p " + str(prefix) in calls and "pip install -q --no-deps" in calls
     assert "pip check" in calls
     assert (prefix / ".block01_env_ok").exists()
@@ -92,7 +92,7 @@ def test_an_interrupted_prefix_is_removed_and_redone(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "stopped half-way" in r.stdout
     assert not (prefix / "half").exists()
-    assert "create -y -q" in (tmp_path / "calls").read_text()
+    assert "create -y -q" in (tmp_path / "calls").read_text(encoding="utf-8")
 
 
 def _tree(path):
@@ -287,7 +287,7 @@ ORIGINAL_MODELS=(cellpose_cpsam)
 ensure_models'''
     r = _bash(INSTALL, body)
     assert r.returncode == 0, r.stderr
-    assert (dest / "README").read_text() == "mine"
+    assert (dest / "README").read_text(encoding="utf-8") == "mine"
     assert not (dest / "cpsam").is_symlink() and (dest / "cpsam").read_bytes() == b"weights"
     real.unlink()                                          # the install does not depend on it
     assert (dest / "cpsam").read_bytes() == b"weights"
@@ -350,7 +350,7 @@ main --root "{tmp_path}"'''
 
 
 def test_a_manual_release_run_never_publishes():
-    wf = (REPO / ".github" / "workflows" / "fusion_viewer_core_release.yml").read_text()
+    wf = (REPO / ".github" / "workflows" / "fusion_viewer_core_release.yml").read_text(encoding="utf-8")
     assert "if: github.event_name == 'push' && github.ref_type == 'tag'" in wf
 
 

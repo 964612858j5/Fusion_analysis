@@ -84,7 +84,7 @@ def test_the_exit_wait_skips_the_readers_of_a_refused_core(monkeypatch):
 def test_main_passes_the_check_to_the_exit_wait_and_utils_imports_no_ui():
     import pathlib
     root = pathlib.Path(adapter.__file__).resolve().parent.parent
-    assert "rust_ok=lambda: not core_unavailable_reason()" in (root / "main.py").read_text()
+    assert "rust_ok=lambda: not core_unavailable_reason()" in (root / "main.py").read_text(encoding="utf-8")
     for d in ("core", "workers", "viewer", "utils", "sources", "seg_runner"):
         for f in (root / d).rglob("*.py"):
             text = f.read_text(encoding="utf-8", errors="replace")

@@ -129,6 +129,7 @@ def test_a_failing_write_leaves_no_half_output(tmp_path, monkeypatch, fail):
         raise OSError(28, "No space left on device")
     if fail == "csv":
         monkeypatch.setattr(few.np, "savetxt", boom)
+        monkeypatch.setattr(few, "_csv_formatter", lambda: boom)   # the Rust text too
     elif fail == "h5ad":
         import h5py
         monkeypatch.setattr(h5py.Group, "create_dataset", boom)

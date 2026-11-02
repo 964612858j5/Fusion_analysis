@@ -10,9 +10,13 @@ is fixed.
   the window has closed; no data is affected.
 * Loading a slide freezes the window for about 4.8 s (deferred by the user).
 * Step0: the wheel zoom has no upper limit.
-* Step0 compare: every panel opens and reads the slide on its own (up to
-  48 reader threads on one file); slow on spinning disks. Planned: one tile
-  cache per file and an HDD read profile.
+* Step0 compare on a spinning disk: a channel switch takes ~1.1 s cold
+  (SSD ~0.65 s); the cost is seeks (~90 scattered blocks per switch), not
+  read-ahead (measured, `docs/v17_step0_compare_reads_plan.md` §6). Set
+  aside by the user.
+* Step4 memory at large cell counts: the obs table, the per-label geometry
+  (~152 B per label) and finalization temporaries are held whole (X and the
+  CSV are streamed). See `docs/step4_20m_laptop_plan.md` (draft).
 * Step1: a drag occasionally stalls.
 * Step3: drawing a mask costs about 50 ms per frame.
 * Step1 / 2 / 3 tissue snapshots drop channels whose shape does not match.

@@ -402,7 +402,10 @@ row, and the duplicate Tissue Preview button in the step bar.
   values only)` (Whole cell -- `Nucleus` for a nuclei-only result -- always
   on and greyed; Nucleus, Cytoplasm), `Features` (Expression always on and
   greyed; Morphology, checked; Nuclear summary), `Outputs` (h5ad always on
-  and greyed; CSV, unchecked -- written only when checked). Nucleus,
+  and greyed; CSV, unchecked -- written only when checked; SpatialData,
+  unchecked -- ticking it without a usable Python that has spatialdata opens
+  a file chooser for one, remembered; a cancelled or unusable choice puts the
+  tick back off; docs/v17_spatialdata_export_plan.md). Nucleus,
   Cytoplasm and Nuclear summary are greyed with the reason in the tooltip
   when the result has no nuclei beside its cells, and checked by default when
   it has; the user's choice is kept while the same result stays chosen. An
@@ -411,7 +414,7 @@ row, and the duplicate Tissue Preview button in the step bar.
   block the run). No Median / 90th percentile. `Output`: the folder (default
   `<workspace>/step4/quantification_runs/<run>/<region>/`, editable) and the
   prefix; one line names the output files (h5ad, `_provenance.json`, the CSV
-  when checked) and says `X = cell mean` (the primary region and the first
+  and `.spatialdata.zarr` when checked) and says `X = cell mean` (the primary region and the first
   checked statistic). Progress, `← Back to Step 3`, `Batch...`, `⏹ Stop`,
   `▶ Extract Features` as before. The `Batch...` dialog has `Also write CSV`
   next to its statistics, unchecked.

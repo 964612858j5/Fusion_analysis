@@ -23,6 +23,7 @@ import datetime
 import json
 import os
 import shutil
+import subprocess
 import time
 import traceback
 
@@ -287,6 +288,112 @@ def _write_h5ad(path, job, result, prov, regions=None):
                     del frame, values
 
 
+class SpatialDataExportError(RuntimeError):
+    """The export script failed; its reason is for the user."""
+
+
+SPATIALDATA_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                  "scripts", "export_spatialdata.py")
+
+
+def _spatialdata_shapes(rin):
+    """The Regions the run applied, for the export's `regions` shapes: every
+    core of the snapshot (`display_cores`: each piece its own ring, never the
+    bridged analysis outline) and every exclusion (rings split back with
+    `split_keyhole`). Polygons are [x, y] slide pixels."""
+    if rin is None:
+        return []
+    from ..core.regions.display import split_keyhole
+    out = []
+    for c in rin.snapshot.get("display_cores") or []:
+        out.append({"kind": "core", "uid": str(c.get("uid", "")), "position_key": c.get("position_key") or "",
+                    "name": c.get("name") or "", "run": bool(c.get("run")), "rings": c.get("polygons") or []})
+    for e in rin.snapshot.get("exclusions") or []:
+        if len(e.get("polygon") or []) >= 3:
+            out.append({"kind": "exclusion", "uid": str(e.get("uid", "")), "position_key": "",
+                        "name": str(e.get("type", "")), "run": not e.get("seg_invalid", False),
+                        "rings": split_keyhole(e["polygon"])})
+    return out
+
+
+def _export_spatialdata(python, h5_partial, out_partial, job, rin, should_stop, job_path):
+    """Run `scripts/export_spatialdata.py` under `python` (another
+    environment's, docs/v17_spatialdata_export_plan.md) on the finished
+    `.partial` h5ad. Stop terminates the child and waits for it. Returns the
+    script's JSON record; raises QuantStopped or SpatialDataExportError."""
+    nuclei_only = job.compartment == qs.NUCLEUS
+    primary = {"name": "nucleus_labels" if nuclei_only else "cell_labels", "path": job.label_path,
+               "instance_key": "nucleus_id" if nuclei_only else "cell_id"}
+    secondary = ([{"name": "nucleus_labels", "path": job.nucleus_path}] if job.has_nuclei else [])
+    pixel_um = rin.pixel_um if rin is not None else qa._pixel_size(job)
+    labels = {"cell": job.label_path} if not nuclei_only else {"nucleus": job.label_path}
+    if job.has_nuclei:
+        labels["nucleus"] = job.nucleus_path
+    spec = {"h5ad": h5_partial, "out": out_partial, "primary": primary, "secondary": secondary,
+            "bbox": [int(v) for v in job.bbox], "pixel_um": list(pixel_um) if pixel_um else None,
+            "shapes": _spatialdata_shapes(rin), "min_side": 256,
+            "uns": {"ome_tiff": job.slide, "source_labels": labels,
+                    "source_images": _source_images(job)}}
+    with open(job_path, "w", encoding="utf-8") as f:
+        json.dump(spec, f)
+    proc = subprocess.Popen([python, "-I", SPATIALDATA_SCRIPT, job_path],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        while True:
+            try:
+                out, err = proc.communicate(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                if should_stop is not None and should_stop():
+                    raise qe.QuantStopped()
+    except BaseException:
+        proc.terminate()                         # Stop or an error here: the child goes first
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        raise
+    record = {}
+    for line in reversed(out.strip().splitlines()):
+        try:
+            record = json.loads(line)
+            break
+        except ValueError:
+            continue
+    if proc.returncode != 0 or not record.get("ok"):
+        why = record.get("error") or (err.strip().splitlines() or ["no output"])[-1]
+        raise SpatialDataExportError(f"the SpatialData export failed: {why}")
+    return record
+
+
+def _source_images(job):
+    """`uns["source_images"]` of the export (plan §1): the slide (path and
+    file identity) and, per channel, what Step4 measured -- the slide or
+    Step0's corrected product (path, array, its recorded identity)."""
+    try:
+        st = os.stat(job.slide)
+        slide = {"path": job.slide, "size": int(st.st_size), "mtime_ns": int(st.st_mtime_ns)}
+    except OSError:
+        slide = {"path": job.slide}
+    # keyed by position ("0", "1", ...), the name a value: a channel name
+    # may hold "/", which zarr / AnnData read as a path separator
+    return {"slide": slide,
+            "channels": {str(k): {"name": c.name, "slide_index": int(c.index), "source": c.kind,
+                                  "path": c.path, "array": c.array or "",
+                                  "identity_json": json.dumps(c.identity or {}, sort_keys=True,
+                                                              default=str)}
+                         for k, c in enumerate(job.channels)}}
+
+
+def _remove(path):
+    """A file or a directory (the SpatialData zarr)."""
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path, ignore_errors=True)
+    elif os.path.lexists(path):
+        os.remove(path)
+
+
 def _provenance(job, result, stats, reader, settings, timing, outputs, seconds, features):
     empty = [int(v) for v in result.empty_label_ids]
     prov = {
@@ -347,9 +454,10 @@ def _provenance(job, result, stats, reader, settings, timing, outputs, seconds, 
 def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions=None,
                    features=("morphology",), write_csv=False, file_prefix=None,
                    open_slide=None, settings=None, progress=None, should_stop=None,
-                   distribution=None, markers=None):
+                   distribution=None, markers=None, spatialdata=False, spatialdata_python=None):
     """Quantify one region and write its outputs: {"h5ad", "csv" (or None),
-    "provenance"}. Raises QuantSourceError (nothing quantified),
+    "spatialdata" (or None), "provenance"}. `spatialdata`: also a SpatialData
+    zarr, written by `spatialdata_python` (else `utils.spatialdata_python`). Raises QuantSourceError (nothing quantified),
     QuantStopped, or any I/O error -- never leaving a `*.partial`, the sink or
     half an output behind."""
     t_start = time.perf_counter()
@@ -373,6 +481,16 @@ def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions
         raise ValueError(f"not a channel of this slide: {unknown}")
     if "nuclear_summary" in features and not job.has_nuclei:
         raise ValueError("this run has no nuclei beside its cells: no nuclear summary")
+    sd_python, sd_version = None, None
+    if spatialdata:                            # refused before any output, like the rest
+        from ..utils import spatialdata_python as sdp
+        if spatialdata_python:
+            ok, info = sdp.check(spatialdata_python)
+            sd_python, sd_version = (spatialdata_python, info) if ok else (None, info)
+        else:
+            sd_python, sd_version = sdp.find()
+        if sd_python is None:
+            raise ValueError(f"no Python with spatialdata for the SpatialData export ({sd_version})")
     base = output_base(file_prefix)
     quant_run = ""
     if run_store.kind_of(job.run_dir) == "segment" and run_store.is_done(job.run_dir):
@@ -393,8 +511,10 @@ def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions
     sink_dir = os.path.join(output_dir, f".{base}_features.partial")
     h5_path = os.path.join(output_dir, f"{base}.h5ad")
     csv_path = os.path.join(output_dir, f"{base}.csv") if write_csv else None
+    sd_path = os.path.join(output_dir, f"{base}.spatialdata.zarr") if spatialdata else None
+    sd_job = os.path.join(output_dir, f".{base}_spatialdata_job.json")
     prov_path = os.path.join(output_dir, f"{base}_provenance.json")
-    finals = [p for p in (h5_path, csv_path, prov_path) if p]
+    finals = [p for p in (h5_path, csv_path, sd_path, prov_path) if p]
     partials = [p + ".partial" for p in finals]
     renamed = []
     ok = False
@@ -415,7 +535,8 @@ def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions
             qc_stats = qa.apply_measurement_qc(result, rin, should_stop=should_stop)
             regions_out = (rin, qa.obs_frame(result, rin, job.run_id))
         outputs = {"h5ad": os.path.basename(h5_path),
-                   "csv": os.path.basename(csv_path) if csv_path else None}
+                   "csv": os.path.basename(csv_path) if csv_path else None,
+                   "spatialdata": os.path.basename(sd_path) if sd_path else None}
         t0 = time.perf_counter()
         if should_stop is not None and should_stop():
             raise qe.QuantStopped()
@@ -430,6 +551,15 @@ def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions
         t0 = time.perf_counter()
         _write_h5ad(h5_path + ".partial", job, result, prov, regions_out)
         prov["timing_seconds"]["write_h5ad"] = round(time.perf_counter() - t0, 3)
+        if sd_path:                            # from the finished h5ad, before anything is published
+            if should_stop is not None and should_stop():
+                raise qe.QuantStopped()
+            t0 = time.perf_counter()
+            record = _export_spatialdata(sd_python, h5_path + ".partial", sd_path + ".partial",
+                                         job, rin, should_stop, sd_job)
+            prov["timing_seconds"]["write_spatialdata"] = round(time.perf_counter() - t0, 3)
+            prov["spatialdata"] = {"python": sd_python, "spatialdata_version": sd_version,
+                                   **{k: v for k, v in record.items() if k != "ok"}}
         prov["total_seconds"] = round(time.perf_counter() - t_start, 3)
         prov["process_peak_rss_bytes"] = _peak_rss_bytes()
         with open(prov_path + ".partial", "w", encoding="utf-8") as f:
@@ -457,13 +587,11 @@ def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions
         ok = True
         register_step4(h5_path, job, prov)         # block A3: after the commit, never raises
     finally:
-        for p in partials:
-            if os.path.exists(p):
-                os.remove(p)
+        for p in partials + [sd_job]:
+            _remove(p)
         if not ok:
             for p in renamed:                 # part of the outputs is half an output
-                if os.path.exists(p):
-                    os.remove(p)
+                _remove(p)
         shutil.rmtree(sink_dir, ignore_errors=True)
         if not ok and made_dir:
             try:
@@ -472,7 +600,7 @@ def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions
                 pass
         if not ok and quant_run:
             run_store.discard(quant_run)
-    return {"h5ad": h5_path, "csv": csv_path, "provenance": prov_path, "job": job,
+    return {"h5ad": h5_path, "csv": csv_path, "spatialdata": sd_path, "provenance": prov_path, "job": job,
             "output_dir": output_dir,
             "n_cells": int(result.ids.size), "nucleus_outside": result.nucleus_outside}
 
@@ -493,8 +621,11 @@ class FeatureExtractWorker(QThread):
 
     def __init__(self, run_path, output_dir, roi_name=None, statistics=None,
                  file_prefix=None, open_slide=None, settings=None, regions=None,
-                 features=("morphology",), write_csv=False, distribution=None, markers=None):
+                 features=("morphology",), write_csv=False, distribution=None, markers=None,
+                 spatialdata=False, spatialdata_python=None):
         super().__init__()
+        self.spatialdata = bool(spatialdata)
+        self.spatialdata_python = spatialdata_python
         self.run_path = run_path
         self.output_dir = output_dir
         self.roi_name = roi_name
@@ -527,6 +658,7 @@ class FeatureExtractWorker(QThread):
                 statistics=self.statistics, regions=self.regions, features=self.features,
                 write_csv=self.write_csv, file_prefix=self.file_prefix,
                 distribution=self.distribution, markers=self.markers,
+                spatialdata=self.spatialdata, spatialdata_python=self.spatialdata_python,
                 open_slide=self.open_slide, settings=self.settings,
                 progress=lambda d, t, m: self.progress.emit(d, max(1, t), m),
                 should_stop=lambda: self._stop)
@@ -536,7 +668,7 @@ class FeatureExtractWorker(QThread):
                                       self.base_name)
         except qe.QuantStopped:
             self.error.emit("Stopped by user.")
-        except (qs.QuantSourceError, qe.QuantLabelError, ValueError) as exc:
+        except (qs.QuantSourceError, qe.QuantLabelError, ValueError, SpatialDataExportError) as exc:
             self.error.emit(str(exc))
         except Exception:                                       # noqa: BLE001
             self.error.emit(traceback.format_exc())

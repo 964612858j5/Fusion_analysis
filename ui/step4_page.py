@@ -5,7 +5,8 @@ block01/ui/step4_page.py — Step4Page (Cell Feature Extraction).
 import os
 
 from PyQt5 import QtWidgets
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5 import sip
+from PyQt5.QtCore import QProcess, QTimer, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QProgressBar, QMessageBox, QFileDialog, QComboBox,
@@ -38,6 +39,9 @@ class Step4Page(QWidget):
         self._running = False
         self._open_slide = ""
         self._job = None            # the resolved QuantJob, or None
+        # SpatialData export: the checked Python, and the check under way
+        self._sd_python = None
+        self._sd_check = None
         # Block A6 G4: the controls' own enabled states, kept while the page
         # is frozen for a run and put back after it.
         self._frozen_states = None
@@ -145,7 +149,8 @@ class Step4Page(QWidget):
 
     def _update_run_button(self):
         self._btn_run.setEnabled(self._job is not None and not self._running
-                                 and not self.__dict__.get("_scope_blocked", False))
+                                 and not self.__dict__.get("_scope_blocked", False)
+                                 and self.__dict__.get("_sd_check") is None)
 
     # ── output scope (block S4-2) ─────────────────────────────────────
 
@@ -197,7 +202,8 @@ class Step4Page(QWidget):
         stats, regions, features, csv = self.scope()
         dist, markers = self.distribution_scope()
         return {"statistics": stats, "regions": regions, "features": features,
-                "csv": bool(csv), "distribution": dist, "markers": markers,
+                "csv": bool(csv), "spatialdata": self._output_checks['spatialdata'].isChecked(),
+                "distribution": dist, "markers": markers,
                 "prefix": self._prefix_edit.text().strip()}
 
     def apply_draft(self, draft):
@@ -213,6 +219,12 @@ class Step4Page(QWidget):
             if self._feature_checks[key].isEnabled():
                 self._feature_checks[key].setChecked(key in (d.get("features") or []))
         self._output_checks['csv'].setChecked(bool(d.get("csv")))
+        sd = self._output_checks['spatialdata']
+        sd.blockSignals(True)                  # a saved tick does not open the chooser here:
+        sd.setChecked(bool(d.get("spatialdata")))   # the Python is looked up quietly
+        sd.blockSignals(False)
+        if sd.isChecked() and self._sd_python is None:
+            self._start_sd_check(None)
         for key, cb in self._dist_checks.items():
             cb.setChecked(key in (d.get("distribution") or []))
         wanted = set(d.get("markers") or [])
@@ -236,7 +248,9 @@ class Step4Page(QWidget):
         self._marker_list.setVisible(bool(dist))
         self._scope_blocked = bool(dist and not markers)
         base = output_base(self._prefix_edit.text().strip())
-        files = [f'{base}.h5ad', f'{base}_provenance.json'] + ([f'{base}.csv'] if csv else [])
+        sd_on = self._output_checks['spatialdata'].isChecked()
+        files = ([f'{base}.h5ad', f'{base}_provenance.json'] + ([f'{base}.csv'] if csv else [])
+                 + ([f'{base}.spatialdata.zarr'] if sd_on else []))
         job = self._job
         primary = 'nucleus' if (job is not None and job.compartment == qs.NUCLEUS) else 'cell'
         x = f'X = {primary} {stats[0]}' if stats else '⚠  choose at least one statistic'
@@ -244,6 +258,8 @@ class Step4Page(QWidget):
             x += '     ·     ⚠  choose the markers for the distribution statistics'
         elif dist:
             x += f'     ·     distribution: {len(markers)} marker' + ('s' if len(markers) > 1 else '')
+        if sd_on and self.__dict__.get("_sd_check") is not None:
+            x += '     ·     checking the SpatialData Python…'
         self._prefix_info.setText('Outputs:  ' + '   '.join(files) + '     ·     ' + x)
         risky = bool(job is not None and job.has_nuclei and job.seam_merge is None
                      and (regions or 'nuclear_summary' in features))
@@ -406,7 +422,12 @@ class Step4Page(QWidget):
             ('nuclear_summary', 'Nuclear summary', False)])
         row, arrow, body = _group('Outputs')
         self._groups['outputs'] = (arrow, body)
-        self._output_checks = _checks(row, [('h5ad', 'h5ad', True), ('csv', 'CSV', False)])
+        self._output_checks = _checks(row, [('h5ad', 'h5ad', True), ('csv', 'CSV', False),
+                                            ('spatialdata', 'SpatialData', False)])
+        self._output_checks['spatialdata'].setToolTip(
+            'Also a SpatialData zarr (labels, cell table, Regions outlines), written by a '
+            'Python that has spatialdata (e.g. Step5\'s environment)')
+        self._output_checks['spatialdata'].toggled.connect(self._spatialdata_toggled)
         for cb in (self._region_checks['cell'], self._feature_checks['expression'],
                    self._output_checks['h5ad']):
             cb.setEnabled(False)                     # always there
@@ -564,6 +585,113 @@ class Step4Page(QWidget):
         dlg = BatchStep4Dialog(parent=self)
         dlg.exec_()
 
+    # ── SpatialData export (docs/v17_spatialdata_export_plan.md §2) ──
+
+    def _spatialdata_toggled(self, on):
+        if on and self._sd_python is None:
+            self._start_sd_check(None)
+        self._update_scope()
+
+    def _start_sd_check(self, path):
+        """Check `path`, or the saved / configured candidates (None), each
+        by a QProcess that imports spatialdata -- never blocking the window;
+        the process belongs to the page and is killed with it. Run waits."""
+        if self._sd_check is not None:
+            return
+        from ..utils import spatialdata_python as sdp
+        queue = [path] if path else [python for _label, python in sdp.candidates()]
+        self._sd_check = {"queue": queue, "chosen": bool(path), "why": [], "proc": None}
+        self._update_scope()
+        self._sd_next()
+
+    def _sd_next(self):
+        from ..utils import spatialdata_python as sdp
+        state = self._sd_check
+        while state["queue"]:
+            python = state["queue"].pop(0)
+            known = sdp.cached(python)
+            if known is not None:
+                if known[0]:
+                    return self._sd_checked(python, known[1], state["chosen"])
+                state["why"].append(known[1])
+                continue
+            proc = QProcess(self)
+            state["proc"] = proc
+            proc.finished.connect(lambda code, _status, p=proc, py=python: self._sd_proc_done(p, py, code))
+            proc.errorOccurred.connect(lambda _err, p=proc, py=python: self._sd_proc_failed(p, py))
+            limit = QTimer(proc)                   # goes with the process
+            limit.setSingleShot(True)
+            limit.timeout.connect(proc.kill)
+            limit.start(int(sdp.CHECK_TIMEOUT_S * 1000))
+            proc.start(python, sdp.CHECK_ARGS)
+            return
+        self._sd_checked("", "; ".join(state["why"]) or "no SpatialData Python chosen yet", state["chosen"])
+
+    def _sd_proc_done(self, proc, python, code):
+        from ..utils import spatialdata_python as sdp
+        if sip.isdeleted(self):
+            return                                 # the page is being destroyed
+        state = self._sd_check
+        if state is None or state["proc"] is not proc:
+            return                                 # stopped meanwhile
+        out = bytes(proc.readAllStandardOutput()).decode(errors="replace")
+        err = bytes(proc.readAllStandardError()).decode(errors="replace")
+        state["proc"] = None
+        proc.deleteLater()
+        ok, info = sdp.remember(python, *sdp.answer(code, out, err))
+        if ok:
+            return self._sd_checked(python, info, state["chosen"])
+        state["why"].append(info)
+        self._sd_next()
+
+    def _sd_proc_failed(self, proc, python):
+        if sip.isdeleted(self) or proc.error() != QProcess.FailedToStart:
+            return                                 # finished() follows
+        from ..utils import spatialdata_python as sdp
+        state = self._sd_check
+        if state is None or state["proc"] is not proc:
+            return
+        state["proc"] = None
+        proc.deleteLater()
+        state["why"].append(sdp.remember(python, False, f"{python} could not be run")[1])
+        self._sd_next()
+
+    def _stop_sd_check(self):
+        """Window close / dataset switch: the lookup ends now."""
+        state, self._sd_check = self._sd_check, None
+        proc = state and state.get("proc")
+        if proc is not None:
+            proc.kill()
+            proc.waitForFinished(2000)
+
+    def _sd_checked(self, python, info, chosen):
+        self._sd_check = None
+        box = self._output_checks['spatialdata']
+        if python:
+            self._sd_python = python
+            if chosen:
+                from ..utils import spatialdata_python as sdp
+                sdp.save(python)
+        elif box.isChecked():
+            if chosen:
+                QMessageBox.warning(self, 'SpatialData export',
+                                    f'This Python cannot write SpatialData:\n{info}')
+                self._untick_spatialdata()
+            else:
+                path, _ = QFileDialog.getOpenFileName(
+                    self, 'Python with spatialdata (e.g. Step5\'s environment: <env>/bin/python)', '')
+                if path:
+                    self._start_sd_check(path)
+                else:
+                    self._untick_spatialdata()
+        self._update_scope()
+
+    def _untick_spatialdata(self):
+        box = self._output_checks['spatialdata']
+        box.blockSignals(True)
+        box.setChecked(False)
+        box.blockSignals(False)
+
     def _run(self):
         self._resolve(set_output=False)     # the files may have changed since
         if self._job is None:
@@ -577,6 +705,12 @@ class Step4Page(QWidget):
                                 'Please select at least one intensity statistic.')
             return
 
+        sd_python = None
+        if self._output_checks['spatialdata'].isChecked():
+            sd_python = self._sd_python
+            if sd_python is None:              # not found yet: look again, Run waits
+                self._start_sd_check(None)
+                return
         prefix = self._prefix_edit.text().strip()
         self._worker = FeatureExtractWorker(
             run_path    = self._job.run_dir,
@@ -590,6 +724,8 @@ class Step4Page(QWidget):
             write_csv   = write_csv,
             distribution = distribution,
             markers     = markers,
+            spatialdata = sd_python is not None,
+            spatialdata_python = sd_python,
         )
         # Block A6 G4: the answer is checked against what it was started for.
         token = self._run_identity()
@@ -611,7 +747,9 @@ class Step4Page(QWidget):
 
     def stop_background_jobs(self):
         """Block A6 G4 -- dataset switch or window close: ask the extraction
-        to stop, never wait for it. True while it is still running."""
+        to stop, never wait for it. True while it is still running. A
+        SpatialData Python lookup is ended at once."""
+        self._stop_sd_check()
         worker = self._worker
         if worker is None or not worker.isRunning():
             return False
@@ -705,6 +843,8 @@ class Step4Page(QWidget):
         self._out_edit.setText(os.path.dirname(files[0]))
         if outs.get('csv'):
             files.append(outs['csv'])
+        if outs.get('spatialdata'):
+            files.append(outs['spatialdata'])
         files.append(outs.get('provenance') or os.path.join(out_dir,
                                                             f'{base_name}_provenance.json'))
         note = ''

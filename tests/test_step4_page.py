@@ -307,3 +307,108 @@ def test_the_page_runs_the_distribution_statistics(tmp_path):
     ad = anndata.read_h5ad(os.path.join(mine, "cell_features.h5ad"))
     assert set(ad.obsm.keys()) == {"cell_p90", "nucleus_p90", "cytoplasm_p90"}
     assert list(ad.obsm["cell_p90"].columns) == ["CD3", "PanCK"]
+
+
+# ── SpatialData export on the page (docs/v17_spatialdata_export_plan.md) ──
+# Stand-in "Pythons": small shell scripts answering the import check, run
+# for real by the page's QProcess.
+
+def _fake_python(tmp_path, name, body):
+    path = tmp_path / name
+    path.write_text("#!/bin/sh\n" + body + "\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+def _isolated_sdp(tmp_path, monkeypatch, env=""):
+    from block01.utils import spatialdata_python as sdp
+    monkeypatch.setattr(sdp, "SETTINGS", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(sdp, "_checked", {})
+    if env:
+        monkeypatch.setenv(sdp.ENV, env)
+    else:
+        monkeypatch.delenv(sdp.ENV, raising=False)
+    return sdp
+
+
+def _settle(page, seconds=15):
+    import time
+    end = time.monotonic() + seconds
+    while page._sd_check is not None and time.monotonic() < end:
+        _app.processEvents()
+        time.sleep(0.01)
+    _app.processEvents()
+    assert page._sd_check is None
+
+
+def test_spatialdata_needs_a_python_chosen_once(tmp_path, monkeypatch):
+    from block01.ui import step4_page as sp
+    sdp = _isolated_sdp(tmp_path, monkeypatch)
+    good = _fake_python(tmp_path, "good", "echo 0.5.0")
+    bad = _fake_python(tmp_path, "bad", "echo 'ModuleNotFoundError: spatialdata' >&2; exit 1")
+    p = build_project(tmp_path)
+    page = _page()
+    page.set_run(p["run_dir"], open_slide=p["slide"])
+    monkeypatch.setattr(sp.QFileDialog, "getOpenFileName", lambda *a, **k: ("", ""))
+    page._output_checks["spatialdata"].setChecked(True)      # nothing saved, cancelled: off
+    _settle(page)
+    assert not page._output_checks["spatialdata"].isChecked() and sdp.saved() == ""
+    monkeypatch.setattr(sp.QFileDialog, "getOpenFileName", lambda *a, **k: (bad, ""))
+    warned = []
+    monkeypatch.setattr(sp.QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    page._output_checks["spatialdata"].setChecked(True)      # unusable: off, says why
+    _settle(page)
+    assert not page._output_checks["spatialdata"].isChecked() and sdp.saved() == ""
+    assert warned and "ModuleNotFoundError" in warned[0]
+    monkeypatch.setattr(sp.QFileDialog, "getOpenFileName", lambda *a, **k: (good, ""))
+    page._output_checks["spatialdata"].setChecked(True)      # usable: kept and remembered
+    _settle(page)
+    assert page._output_checks["spatialdata"].isChecked() and sdp.saved() == good
+    assert page._sd_python == good and page._btn_run.isEnabled()
+    assert "cell_features.spatialdata.zarr" in page._prefix_info.text()
+    assert page.draft()["spatialdata"] is True
+
+
+def test_the_check_never_blocks_the_window_and_run_waits(tmp_path, monkeypatch):
+    import time
+    slow = _fake_python(tmp_path, "slow", "sleep 1; echo 0.5.0")
+    _isolated_sdp(tmp_path, monkeypatch, env=slow)
+    p = build_project(tmp_path)
+    page = _page()
+    page.set_run(p["run_dir"], open_slide=p["slide"])
+    t0 = time.monotonic()
+    page._output_checks["spatialdata"].setChecked(True)
+    assert time.monotonic() - t0 < 0.5                       # returned at once
+    assert not page._btn_run.isEnabled()
+    assert "checking the SpatialData Python" in page._prefix_info.text()
+    _settle(page)
+    assert page._sd_python == slow and page._btn_run.isEnabled()
+
+
+def test_closing_ends_a_running_check(tmp_path, monkeypatch):
+    slow = _fake_python(tmp_path, "slow", "sleep 30; echo 0.5.0")
+    _isolated_sdp(tmp_path, monkeypatch, env=slow)
+    p = build_project(tmp_path)
+    page = _page()
+    page.set_run(p["run_dir"], open_slide=p["slide"])
+    page._output_checks["spatialdata"].setChecked(True)
+    proc = page._sd_check["proc"]
+    assert proc is not None and proc.state() != 0
+    assert page.stop_background_jobs() is False              # nothing left running
+    assert page._sd_check is None and proc.state() == 0      # QProcess.NotRunning
+
+
+def test_a_saved_spatialdata_tick_comes_back_without_a_chooser(tmp_path, monkeypatch):
+    from block01.ui import step4_page as sp
+    sdp = _isolated_sdp(tmp_path, monkeypatch)
+    good = _fake_python(tmp_path, "good", "echo 0.5.0")
+    sdp.save(good)
+    p = build_project(tmp_path)
+    page = _page()
+    page.set_run(p["run_dir"], open_slide=p["slide"])
+    monkeypatch.setattr(sp.QFileDialog, "getOpenFileName",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no chooser here")))
+    page.apply_draft(dict(page.draft(), spatialdata=True))
+    _settle(page)
+    assert page._output_checks["spatialdata"].isChecked() and page._sd_python == good
+    assert "cell_features.spatialdata.zarr" in page._prefix_info.text()

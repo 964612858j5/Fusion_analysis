@@ -24,11 +24,10 @@ from PyQt5.QtWidgets import (
 
 from .step_frame import StepFrame
 
-#: The viewer slot's fallback notice, shown when the whole-slide viewer
-#: cannot draw (its text predates block 2c-2; changing it is a UI change).
-VIEWER_PENDING_TEXT = ("The whole-slide view is not connected yet.\n"
-                       "Channels, weights and the Overlay / Fusion mode already "
-                       "act on Step1's picture and the Tissue Preview.")
+#: The viewer slot's notice when the whole-slide viewer is closed without a
+#: failure: the dataset moved (`_close_step3_viewer`); the next Step3 entry
+#: reopens it. A failure says why instead (`_step3_viewer_failed`).
+VIEWER_PENDING_TEXT = "The whole-slide view is closed; it reopens when Step 3 is entered."
 
 
 class Step3Page(QWidget):

@@ -79,3 +79,7 @@ plan; `utils/closing_threads.py` + `main.py` + `tests/test_core_api_check.py`
   run's display name) + 1 advisory (`set_viewport_rect` has a guarded Step0
   caller) — all applied.
 * Codex review round 2: PASS (all 6 P3 + advisory resolved; 26 files comment/docstring-only). Not committed (user away; the install item is also uncommitted).
+* Follow-up (user, TG 2026-11-02): the Step3 notice is reworded. It shows
+  only when Step3's viewer was closed because the dataset moved (a failure
+  shows its own reason): "The whole-slide view is closed; it reopens when
+  Step 3 is entered."

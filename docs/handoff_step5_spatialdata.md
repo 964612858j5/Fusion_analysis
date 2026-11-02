@@ -136,7 +136,7 @@ Block01 的 Step4 有一个新的输出选项 **SpatialData**（只读方式调�
   - 计划：`block01_v16/docs/v17_spatialdata_export_plan.md`
   - 导出脚本：`block01_v16/scripts/export_spatialdata.py`（不依赖 Block01，Step5 也可以直接看）
   - 测试：`block01_v16/tests/test_spatialdata_export.py`
-  - 状态：已实现，codex 代码审查进行中，尚未提交（提交后会在本文件补上提交号）。
+  - 状态：已实现，codex 代码审查三轮后通过，已提交并推送：分支 `v17`，提交 `0fe5255`。
 - **以后可能的变化**：
   - Block01 的一键安装会另外建一个专门用于 SpatialData 的环境，不再借用 Step5 的环境。
   - 将来可能可选把校正图或融合图写进 `images/`。

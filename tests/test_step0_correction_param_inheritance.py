@@ -32,6 +32,15 @@ from block01.ui.step0.search_ctrl import (  # noqa: E402
 )
 
 
+def _settle(worker):
+    """What the Save page does with a finished worker: its staged channels
+    moved into the live product and the move committed
+    (docs/v17_save_inplace_step1_ahead_plan.md §8)."""
+    from block01.core import product_swap
+    product_swap.apply_plan(worker.output_dir, worker.swap_plan)
+    product_swap.commit(worker.output_dir)
+
+
 @pytest.fixture(scope="module")
 def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -223,6 +232,7 @@ def _write_real_corrected_zarr(step0_dir, loader, config, rois,
         lambda path, decisions: result.update(path=path, decisions=decisions))
     worker.error.connect(lambda message: result.update(error=message))
     worker.run()
+    _settle(worker)                     # what the Save page does next
     assert "error" not in result
     assert result.get("path")
     return result["path"]

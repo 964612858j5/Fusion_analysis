@@ -557,6 +557,13 @@ class _PresegSignals(QtCore.QObject):
     finished = QtCore.pyqtSignal(object)    # (run_id, records)
 
 
+
+def _preseg_parts(current):
+    """`_preseg_current()` as (pixel_key, fusion hash, identity, components);
+    a shorter answer (test doubles) lacks the last ones."""
+    current = tuple(current or ())
+    return (current + (None, None, None, None))[:4]
+
 class MainWindow(QMainWindow):
     #: docs/f5_tma_display_plan.md §10: (seq, key, items, error) of a Step1
     #: core-outline computation done off the GUI thread after a Regions Save.
@@ -600,6 +607,9 @@ class MainWindow(QMainWindow):
         self._all_patches        = []
         self._patch_channel_cache: dict = {}
         self._patch_loaders: dict = {}
+        # Stopped patch loaders still finishing their current read: never
+        # waited for, released on `finished` (docs/v17_patch_reader_versions_plan.md §1.2)
+        self._retired_loaders: set = set()
         self._patch_load_ready: set = set()
         self._patch_seg_results: dict = {}
         self._preserve_view_after_patch_load: dict = {}
@@ -890,6 +900,7 @@ class MainWindow(QMainWindow):
         self._step0.camera_sink = self._on_step0_camera
         self._step0.camera_jump_sink = self._on_step0_jump
         self._step0.step0_complete.connect(self._on_step0_complete)
+        self._step0.before_product_swap = self._before_product_swap
         # A committed dataset switch invalidates every Step1 fact that was
         # derived from the previous dataset.  This is a different event from
         # step0_complete (Save/handoff) and must not be folded into it.
@@ -4292,8 +4303,15 @@ class MainWindow(QMainWindow):
         # ROI, a regenerated corrected product or a republished manifest is
         # another source identity, and frames composed from the old one are a
         # picture of something else.
+        whole_slide_before = self._step1_whole_slide_active()
         with perf_trace.span("step1.handoff.sync_viewer"):
             self._step1_sync_whole_slide_source("handoff")
+        # A FAILED rebind put the patch view back after `_on_patches` skipped
+        # its preload (the whole-slide viewer was showing then): the selected
+        # patch is asked at once, or the view stays empty until a click. In
+        # every other case the existing paths already ask.
+        if whole_slide_before and not self._step1_whole_slide_active():
+            self._ensure_channels_cached(self._preview_patch_idx)
         return True
 
     @staticmethod
@@ -5306,8 +5324,9 @@ class MainWindow(QMainWindow):
             # restore asked for it twice (~65 ms each on the A5 slide).
             current = self._preseg_current()
             if used and self._params_source == PRESEG_SOURCE:
-                key, fhash = current
-                ok, _why = preseg_run.selectable(run, self._preseg_records, used, key, fhash)
+                key, fhash, ident, comps = _preseg_parts(current)
+                ok, _why = preseg_run.selectable(run, self._preseg_records, used, key, fhash,
+                                                 ident, comps)
                 if ok:
                     self._preseg_selected = {"run": run, "combo_id": used}
                     # Made again from the run: the saved draft's copy may
@@ -6679,8 +6698,9 @@ class MainWindow(QMainWindow):
             "run_id": run_id,
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "patches": patches, "combos": combos, "tasks": tasks,
-            "fusion": copy.deepcopy({k: snapshot.get(k)
-                                     for k in ("hash", "fusion_config", "display_mapping")}),
+            "fusion": copy.deepcopy(dict(
+                {k: snapshot.get(k) for k in ("hash", "fusion_config", "display_mapping")},
+                components=(snapshot.get("bound_to") or {}).get("components"))),
             "source": source, "halo_px": PRESEG_HALO_PX, "bounds": bounds, "roi": roi or {},
         }
         if regions:
@@ -6944,7 +6964,7 @@ class MainWindow(QMainWindow):
             self._close_montage_supply()
             supply = None
         if supply is None and provider is not None:
-            key, _ = self._preseg_current()
+            key = self._preseg_current()[0]
             supply = MontageSupply(provider, key or "", parent=self)
             supply.composed.connect(self._on_montage_composed)
             supply.missing.connect(self._on_montage_missing)
@@ -7239,30 +7259,36 @@ class MainWindow(QMainWindow):
                 print(f"[Montage] no display window for {ch} yet: {exc}")
 
     def _preseg_current(self):
-        key, _, _ = self._preseg_source()
-        return key, (self._committed_fusion_settings() or {}).get("hash")
+        """(pixel_key, committed fusion hash, structured pixel identity, the
+        committed settings' component identities)."""
+        key, source, _ = self._preseg_source()
+        snapshot = self._committed_fusion_settings() or {}
+        return (key, snapshot.get("hash"), (source or {}).get("pixel_identity"),
+                (snapshot.get("bound_to") or {}).get("components"))
 
     def _refresh_preseg_results(self, current=None):
         """Each row's state, and whether the chosen result is still valid.
         `current`: `_preseg_current()` already worked out by the caller in
         the same handler (A9-O3-6, P3')."""
         run = self._preseg_run
-        key, fhash = current if current is not None else self._preseg_current()
+        key, fhash, ident, comps = _preseg_parts(current if current is not None
+                                                  else self._preseg_current())
         supply = self.__dict__.get("_preseg_montage_supply")
         if supply is not None and key is not None:
             supply.set_pixel_key(key)             # other pixels: its caches go
         sel = self._preseg_selected
-        if sel is not None and preseg_run.is_stale(sel["run"], key, fhash):
+        if sel is not None and preseg_run.is_stale(sel["run"], key, fhash, ident, comps):
             self._drop_preseg_selection()
             sel = None
         panel = self._preseg_results
         if run is None:
             return
-        stale = preseg_run.is_stale(run, key, fhash)
+        stale = preseg_run.is_stale(run, key, fhash, ident, comps)
         for combo in run["combos"]:
             cid = combo["combo_id"]
             st = preseg_run.combo_status(run, self._preseg_records, cid)
-            can, why = preseg_run.selectable(run, self._preseg_records, cid, key, fhash)
+            can, why = preseg_run.selectable(run, self._preseg_records, cid, key, fhash,
+                                             ident, comps)
             bits = [f"{st['total'] - st['pending']}/{st['total']} patches"]
             if st[preseg_run.OK]:
                 bits.append(f"{st['cells']} cells")
@@ -7294,8 +7320,9 @@ class MainWindow(QMainWindow):
         run = sel["run"]
         records = preseg_run.load_records(preseg_run.run_dir(self._preseg_runs_root(),
                                                             run["run_id"]))
-        key, fhash = self._preseg_current()
-        ok, why = preseg_run.selectable(run, records, sel["combo_id"], key, fhash)
+        key, fhash, ident, comps = _preseg_parts(self._preseg_current())
+        ok, why = preseg_run.selectable(run, records, sel["combo_id"], key, fhash, ident,
+                                        comps)
         return ok, why
 
     def _preseg_segmentation_config(self):
@@ -7334,8 +7361,9 @@ class MainWindow(QMainWindow):
         run = self._preseg_run
         if run is None:
             return False
-        key, fhash = self._preseg_current()
-        ok, why = preseg_run.selectable(run, self._preseg_records, combo_id, key, fhash)
+        key, fhash, ident, comps = _preseg_parts(self._preseg_current())
+        ok, why = preseg_run.selectable(run, self._preseg_records, combo_id, key, fhash,
+                                        ident, comps)
         if not ok:
             QMessageBox.information(self, "Use", f"This result cannot be used: {why}.")
             return False
@@ -8093,10 +8121,9 @@ class MainWindow(QMainWindow):
                        and self.prev_img.image is not None)
         pending_view = self._save_patch_preview_view_state() if incremental else None
 
-        # Stop any existing loader for this patch before replacing it.
-        if not self._stop_loader_for(idx):
-            self.prev_status.setText(f"{self._patch_label(idx)} is still stopping… please wait")
-            return
+        # Retire any existing loader for this patch: it is not waited for,
+        # and its late answers are refused by thread identity.
+        self._stop_loader_for(idx)
 
         patch_bbox = self._all_patches[idx]
         y0, y1, x0, x1 = self._limited_patch_bbox(patch_bbox)
@@ -8208,6 +8235,9 @@ class MainWindow(QMainWindow):
         is how a failing channel becomes an endless restart, or an old
         dataset's thread starts reading for the new one.
         """
+        # a retired one is released first, and touches nothing else: the
+        # demand, channels and failures belong to its replacement
+        self._retired_loaders.discard(thread)
         if self._patch_loaders.get(patch_idx) is not thread:
             return
         self._patch_loaders.pop(patch_idx, None)
@@ -8222,21 +8252,36 @@ class MainWindow(QMainWindow):
         # channels that are now cached or have failed on their own.
         self._ensure_channels_cached(patch_idx)
 
-    def _stop_loader_for(self, idx, timeout_ms=3000):
+    def _retire_patch_loader(self, idx, thread):
+        """Stop one patch loader WITHOUT waiting (plan §1.2). A thread inside
+        a blocking read cannot be interrupted; it finishes that read against
+        the reader version it started with (`io_loader._Binding`), its
+        `done` / `progress` / `error` are disconnected (and refused by thread
+        identity anyway), and it stays referenced until its `finished`. One
+        that has already finished is simply dropped."""
+        if self._patch_loaders.get(idx) is thread:
+            self._patch_loaders.pop(idx, None)
+        if not thread.isRunning():
+            return
+        thread.stop()
+        for signal in (thread.done, thread.progress, thread.error):
+            try:
+                signal.disconnect()
+            except Exception:                               # noqa: BLE001
+                pass
+        # `finished` stays connected: `_on_patch_loader_finished` releases it
+        self._retired_loaders.add(thread)
+
+    def _stop_loader_for(self, idx, timeout_ms=0):
+        """Retire this patch's loader; never waits, never refuses. (The
+        old 3 s wait protected only the shared reader, now immutable per
+        version; `timeout_ms` is kept for callers and ignored.)"""
         self._pending_channel_demand.pop(idx, None)
         self._loader_channels.pop(idx, None)
         thread = self._patch_loaders.get(idx)
-        if thread is None:
-            return True
-        if thread.isRunning():
-            thread.stop()
-            with perf_trace.span("loader.wait", who="_stop_loader_for",
-                                 patch=idx, timeout_ms=int(timeout_ms)):
-                thread.wait(timeout_ms)
-        if not thread.isRunning() and self._patch_loaders.get(idx) is thread:
-            self._patch_loaders.pop(idx, None)
-            return True
-        return not thread.isRunning()
+        if thread is not None:
+            self._retire_patch_loader(idx, thread)
+        return True
 
     @_perf("switch.stop_all_loaders")
     def _stop_all_loaders(self):
@@ -8244,23 +8289,9 @@ class MainWindow(QMainWindow):
         self._pending_channel_demand.clear()
         self._loader_channels.clear()
         self._failed_channels.clear()
-        survivors = {}
         for idx, t in list(self._patch_loaders.items()):
-            if t.isRunning():
-                t.stop()
-                with perf_trace.span("loader.wait", who="_stop_all_loaders",
-                                     patch=idx, timeout_ms=3000):
-                    t.wait(3000)
-            try:
-                t.done.disconnect()
-                t.progress.disconnect()
-                t.error.disconnect()
-            except Exception:
-                pass
-            if t.isRunning():
-                survivors[idx] = t
-                print(f"[Preview] loader {self._patch_label(idx)} still running after stop request; keeping reference")
-        self._patch_loaders = survivors
+            self._retire_patch_loader(idx, t)
+        self._patch_loaders = {}
 
     @_perf("switch.rm_save_view")
     def _rm_save_view(self, step):
@@ -8410,7 +8441,10 @@ class MainWindow(QMainWindow):
             self._fusion_lbl.setText("Waiting for the fusion job to stop…")
             QtCore.QTimer.singleShot(500, self.close)
             return
-        if self._patch_loaders:
+        # retired patch loaders too: each ends its current read on its own
+        # (and its perf-trace `job.end` must precede the sink's shutdown)
+        self._retired_loaders = {t for t in self._retired_loaders if t.isRunning()}
+        if self._patch_loaders or self._retired_loaders:
             event.ignore()
             self._display.resume()
             self.prev_status.setText("Waiting for preview loaders to stop…")
@@ -10076,28 +10110,82 @@ class MainWindow(QMainWindow):
         hash algorithm. Display visibility is not in the draft, so hiding a
         channel cannot make a saved project look unsaved.
         """
-        return self._display.fusion.is_dirty()
+        return (self._display.fusion.is_dirty()
+                or bool(self.__dict__.get("_fusion_unsaved_why")))
 
     def _fusion_settings_path(self, output_dir=None):
         out = output_dir or (self.step0_output or {}).get("step1_dir") \
             or (self.step0_output or {}).get("output_dir") or OUTPUT_DIR
         return os.path.join(out, "step1_fusion_settings.json")
 
+    @staticmethod
+    def _fusion_components(fusion_config):
+        """The channels a fusion is made of: the nucleus and every group
+        channel with a weight above 0 in a group weighted above 0."""
+        cfg = fusion_config or {}
+        out = set()
+        nuc = cfg.get("nucleus") or {}
+        if nuc.get("channel") and float(nuc.get("weight", 1.0) or 0.0) > 0:
+            out.add(str(nuc["channel"]))
+        for data in (cfg.get("groups") or {}).values():
+            if float((data or {}).get("group_weight", 1.0) or 0.0) <= 0:
+                continue
+            for ch, weight in ((data or {}).get("channels") or {}).items():
+                if float(weight or 0.0) > 0:
+                    out.add(str(ch))
+        return out
+
+    def _fusion_component_identity(self, fusion_config):
+        """{channel: [correction decision, write token]} of the fusion's
+        component channels, as the current Step0 result holds them (the
+        token changes with every rewrite of a channel's pixels)."""
+        _key, source, _manifest = self._preseg_source()
+        chans = ((source or {}).get("pixel_identity") or {}).get("channels") or {}
+        out = {}
+        for ch in sorted(self._fusion_components(fusion_config)):
+            entry = chans.get(ch) or {}
+            out[ch] = [str(entry.get("decision") or "original"),
+                       str((entry.get("product") or {}).get("source_identity") or "")]
+        return out
+
+    def _changed_fusion_components(self, snapshot):
+        """The component channels whose correction changed since `snapshot`
+        was saved (user ruling 2026-11-02: as if their weight had changed).
+        [] for a snapshot that recorded none."""
+        saved = ((snapshot or {}).get("bound_to") or {}).get("components")
+        if not isinstance(saved, dict):
+            return []
+        now = self._fusion_component_identity(snapshot.get("fusion_config"))
+        return sorted(ch for ch in set(saved) | set(now)
+                      if list(saved.get(ch) or []) != list(now.get(ch) or []))
+
     def _rm_check_settings_binding(self):
         """Block RM option C, inside a session (acceptance 2026-10-04): a
-        republished handoff on a NEW correct run makes the committed fusion
-        settings unsaved. Only the snapshot is dropped -- the draft, and the
-        Intensity Step0 just saved, stay as they are."""
+        republished handoff on another correct run -- or, since Save writes
+        in place, a changed correction of one of the fusion's component
+        channels (user ruling 2026-11-02) -- makes the committed fusion
+        settings unsaved, the same path as a changed weight. Only the
+        snapshot is dropped -- the draft, and the Intensity Step0 just
+        saved, stay as they are."""
         snapshot = self._committed_fusion_settings()
         saved = (snapshot or {}).get("bound_to")
         current = self._settings_binding()
         if not isinstance(saved, dict) or current is None:
             return False
-        if current.get("correct_run") == saved.get("correct_run"):
-            return False
-        self._display.fusion.install_committed_snapshot(None)
-        print("[Step1] saved fusion settings not adopted: the Step0 result "
-              "changed since it was saved (new pixels)")
+        if current.get("correct_run") != saved.get("correct_run"):
+            why = "the Step0 result changed since it was saved (new pixels)"
+            self._display.fusion.install_committed_snapshot(None)
+            print(f"[Step1] saved fusion settings not adopted: {why}")
+        else:
+            changed = self._changed_fusion_components(snapshot)
+            if not changed:
+                return False
+            # KEPT, but unsaved until saved again (user ruling 2026-11-02):
+            # results made with them stay valid until then.
+            why = ("the correction of " + ", ".join(changed)
+                   + " changed since they were saved")
+            print(f"[Step1] saved fusion settings must be saved again: {why}")
+        self._fusion_unsaved_why = why
         self._update_fusion_settings_state()
         return True
 
@@ -10193,6 +10281,7 @@ class MainWindow(QMainWindow):
         left on disk and the draft simply counts as unsaved.
         """
         self._display.fusion.install_committed_snapshot(None)
+        self._fusion_unsaved_why = None
         snapshot, why = self._valid_committed_fusion_settings()
         if snapshot is None:
             if why:
@@ -10214,6 +10303,8 @@ class MainWindow(QMainWindow):
                     adopt(snapshot["display_mapping"], origin="Step1's saved fusion settings")
             except Exception as exc:                        # noqa: BLE001
                 print(f"[Step1] saved windows not adopted: {exc}")
+        # a component channel whose correction changed since: kept, unsaved
+        self._rm_check_settings_binding()
         with perf_trace.span("restore.fusion_settings.update_state"):
             self._update_fusion_settings_state()
         return snapshot
@@ -10221,14 +10312,73 @@ class MainWindow(QMainWindow):
     def _on_save_fusion_settings_clicked(self, _checked=False):
         """The button: commit, and SAY it worked (user ruling, 2026-09-24) --
         a failure already says so. Callers that commit on their own way (Save,
-        tests) get no popup."""
-        if self._commit_fusion_settings():
-            QMessageBox.information(
-                self, "Fusion settings",
-                "Fusion settings saved.\n\nRuns and Save now use them.\n\n"
-                f"File: {self._fusion_settings_path()}")
-            return True
-        return False
+        tests) get no popup.
+
+        The commit takes a second or two on this thread (the draft, the
+        component channels' identities, the file), and a button that answers
+        nothing for that long looks frozen (acceptance 2026-11-02). So ONE
+        box is shown at once saying it is saving, and the commit starts only
+        after the box has really been drawn -- a box shown and then blocked
+        before its first paint came up as an empty frame (acceptance
+        2026-11-03). The same box then says it is saved. Returns False when a
+        save is already under way."""
+        if self.__dict__.get("_fusion_saving_box") is not None:
+            return False
+        # the same lines as the answer, so the box keeps its size and only
+        # its first line changes
+        path = self._fusion_settings_path()
+        box = QMessageBox(QMessageBox.Information, "Fusion settings",
+                          "Saving fusion settings\u2026\n\nRuns and Save will use them "
+                          f"once they are saved.\n\nFile: {path}",
+                          QMessageBox.NoButton, self)
+        box.setWindowModality(Qt.NonModal)
+        box.setStandardButtons(QMessageBox.NoButton)
+        box.setAttribute(Qt.WA_DeleteOnClose)
+        self._fusion_saving_box = box
+        button = getattr(self, "_btn_save_fusion_settings", None)
+        if button is not None:
+            button.setEnabled(False)
+        painted = {"n": 0}
+
+        class _Painted(QtCore.QObject):
+            def eventFilter(self, _obj, event):             # noqa: N802
+                if event.type() == QtCore.QEvent.Paint:
+                    painted["n"] += 1
+                return False
+        watcher = _Painted(box)
+        box.installEventFilter(watcher)
+        box.show()
+        started = time.monotonic()
+        poll = QTimer(box)
+        poll.setInterval(15)
+
+        def commit():
+            try:
+                ok = self._commit_fusion_settings()
+            finally:
+                self._fusion_saving_box = None
+                if button is not None:
+                    self._update_fusion_settings_state()   # enabled again while dirty
+            if not ok:
+                # the commit said why itself. (hide, not close: a message box
+                # without a button refuses to be closed)
+                box.hide()
+                box.deleteLater()
+                return
+            box.setText("Fusion settings saved.\n\nRuns and Save now use them.\n\n"
+                        f"File: {path}")
+            box.setStandardButtons(QMessageBox.Ok)
+
+        def wait_for_paint():
+            handle = box.windowHandle()
+            drawn = painted["n"] > 0 and handle is not None and handle.isExposed()
+            if drawn or time.monotonic() - started > 1.0:
+                poll.stop()
+                # one more frame for the picture to reach the screen
+                QTimer.singleShot(40, commit)
+        poll.timeout.connect(wait_for_paint)
+        poll.start()
+        return True
 
     def _commit_fusion_settings(self, _checked=False):
         """Freeze the draft as the settings every job will run on.
@@ -10251,6 +10401,8 @@ class MainWindow(QMainWindow):
             self._update_fusion_settings_state()
             return False
         draft = self._fusion_settings_draft()
+        identity = dict(identity)
+        identity["components"] = self._fusion_component_identity(draft["fusion_config"])
         snapshot = {
             "version": FUSION_SETTINGS_VERSION,
             "hash": self._fusion_settings_hash(draft),
@@ -10272,6 +10424,7 @@ class MainWindow(QMainWindow):
                 f"committed.\n\nReason: {exc}")
             self._update_fusion_settings_state()
             return False
+        self._fusion_unsaved_why = None
         self._display.fusion.install_committed_snapshot(snapshot)
         print(f"[Step1] fusion settings committed: {snapshot['hash'][:12]}")
         # Results of other settings are now out of date, and so is a choice.
@@ -10318,7 +10471,8 @@ class MainWindow(QMainWindow):
         label = getattr(self, "_fusion_settings_label", None)
         if label is not None:
             if dirty:
-                label.setText("Unsaved fusion changes")
+                why = self.__dict__.get("_fusion_unsaved_why")
+                label.setText("Unsaved fusion changes" + (f" \u2014 {why}" if why else ""))
                 label.setStyleSheet("color:#f4c45e;font-size:10px;")
             else:
                 snapshot = self._committed_fusion_settings() or {}
@@ -10333,9 +10487,11 @@ class MainWindow(QMainWindow):
         """Refuse to start `what` while the screen and the snapshot disagree."""
         if not self._fusion_settings_dirty():
             return True
+        why = self.__dict__.get("_fusion_unsaved_why")
         QMessageBox.warning(
             self, "Unsaved fusion changes",
-            f"{what} runs on the saved fusion settings, and the channel "
+            (f"Something the fusion is made of has changed: {why}.\n\n" if why else "")
+            + f"{what} runs on the saved fusion settings, and the channel "
             "settings on screen have not been saved.\n\nClick "
             "\"Save Fusion Settings\" first — the preview keeps following "
             "what you change, and a running job keeps the settings it started "
@@ -11423,6 +11579,14 @@ class MainWindow(QMainWindow):
         for k in self._RM_FCFG_DROP:
             fcfg.pop(k, None)
         key["fusion_config"] = fcfg
+        # Save rewrites the correct run in place, so the upstream path no
+        # longer says which pixels a fused product was made of: the
+        # component channels' correction identities (as the committed
+        # settings recorded them) do. Absent in settings saved before.
+        components = ((self._committed_fusion_settings() or {}).get("bound_to")
+                      or {}).get("components")
+        if components:
+            key["components"] = components
         return key
 
     def _rm_regions(self):
@@ -11676,6 +11840,15 @@ class MainWindow(QMainWindow):
                                       "not_moved": list(entry.get("not_moved") or [])})
         except Exception as exc:               # noqa: BLE001 -- auxiliary record
             print(f"[Provenance] deletion not recorded ({type(exc).__name__}: {exc})")
+
+    def _before_product_swap(self):
+        """Step0 is about to move a Save's channels into the corrected
+        product (`core.product_swap`, on this thread): no reader may be part
+        way through it. The tissue preview's saved-stage reader and the patch
+        loaders are let go -- their late results are refused -- and none can
+        start until the move has returned."""
+        self._display._stop_saved_worker()
+        self._stop_all_loaders()
 
     def _busy_reason(self):
         """Why nothing may be deleted now ('' / None when it may): a Step0

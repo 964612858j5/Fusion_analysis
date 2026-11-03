@@ -6,7 +6,6 @@ import os
 import gc
 import json
 import time
-import shutil
 import traceback
 import uuid
 
@@ -54,6 +53,7 @@ from ...core.bg_correction import (
 )
 from ...core.bg_parallel import (MEM_PER_TILE_BYTES, MEM_PER_TILE_FAST_BYTES, choose_workers,
                                  mem_available_bytes, ordered_results)
+from ...core import product_swap
 from ...core.io_loader import OMETIFFLoader
 from ...viewer import step1_source as sources
 from ...viewer import display_pyramid
@@ -2165,11 +2165,20 @@ class WsiCorrectionWorker(QThread):
         self.rois = list(rois or [])
         self._cancel_requested = False
         # Incremental save: process only `process_channels` (None = all assigned);
-        # when `incremental`, merge into the existing zarr (keep already-corrected
-        # channels + ROI groups) instead of wiping and rewriting it.
+        # when `incremental`, the computed channels replace theirs in the
+        # existing product and the rest stay; otherwise the product is
+        # replaced as a whole. Either way the channels are computed into a
+        # staging product, and the live product is NOT touched here: the
+        # page moves them in on the GUI thread (`swap_plan`, read when
+        # `finished` arrives; `core.product_swap`, docs/v17_save_inplace_
+        # step1_ahead_plan.md §8).
         self._process_channels = (None if process_channels is None
                                   else set(process_channels))
         self._incremental = bool(incremental)
+        #: what the page moves into the live product when `finished` arrives:
+        #: ("in", [(group, channel)], [(group, withdrawn channel)]) or
+        #: ("whole",); None when there is nothing to move
+        self.swap_plan = None
 
     def stop_after_current_channel(self):
         """Request cancellation. Honoured at the next TILE boundary (see
@@ -2179,28 +2188,6 @@ class WsiCorrectionWorker(QThread):
     @staticmethod
     def _sidecar_path(output_dir):
         return os.path.join(output_dir, sources.COARSE_SIDECAR_DIRNAME)
-
-    @staticmethod
-    def _drop_plane(sidecar_path, group_name, ch_name):
-        """Make this channel's plane unusable BEFORE its level 0 moves.
-
-        Deleted, not overwritten: between here and the moment the new plane
-        is marked complete there must be NO plane for this channel at all,
-        so an interrupted run cannot leave one that matches the product it
-        no longer describes.
-        """
-        if not os.path.isdir(sidecar_path):
-            return False
-        try:
-            root = zarr.open_group(sidecar_path, mode="a")
-            if group_name in root and ch_name in root[group_name]:
-                del root[group_name][ch_name]
-                return True
-        except Exception:                                   # noqa: BLE001
-            # A plane that cannot be deleted must not be readable either;
-            # the identity check refuses it once level 0 has a new token.
-            return False
-        return False
 
     def _correct_channel(self, ds, accumulator, tiles, ch_name, method, param, path,
                          info, roi_y0, roi_x0, poly_mask, progress, impl=None):
@@ -2292,28 +2279,6 @@ class WsiCorrectionWorker(QThread):
         ds[y0:y1, x0:x1] = out
         if accumulator is not None:
             accumulator.add(out, y0, x0)
-
-    @staticmethod
-    def _discard_partial(zarr_path, incremental, group, ch_name):
-        """What a cancel leaves behind. Fresh save: nothing -- the whole
-        zarr goes, it held only this run's output. Incremental save: the
-        channels complete before this run stay; only the dataset that was
-        being written (`ch_name` in `group`, if any) is removed, so the zarr
-        never holds a half-written channel that reads as corrected."""
-        if not incremental:
-            shutil.rmtree(zarr_path, ignore_errors=True)
-            # The planes described a product that no longer exists.
-            shutil.rmtree(
-                os.path.join(os.path.dirname(zarr_path),
-                             sources.COARSE_SIDECAR_DIRNAME),
-                ignore_errors=True)
-            shutil.rmtree(display_pyramid.display_root(zarr_path), ignore_errors=True)
-            return
-        if group is not None and ch_name is not None and ch_name in group:
-            try:
-                del group[ch_name]
-            except Exception:
-                pass
 
     @staticmethod
     def _safe_group_name(name, idx):
@@ -2415,15 +2380,16 @@ class WsiCorrectionWorker(QThread):
                 (ch, method, _param_for(ch, method))
                 for ch, method in process.items()
             ]
-            zarr_path = os.path.join(self.output_dir, "corrected_channels.zarr")
-
-            incremental = self._incremental and os.path.isdir(zarr_path)
-            sidecar_path = self._sidecar_path(self.output_dir)
-            if not incremental and os.path.exists(zarr_path):
-                shutil.rmtree(zarr_path, ignore_errors=True)
-                # Every plane belonged to the product just removed.
-                shutil.rmtree(sidecar_path, ignore_errors=True)
-                shutil.rmtree(display_pyramid.display_root(zarr_path), ignore_errors=True)
+            live_path = os.path.join(self.output_dir, "corrected_channels.zarr")
+            incremental = self._incremental and os.path.isdir(live_path)
+            # What the product holds now, and which of it this Save withdraws.
+            withdrawn = []
+            if incremental:
+                live_root = zarr.open_group(live_path, mode="r")
+                for g in live_root.group_keys():
+                    for ch in live_root[g].array_keys():
+                        if ch not in desired:
+                            withdrawn.append((g, ch))
             # Which level Step1 will ask a corrected channel for, read from
             # the slide's own pyramid. `None` means "do not write a plane" --
             # never a guessed stride.
@@ -2437,15 +2403,20 @@ class WsiCorrectionWorker(QThread):
                 # Nothing to (re)compute. In incremental mode the zarr already
                 # holds every desired channel -> report the merged state; in fresh
                 # mode there is genuinely nothing.
-                self.finished.emit(zarr_path if incremental else "",
+                if incremental and withdrawn:
+                    self.swap_plan = ("in", [], withdrawn)
+                self.finished.emit(live_path if incremental else "",
                                    dict(desired) if incremental else {})
                 return
 
             os.makedirs(self.output_dir, exist_ok=True)
-            root = zarr.open_group(zarr_path, mode="a" if incremental else "w")
+            staging = product_swap.new_staging(self.output_dir)
+            zarr_path = os.path.join(staging, "corrected_channels.zarr")
+            sidecar_path = self._sidecar_path(staging)
+            root = zarr.open_group(zarr_path, mode="w")
             root.attrs["mode"] = "roi_only"
             root.attrs["source_ome"] = os.path.abspath(getattr(self.loader, "filepath", "") or "")
-            root.attrs["output_dir"] = os.path.abspath(self.output_dir)
+            root.attrs["output_dir"] = os.path.abspath(self.output_dir)   # the live run
             root.attrs["created_by"] = "Step0"
             # Version of the correction numerics that LAST wrote this zarr.
             # Per-channel identity (bg_correction_algo_version on each array)
@@ -2505,12 +2476,8 @@ class WsiCorrectionWorker(QThread):
             display = None                 # the display builder under way, if any
 
             for info in roi_infos:
-                # Incremental: reuse the existing group (keep its already-corrected
-                # channel datasets); fresh: create/overwrite a clean group.
-                if incremental and info["group_name"] in root:
-                    group = root[info["group_name"]]
-                else:
-                    group = root.create_group(info["group_name"], overwrite=True)
+                # the staging product holds only what this run computes
+                group = root.create_group(info["group_name"], overwrite=True)
                 group.attrs["roi_name"] = info["roi_name"]
                 group.attrs["bbox_fullres"] = info["bbox"]
                 group.attrs["shape"] = [int(roi_h), int(roi_w)]
@@ -2538,17 +2505,15 @@ class WsiCorrectionWorker(QThread):
                         # recomputed with scipy goes back to 4096)
                         tiles = list(_tile_slices(roi_h, roi_w,
                                                   correction_tile_size(method, impl), overlap))
-                        # THIS CHANNEL'S PLANE GOES FIRST. Its level 0 is about
-                        # to be rewritten, so the plane beside it stops being
-                        # true at the first tile written below.
-                        self._drop_plane(sidecar_path, info["group_name"], ch_name)
+                        # (staged: the live channel, its plane and its display
+                        # layers stand until the swap at the end of the run)
                         accumulator = None
                         if level_stride is not None:
                             accumulator = _CoarsePlaneAccumulator(
                                 info["bbox"], level_stride[1])
-                        # its display layers go too (a builder that cannot
-                        # run -- no level, no disk, a sample it cannot keep
-                        # -- leaves none, and Step1 reads as before)
+                        # (a display builder that cannot run -- no level, no
+                        # disk, a sample it cannot keep -- leaves none, and
+                        # Step1 reads as before)
                         display_pyramid.drop(display_pyramid.display_root(zarr_path),
                                              info["group_name"], ch_name)
                         ds = group.create_dataset(
@@ -2615,11 +2580,9 @@ class WsiCorrectionWorker(QThread):
                         # cancel that waited for it was a cancel that did
                         # nothing for minutes. The channel in progress is
                         # partial and is dropped; a fresh save drops the
-                        # whole zarr, an incremental save keeps the
-                        # channels that were already complete before this
-                        # run and drops only the partial dataset.
-                        self._discard_partial(zarr_path, incremental, group, ch_name)
-                        self.canceled.emit(zarr_path)
+                        # staging goes; the live product was never touched.
+                        product_swap.discard_staging(self.output_dir)
+                        self.canceled.emit(live_path)
                         return
                     # Block S0P: which backend made these pixels -- part of
                     # the incremental-reuse signature.
@@ -2649,17 +2612,23 @@ class WsiCorrectionWorker(QThread):
                     completed_units += len(tiles)
                     if self._cancel_requested:
                         # Requested after the last tile of this channel: the
-                        # channel is complete, nothing partial to drop.
-                        self._discard_partial(zarr_path, incremental, None, None)
-                        self.canceled.emit(zarr_path)
+                        # Save is canceled as a whole all the same.
+                        product_swap.discard_staging(self.output_dir)
+                        self.canceled.emit(live_path)
                         return
 
-            self.finished.emit(zarr_path, corrected_decisions)
+            # Every channel is complete: the page moves them in.
+            self.swap_plan = (
+                ("in", [(info["group_name"], ch) for info in roi_infos
+                        for ch, _m, _p in channels], withdrawn)
+                if incremental else ("whole",))
+            self.finished.emit(live_path, corrected_decisions)
         except Exception:
             # a display builder still running ends with the save (R7b B2)
             builder = locals().get("display")
             if builder is not None:
                 builder.abort()
+            product_swap.discard_staging(self.output_dir)
             self.error.emit(traceback.format_exc())
 
 

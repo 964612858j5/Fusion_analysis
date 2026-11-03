@@ -35,6 +35,15 @@ from test_step0_background_correction_tab import _GpuPathLoader, app  # noqa: E4
 
 # ── 1. the worker cancels at a tile boundary ─────────────────────────────
 
+
+def _settle(worker):
+    """What the Save page does with a finished worker: its staged channels
+    moved into the live product and the move committed
+    (docs/v17_save_inplace_step1_ahead_plan.md §8)."""
+    from block01.core import product_swap
+    product_swap.apply_plan(worker.output_dir, worker.swap_plan)
+    product_swap.commit(worker.output_dir)
+
 class _Loader:
     """Two channels, an ROI tall enough for several 4096-row tiles, and a
     hook that flips the worker's cancel flag after `cancel_after` reads."""
@@ -71,6 +80,7 @@ def _run(worker):
     worker.canceled.connect(lambda p: got["canceled"].append(p))
     worker.error.connect(lambda m: got["error"].append(m))
     worker.run()                      # synchronously, on this thread
+    _settle(worker)                     # what the Save page does next
     return got
 
 

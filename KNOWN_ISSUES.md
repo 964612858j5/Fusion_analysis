@@ -27,10 +27,7 @@ is fixed.
 * GPU background correction needs a CUDA toolkit (CuPy compiles against it);
   without one the CPU is used.
 * Waits still blocking the window (`docs/v17_small_review_items_plan.md`
-  §3, deferred): Step1 patch loaders wait up to 3 s each on a switch,
-  because every loader shares one slide reader whose corrected images a
-  Step0 Save swaps in place (its own plan next, §13); Step0's release of a
-  finished background process; the pre-segmentation job's close on a
+  §3, deferred): Step0's release of a finished background process; the pre-segmentation job's close on a
   dataset switch; the montage's close; stopping background workers when a
   dataset is loaded.
 * Step0's preload cache can admit a read that started before a Save after

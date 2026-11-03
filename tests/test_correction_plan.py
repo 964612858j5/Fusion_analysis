@@ -161,6 +161,9 @@ def test_saved_product_matches_only_its_own_parameter(tmp_path):
         _corrected_zarr_path = store
         _corrected_decisions = {"M": "tophat"}
 
+        def corrected_store_binding(self):
+            return self._corrected_zarr_path, dict(self._corrected_decisions)
+
     loader = _Loader()
     saved_correction.register_loader(loader)
     found = cp.saved_product(slide, "M", "tophat", (15,), (H, W))
@@ -196,6 +199,9 @@ def test_an_roi_at_the_origin_does_not_vouch_for_the_whole_slide(tmp_path):
         filepath = slide
         _corrected_zarr_path = store
         _corrected_decisions = {"M": "tophat"}
+
+        def corrected_store_binding(self):
+            return self._corrected_zarr_path, dict(self._corrected_decisions)
 
     saved_correction.register_loader(_Loader())
     assert cp.saved_product(slide, "M", "tophat", (15,), (H, W)) is None

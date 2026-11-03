@@ -15,6 +15,15 @@ import pytest
 from block01.core import bg_parallel as bp  # noqa: E402
 
 
+def _settle(worker):
+    """What the Save page does with a finished worker: its staged channels
+    moved into the live product and the move committed
+    (docs/v17_save_inplace_step1_ahead_plan.md §8)."""
+    from block01.core import product_swap
+    product_swap.apply_plan(worker.output_dir, worker.swap_plan)
+    product_swap.commit(worker.output_dir)
+
+
 @pytest.fixture(autouse=True)
 def _cpu_backend(monkeypatch):
     """These tests are about the CPU backend: run them as on a machine
@@ -202,6 +211,7 @@ def _save(out_dir, loader=None, method="tophat", **kw):
     w.error.connect(got["error"].append)
     w.canceled.connect(got["canceled"].append)
     w.run()
+    _settle(w)                     # what the Save page does next
     assert got["error"] == [], got["error"]
     return w, got, zarr.open_group(str(out_dir / "corrected_channels.zarr"), mode="r")["R"]["CD3"]
 
@@ -301,6 +311,7 @@ def _real_save(out_dir, slide, method, monkeypatch, n=None, hook=None):
     if hook:
         hook(w)
     w.run()
+    _settle(w)                     # what the Save page does next
     assert got["error"] == [], got["error"]
     return w, got
 

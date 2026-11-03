@@ -75,6 +75,9 @@ def slide(tmp_path_factory):
         _corrected_zarr_path = store
         _corrected_decisions = {"CD3": "tophat"}
 
+        def corrected_store_binding(self):
+            return self._corrected_zarr_path, dict(self._corrected_decisions)
+
     loader = _Loader()
     saved_correction.register_loader(loader)
     yield str(path), loader

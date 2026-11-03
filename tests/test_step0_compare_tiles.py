@@ -789,7 +789,7 @@ def test_escape_goes_back_to_the_image_too(app):
 def test_a_right_click_on_the_chrome_goes_back_too(app):
     page = _page(app)
     _enter(page)
-    _right_click(page._preview_status)
+    _right_click(page._compare_strip)
     assert page._compare_mode() is False
 
 
@@ -1109,49 +1109,6 @@ def test_the_thumbnail_goes_back_to_the_full_image_on_the_way_out(app):
     assert popup.overview.rects[-1] == pytest.approx((y0, y1, x0, x1))
 
 
-# ── 11. Save as patch ────────────────────────────────────────────────────
-
-def test_save_as_patch_is_off_until_the_panels_have_opened(app):
-    page = _page(app)
-    assert page._btn_snapshot_patch.isEnabled() is False
-    assert page._save_snapshot_as_patch() is None
-
-
-def test_save_as_patch_appends_the_panels_current_rectangle(app):
-    page = _page(app)
-    strip = _enter(page)
-    x0, y0, w, h = strip.view_rect_l0(0)
-    coords = page._save_snapshot_as_patch()
-    assert coords == (int(round(y0)), int(round(y0 + h)),
-                      int(round(x0)), int(round(x0 + w)))
-    assert list(page.patches)[-1] == coords
-
-
-def test_save_as_patch_follows_the_camera(app):
-    """The rectangle that means "here" is the one on screen when the button
-    is pressed, not one recorded when the panels opened."""
-    page = _page(app)
-    strip = _enter(page)
-    first = page._save_snapshot_as_patch()
-    now = strip.camera(0)
-    page._apply_compare_camera(now[0] + 800.0, now[1], now[2])
-    QtTest.QTest.qWait(10)
-    second = page._save_snapshot_as_patch()
-    assert second != first
-    assert second[2] > first[2]
-
-
-def test_save_as_patch_computes_nothing(app, monkeypatch):
-    page = _page(app)
-    _enter(page)
-
-    def _boom(*_a, **_k):
-        raise AssertionError("a BatchProcessWorker was constructed")
-
-    monkeypatch.setattr(sp, "BatchProcessWorker", _boom)
-    page._save_snapshot_as_patch()
-
-
 # ── 12. the metrics ──────────────────────────────────────────────────────
 
 def test_the_metrics_say_they_are_a_preview(app):
@@ -1243,7 +1200,6 @@ def test_a_dataset_switch_drops_the_strip(app):
     assert strip.built is False
     assert page._compare_opened is False
     assert page._compare_entry_full_camera is None
-    assert page._btn_snapshot_patch.isEnabled() is False
 
 
 def test_the_page_tears_the_strip_down(app):

@@ -44,8 +44,9 @@ def saved_store(dataset_path):
     loader = ref() if ref is not None else None
     if loader is None:
         return "", {}
-    path = getattr(loader, "_corrected_zarr_path", None) or ""
-    decisions = dict(getattr(loader, "_corrected_decisions", None) or {})
+    # path and decisions from ONE version of the loader's binding
+    path, decisions = loader.corrected_store_binding()
+    path, decisions = path or "", dict(decisions or {})
     if not path or not os.path.exists(path):
         return "", {}
     return str(path), decisions

@@ -268,9 +268,33 @@ def copy_reused(rdir, run, task, rec):
 
 
 # ── what may be chosen (plan 7.7) ───────────────────────────────────────────
-def is_stale(run, current_pixel_key, current_fusion_hash):
-    """Shown, but never chosen: the pixels or the fusion settings changed."""
+def _beyond_correction(identity):
+    """A pixel identity without its correction part: the slide, the region,
+    the remap and the channel names, not what each channel's correction is."""
+    out = dict(identity or {})
+    out["channels"] = sorted((identity or {}).get("channels") or {})
+    return config_hash.config_hash(out)
+
+
+def is_stale(run, current_pixel_key, current_fusion_hash, current_identity=None,
+             current_components=None):
+    """Shown, but never chosen: the image or the fusion settings changed.
+
+    A correction change alone does not make a result stale (user ruling
+    2026-11-02, docs/v17_save_inplace_step1_ahead_plan.md §A4): when both
+    sides carry the structured identity, its correction part is left out --
+    a changed fusion channel makes the fusion settings unsaved instead, and
+    a result is stale once they are saved again: then the saved settings'
+    component identities (`current_components`, which a re-save with the same
+    weights changes too) differ from the ones the run recorded."""
     src = run.get("source") or {}
+    recorded = (run.get("fusion") or {}).get("components")
+    if (current_components is not None and recorded is not None
+            and recorded != current_components):
+        return True
+    if current_identity is not None and src.get("pixel_identity") is not None:
+        return (_beyond_correction(src["pixel_identity"]) != _beyond_correction(current_identity)
+                or (run.get("fusion") or {}).get("hash") != current_fusion_hash)
     return (src.get("pixel_key") != current_pixel_key
             or (run.get("fusion") or {}).get("hash") != current_fusion_hash)
 
@@ -299,7 +323,8 @@ def combo_status(run, records, combo_id):
     return st
 
 
-def selectable(run, records, combo_id, current_pixel_key, current_fusion_hash):
+def selectable(run, records, combo_id, current_pixel_key, current_fusion_hash,
+               current_identity=None, current_components=None):
     """(may be chosen, why not / what to warn about). The five conditions of
     plan 7.7 (E1): all tasks ended and none cancelled; every file there; at
     least one ok; not stale. Failures do not block: the caller asks."""
@@ -312,6 +337,7 @@ def selectable(run, records, combo_id, current_pixel_key, current_fusion_hash):
         return False, "a result file is missing"
     if not st[OK]:
         return False, "no patch succeeded"
-    if is_stale(run, current_pixel_key, current_fusion_hash):
+    if is_stale(run, current_pixel_key, current_fusion_hash, current_identity,
+                current_components):
         return False, "the image or the Fusion settings changed since this run"
     return True, (f"{st[FAILED]} of {st['total']} patches failed" if st[FAILED] else "")

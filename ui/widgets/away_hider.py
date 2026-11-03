@@ -15,13 +15,24 @@ not stop the others hiding on a real switch; only the window that owns it
 stays, so the box keeps its parent. The check
 waits a moment so focus passing between Block01's own windows (briefly
 "inactive" on X11) does not flicker them.
+
+Not while one of these windows is being MOVED: dragging a window by its
+title bar makes the window manager take the pointer, and Qt reports the
+application inactive for the length of the drag. Hiding then and showing it
+again when the drag ended put the window back where the drag started
+(acceptance 2026-11-03: the Tissue Preview could not be moved). A window that
+moved within the last `MOVING_MS` is being dragged; the check waits again.
 """
+
+import time
 
 from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtCore import Qt
 
 #: how long the application must stay inactive before the windows hide
 SETTLE_MS = 250
+#: a window that moved this recently is being dragged, not left behind
+MOVING_MS = 400
 
 
 class _AwayHider(QtCore.QObject):
@@ -29,6 +40,7 @@ class _AwayHider(QtCore.QObject):
         super().__init__(app)
         self._app = app
         self._windows = {}           # id(win) -> [win, allowed, hidden by us]
+        self._last_move = 0.0        # monotonic time a managed window last moved
         self._timer = QtCore.QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(SETTLE_MS)
@@ -42,7 +54,15 @@ class _AwayHider(QtCore.QObject):
                 self._windows[key][1] = allowed
             return
         self._windows[key] = [win, allowed, False]
+        win.installEventFilter(self)
         win.destroyed.connect(lambda _o=None, k=key: self._windows.pop(k, None))
+
+    def eventFilter(self, obj, event):                      # noqa: N802
+        # spontaneous: the window manager moved it (a drag), not the program
+        if (event.type() == QtCore.QEvent.Move and event.spontaneous()
+                and id(obj) in self._windows):
+            self._last_move = time.monotonic()
+        return False
 
     def _on_state(self, state):
         if state == Qt.ApplicationActive:
@@ -56,6 +76,9 @@ class _AwayHider(QtCore.QObject):
 
     def _step_aside(self):
         if self._app_active():
+            return
+        if (time.monotonic() - self._last_move) * 1000.0 < MOVING_MS:
+            self._timer.start()      # a window is being dragged: ask again
             return
         modal = QtWidgets.QApplication.activeModalWidget()
         if _native_file_dialog(modal):

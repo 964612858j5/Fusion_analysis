@@ -25,6 +25,15 @@ from block01.core.bg_correction import current_compute_signature as _ccs  # noqa
 _T, _C = _ccs("tophat"), _ccs("cucim")
 
 
+def _settle(worker):
+    """What the Save page does with a finished worker: its staged channels
+    moved into the live product and the move committed
+    (docs/v17_save_inplace_step1_ahead_plan.md §8)."""
+    from block01.core import product_swap
+    product_swap.apply_plan(worker.output_dir, worker.swap_plan)
+    product_swap.commit(worker.output_dir)
+
+
 @pytest.fixture(scope="module")
 def app():
     from PyQt5 import QtWidgets
@@ -149,6 +158,7 @@ def test_explicit_worker_writes_nonempty_corrected_zarr(app, tmp_path):
     w.finished.connect(lambda p, dec: out.update(path=p, dec=dec))
     w.error.connect(lambda m: out.update(err=m))
     w.run()                              # run synchronously (no QThread)
+    _settle(w)                     # what the Save page does next
     assert out.get("err") is None
     path = out["path"]
     assert path.endswith("corrected_channels.zarr")
@@ -172,6 +182,7 @@ def test_worker_no_channels_makes_no_zarr(app, tmp_path):
     out = {}
     w.finished.connect(lambda p, dec: out.update(path=p, dec=dec))
     w.run()
+    _settle(w)                     # what the Save page does next
     assert out.get("path") == ""         # no corrected output claimed
 
 
@@ -241,6 +252,7 @@ def _run_worker(tmp_dir, decisions, rois, process_channels=None, incremental=Fal
     w.finished.connect(lambda p, dec: out.update(path=p, dec=dec))
     w.error.connect(lambda m: out.update(err=m))
     w.run()
+    _settle(w)                     # what the Save page does next
     return out
 
 
@@ -722,6 +734,7 @@ def _run_one(tmp_dir, ch, method, param, process_channels=None, incremental=Fals
     w.finished.connect(lambda p, dec: out.update(path=p, dec=dec))
     w.error.connect(lambda m: out.update(err=m))
     w.run()
+    _settle(w)                     # what the Save page does next
     return out
 
 

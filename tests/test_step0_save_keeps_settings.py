@@ -83,9 +83,8 @@ def test_cancel_while_computing(save):
     _prepared(page)
     with open(path, "rb") as f:
         assert f.read() != before                   # the Save did write its settings
-    run = page._rm_pending_run
     page._wsi_dialog = None
-    page._on_wsi_canceled(os.path.join(run, "corrected_channels.zarr"))
+    page._on_wsi_canceled(os.path.join(base, "corrected_channels.zarr"))
     _previous(page, path, before)
     assert _runs(ctx) == [os.path.basename(base)]
 
@@ -108,13 +107,14 @@ def test_a_correction_error(save):
     _previous(page, path, before)
 
 
-def test_run_creation_failing(save, monkeypatch):
-    import block01.ui.step0.step0_page as sp
+def test_the_preparation_failing(save, monkeypatch):
+    """(Save writes the run in place: no run is created. What can fail before
+    the run starts is the viewer's hand-off.)"""
     page, path, before, ctx, base = save
 
     def boom(*a, **k):
         raise OSError("disk full")
-    monkeypatch.setattr(sp.run_store, "new_run", boom)
+    monkeypatch.setattr(Step0Page, "_begin_release_explore_for_production", boom)
     with pytest.raises(OSError):
         page._save_and_continue()
     _previous(page, path, before)
@@ -139,9 +139,8 @@ def test_a_first_save_cancelled_leaves_no_file(save):
     os.remove(path)
     page._save_and_continue()
     _prepared(page)
-    run = page._rm_pending_run
     page._wsi_dialog = None
-    page._on_wsi_canceled(os.path.join(run, "corrected_channels.zarr"))
+    page._on_wsi_canceled(os.path.join(base, "corrected_channels.zarr"))
     assert not os.path.exists(path)
 
 
@@ -226,9 +225,9 @@ def test_a_handoff_failure_reads_the_previous_product_again(real, monkeypatch):
 
 
 def test_a_failure_after_publication_keeps_the_published_run(real, monkeypatch):
-    """The handoff published the run and then failed: the run stays (a
-    published run is never deleted, plan §3 limits), the settings and the
-    previous product's reads come back."""
+    """The handoff published the run (rewritten in place) and then failed:
+    the run stays, no other run appears, the settings and the previous
+    product's reads come back."""
     from block01.core import step0_handoff
     from block01.utils import run_store as rs
     page, path, before, ctx, base, loader = real
@@ -241,9 +240,8 @@ def test_a_failure_after_publication_keeps_the_published_run(real, monkeypatch):
     monkeypatch.setattr(step0_handoff, "write_handoff", write)
     page._save_and_continue()
     _prepared(page)
-    new = [n for n in _runs(ctx) if n != os.path.basename(base)]
-    assert published and len(new) == 1
-    assert rs.is_done(os.path.join(rs.runs_dir(ctx["roi_dir"]), new[0]))
+    assert published and _runs(ctx) == [os.path.basename(base)]
+    assert rs.is_done(base)
     with open(path, "rb") as f:
         assert f.read() == before
     assert _cd8(loader) == 1000.0
@@ -268,7 +266,7 @@ def test_the_status_line_says_unsaved_until_the_setting_is_saved(save):
     page._save_and_continue()
     _prepared(page)
     page._wsi_dialog = None
-    page._on_wsi_canceled(os.path.join(page._rm_pending_run, "corrected_channels.zarr"))
+    page._on_wsi_canceled(os.path.join(base, "corrected_channels.zarr"))
     assert page._decision_status.full_text().startswith("Unsaved: CD8 tophat")   # kept as a draft
     page._set_channel_decision("CD3", "original")                # saved: tophat
     assert _status_of(page, "CD3") == "Unsaved: CD3 original"

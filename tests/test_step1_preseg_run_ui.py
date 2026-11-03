@@ -315,13 +315,62 @@ def test_save_plan_and_save_fusion_settings_say_they_worked(app, tmp_path, monke
                             lambda: (_ for _ in ()).throw(OSError("disk full")))
         w._preseg_methods.btn_save.click()
         assert "could not be saved" in told[-1] and "disk full" in told[-1]
-        n = len(told)
         monkeypatch.setattr(w, "_commit_fusion_settings", lambda *a: False)
+        w._btn_save_fusion_settings.setEnabled(True)
         w._btn_save_fusion_settings.click()
-        assert len(told) == n                              # a failure speaks for itself
+        assert _settled(w) == []                           # a failure speaks for itself
         monkeypatch.setattr(w, "_commit_fusion_settings", lambda *a: True)
         w._btn_save_fusion_settings.setEnabled(True)
         w._btn_save_fusion_settings.click()
-        assert told[-1].startswith("Fusion settings saved.")
+        texts = _settled(w)
+        assert texts and texts[-1].startswith("Fusion settings saved.")
+    finally:
+        w.close()
+
+
+def _boxes():
+    from PyQt5 import QtWidgets
+    return [b for b in QtWidgets.QApplication.topLevelWidgets()
+            if isinstance(b, QtWidgets.QMessageBox) and b.isVisible()
+            and b.windowTitle() == "Fusion settings"]
+
+
+def _settled(w, ms=3000):
+    """Wait for the Save Fusion Settings box to finish; its visible texts."""
+    from PyQt5 import QtTest
+    for _ in range(ms // 10):
+        if getattr(w, "_fusion_saving_box", None) is None:
+            break
+        QtTest.QTest.qWait(10)
+    texts = [b.text() for b in _boxes()]
+    for b in _boxes():
+        b.hide()
+        b.deleteLater()
+    return texts
+
+
+def test_save_fusion_settings_says_saving_before_it_starts(app, tmp_path, monkeypatch):
+    """Acceptance 2026-11-02/03: the commit takes a second or two, so ONE box
+    says it is saving -- already drawn, with its text, when the commit starts
+    -- and the same box then says it is saved."""
+    w = _window(app, tmp_path, monkeypatch)
+    try:
+        _quiet(monkeypatch)
+        seen = []
+
+        def commit(*_a):
+            seen.extend((b.text(), b.windowHandle() is not None) for b in _boxes())
+            assert not w._btn_save_fusion_settings.isEnabled()    # no second click
+            return True
+        monkeypatch.setattr(w, "_commit_fusion_settings", commit)
+        w._btn_save_fusion_settings.setEnabled(True)
+        w._btn_save_fusion_settings.click()
+        assert seen == []                                  # not before it is drawn
+        assert w._btn_save_fusion_settings.isEnabled() is False
+        box = _boxes()[0]
+        texts = _settled(w)
+        assert seen and seen[0][0].startswith("Saving fusion settings") and seen[0][1]
+        assert len(texts) == 1 and texts[0] == box.text()          # the SAME box
+        assert texts[0].startswith("Fusion settings saved.")
     finally:
         w.close()

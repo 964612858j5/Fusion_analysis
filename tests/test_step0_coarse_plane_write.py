@@ -31,6 +31,15 @@ ROI = [96, 96 + 640, 48, 48 + 512]          # unaligned on purpose
 CHANNELS = ("CH_A", "CH_B")
 
 
+
+def _settle(worker):
+    """What the Save page does with a finished worker: its staged channels
+    moved into the live product and the move committed
+    (docs/v17_save_inplace_step1_ahead_plan.md §8)."""
+    from block01.core import product_swap
+    product_swap.apply_plan(worker.output_dir, worker.swap_plan)
+    product_swap.commit(worker.output_dir)
+
 class _Loader:
     """Only what the worker reads from a loader."""
 
@@ -108,10 +117,12 @@ def _run_save(tmp_path, loader, out_dir, channels=CHANNELS, incremental=False,
         search_ctrl._CoarsePlaneAccumulator.add = counting
         try:
             worker.run()
+            _settle(worker)                     # what the Save page does next
         finally:
             search_ctrl._CoarsePlaneAccumulator.add = original
         return worker
     worker.run()
+    _settle(worker)                     # what the Save page does next
     return worker
 
 
@@ -363,23 +374,26 @@ def test_a_cancelled_channel_publishes_no_plane(tmp_path, monkeypatch):
     assert not (out / sources.COARSE_SIDECAR_DIRNAME).exists()
 
 
-def test_a_cancelled_incremental_save_keeps_the_finished_channels_plane(
+def test_a_cancelled_incremental_save_leaves_the_product_as_it_was(
         tmp_path, monkeypatch):
+    """Save in place (docs/v17_save_inplace_step1_ahead_plan.md): the
+    channels are computed into a staging product, so a cancel leaves every
+    live channel -- the one being recomputed included -- and its plane as
+    they were, and no staging behind."""
     out = tmp_path / "step0"
     slide_a, data_a = _slide(tmp_path, seed=1)
     _run_save(tmp_path, _Loader(slide_a, data_a), out)
-    keep = np.asarray(_plane(out, "CH_B")[:, :], np.float32).copy()
+    keep_a = np.asarray(_plane(out, "CH_A")[:, :], np.float32).copy()
+    keep_b = np.asarray(_plane(out, "CH_B")[:, :], np.float32).copy()
 
     slide_b, data_b = _slide(tmp_path, seed=2)
     _small_writer_tiles(monkeypatch)
     _run_save(tmp_path, _Loader(slide_b, data_b), out, channels=("CH_A",),
               incremental=True, cancel_after_tiles=2)
 
-    # CH_A: its level 0 was dropped and its plane went first -- neither may
-    # be readable as "the current one"
-    assert _plane(out, "CH_A") is None
-    assert np.array_equal(np.asarray(_plane(out, "CH_B")[:, :], np.float32),
-                          keep)
+    assert np.array_equal(np.asarray(_plane(out, "CH_A")[:, :], np.float32), keep_a)
+    assert np.array_equal(np.asarray(_plane(out, "CH_B")[:, :], np.float32), keep_b)
+    assert not (out / ".staging").exists()
 
 
 def test_a_slide_without_a_pyramid_writes_no_plane_and_still_saves(tmp_path):

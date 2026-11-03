@@ -8,7 +8,7 @@ under `docs/` (index: `docs/README.md`); the binding UI spec is
 
 | Step | Page | What it makes |
 |---|---|---|
-| 0 Setup & Preprocessing | `ui/step0/step0_page.py` | region (ROI), patches, per-channel background correction and Intensity; Save → a **correct run** |
+| 0 Setup & Preprocessing | `ui/step0/step0_page.py` | region (ROI), patches, per-channel background correction and Intensity; Save → the workspace's **correct run**, rewritten in place (only changed channels, staged then swapped: `core/product_swap.py`; 2026-11-02) |
 | 0.5 Regions | `ui/regions/` | TMA cores and exclusion areas, saved per slide (`core/regions/`) |
 | 1 Fusion | `ui/step1_*`, `ui/step1_presegmentation/` | fusion settings, patch pre-segmentation (**preseg run**), Generate → a **fuse run** |
 | 2 Segmentation & Merge | `ui/step2_page.py`, `workers/segment_merge_worker.py` | whole-region segmentation in tiles → a **segment run** (label store) |

@@ -733,6 +733,11 @@ def test_a_tick_made_during_a_load_is_not_lost(app):
     """The second tick must be served once the first loader is off the slot."""
     w = _window(app, cached=())
     try:
+        # the window's own first read (with the plain loader) ends first:
+        # stopping a loader no longer waits for it, so it may still be on
+        # the slot here (docs/v17_patch_reader_versions_plan.md §1.2)
+        assert _pump(w, lambda: not any(t.isRunning() for t in w._patch_loaders.values()))
+        w._patch_channel_cache.pop(0, None)
         w.loader = _BlockingLoader("DAPI")
         w._patch_load_ready.discard(0)
         w._ensure_channels_cached(0)                 # starts the DAPI read
@@ -1031,6 +1036,11 @@ def test_the_real_start_path_records_what_the_worker_is_reading(app):
     """
     w = _window(app, cached=())
     try:
+        # the window's own first read (with the plain loader) ends first:
+        # stopping a loader no longer waits for it, so it may still be on
+        # the slot here (docs/v17_patch_reader_versions_plan.md §1.2)
+        assert _pump(w, lambda: not any(t.isRunning() for t in w._patch_loaders.values()))
+        w._patch_channel_cache.pop(0, None)
         w.loader = _FailingBlockingLoader("DAPI")
         w._patch_load_ready.discard(0)
         requested = []

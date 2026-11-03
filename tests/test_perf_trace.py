@@ -757,4 +757,5 @@ def test_a_close_that_is_refused_keeps_the_writer_alive(monkeypatch,
         assert perf_trace.WRITER.is_running()
     finally:
         w._patch_loaders = {}
+        w._retired_loaders = set()          # retired by the close, not waited for
         _drain()

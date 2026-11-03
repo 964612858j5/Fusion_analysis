@@ -1,6 +1,7 @@
 """Block CS P2: Step0 Save prepares off the GUI thread -- the viewer's
-hand-off (floor thread + scheduler drain) and the copy of the base correct
-run -- and starts only when both are done. The synchronous
+hand-off (floor thread + scheduler drain) -- and starts only when it is done.
+There is no copy any more: Save rewrites the workspace's correct run in
+place (docs/v17_save_inplace_step1_ahead_plan.md). The synchronous
 `suspend_for_production` that Compare relies on is unchanged."""
 import os
 import threading
@@ -177,18 +178,6 @@ def _page(app, tmp_path, monkeypatch):
     return page, base, str(ws)
 
 
-def _slow_copy(monkeypatch, seconds=0.5, fail=False):
-    from block01.ui.step0.step0_page import Step0Page
-    real = Step0Page._rm_copy_pixels
-
-    def slow(base, dst):
-        time.sleep(seconds)
-        if fail:
-            raise OSError("disk full")
-        real(base, dst)
-    monkeypatch.setattr(Step0Page, "_rm_copy_pixels", staticmethod(slow))
-
-
 def _until(pred, ms=5000):
     for _ in range(ms // 10):
         if pred():
@@ -197,70 +186,58 @@ def _until(pred, ms=5000):
     return False
 
 
-def test_the_copy_runs_while_the_window_stays_responsive(app, tmp_path, monkeypatch):
+def _held_viewer(monkeypatch):
+    from block01.ui.step0.step0_page import Step0Page
+    viewer_free = threading.Event()
+    monkeypatch.setattr(Step0Page, "_begin_release_explore_for_production",
+                        lambda self, reason, cancelled=None: (viewer_free, {}))
+    return viewer_free
+
+
+def test_a_save_waits_for_the_viewer_while_the_window_stays_responsive(
+        app, tmp_path, monkeypatch):
     page, base, ws = _page(app, tmp_path, monkeypatch)
-    _slow_copy(monkeypatch)
+    viewer_free = _held_viewer(monkeypatch)
     got = []
     t0 = time.perf_counter()
-    page._rm_prepare_save(base, True, None, got.append)
+    page._rm_prepare_save(base, "whole-slide correction (Save)", got.append)
     assert time.perf_counter() - t0 < 0.3              # Save returned at once
     assert page.production_correction_busy() == "whole-slide correction (Save)"
     assert not page._btn_load.isEnabled()
+    QtTest.QTest.qWait(200)
+    assert got == []                                   # the viewer is not free yet
+    viewer_free.set()
     assert _until(lambda: got)
-    zarr_path = got[0]
-    assert os.path.isfile(os.path.join(zarr_path, "pixels.bin"))
-    assert os.path.dirname(zarr_path) != os.path.dirname(base)   # a new run
-    assert page.production_correction_busy() is None
-    assert page._btn_load.isEnabled()
+    assert got == [base]                               # the same run, in place
+    assert rs.list_runs(ws, "correct") == [os.path.dirname(base)]
 
 
-def test_cancel_while_preparing_leaves_no_run(app, tmp_path, monkeypatch):
+def test_cancel_while_preparing_leaves_the_run_as_it_was(app, tmp_path, monkeypatch):
     page, base, ws = _page(app, tmp_path, monkeypatch)
-    _slow_copy(monkeypatch, 0.3)
+    _held_viewer(monkeypatch)
+    page._on_production_worker_finished = lambda: None
     got = []
-    page._rm_prepare_save(base, True, None, got.append)
-    run = page._rm_pending_run
+    page._rm_prepare_save(base, "whole-slide correction (Save)", got.append)
     page._wsi_dialog.cancel()
     assert _until(lambda: page.production_correction_busy() is None)
     QtTest.QTest.qWait(50)
     assert got == []
-    assert not os.path.exists(run)
+    assert os.path.isfile(os.path.join(base, "pixels.bin"))
+    assert sorted(os.listdir(os.path.join(ws, "runs"))) == [os.path.basename(os.path.dirname(base))]
     assert page._btn_load.isEnabled()
-
-
-def test_a_failed_copy_saves_nothing(app, tmp_path, monkeypatch):
-    import block01.ui.step0.step0_page as sp
-    page, base, ws = _page(app, tmp_path, monkeypatch)
-    _slow_copy(monkeypatch, 0.1, fail=True)
-    shown = []
-    monkeypatch.setattr(sp.QMessageBox, "critical",
-                        staticmethod(lambda *a, **k: shown.append(a[2])))
-    got = []
-    page._rm_prepare_save(base, True, None, got.append)
-    run = page._rm_pending_run
-    assert _until(lambda: page.production_correction_busy() is None)
-    assert got == [] and shown and "disk full" in shown[0]
-    assert not os.path.exists(run)
-
-
-def test_a_save_waits_for_the_viewer_and_the_copy_together(app, tmp_path, monkeypatch):
-    from block01.ui.step0.step0_page import Step0Page
-    page, base, ws = _page(app, tmp_path, monkeypatch)
-    _slow_copy(monkeypatch, 0.1)
-    viewer_free = threading.Event()
-    monkeypatch.setattr(Step0Page, "_begin_release_explore_for_production",
-                        lambda self, reason, cancelled=None: (viewer_free, {}))
-    got = []
-    page._rm_prepare_save(base, True, "whole-slide correction (Save)", got.append)
-    QtTest.QTest.qWait(400)                            # the copy is done by now
-    assert got == []                                   # ...but the viewer is not free
-    viewer_free.set()
-    assert _until(lambda: got)
 
 
 def test_nothing_slow_stays_synchronous(app, tmp_path, monkeypatch):
     page, base, ws = _page(app, tmp_path, monkeypatch)
     got = []
-    page._rm_prepare_save(base, False, None, got.append)    # a new empty run, no copy
-    assert len(got) == 1                                     # done before returning
+    page._rm_prepare_save(base, None, got.append)
+    assert got == [base]                                     # done before returning
     assert page.production_correction_busy() is None
+
+
+def test_a_workspace_without_a_product_gets_its_first_run(app, tmp_path, monkeypatch):
+    page, base, ws = _page(app, tmp_path, monkeypatch)
+    got = []
+    page._rm_prepare_save("", None, got.append)
+    assert len(got) == 1 and os.path.dirname(got[0]) != os.path.dirname(base)
+    assert os.path.dirname(got[0]) == page._rm_pending_run

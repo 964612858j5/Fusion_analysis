@@ -35,7 +35,7 @@ def _chosen(w):
     from block01.ui import main_window as mw
     # Of the pixels and saved settings now current, so it is not stale --
     # the fields `_on_preseg_use` gives a real choice.
-    key, fhash = w._preseg_current()
+    key, fhash = w._preseg_current()[:2]
     w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30,
                     "params": {"diameter": 30}, "fusion_settings_hash": fhash,
                     "pixel_key": key, "preseg_run_id": "r", "combo_id": "c"}

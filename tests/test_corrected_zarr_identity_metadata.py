@@ -14,6 +14,15 @@ pytest.importorskip("PyQt5")
 zarr = pytest.importorskip("zarr")
 
 
+def _settle(worker):
+    """What the Save page does with a finished worker: its staged channels
+    moved into the live product and the move committed
+    (docs/v17_save_inplace_step1_ahead_plan.md §8)."""
+    from block01.core import product_swap
+    product_swap.apply_plan(worker.output_dir, worker.swap_plan)
+    product_swap.commit(worker.output_dir)
+
+
 @pytest.fixture(scope="module")
 def app():
     from PyQt5 import QtWidgets
@@ -42,6 +51,7 @@ def _run_worker(tmp_path, decisions):
     w.finished.connect(lambda p, dec: out.update(path=p))
     w.error.connect(lambda m: out.update(err=m))
     w.run()
+    _settle(w)                     # what the Save page does next
     assert out.get("err") is None
     return out["path"]
 

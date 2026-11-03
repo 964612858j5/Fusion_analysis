@@ -38,6 +38,15 @@ POLY = [(48, 96), (560, 96), (560, 736), (300, 600), (48, 736)]
 CHANNELS = ("CH_A", "CH_B")
 
 
+
+def _settle(worker):
+    """What the Save page does with a finished worker: its staged channels
+    moved into the live product and the move committed
+    (docs/v17_save_inplace_step1_ahead_plan.md §8)."""
+    from block01.core import product_swap
+    product_swap.apply_plan(worker.output_dir, worker.swap_plan)
+    product_swap.commit(worker.output_dir)
+
 class _Loader:
     def __init__(self, path, data):
         self.filepath = str(path)
@@ -80,6 +89,7 @@ def _save(tmp_path, out, method="tophat", seed=1, hook=None, monkeypatch=None):
     if hook:
         hook(worker)
     worker.run()
+    _settle(worker)                     # what the Save page does next
     assert got["error"] == [], got["error"]
     return got
 

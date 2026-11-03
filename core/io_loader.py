@@ -19,6 +19,33 @@ from .bg_correction import (
 )
 
 
+class _Binding:
+    """One version of what a loader reads as corrected: the correction config
+    and the saved corrected store with its per-channel decisions. NEVER
+    changed after it is made (docs/v17_patch_reader_versions_plan.md §1.1):
+    a Save or a handoff makes a new one, and a read already running keeps
+    the one it started with. The store is opened once, lazily, under this
+    version's own lock."""
+
+    __slots__ = ("correction_config", "zarr_path", "decisions", "_store", "_lock")
+
+    def __init__(self, correction_config, zarr_path=None, decisions=None):
+        self.correction_config = correction_config
+        self.zarr_path = zarr_path
+        self.decisions = dict(decisions or {})
+        self._store = None
+        self._lock = threading.Lock()
+
+    def has_store(self):
+        return bool(self.zarr_path) and os.path.exists(self.zarr_path)
+
+    def store(self):
+        with self._lock:
+            if self._store is None:
+                self._store = zarr.open(self.zarr_path, mode="r")
+            return self._store
+
+
 class OMETIFFLoader:
     """
     OME-TIFF Loader.
@@ -34,10 +61,8 @@ class OMETIFFLoader:
         self.ch_map   = {}
         self.shape    = (0, 0)
         self._zarr_array = None   # lazy init, avoid resource usage at startup
-        self.correction_config = _normalize_correction_config(correction_config)
-        self._corrected_zarr_path = None
-        self._corrected_decisions = {}
-        self._corrected_store = None
+        # what is read as corrected: one immutable version, replaced whole
+        self._binding = _Binding(_normalize_correction_config(correction_config))
         self._parse()
 
     def _parse(self):
@@ -71,23 +96,46 @@ class OMETIFFLoader:
         """
         return None  # marker: no caching, open inside each read_region call
 
+    # The current version's fields, read-only views (callers and tests read
+    # them; nothing outside this class writes them).
+    @property
+    def correction_config(self):
+        return self._binding.correction_config
+
+    @correction_config.setter
+    def correction_config(self, correction_config):
+        self.set_correction_config(correction_config)
+
+    @property
+    def _corrected_zarr_path(self):
+        return self._binding.zarr_path
+
+    @property
+    def _corrected_decisions(self):
+        return self._binding.decisions
+
+    @property
+    def _corrected_store(self):
+        return self._binding._store
+
     def set_correction_config(self, correction_config):
-        self.correction_config = _normalize_correction_config(correction_config)
+        b = self._binding
+        self._binding = _Binding(_normalize_correction_config(correction_config),
+                                 b.zarr_path, b.decisions)
 
     def corrected_store_binding(self):
         """(path or None, decisions): the corrected store this loader reads,
-        as `set_corrected_zarr_store` takes it back."""
-        return (getattr(self, "_corrected_zarr_path", None),
-                dict(getattr(self, "_corrected_decisions", None) or {}))
+        as `set_corrected_zarr_store` takes it back -- both from ONE version."""
+        b = self._binding
+        return b.zarr_path, dict(b.decisions)
 
     def set_corrected_zarr_store(self, zarr_path, decisions):
-        self._corrected_zarr_path = zarr_path if zarr_path and os.path.exists(zarr_path) else None
-        self._corrected_decisions = {
-            str(ch): str(method).strip().lower()
-            for ch, method in dict(decisions or {}).items()
-            if str(method).strip().lower() in {"tophat", "cucim"}
-        }
-        self._corrected_store = None
+        self._binding = _Binding(
+            self._binding.correction_config,
+            zarr_path if zarr_path and os.path.exists(zarr_path) else None,
+            {str(ch): str(method).strip().lower()
+             for ch, method in dict(decisions or {}).items()
+             if str(method).strip().lower() in {"tophat", "cucim"}})
         # the viewers' saved-product answer (`core.saved_correction`)
         from . import saved_correction
         saved_correction.register_loader(self)
@@ -100,22 +148,30 @@ class OMETIFFLoader:
         Implementation: prefer zarr lazy loading (reads only ROI tiles),
         raises exception on failure.
         """
+        # ONE version for the whole read: a Save while it runs does not mix
+        # (docs/v17_patch_reader_versions_plan.md §1.1)
+        return self._read_region(self._binding, channel_name, y0, y1, x0, x1,
+                                 downsample=downsample,
+                                 correction_config=correction_config, normalize=normalize)
+
+    def _read_region(self, b, channel_name, y0, y1, x0, x1, downsample=1,
+                     correction_config=None, normalize=True):
+        """`read_region` against the version `b`."""
         if channel_name not in self.ch_map:
             raise KeyError(f"Channel '{channel_name}' not found")
-        if channel_name in self._corrected_decisions and self._corrected_zarr_path and os.path.exists(self._corrected_zarr_path):
-            if self._corrected_store is None:
-                self._corrected_store = zarr.open(self._corrected_zarr_path, mode="r")
-            corrected_mode = str(self._corrected_store.attrs.get("mode", "")).strip().lower()
+        if channel_name in b.decisions and b.has_store():
+            store = b.store()
+            corrected_mode = str(store.attrs.get("mode", "")).strip().lower()
             if corrected_mode == "roi_only":
-                region = self._read_corrected_roi_only(channel_name, y0, y1, x0, x1)
+                region = self._read_corrected_roi_only(store, channel_name, y0, y1, x0, x1)
                 if region is not None:
                     if downsample > 1:
                         region = region[::downsample, ::downsample]
                     if normalize:
                         return self._norm(region)
                     return region.astype(np.float32, copy=False)
-            elif channel_name in self._corrected_store:
-                region = np.asarray(self._corrected_store[channel_name][y0:y1, x0:x1], dtype=np.float32)
+            elif channel_name in store:
+                region = np.asarray(store[channel_name][y0:y1, x0:x1], dtype=np.float32)
                 if downsample > 1:
                     region = region[::downsample, ::downsample]
                 if normalize:
@@ -123,7 +179,7 @@ class OMETIFFLoader:
                 return region.astype(np.float32, copy=False)
 
         page_idx = self.ch_map[channel_name]
-        cfg = self.correction_config if correction_config is None else _normalize_correction_config(correction_config)
+        cfg = b.correction_config if correction_config is None else _normalize_correction_config(correction_config)
         if downsample > 1 and not self._corrects(channel_name, cfg):
             # Block A9 §36: nothing to correct, so read only every
             # `downsample`-th pixel -- exactly `full[::ds, ::ds]`, without
@@ -178,9 +234,10 @@ class OMETIFFLoader:
         correction. A TIFF without a pyramid takes the same fallback.
         """
         ds = max(1, int(downsample))
-        if ds == 1 or self._channel_is_corrected(channel_name):
-            return self.read_region(channel_name, y0, y1, x0, x1,
-                                    downsample=ds, normalize=normalize)
+        b = self._binding               # one version, passed down to the fallbacks
+        if ds == 1 or self._channel_is_corrected(channel_name, b):
+            return self._read_region(b, channel_name, y0, y1, x0, x1,
+                                     downsample=ds, normalize=normalize)
         if channel_name not in self.ch_map:
             raise KeyError(f"Channel '{channel_name}' not found")
         page_idx = self.ch_map[channel_name]
@@ -205,8 +262,8 @@ class OMETIFFLoader:
             if chosen == 0:
                 # Nothing coarser than the base level: the plain path is
                 # already what this would compute.
-                return self.read_region(channel_name, y0, y1, x0, x1,
-                                        downsample=ds, normalize=normalize)
+                return self._read_region(b, channel_name, y0, y1, x0, x1,
+                                         downsample=ds, normalize=normalize)
             lv = levels[chosen]
             lds_y = h0 / float(lv.shape[-2])
             lds_x = w0 / float(lv.shape[-1])
@@ -229,24 +286,22 @@ class OMETIFFLoader:
             return self._norm(region)
         return region.astype(np.float32, copy=False)
 
-    def _channel_is_corrected(self, channel_name):
+    def _channel_is_corrected(self, channel_name, b=None):
         """True when `read_region` would return CORRECTED pixels for this
         channel -- from the saved store, or by applying the correction
-        config on the fly."""
-        if (channel_name in self._corrected_decisions
-                and self._corrected_zarr_path
-                and os.path.exists(self._corrected_zarr_path)):
+        config on the fly. Against the version `b` (default: the current)."""
+        b = self._binding if b is None else b
+        if channel_name in b.decisions and b.has_store():
             return True
-        decisions = (self.correction_config or {}).get("channel_decisions") or {}
+        decisions = (b.correction_config or {}).get("channel_decisions") or {}
         return str(decisions.get(channel_name, "original")).strip().lower() in {"tophat", "cucim"}
 
-    def _read_corrected_roi_only(self, channel_name, y0, y1, x0, x1):
+    def _read_corrected_roi_only(self, store, channel_name, y0, y1, x0, x1):
         """
         Read a global-coordinate request from ROI-only corrected zarr when the
         request is fully contained in one stored ROI. Otherwise return None so
         callers never treat ROI-local arrays as full-WSI datasets.
         """
-        store = self._corrected_store
         for group_name in store.group_keys():
             group = store[group_name]
             bbox = group.attrs.get("bbox_fullres")

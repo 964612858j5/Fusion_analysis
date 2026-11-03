@@ -2681,8 +2681,7 @@ class OverviewPanel(QWidget):
         """Add a patch from a FULL-RESOLUTION rectangle, with no drawing.
 
         The public form of `_add_patch` for callers that already know the
-        level-0 rectangle they want -- Step 0's "Save as patch" on a compare
-        snapshot -- rather than a drag on this canvas. It goes through the
+        level-0 rectangle they want, rather than a drag on this canvas. It goes through the
         same list, the same artists and the same `patches_changed` signal,
         so a patch made this way is indistinguishable from a drawn one
         everywhere downstream.

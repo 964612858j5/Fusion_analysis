@@ -257,8 +257,11 @@ def _runs(ctx, kind="correct"):
     return sorted(n for n in os.listdir(root) if n.startswith(kind + "_"))
 
 
-def test_a_correction_change_writes_a_new_run_and_leaves_the_old_one(
+def test_a_correction_change_rewrites_the_same_run_in_place(
         dv_page, tmp_path, slides, monkeypatch):
+    """Save in place (user ruling 2026-11-02, docs/v17_save_inplace_step1_
+    ahead_plan.md): no new run and no copy -- the changed channel is computed
+    for the run the handoff names; the rest of it is not touched."""
     import block01.ui.step0.step0_page as sp
     proj, ctx, base, held = _published_tophat(tmp_path, slides, dv_page)
     dv_page._open_existing_workspace()
@@ -269,15 +272,11 @@ def test_a_correction_change_writes_a_new_run_and_leaves_the_old_one(
     dv_page._save_and_continue()
     _prepared(dv_page)
     w = _FakeWsi.made[-1]
-    new = [n for n in _runs(ctx) if n != os.path.basename(base)]
-    assert len(new) == 1
-    new_dir = os.path.join(rs.runs_dir(ctx["roi_dir"]), new[0])
-    assert w.output_dir == new_dir                                # never the published run
+    assert _runs(ctx) == [os.path.basename(base)]                 # no new run
+    assert w.output_dir == base                                   # the run being edited
     assert w.incremental is True and w.process_channels == {"CD8"}
-    assert os.path.isfile(os.path.join(new_dir, "corrected_channels.zarr", "marker.bin"))
-    assert os.path.isdir(os.path.join(new_dir, "corrected_coarse.zarr"))
-    assert not rs.is_done(new_dir)                               # published with the handoff
-    assert _tree(base) == before                                  # the first run, byte for byte
+    assert dv_page.__dict__.get("_rm_pending_run") is None
+    assert _tree(base) == before                                  # the worker swaps, not the page
 
 
 def test_an_intensity_only_save_keeps_the_correct_run(dv_page, tmp_path, slides, monkeypatch):
@@ -296,22 +295,26 @@ def test_an_intensity_only_save_keeps_the_correct_run(dv_page, tmp_path, slides,
     assert emitted == [os.path.join(base, "corrected_channels.zarr")]   # the same run
 
 
-def test_a_withdrawn_channel_is_a_new_run_of_the_same_pixels(dv_page, tmp_path, slides,
-                                                             monkeypatch):
+def test_a_withdrawn_channel_leaves_the_same_run(dv_page, tmp_path, slides, monkeypatch):
+    """No channel recomputed, no new run: the handoff names the same run,
+    and the withdrawn channel leaves it once the Save has completed."""
     import block01.ui.step0.step0_page as sp
     proj, ctx, base, held = _published_tophat(tmp_path, slides, dv_page)
     dv_page._open_existing_workspace()
     monkeypatch.setattr(sp, "read_corrected_zarr_state",
                         lambda path: (dict(held), [(0, 1001, 0, 999)]))
+    removed = []
+    monkeypatch.setattr(sp.product_swap, "remove_channels",
+                        lambda run, pairs: removed.append((run, list(pairs))))
+    monkeypatch.setattr(sp.product_swap, "groups", lambda path: ["R1"])
     dv_page._set_channel_decision("CD8", "original")
-    _quiet_emit(monkeypatch)
+    emitted = _quiet_emit(monkeypatch)
     dv_page._save_and_continue()
     _prepared(dv_page)
     assert _FakeWsi.made == []                                    # no channel recomputed
-    new = [n for n in _runs(ctx) if n != os.path.basename(base)]
-    assert len(new) == 1
-    assert os.path.isfile(os.path.join(rs.runs_dir(ctx["roi_dir"]), new[0],
-                                       "corrected_channels.zarr", "marker.bin"))
+    assert _runs(ctx) == [os.path.basename(base)]
+    assert emitted == [os.path.join(base, "corrected_channels.zarr")]
+    assert removed == [(base, [("R1", "CD8")])]
 
 
 def test_publishing_a_correct_run_freezes_its_parameters(dv_page, tmp_path, slides,
@@ -324,7 +327,7 @@ def test_publishing_a_correct_run_freezes_its_parameters(dv_page, tmp_path, slid
     dv_page._channel_params = {"CD8": {"tophat_radius": 40}}
     dv_page._save_and_continue()
     _prepared(dv_page)
-    run = dv_page._rm_pending_run
+    run = base                                                    # rewritten in place
     zarr_path = os.path.join(run, "corrected_channels.zarr")
     config = dv_page._clean_correction_config(dv_page._build_config())
     seen = {}
@@ -342,26 +345,27 @@ def test_publishing_a_correct_run_freezes_its_parameters(dv_page, tmp_path, slid
     assert seen["spec"]["register_corrected"] is True             # A3 at publication
     assert rs.is_done(run) and dv_page._rm_pending_run is None
     params = rs.read_params(run)
-    assert params["kind"] == "correct"
+    assert params["kind"] == "correct" and params["updated_at"]
     assert params["corrected"]["CD8"][1] == 40                    # the frozen signature
     assert params["geometry"]["rois"] and params["correction_config"] == config
     assert rs.read_inputs(run)["upstream"] == "raw"
 
 
-def test_a_cancelled_correction_leaves_no_run(dv_page, tmp_path, slides, monkeypatch):
+def test_a_cancelled_correction_leaves_the_run_as_it_was(dv_page, tmp_path, slides,
+                                                         monkeypatch):
     import block01.ui.step0.step0_page as sp
     proj, ctx, base, held = _published_tophat(tmp_path, slides, dv_page)
     dv_page._open_existing_workspace()
     monkeypatch.setattr(sp, "read_corrected_zarr_state",
                         lambda path: (dict(held), [(0, 1001, 0, 999)]))
     monkeypatch.setattr(sp.QMessageBox, "information", lambda *a, **k: None)
+    before = _tree(base)
     dv_page._channel_params = {"CD8": {"tophat_radius": 40}}
     dv_page._save_and_continue()
     _prepared(dv_page)
-    run = dv_page._rm_pending_run
     dv_page._wsi_dialog = None                                    # the test's dialog is a stub
-    dv_page._on_wsi_canceled(os.path.join(run, "corrected_channels.zarr"))
-    assert not os.path.exists(run) and _runs(ctx) == [os.path.basename(base)]
+    dv_page._on_wsi_canceled(os.path.join(base, "corrected_channels.zarr"))
+    assert _runs(ctx) == [os.path.basename(base)] and _tree(base) == before
 
 
 def test_an_old_project_is_neither_opened_nor_written(page, tmp_path, slides, monkeypatch):
@@ -781,3 +785,50 @@ def test_a_save_never_corrects_into_another_projects_run(dv_page, tmp_path, slid
     w = _FakeWsi.made[-1]
     assert os.path.dirname(w.output_dir) == rs.runs_dir(ctx["roi_dir"])   # its own run
     assert _tree(str(other)) == before                                    # never written
+
+
+@pytest.mark.parametrize("completes", [True, False])
+def test_the_page_keeps_the_move_only_when_the_save_completes(
+        dv_page, tmp_path, slides, monkeypatch, completes):
+    """Save in place (docs/v17_save_inplace_step1_ahead_plan.md §8): the
+    worker's staged channel is moved in on the GUI thread after every reader
+    was let go; a handoff that then fails puts the product back."""
+    import numpy as np
+    import zarr
+    import block01.ui.step0.step0_page as sp
+    from block01.core import product_swap
+    from block01.ui.step0.step0_page import Step0Page
+    proj, ctx, base, held = _published_tophat(tmp_path, slides, dv_page)
+    dv_page._open_existing_workspace()
+    monkeypatch.setattr(sp, "read_corrected_zarr_state",
+                        lambda path: (dict(held), [(0, 1001, 0, 999)]))
+    product = os.path.join(base, "corrected_channels.zarr")
+    zarr.open_group(product, mode="a").require_group("ROI_1").create_dataset(
+        "CD8", data=np.full((4, 4), 1.0, np.float32), overwrite=True)
+    dv_page._channel_params = {"CD8": {"tophat_radius": 40}}
+    dv_page._save_and_continue()
+    _prepared(dv_page)
+    worker = _FakeWsi.made[-1]
+    staged = product_swap.new_staging(base)
+    zarr.open_group(os.path.join(staged, "corrected_channels.zarr"), mode="a").require_group(
+        "ROI_1").create_dataset("CD8", data=np.full((4, 4), 2.0, np.float32))
+    worker.swap_plan = ("in", [("ROI_1", "CD8")], [])
+    let_go = []
+    dv_page.before_product_swap = lambda: let_go.append(True)
+    monkeypatch.setattr(sp.QMessageBox, "information", lambda *a, **k: None)
+    applied = []
+    monkeypatch.setattr(Step0Page, "_apply_corrected_store",
+                        lambda self, *a, **k: applied.append(k.get("only")))
+    monkeypatch.setattr(Step0Page, "_emit_complete", lambda self, *a: completes)
+    dv_page._wsi_worker = worker
+    dv_page._wsi_dialog = None
+    dv_page.loader.corrected_store_binding = lambda: (product, {"CD3": "tophat",
+                                                                "CD8": "tophat"})
+    dv_page._on_wsi_finished({}, product, {"CD3": "tophat", "CD8": "tophat"})
+    value = float(zarr.open_group(product, mode="r")["ROI_1"]["CD8"][0, 0])
+    assert let_go == [True]
+    assert value == (2.0 if completes else 1.0)
+    # undone: the channel that was moved in is read again from what is there
+    assert applied[1:] == ([] if completes else [{"CD8"}])
+    assert not product_swap.pending(base)
+    assert not os.path.exists(product_swap.staging_dir(base))

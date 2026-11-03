@@ -1555,6 +1555,9 @@ def test_a_close_that_is_refused_does_not_kill_the_display_services(app):
             def wait(self, _ms=0):
                 return False
 
+            def __getattr__(self, _name):            # its signals
+                return lambda *a, **k: None
+
         w._patch_loaders[99] = _StuckLoader()
         event = QCloseEvent()
         w.closeEvent(event)
@@ -1570,6 +1573,7 @@ def test_a_close_that_is_refused_does_not_kill_the_display_services(app):
 
         # Release the blocker; the second close is accepted and finalises once.
         w._patch_loaders.clear()
+        w._retired_loaders.clear()          # retired by the first close, not waited for
         event2 = QCloseEvent()
         w.closeEvent(event2)
         assert w._display.is_finalized()

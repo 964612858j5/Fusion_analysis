@@ -33,7 +33,7 @@ def _chosen(w):
     from block01.ui import main_window as mw
     # Of the pixels and saved settings now current, so it is not stale --
     # the fields `_on_preseg_use` gives a real choice.
-    key, fhash = w._preseg_current()
+    key, fhash = w._preseg_current()[:2]
     w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30,
                     "params": {"diameter": 30}, "fusion_settings_hash": fhash,
                     "pixel_key": key, "preseg_run_id": "r", "combo_id": "c"}
@@ -839,5 +839,56 @@ def test_restored_settings_bring_their_windows_back_as_the_current_intensity(
         restored = w._restore_fusion_settings()
         assert restored is not None
         assert adopted == [saved["display_mapping"]]
+    finally:
+        w.close()
+
+
+# ── a fusion channel's correction changed (user ruling 2026-11-02) ─────────
+
+def _tokens(w, monkeypatch, tokens):
+    """What the current Step0 result holds per channel: [decision, token]."""
+    def source():
+        chans = {ch: {"decision": "tophat", "product": {"source_identity": tok}}
+                 for ch, tok in tokens.items()}
+        return "key", {"pixel_identity": {"channels": chans}}, {}
+    monkeypatch.setattr(w, "_preseg_source", source)
+
+
+def test_a_changed_correction_of_a_fusion_channel_unsaves_the_settings(
+        app, tmp_path, monkeypatch):
+    """Save rewrites the correct run in place, so the path never moves: a
+    component channel's new correction makes the saved fusion settings
+    unsaved -- the same path as a changed weight -- and Generate is refused
+    until they are saved again (docs/v17_save_inplace_step1_ahead_plan.md A4)."""
+    w = _window(app, tmp_path)
+    try:
+        _enable(w, "CD3", True)
+        w.config._rows["CD3"].spin.setValue(0.5)
+        _tokens(w, monkeypatch, {"CD3": "t1", "CD8": "t1"})
+        assert w._commit_fusion_settings()
+        assert w._committed_fusion_settings()["bound_to"]["components"]["CD3"] == ["tophat", "t1"]
+
+        _tokens(w, monkeypatch, {"CD3": "t1", "CD8": "t2"})     # CD8: weight 0
+        assert w._rm_check_settings_binding() is False
+        assert w._fusion_settings_dirty() is False
+
+        _tokens(w, monkeypatch, {"CD3": "t2", "CD8": "t2"})     # CD3: a component
+        before = w._committed_fusion_settings()
+        assert w._rm_check_settings_binding() is True
+        assert w._fusion_settings_dirty() is True
+        # kept (results made with it stay valid until it is saved again)
+        assert w._committed_fusion_settings() == before
+        from block01.ui import main_window as mw
+        said = []
+        monkeypatch.setattr(mw.QMessageBox, "warning", lambda *a, **k: said.append(a[2]))
+        assert w._require_committed_fusion_settings("Generate") is False
+        assert said and "the correction of CD3 changed" in said[0]
+
+        assert w._commit_fusion_settings()                       # saved again
+        assert w._fusion_settings_dirty() is False
+        assert w._rm_check_settings_binding() is False
+        # the same weights, a new identity: what a pre-segmentation compares
+        assert w._committed_fusion_settings()["hash"] == before["hash"]
+        assert w._preseg_current()[3] == {"CD3": ["tophat", "t2"], "DAPI": ["original", ""]}
     finally:
         w.close()

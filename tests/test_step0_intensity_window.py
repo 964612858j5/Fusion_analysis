@@ -330,9 +330,8 @@ def test_the_button_lives_next_to_the_channel_list(app):
     page = _page(app)
     btn = page._btn_intensity_window
     assert btn.text() == "Intensity…"
-    # NOT in the Patch Preview header.
-    row = page._preview_ctrl_row
-    assert btn not in [row.itemAt(i).widget() for i in range(row.count())]
+    # NOT in the compare area.
+    assert not page._compare_strip.isAncestorOf(btn)
 
 
 # ── 2. the controls edit the one mapping every view reads ────────────────
@@ -662,21 +661,16 @@ def test_a_drawn_patch_does_not_change_the_workbench_pixels(app):
 
 # ── 4. the compare header carries the snapshot's own controls ────────────
 
-def test_the_compare_header_says_where_and_offers_the_patch(app):
-    """The header carries what the three viewers need and nothing else.
-
-    The "downsampled xN" label went with the snapshot: it existed because a
-    snapshot was ONE pyramid level and the whole frame was that level, a
-    fact the user had to be told because Save writes level 0. These are the
-    viewer's own layers -- the level follows the camera and coarse tiles are
-    refined in place -- so there is no single level for a label to name."""
+def test_the_compare_area_is_the_three_panels_and_nothing_else(app):
+    """Compare mode gives every pixel to the viewers: no title, no header
+    row ("Comparing around ...", "+ Save as patch"), no status line."""
     page = _page(app)
-    row = page._preview_ctrl_row
-    widgets = [row.itemAt(i).widget() for i in range(row.count())]
-    widgets = [w for w in widgets if w is not None]
-
-    assert widgets == [page._compare_where_lbl, page._btn_snapshot_patch], (
+    lay = page._compare_strip.layout()
+    widgets = [lay.itemAt(i).widget() for i in range(lay.count())]
+    assert widgets == [page._compare_strip_widget], (
         [w.__class__.__name__ for w in widgets])
+    assert not isinstance(page._compare_strip, QtWidgets.QGroupBox)
+    assert not page._compare_strip.isAncestorOf(page._preview_status)
     # The three panels are one camera; the mirroring that makes them one is
     # the strip's, not a control on this row. What is gone is the BUTTONS --
     # the lock is permanent and has no switch, and there is no per-panel
@@ -686,7 +680,9 @@ def test_the_compare_header_says_where_and_offers_the_patch(app):
                  "_dec_process_btn", "_preview_stack", "_compare_level_lbl",
                  "_nuc_color_btn", "_marker_color_btn", "_btn_display_popup",
                  "_display_popup", "show_display_popup", "toggle_display_popup",
-                 "_ensure_display_popup", "_use_display_as_segmentation_remap"):
+                 "_ensure_display_popup", "_use_display_as_segmentation_remap",
+                 "_compare_where_lbl", "_btn_snapshot_patch",
+                 "_save_snapshot_as_patch", "_preview_ctrl_row"):
         assert not hasattr(page, gone), gone
 
 

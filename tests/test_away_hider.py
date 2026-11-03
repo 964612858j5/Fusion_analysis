@@ -125,3 +125,22 @@ def test_allowed_and_forget(rig):
     hider.forget_hidden(win)
     _back(hider, state)
     assert not win.isVisible()
+
+
+def test_a_window_being_dragged_is_not_hidden(rig):
+    """Acceptance 2026-11-03: dragging a window by its title bar makes the
+    application inactive for the drag; hiding it then and showing it again
+    afterwards put it back where the drag started. A window the window
+    manager moved within `MOVING_MS` stays, and the check asks again."""
+    import time
+    window, state = rig
+    win, hider = window()
+    hider._last_move = time.monotonic()              # the window manager is moving it
+    _away(hider, state)
+    assert win.isVisible() and not hider.hidden_by_us(win)
+    assert hider._timer.isActive()                   # asked again
+    hider._timer.stop()
+    hider._last_move = time.monotonic() - 10.0       # the drag is long over
+    hider._step_aside()
+    assert not win.isVisible() and hider.hidden_by_us(win)
+    _back(hider, state)

@@ -7,7 +7,6 @@ import copy
 import gc
 import math
 import json
-import shutil
 import time
 import traceback
 import weakref
@@ -51,7 +50,7 @@ from ...core.bg_correction import (
     CORRECTED_ZARR_OUTPUT_KIND,
     CREATED_FROM_STEP0_BACKGROUND_CORRECTION,
 )
-from ...core import step0_handoff
+from ...core import product_swap, step0_handoff
 from ...core.io_loader import OMETIFFLoader
 from ...core.provenance import write_json_atomic
 from ...core.fusion_engine import FusionEngine
@@ -486,8 +485,8 @@ class Step0Page(QWidget):
         # `_sync_full_image_to_channel`.
         self._full_image_channel_stale = False
         # True once the panels have been opened at least once on this
-        # dataset: what "Save as patch" and the Tissue Preview rectangle need
-        # before they can speak for the panels.
+        # dataset: what the Tissue Preview rectangle needs before it can
+        # speak for the panels.
         self._compare_opened = False
         # NO TIMER HERE any more. The Tissue Preview's clock is Block01's
         # (`TissuePreviewCoordinator`), because the picture is not this page's
@@ -1107,13 +1106,13 @@ class Step0Page(QWidget):
 
         # C-右：the viewing area (the frame's right tab)
 
-        prev_box = QGroupBox("Compare  —  Original | TopHat | cucim")
-        prev_box.setStyleSheet(self._box_style("#c678dd"))
+        # Compare mode is the three panels and nothing else: no title, no
+        # header row, no status line. Every pixel of the area is viewer (the
+        # panels carry their own Original / TopHat / cuCIM titles).
+        prev_box = QWidget()
         pvl = QVBoxLayout(prev_box)
-
-        # ── 控制行 ────────────────────────────────────────────────────
-        ctrl_row = QHBoxLayout()
-        ctrl_row.setSpacing(4)
+        pvl.setContentsMargins(0, 0, 0, 0)
+        pvl.setSpacing(0)
 
         # Nucleus / Marker display colours. The COLOUR PICKERS are no longer
         # here: every channel (the nucleus included) carries its own swatch in
@@ -1143,39 +1142,6 @@ class Step0Page(QWidget):
         self._btn_show_marker.setChecked(True)
         self._btn_show_marker.setVisible(False)
 
-        # The header carries what the three viewers need and nothing else.
-        # Colours live on the channel swatches and display mapping in the
-        # floating "Intensity" window, so there is nothing to reset here.
-        #
-        # There is no "downsampled xN" label any more. It existed because a
-        # SNAPSHOT was cut at one pyramid level and the whole frame was that
-        # level -- a fact the user had to be told, because Save writes level
-        # 0. These are the viewer's own layers: the level follows the camera,
-        # coarse tiles are refined in place, and the full image's header
-        # already states the level for the mode that has one frame.
-        self._compare_where_lbl = QLabel(
-            "Right-click the full image to compare that spot. "
-            "Right-click again, or press Esc, to come back.")
-        self._compare_where_lbl.setStyleSheet("color:#888;font-size:10px;")
-        ctrl_row.addWidget(self._compare_where_lbl)
-        ctrl_row.addStretch()
-
-        self._btn_snapshot_patch = QPushButton("＋ Save as patch")
-        self._btn_snapshot_patch.setToolTip(
-            "Add what the panels are showing to the patch list, as a "
-            "level-0 rectangle, so Step 1 can be seeded from it.")
-        self._btn_snapshot_patch.setStyleSheet(
-            "QPushButton{color:#98c379;border:1px solid #4a6f43;"
-            "border-radius:3px;padding:2px 8px;font-size:10px;"
-            "background:#1a1a1a;}"
-            "QPushButton:hover{color:#fff;border-color:#98c379;}"
-            "QPushButton:disabled{color:#555;border-color:#333;}"
-        )
-        self._btn_snapshot_patch.setEnabled(False)
-        self._btn_snapshot_patch.clicked.connect(self._save_snapshot_as_patch)
-        ctrl_row.addWidget(self._btn_snapshot_patch)
-
-        self._preview_ctrl_row = ctrl_row   # exposed for the header's own tests
 
         self._btn_show_nucleus.toggled.connect(
             lambda _: self._on_compare_nucleus_toggled())
@@ -1187,7 +1153,6 @@ class Step0Page(QWidget):
         # write coming back the other way stops here.
         self._btn_show_marker.toggled.connect(
             self._on_marker_visibility_toggled)
-        pvl.addLayout(ctrl_row)
 
         # ── 三联图（同一GraphicsLayoutWidget，保证同步repaint）────────
         #
@@ -1278,13 +1243,12 @@ class Step0Page(QWidget):
         self._compare_strip_widget.set_engine_host_provider(_engine_host)
         pvl.addWidget(self._compare_strip_widget, stretch=1)
 
+        # Kept as the page's status text (written in many places, read by
+        # tests), but never shown: it is not in the compare area any more.
         self._preview_status = QLabel(
-            "Right-click anywhere on the full image to compare that spot."
-        )
-        self._preview_status.setAlignment(Qt.AlignCenter)
-        self._preview_status.setWordWrap(True)
-        self._preview_status.setStyleSheet("color:#aaa;font-size:10px;")
-        pvl.addWidget(self._preview_status)
+            "Right-click anywhere on the full image to compare that spot.",
+            self)
+        self._preview_status.setVisible(False)
 
         # -- ONE viewing area, two exclusive modes ------------------------
         #
@@ -1336,8 +1300,7 @@ class Step0Page(QWidget):
         # the press so it never reaches a filter. The filter is for the
         # chrome around them: the header, the status line and the box
         # itself, where a right-click must mean the same thing.
-        for widget in (prev_box, self._compare_strip_widget,
-                       self._preview_status):
+        for widget in (prev_box, self._compare_strip_widget):
             if widget is not None:
                 widget.installEventFilter(self)
         # Esc is the same way out, for a hand already on the keyboard --
@@ -2727,10 +2690,6 @@ class Step0Page(QWidget):
         # command -- one jump; leaving and the mirrored panels write nothing.
         self._connect_compare_user_ranges(strip)
         self.publish_camera("step0-compare-enter", jump=True)
-        self._btn_snapshot_patch.setEnabled(True)
-        self._compare_where_lbl.setText(
-            f"Comparing around ({int(round(px))}, {int(round(py))}) "
-            "\u2014 right-click or Esc to go back.")
         self._preview_status.setText(
             "Original | TopHat | cucim, one camera. Wheel to zoom, drag to "
             "pan; right-click, Esc or \u201cBack to full image\u201d returns "
@@ -3242,7 +3201,7 @@ class Step0Page(QWidget):
 
         Level-0 because that is the coordinate system the tile viewers work
         in, which is what lets this rectangle be handed straight to the full
-        image -- and to "Save as patch", which writes level-0 rectangles.
+        image.
         There is no region to map through and nothing to clip to any more:
         the panels ARE the slide.
         """
@@ -3254,37 +3213,6 @@ class Step0Page(QWidget):
         if not (w > 0 and h > 0 and math.isfinite(w) and math.isfinite(h)):
             return None
         return rect
-
-    def _save_snapshot_as_patch(self):
-        """Add what the panels are showing to the patch list, as a level-0
-        rectangle.
-
-        The one place compare mode leaves anything behind, and it leaves a
-        BOOKMARK: a patch is where Step 1 is seeded from, so "I want to work
-        here" is worth recording. It computes nothing and marks nothing.
-
-        The rectangle is what the panels are SHOWING, in level-0 slide
-        coordinates. There is no region R any more to prefer over it: the
-        panels are cameras on the whole slide, so "this spot" is exactly
-        the spot on screen, and it is already in the coordinate system Save
-        writes.
-        """
-        rect = self._compare_view_rect_l0() if self._compare_opened else None
-        if not rect:
-            return None
-        x0, y0, w, h = (int(round(float(v))) for v in rect)
-        coords = (y0, y0 + h, x0, x0 + w)
-        overview = getattr(self, "overview", None)
-        adder = getattr(overview, "add_patch_rect", None)
-        if callable(adder):
-            adder(*coords)
-        else:
-            self._on_patches_changed(list(self.patches) + [coords])
-        self._preview_status.setText(
-            f"Added patch y[{coords[0]}:{coords[1]}] x[{coords[2]}:{coords[3]}]"
-            " from the comparison.")
-        return coords
-
 
     def _enter_full_image_landing(self):
         """Open the full image as the LANDING view of a freshly loaded slide.
@@ -3304,6 +3232,14 @@ class Step0Page(QWidget):
         if getattr(self, "_view_area", None) is None:
             return
         self._full_image_source = "original"
+        # A slide that comes BACK (switched away and back in this session)
+        # remembers which marker was ticked, and a ticked Step0 marker is the
+        # selected one (user ruling 2026-10-27). Landing on DAPI then showed
+        # a ticked row nothing drew, until it was ticked again (acceptance
+        # 2026-11-02): select it through the one selection path instead.
+        ticked = self._remembered_ticked_marker()
+        if ticked and ticked != self.current_channel:
+            self._on_channel_selected_by_id(ticked)
 
         self._update_decision_ui()
         self._update_full_method_buttons()
@@ -3583,6 +3519,19 @@ class Step0Page(QWidget):
         """
         nucleus = self.nucleus_channel
         return bool(nucleus) and self.current_channel == nucleus
+
+    def _remembered_ticked_marker(self):
+        """The first marker this slide's Step0 display answers have ticked,
+        or None (a fresh slide: none)."""
+        state = getattr(getattr(self, "display", None), "state", None)
+        if state is None or not self._display_scope_is_mine():
+            return None
+        try:
+            shown = state.display_visibility()
+        except Exception:                                   # noqa: BLE001
+            return None
+        return next((ch for ch in self._channel_order
+                     if ch != self.nucleus_channel and shown.get(ch)), None)
 
     def _landing_channel(self):
         """The channel a slide is shown in before any marker is chosen.
@@ -10827,11 +10776,7 @@ class Step0Page(QWidget):
         # requests for where they are going.
         if not self._apply_compare_camera(*camera):
             return False
-        cx, cy, _scale = camera
         self.publish_camera("step0-compare-patch", jump=True)            # A7 U5
-        self._compare_where_lbl.setText(
-            f"Comparing patch P{idx+1} around ({int(round(cx))}, "
-            f"{int(round(cy))}) — right-click or Esc to go back.")
         return True
 
     # ══ Params dirty tracking ════════════════════════════════════════
@@ -11384,11 +11329,6 @@ class Step0Page(QWidget):
         # because compare mode was up when the row changed. See
         # `_sync_full_image_to_channel`.
         self._full_image_channel_stale = False
-        if hasattr(self, "_btn_snapshot_patch"):
-            self._btn_snapshot_patch.setEnabled(False)
-            self._compare_where_lbl.setText(
-                "Right-click the full image to compare that spot. "
-                "Right-click again, or press Esc, to come back.")
         if getattr(self, "_view_area", None) is not None:
             self._set_compare_mode(False)
 
@@ -11603,6 +11543,10 @@ class Step0Page(QWidget):
             removed = run_store.cleanup_incomplete(ws.workspace_dir)
             if removed:
                 print(f"[Workspace] removed unfinished run folders: {removed}")
+            # a Save in place that a crash interrupted: finished or undone
+            for run_dir in run_store.list_runs(ws.workspace_dir, "correct"):
+                if product_swap.recover(run_dir):
+                    print(f"[Workspace] interrupted Save repaired: {run_dir}")
         # §9: viewing / editing pointers to runs that are gone go back to nothing.
         reset = run_store.validate_session(ws.workspace_dir)
         if reset:
@@ -11957,8 +11901,9 @@ class Step0Page(QWidget):
     # ── runs: the correct run a Save writes (block RM §5) ───────────────
 
     def _rm_base_corrected_path(self):
-        """The corrected zarr of the correct run being edited -- the one the
-        published handoff names -- or "" when this workspace has none yet."""
+        """The corrected zarr of the workspace's correct run -- the one the
+        published handoff names, else the newest finished one -- or "" when
+        this workspace has none yet."""
         published = self._published_handoff()
         ws = (self._roi_context or {}).get("roi_dir")
         if not ws:
@@ -11967,13 +11912,16 @@ class Step0Page(QWidget):
             step0_dir = ((self._roi_context or {}).get("step_dirs") or {}).get("step0") \
                 or self.output_dir
             return os.path.join(step0_dir, "corrected_channels.zarr")
-        if published is None or not published[2]:
-            return ""
-        run_dir = os.path.dirname(published[2])
-        if (run_store.kind_of(run_dir) != "correct" or not run_store.is_done(run_dir)
+        run_dir = os.path.dirname(published[2]) if published is not None and published[2] else ""
+        if (not run_dir or run_store.kind_of(run_dir) != "correct"
+                or not run_store.is_done(run_dir)
                 or os.path.abspath(run_store.roi_dir_of(run_dir)) != os.path.abspath(ws)):
-            return ""
-        return published[2]
+            # The handoff names none (or one that is gone): the newest
+            # finished correct run of the workspace is its product.
+            run_dir = run_store.latest_run(ws, "correct")
+            if not run_dir:
+                return ""
+        return os.path.join(run_dir, "corrected_channels.zarr")
 
     @staticmethod
     def _rm_sigs(sigs):
@@ -11991,157 +11939,90 @@ class Step0Page(QWidget):
         return self._rm_sigs({ch: normalize_save_signature(sig)
                               for ch, sig in saved.items()})
 
-    def _rm_new_correct_run(self, base_path="", copy=False, defer_copy=False):
+    def _rm_new_correct_run(self):
         """A new, unpublished correct run; returns the corrected zarr path in
-        it. `copy`: start from the base run's pixels (and coarse sidecar), so
-        only the changed channels are recomputed. A published run is never
-        written. `defer_copy`: the caller copies (`_rm_copy_pixels`, off the
-        GUI thread -- block CS P2)."""
+        it. Only for a workspace that has no product yet: a Save rewrites
+        the one it has (docs/v17_save_inplace_step1_ahead_plan.md)."""
         ws = (self._roi_context or {}).get("roi_dir")
         if not ws:
-            return base_path or self._rm_base_corrected_path()   # in place, no runs
+            return self._rm_base_corrected_path()      # in place, no runs
         # not an end of THIS Save: its kept settings stay kept (plan §3.5)
         self._rm_discard_pending("superseded by a new Save", settings=False)
         run_dir = run_store.new_run(ws, "correct")
         self._rm_pending_run = run_dir
-        zarr_path = os.path.join(run_dir, "corrected_channels.zarr")
-        if copy and base_path and os.path.isdir(base_path):
-            if defer_copy:
-                return zarr_path
-            try:
-                self._rm_copy_pixels(base_path, zarr_path)
-            except Exception:
-                self._rm_discard_pending("copying the pixels failed")
-                raise
-        else:
-            print(f"[Step0] new correct run {os.path.basename(run_dir)}")
-        return zarr_path
+        print(f"[Step0] new correct run {os.path.basename(run_dir)}")
+        return os.path.join(run_dir, "corrected_channels.zarr")
 
-    @staticmethod
-    def _rm_copy_pixels(base_path, zarr_path):
-        """The base run's corrected pixels (and coarse sidecar) into the new
-        run's folder. Thread-safe: touches only those two folders."""
-        run_dir = os.path.dirname(zarr_path)
-        shutil.copytree(base_path, zarr_path)
-        sidecar = os.path.join(os.path.dirname(base_path), "corrected_coarse.zarr")
-        if os.path.isdir(sidecar):
-            shutil.copytree(sidecar, os.path.join(run_dir, "corrected_coarse.zarr"))
-        print(f"[Step0] new correct run {os.path.basename(run_dir)}: copied the "
-              f"pixels of {os.path.basename(os.path.dirname(base_path))}", flush=True)
-
-    def _rm_prepare_save(self, base_path, copy, release, then):
-        """Block CS P2: everything a Save must finish BEFORE it starts --
-        copying the base run's pixels into the new correct run and, for a
-        correction run, the viewer's hand-off (`release` = its reason) --
-        happens off the GUI thread. The window stays responsive, the
-        progress dialog says what is being waited for, and `then(zarr_path)`
-        runs on the GUI thread once both are done. Cancel (or an error, or a
-        dataset switch) discards the unpublished run and gives the viewer
-        back. A hand-off still in progress is never a reason to start."""
-        import threading
+    def _rm_prepare_save(self, base_path, release, then):
+        """Block CS P2: what a Save must finish BEFORE it starts -- the
+        viewer's hand-off (`release` = its reason) -- happens off the GUI
+        thread. The window stays responsive, the progress dialog says what
+        is being waited for, and `then(zarr_path)` runs on the GUI thread
+        once it is done. Cancel (or an error, or a dataset switch) discards
+        a new unpublished run and gives the viewer back. A hand-off still in
+        progress is never a reason to start. `base_path` is the product
+        rewritten in place; "" makes a new correct run."""
         try:
-            zarr_path = self._rm_new_correct_run(base_path, copy=copy, defer_copy=True)
+            zarr_path = base_path or self._rm_new_correct_run()
         except Exception:
             self._rm_discard_pending("the correct run could not be created")
             raise
-        needs_copy = bool(copy and base_path and os.path.isdir(base_path)
-                          and os.path.abspath(zarr_path) != os.path.abspath(base_path)
-                          and not os.path.exists(zarr_path))
-        if not needs_copy and not release:
+        if not release:
             # Nothing slow to wait for: done here, as before.
             then(zarr_path)
             return
-        prep = {"cancel": False, "error": None, "copied": not needs_copy}
+        prep = {"cancel": False}
         self._save_prep = prep
         self._set_save_enabled(False)
         self._btn_load.setEnabled(False)
         # The viewer is asked to stop FIRST (it returns at once; the waiting
         # is done off this thread), so nothing new starts on it meanwhile.
-        if release:
-            try:
-                ready, timings = self._begin_release_explore_for_production(
-                    release, cancelled=lambda: prep["cancel"])
-            except Exception:
-                # No hand-off, no run: nothing of this Save stays behind.
-                self._save_prep = None
-                self._rm_discard_pending("the viewer could not be handed off")
-                self._set_save_enabled(True)
-                self._btn_load.setEnabled(True)
-                raise
-        else:
-            ready, timings = threading.Event(), {}
-            ready.set()
+        try:
+            ready, timings = self._begin_release_explore_for_production(
+                release, cancelled=lambda: prep["cancel"])
+        except Exception:
+            # No hand-off, no run: nothing of this Save stays behind.
+            self._save_prep = None
+            self._rm_discard_pending("the viewer could not be handed off")
+            self._set_save_enabled(True)
+            self._btn_load.setEnabled(True)
+            raise
         dialog = _WsiCorrectionProgressDialog(self)
         self._wsi_dialog = dialog
         dialog.cancel_requested.connect(lambda: prep.__setitem__("cancel", True))
-        waiting = []
-        if needs_copy:
-            waiting.append("copying the previous Step0 result")
-        if release:
-            waiting.append("waiting for the preview to stop")
-        dialog.set_progress(0, "Preparing: " + (" and ".join(waiting) or "starting")
-                            + "\u2026", None)
+        dialog.set_progress(0, "Preparing: waiting for the preview to stop\u2026", None)
         dialog.show()
-        if needs_copy:
-            def copy_job():
-                try:
-                    self._rm_copy_pixels(base_path, zarr_path)
-                except Exception as exc:                    # noqa: BLE001
-                    prep["error"] = exc
-                prep["copied"] = True
-            threading.Thread(target=copy_job, daemon=True, name="step0-save-copy").start()
         gen = self._dataset_gen
         t0 = time.perf_counter()
         timer = QTimer(self)
         timer.setInterval(50)
 
-        def give_up(reason):
-            self._save_prep = None
-            self._rm_discard_pending(reason)
-            dialog.allow_close()
-            dialog.reject()
-            self._set_save_enabled(True)
-            self._btn_load.setEnabled(True)
-            if release:
-                self._on_production_worker_finished()
-
         def poll():
             if gen != self._dataset_gen:
                 # Another dataset: this Save is over (its viewer is gone with
-                # the old dataset, so nothing is resumed) -- once the copy,
-                # which cannot be interrupted, has finished.
+                # the old dataset, so nothing is resumed).
                 prep["cancel"] = True
-                if not prep["copied"]:
-                    return
                 timer.stop()
                 self._save_prep = None
                 self._rm_discard_pending("another dataset was loaded")
                 dialog.allow_close()
                 dialog.reject()
                 return
-            if not prep["copied"]:
-                return
             if not prep["cancel"] and not ready.is_set():
                 return
             timer.stop()
-            if prep["error"] is not None:
-                give_up("copying the pixels failed")
-                QMessageBox.critical(self, "Save", f"The previous Step0 result could not "
-                                     f"be copied, so nothing was saved.\n\n{prep['error']}")
-                return
-            if prep["cancel"]:
-                give_up("Save canceled while preparing")
-                return
             self._save_prep = None
-            print(f"[step0] Save prepared in {(time.perf_counter() - t0) * 1000:.0f} ms"
-                  + (f" (floor join {timings.get('floor_join_ms', 0):.0f} ms, scheduler "
-                     f"drain {timings.get('scheduler_drain_ms', 0):.0f} ms)" if release else ""),
-                  flush=True)
-            if not release:
+            if prep["cancel"]:
+                self._rm_discard_pending("Save canceled while preparing")
                 dialog.allow_close()
-                dialog.accept()
+                dialog.reject()
                 self._set_save_enabled(True)
                 self._btn_load.setEnabled(True)
+                self._on_production_worker_finished()
+                return
+            print(f"[step0] Save prepared in {(time.perf_counter() - t0) * 1000:.0f} ms"
+                  f" (floor join {timings.get('floor_join_ms', 0):.0f} ms, scheduler "
+                  f"drain {timings.get('scheduler_drain_ms', 0):.0f} ms)", flush=True)
             then(zarr_path)
 
         timer.timeout.connect(poll)
@@ -12231,9 +12112,12 @@ class Step0Page(QWidget):
                      for ch, m in (config.get("channel_decisions") or {}).items()}
         summary = ", ".join(f"{ch} {sig[0]} {sig[1]}" for ch, sig in sorted(sigs.items())) \
             or "no correction"
+        now = datetime.now().isoformat(timespec="seconds")
         params = {
             "kind": "correct",
-            "created_at": datetime.now().isoformat(timespec="seconds"),
+            # rewritten in place by later Saves: made once, updated each time
+            "created_at": run_store.read_params(run_dir).get("created_at") or now,
+            "updated_at": now,
             "summary": summary,
             "correction_config": config,
             "channel_decisions": decisions,
@@ -12273,6 +12157,9 @@ class Step0Page(QWidget):
         # project-relative, like every other record)
         params["geometry"] = run_store.to_records(params["geometry"],
                                                   run_store.project_dir_of(run_dir))
+        # what this Save replaces, for `_settle_product` if it does not complete
+        self._rm_replaced_params = (run_dir, run_store.read_params(run_dir)
+                                    if run_store.is_done(run_dir) else None)
         run_store.write_params(run_dir, params)
         run_store.write_inputs(run_dir, None, slide_id=slide_id,
                                slide_id_unavailable=unavailable)
@@ -12414,6 +12301,16 @@ class Step0Page(QWidget):
             return
         if self._rm_old_project_refused():
             return
+        # Save writes the corrected product IN PLACE (docs/v17_save_inplace_
+        # step1_ahead_plan.md §A3): not while a job may be reading it.
+        blocker = getattr(self, "deletion_blocker", None)
+        busy = blocker() if callable(blocker) else None
+        if busy:
+            QMessageBox.information(
+                self, "Save",
+                f"Save has to wait: {busy}, and it may be reading the corrected "
+                "channels this Save would rewrite.\n\nSave again when it has finished.")
+            return
 
         # Preview patches are navigation/preview bookmarks, not the analysis
         # region.  With no bookmark, the existing ROI-or-full-WSI decision
@@ -12515,12 +12412,13 @@ class Step0Page(QWidget):
             for ch, method in (config.get("channel_decisions") or {}).items()
             if method in {"tophat", "cucim"}
         }
-        # Block DV (§3.15): the corrected product this Save starts from -- the
-        # draft if there is one, else the one the handoff references (a
-        # published version's: read-only), else a new draft.
-        # Block RM (§5): the correct run being edited. It is published and
-        # read-only; a Save that changes pixels writes a new correct run.
+        # The workspace's ONE corrected product (user ruling 2026-11-02,
+        # docs/v17_save_inplace_step1_ahead_plan.md): a Save rewrites the
+        # channels it changes in place; only "Save as new workspace" -- or a
+        # workspace that has none yet -- starts another correct run.
         base_path = self._rm_base_corrected_path()
+        if base_path:
+            product_swap.recover(os.path.dirname(base_path))
         base_sigs = self._rm_base_sigs(base_path)
         zarr_path = base_path
         self._rm_save_sigs = {}
@@ -12540,20 +12438,38 @@ class Step0Page(QWidget):
                 return
             _write_current_correction_config()
             # Block RM (§16.3-3): the first Save makes a correct run even
-            # without corrected channels; later it is reused unless pixels
-            # change (a channel withdrawn, or another region).
+            # without corrected channels; later the same one is rewritten:
+            # the channels no longer corrected leave it.
+            emptied = ""
             try:
-                if not base_path or base_sigs or region_rewritten:
+                if not base_path:
                     zarr_path = self._rm_new_correct_run()
+                elif base_sigs or region_rewritten:
+                    # an empty product, staged, replaces the one there --
+                    # kept only if the Save completes
+                    emptied = os.path.dirname(zarr_path)
+                    staged = product_swap.new_staging(emptied)
+                    try:
+                        self._ensure_empty_corrected_zarr(
+                            os.path.join(staged, "corrected_channels.zarr"), rois)
+                    except Exception:
+                        product_swap.discard_staging(emptied)
+                        raise
+                    self._move_into_product(emptied, ("whole",))
                 if not os.path.exists(zarr_path):
                     self._ensure_empty_corrected_zarr(zarr_path, rois)
             except Exception:
                 # an unfinished Save: its run goes, the previous settings come back
+                if emptied:
+                    product_swap.recover(emptied)
                 self._rm_discard_pending("the correct run could not be created")
                 raise
             # Reconciles the cache: previously corrected channels revert to raw.
             self._apply_corrected_store(None, {})
-            if not self._emit_complete(config, zarr_path, {}):
+            completed = self._emit_complete(config, zarr_path, {})
+            if emptied:
+                self._settle_product(emptied, completed)
+            if not completed:
                 return
             QMessageBox.information(
                 self, "No background correction",
@@ -12594,22 +12510,34 @@ class Step0Page(QWidget):
                 return
             _write_current_correction_config()
             self._rm_save_sigs = current_sigs
-            # Block RM (§5): only Intensity changed -> the same correct run.
-            # A withdrawn channel or another outline -> a new run made of
-            # the same pixels.
+            # The same correct run, whatever changed: a withdrawn channel
+            # leaves it in place -- once the Save has completed (until then
+            # the settings it replaces may still come back).
+            withdrawn = sorted(set(base_sigs) - set(current_sigs)) if base_path else []
+
             def _finish(zarr_path):
                 self._apply_corrected_store(zarr_path, corrected)
                 completed = self._emit_complete(config, zarr_path, corrected)
+                if completed and withdrawn:
+                    # (published already: the channels are no longer read as
+                    # corrected; one that cannot be removed now stays, unused)
+                    run_dir = os.path.dirname(base_path)
+                    try:
+                        self._move_into_product(
+                            run_dir, ("in", [], [(g, ch) for g in product_swap.groups(base_path)
+                                                 for ch in withdrawn]))
+                        product_swap.commit(run_dir)
+                    except Exception as exc:                # noqa: BLE001
+                        product_swap.recover(run_dir)
+                        error_hook.report(exc, "Step0 Save: removing withdrawn channels")
                 if completed and intensity_changed and not correction_changed:
                     QMessageBox.information(
                         self, "Intensity saved",
                         "Intensity/remap parameters were saved.\n\n"
                         "Background-correction parameters did not change, so the "
                         "existing corrected results were reused.")
-            if region_rewritten or self._rm_sigs(current_sigs) != base_sigs:
-                # (the copy runs off the GUI thread -- block CS P2)
-                self._rm_prepare_save(base_path, True, None, _finish)
-                return
+            if not base_path:
+                zarr_path = self._rm_new_correct_run()    # a workspace's first run
             _finish(zarr_path)
             return
 
@@ -12618,14 +12546,14 @@ class Step0Page(QWidget):
             return
         _write_current_correction_config()
         self._rm_save_sigs = current_sigs
-        # Block RM (§5): never write a published run. Same ROI and source ->
-        # a new run starting from its pixels, only changed channels
-        # recomputed; another ROI -> a new empty run, every channel computed.
+        # In place: same ROI and source -> only the changed channels are
+        # computed and replace theirs; another ROI -> every channel, and the
+        # product is replaced as a whole (`WsiCorrectionWorker`, staged).
         if not rois_match:
             to_process = dict(corrected)
-        # Block CS P2: the copy of the base run and the viewer's hand-off are
-        # done off the GUI thread; the run starts when both have finished.
-        self._rm_prepare_save(base_path, rois_match, "whole-slide correction (Save)",
+        # Block CS P2: the viewer's hand-off is done off the GUI thread; the
+        # run starts when it has finished.
+        self._rm_prepare_save(base_path, "whole-slide correction (Save)",
                               lambda zarr_path: self._start_wsi_correction(
                                   config, rois, zarr_path, to_process, rois_match))
 
@@ -12663,6 +12591,27 @@ class Step0Page(QWidget):
         if self._wsi_dialog is not None:
             self._wsi_dialog.allow_close()
             self._wsi_dialog.accept()
+        # The worker computed into a staging product: its channels move into
+        # the live one here, on this thread, with every reader let go first;
+        # the move is kept only if the Save then completes (§8 of
+        # docs/v17_save_inplace_step1_ahead_plan.md).
+        worker = self.__dict__.get("_wsi_worker")
+        plan = getattr(worker, "swap_plan", None)
+        run_dir = os.path.dirname(os.path.abspath(zarr_path)) if zarr_path else ""
+        if plan and run_dir:
+            try:
+                self._move_into_product(run_dir, plan)
+            except Exception as exc:                        # noqa: BLE001
+                product_swap.recover(run_dir)
+                self._rm_discard_pending("the corrected channels could not be moved in")
+                self._set_save_enabled(True)
+                self._btn_load.setEnabled(True)
+                error_hook.report(exc, "Step0 Save: moving the corrected channels in")
+                QMessageBox.critical(
+                    self, "Step0 Save failed",
+                    "The corrected channels could not be put in place, so nothing was "
+                    f"changed.\n\nDetails: {exc}")
+                return
         # Store swap + cache reconcile in one place: corrected channels re-read
         # corrected pixels; channels whose correction was withdrawn re-read raw.
         # On an incremental save only channels REprocessed this run re-read as
@@ -12670,7 +12619,40 @@ class Step0Page(QWidget):
         only = getattr(self, "_incremental_processed", None)
         self._incremental_processed = None
         self._apply_corrected_store(zarr_path, decisions, only=only)
-        self._emit_complete(config, zarr_path, decisions)
+        completed = self._emit_complete(config, zarr_path, decisions)
+        if plan and run_dir:
+            moved = {ch for _g, ch in plan[1]} if plan[0] == "in" else set(decisions or {})
+            self._settle_product(run_dir, completed, moved)
+
+    def _move_into_product(self, run_dir, plan):
+        """`core.product_swap.apply_plan`, after the window has let every
+        reader of the product go (`before_product_swap`)."""
+        hook = getattr(self, "before_product_swap", None)
+        if callable(hook):
+            hook()
+        return product_swap.apply_plan(run_dir, plan)
+
+    def _settle_product(self, run_dir, completed, channels=()):
+        """A move is kept when its Save completed and undone when not (the
+        settings it replaced came back with `_rm_discard_pending`); undone,
+        the run's record is put back too and `channels` -- the ones that were
+        moved in -- are read again from what is there now."""
+        replaced = self.__dict__.pop("_rm_replaced_params", None)
+        if not os.path.isdir(run_dir):
+            return                          # a new run this Save made went with it
+        if completed:
+            product_swap.commit(run_dir)
+            return
+        if not product_swap.rollback(run_dir):
+            return
+        if replaced and replaced[0] == run_dir and replaced[1]:
+            run_store.write_params(run_dir, replaced[1])
+        print(f"[Step0] the Save did not complete: {os.path.basename(run_dir)} "
+              f"is as it was before it")
+        binding = getattr(self.loader, "corrected_store_binding", None)
+        if channels and binding is not None:
+            path, decisions = binding()
+            self._apply_corrected_store(path, decisions, only=set(channels))
 
     def _apply_corrected_store(self, zarr_path, decisions, only=None):
         """Single entry point for swapping the corrected store.
@@ -12736,9 +12718,10 @@ class Step0Page(QWidget):
                 self._preview_provider.invalidate(ch)
         self._maybe_refresh_conditioning()
 
-    def _on_wsi_canceled(self, zarr_path):
-        if os.path.exists(zarr_path):
-            shutil.rmtree(zarr_path, ignore_errors=True)
+    def _on_wsi_canceled(self, _zarr_path):
+        # The worker computed into a staging product and has deleted it; the
+        # live product was never touched (docs/v17_save_inplace_step1_ahead_
+        # plan.md §A3b). A new run this Save made goes with it.
         self._rm_discard_pending("background correction canceled")
         if self._wsi_dialog is not None:
             self._wsi_dialog.allow_close()
@@ -12747,8 +12730,8 @@ class Step0Page(QWidget):
         self._btn_load.setEnabled(True)
         QMessageBox.information(
             self, "Canceled",
-            "Background correction was canceled. The channel that was being "
-            "written has been removed; nothing partial was kept.")
+            "Background correction was canceled. Nothing was changed: the "
+            "corrected channels are as they were before this Save.")
 
     def _on_wsi_error(self, msg):
         self._rm_discard_pending("background correction failed")
@@ -12966,10 +12949,12 @@ class Step0Page(QWidget):
         # Block RM (§5): the correct run this Save wrote is published inside
         # the handoff write -- pixels and attributes final, before the
         # manifest that names it -- and its channels are registered (A3).
-        pending = self.__dict__.get("_rm_pending_run")
-        if (pending and zarr_path and os.path.abspath(os.path.dirname(zarr_path))
-                == os.path.abspath(pending)):
-            spec["publish_run"] = lambda: self._rm_publish_correct_run(pending, spec)
+        # Its own run (a new one, or the one rewritten in place) every Save.
+        run_dir = os.path.dirname(os.path.abspath(zarr_path)) if zarr_path else ""
+        ws = (self._roi_context or {}).get("roi_dir")
+        if (run_dir and ws and run_store.kind_of(run_dir) == "correct"
+                and os.path.abspath(run_store.roi_dir_of(run_dir)) == os.path.abspath(ws)):
+            spec["publish_run"] = lambda: self._rm_publish_correct_run(run_dir, spec)
             spec["register_corrected"] = True
         print("[Step0] writing ROI-specific outputs")
         print(f"[Step0] roi_id={spec['roi_id']}")

@@ -795,3 +795,31 @@ def test_a_committed_switch_lands_on_the_new_slides_dapi(app, tmp_path,
     # ...and the correction switch is shut over it, as it is over any DAPI.
     assert not page._full_method_buttons["tophat"].isEnabled()
     assert not page._full_method_buttons["cucim"].isEnabled()
+
+
+def test_a_slide_that_comes_back_shows_its_ticked_marker(app, tmp_path, monkeypatch):
+    """Acceptance 2026-11-02: a marker ticked on slide A, a switch to B and
+    back to A -- the tick is remembered with A, and the ticked Step0 marker is
+    the selected one (user ruling 2026-10-27), so A comes back ON it: the row,
+    the selection and the picture agree. Before, A landed on DAPI with CD20
+    still ticked and nothing drawing it."""
+    page = _fresh_page(tmp_path, monkeypatch)
+    a = tmp_path / "A.tif"
+    a.write_bytes(b"not-really-a-tiff")
+    page._ome_path_edit.setText(str(a))
+    page._out_path_edit.setText(str(tmp_path / "out"))
+    _switch_to_b(page, tmp_path, monkeypatch)         # (the helper's switch, to B)
+    page._ome_path_edit.setText(str(a))
+    page._reload_from_paths()                         # A, bound for real
+    page._channel_rows["CD20"]["checkbox"].setChecked(True)
+    assert page.current_channel == "CD20"
+    _switch_to_b(page, tmp_path, monkeypatch)
+    assert page.current_channel == "DAPI"             # B: a fresh slide, DAPI
+    page._ome_path_edit.setText(str(a))
+    page._out_path_edit.setText(str(tmp_path / "out"))
+    page._reload_from_paths()
+    state = page.display.state
+    assert state.display_visible("CD20") is True
+    assert page.current_channel == "CD20"
+    assert state.selected_channel() == "CD20"
+    assert page._channel_list.currentRow() == page._channel_order.index("CD20")

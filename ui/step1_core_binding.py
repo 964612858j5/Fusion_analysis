@@ -125,6 +125,7 @@ class Step1CoreBinding(QtCore.QObject):
         self._on_unsupported = on_unsupported
         self.on_status_changed: Optional[Callable[[], None]] = None
         self._paused = False
+        self._ahead = False
         self._disposed = False
         self._unsupported = ""
         self._active: Tuple[str, ...] = ()
@@ -175,15 +176,64 @@ class Step1CoreBinding(QtCore.QObject):
     def pause(self) -> bool:
         if self._disposed or self._paused:
             return False
+        self._ahead = False
         self._paused = True
         self._disconnect_controller()
         self.core.pause()
         self.layer.hidden = True
         return True
 
+    # ── prepared ahead while paused (docs/v17_save_inplace_step1_ahead_plan.md §9)
+    #: the user's cap: at most this many channels are prepared ahead
+    AHEAD_MAX_CHANNELS = 15
+
+    def prepare_ahead(self) -> bool:
+        """While PAUSED (Step1 not on screen): the display as it now reads
+        -- its first `AHEAD_MAX_CHANNELS` channels; the user's ticks are not
+        touched -- and the controller's current view go to the core, which
+        starts reading them. No controller subscription, no owner, nothing
+        presented: the layer's `paint_ahead` takes the tiles. False when
+        there is nothing to prepare."""
+        if self._disposed or not self._paused or self._unsupported:
+            return False
+        display = self._display_source()
+        if self._unsupported_reason(display):
+            return False
+        rows, active, _missing = self._rows(display)
+        if not rows:
+            return False
+        kept = set(active[:self.AHEAD_MAX_CHANNELS])
+        rows = [r for r in rows if self._names[r[0]] in kept]
+        snapshot = self.controller.snapshot()
+        bbox = getattr(snapshot, "bbox_l0", None)
+        if bbox is None:
+            return False
+        self.core.resume()
+        self._ahead = True
+        self.core.set_display(rows, bool(self.layer.smooth), display.mode == MODE_FUSION)
+        self._apply_polygon()
+        self.core.set_view(int(snapshot.level), tuple(int(v) for v in bbox),
+                           int(snapshot.epoch), False)
+        return True
+
+    def end_ahead(self) -> bool:
+        """The preparation stops; the core is paused again (its tiles stay
+        for the entry). False when none was running."""
+        if not self._ahead:
+            return False
+        self._ahead = False
+        if self._paused and not self._disposed:
+            self.core.pause()
+        return True
+
+    @property
+    def ahead(self) -> bool:
+        return self._ahead
+
     def resume(self) -> bool:
         if self._disposed or not self._paused:
             return False
+        self._ahead = False
         self._paused = False
         self.layer.hidden = False
         from . import gpu_memory

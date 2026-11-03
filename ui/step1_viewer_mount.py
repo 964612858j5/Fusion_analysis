@@ -340,6 +340,57 @@ class Step1WholeSlideMount(QtCore.QObject):
         self._load_overview_for_the_cpu_picture(stack)
         return self._start_cpu_backend(stack)
 
+    # ── built and prepared ahead, Step1 not on screen (§9 of
+    #    docs/v17_save_inplace_step1_ahead_plan.md) ─────────────────────
+    def open_ahead_stack(self):
+        """First half of `open`, for the window's preparation ahead: the
+        stack only. The GPU half is the next turn's (`open_ahead_backend`)
+        so no turn of the event loop holds both."""
+        self._open_channel = ""
+        self._ahead_stack = self.viewer.open("")
+        return self._ahead_stack is not None
+
+    def open_ahead_backend(self):
+        """Second half: the Rust backend on the stack opened ahead, then
+        PAUSED at once -- built, not reading. No CPU fallback here: a GPU
+        that cannot start closes the mount, and the entry opens it the usual
+        way. True when the mount is built and paused."""
+        stack = self.__dict__.pop("_ahead_stack", None)
+        if stack is None or self.host.stack is not stack:
+            return False
+        if not self._start_gpu_backend(stack):
+            self.close()
+            return False
+        self._connect_view_rect()
+        self.pause_requests()
+        return True
+
+    @property
+    def ahead_stack_open(self):
+        return self.__dict__.get("_ahead_stack") is not None
+
+    @property
+    def source_pending_while_paused(self):
+        return self._paused and self._source_pending is not None
+
+    def rebuild_paused(self):
+        """A source that moved while paused (a Step0 Save) is rebuilt now,
+        ahead, and the mount STAYS paused: the new binding is paused at once
+        and the pending rebuild is consumed, so the entry does not rebuild
+        again. True when rebuilt on the GPU backend."""
+        if not self._paused or self._source_pending is None:
+            return False
+        if self.gpu_binding is None and self.gpu_layer is None:
+            return False                       # the CPU picture rebuilds on entry
+        reason, self._source_pending = self._source_pending, None
+        stack = self._gpu_source_changed(reason)
+        if stack is None or self.gpu_binding is None:
+            return False
+        self.gpu_binding.pause()
+        if self.label_binding is not None:
+            self.label_binding.pause()
+        return True
+
     # ── the overview nobody would have looked at (G3.2b.4D) ───────────
     def _defer_overview_to_the_cpu_fallback(self):
         """Build the stack without the synchronous coarsest-level read.

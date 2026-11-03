@@ -2950,7 +2950,13 @@ class MainWindow(QMainWindow):
 
     @_perf("switch.step1_follow")
     def _step1_follow_step(self, active):
+        self._stop_step1_ahead()                     # the entry takes over
         mount = getattr(self, "_step1_mount", None)
+        if active == 1 and mount is not None and mount.ahead_stack_open:
+            # entered between the two halves of a build ahead: finished now
+            if mount.open_ahead_backend():
+                mount.set_mode(self._step1_preview_mode)
+                self._wire_step1_tissue_navigation()
         if active != 1:
             if mount is not None:
                 # RESIDENT, NOT READING (block 2c-2): paused, it issues no
@@ -2996,6 +3002,164 @@ class MainWindow(QMainWindow):
         mount.set_mode(self._step1_preview_mode)
         self._wire_step1_tissue_navigation()
         return True
+
+    # ── Step1 prepared ahead (docs/v17_save_inplace_step1_ahead_plan.md §9) ──
+    #
+    # While Step0 is on screen and still, Step1's viewer is built (once) and
+    # its view -- the camera Step1 will adopt on entry -- read, so entering
+    # Step1 shows a sharp picture at once (user ruling 2026-11-02/03). One
+    # piece per turn of the event loop; it gives way to Step0's own reads,
+    # to production runs and to any Step0 camera move.
+    STEP1_AHEAD_QUIET_MS = 700        # Step0 still this long: start
+    STEP1_AHEAD_BUILD_QUIET_S = 2.0   # ...and this long for a build piece
+                                      # (~1 s each on a cold HDD, once per slide)
+    STEP1_AHEAD_STEP_MS = 60          # between two pieces of the build
+    STEP1_AHEAD_PAINT_MS = 100        # between two off-screen paints
+    STEP1_AHEAD_ROUND_S = 10.0        # one round's deadline
+
+    def _arm_step1_ahead(self, why=""):
+        """(Re)start the quiet wait; a round under way stops (Step0 moved,
+        a handoff landed, ...)."""
+        if self.__dict__.get("_closing") or self.__dict__.get("_step1_ahead_off"):
+            return
+        try:
+            self._stop_step1_ahead()
+            self._step1_ahead_armed_at = time.monotonic()
+            self._step1_ahead_next(self.STEP1_AHEAD_QUIET_MS)
+        except RuntimeError:
+            # A WINDOW THAT WAS NEVER BUILT (the handoff reader is driven
+            # against half-constructed windows): nothing to prepare.
+            return
+
+    def _stop_step1_ahead(self):
+        """No more pieces; a preparation running in the core is paused."""
+        timer = self.__dict__.get("_step1_ahead_timer")
+        if timer is not None:
+            timer.stop()
+        self._step1_ahead_round = None
+        mount = self.__dict__.get("_step1_mount")
+        binding = getattr(mount, "gpu_binding", None)
+        end = getattr(binding, "end_ahead", None)
+        if end is not None:
+            try:
+                end()
+            except Exception as exc:                        # noqa: BLE001
+                error_hook.report(exc, "Step1 prepared ahead: stop")
+
+    def _step1_ahead_next(self, ms):
+        timer = self.__dict__.get("_step1_ahead_timer")
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._step1_ahead_step)
+            self._step1_ahead_timer = timer
+        timer.start(int(ms))
+
+    def _step1_ahead_gate(self):
+        """(why no piece may run now, or ""; whether that is worth waiting
+        out -- a busy Step0, a job -- rather than giving up until re-armed)."""
+        if self.__dict__.get("_closing"):
+            return "closing", False
+        if self._current_step != 0:
+            return "Step0 is not on screen", False
+        step0 = self.__dict__.get("_step0")
+        if not getattr(self, "loader", None) or not (self.step0_output or {}).get(
+                "step0_manifest_path"):
+            return "no Step0 result for Step1 yet", False
+        if self._camera_dataset(0) != self._camera_dataset(1):
+            return "Step0 shows another slide than Step1", False
+        path = str(getattr(self.loader, "filepath", "") or "")
+        if self.__dict__.get("_step1_mount_refused_for") == path:
+            return "the Step1 viewer cannot open this slide", False
+        busy = self._busy_reason()
+        production = getattr(step0, "production_correction_busy", None)
+        busy = busy or (production() if callable(production) else None)
+        if busy:
+            return str(busy), True
+        reads = getattr(step0, "reads_busy", None)
+        if callable(reads) and reads():
+            return "Step0 is reading", True
+        return "", False
+
+    def _step1_ahead_step(self):
+        """ONE piece -- build the stack, build the backend, rebuild a source
+        that moved, or prepare / paint the view -- then the next turn."""
+        why, wait = self._step1_ahead_gate()
+        if why:
+            if self.__dict__.get("_step1_ahead_round") is not None:
+                self._stop_step1_ahead()
+            if wait:
+                self._step1_ahead_next(self.STEP1_AHEAD_QUIET_MS)
+            return
+        try:
+            self._step1_ahead_piece()
+        except Exception as exc:                            # noqa: BLE001
+            # never a reason for Step0 to fail: the entry does it the usual way
+            self._stop_step1_ahead()
+            self._step1_ahead_off = True
+            error_hook.report(exc, "Step1 prepared ahead")
+
+    def _step1_ahead_build_wait(self):
+        """Seconds still to wait before a BUILD piece may run (0: now)."""
+        quiet = time.monotonic() - float(self.__dict__.get("_step1_ahead_armed_at") or 0.0)
+        return max(0.0, self.STEP1_AHEAD_BUILD_QUIET_S - quiet)
+
+    def _step1_ahead_piece(self):
+        mount = self.__dict__.get("_step1_mount")
+        building = (mount is None or mount.host.stack is None or mount.ahead_stack_open
+                    or mount.source_pending_while_paused)
+        wait = self._step1_ahead_build_wait() if building else 0.0
+        if wait > 0.0:
+            self._step1_ahead_next(wait * 1000.0 + 1)
+            return
+        if mount is None or (mount.host.stack is None and not mount.ahead_stack_open):
+            mount = self._step1_whole_slide()
+            with perf_trace.span("step1.ahead.stack"):
+                opened = mount.open_ahead_stack()
+            if opened:
+                self._step1_ahead_next(self.STEP1_AHEAD_STEP_MS)
+            return                                  # (not opened: the entry tries, and says why)
+        if mount.ahead_stack_open:
+            with perf_trace.span("step1.ahead.backend"):
+                built = mount.open_ahead_backend()
+            if built:
+                mount.set_mode(self._step1_preview_mode)
+                self._wire_step1_tissue_navigation()
+                self._step1_ahead_next(self.STEP1_AHEAD_STEP_MS)
+            return
+        if not mount.paused:
+            return                                  # it is on screen: not ours
+        if mount.source_pending_while_paused:
+            with perf_trace.span("step1.ahead.rebuild"):
+                mount.rebuild_paused()
+            self._step1_ahead_next(self.STEP1_AHEAD_STEP_MS)
+            return
+        binding, layer = mount.gpu_binding, mount.gpu_layer
+        if binding is None or not hasattr(binding, "prepare_ahead") \
+                or not hasattr(layer, "paint_ahead"):
+            return                                  # the Python paths: nothing ahead
+        round_ = self.__dict__.get("_step1_ahead_round")
+        if round_ is None:
+            # the camera Step1 adopts on entry, then the core reads it
+            self._apply_owner_camera_to(1)
+            if not binding.prepare_ahead():
+                return
+            round_ = self._step1_ahead_round = {"t0": time.monotonic(), "paints": 0}
+        report = layer.paint_ahead() or {}
+        round_["paints"] += 1
+        from .core_gl_session import CoreGlSession
+        done = (not report.get("failed") and binding.idle()
+                and CoreGlSession.again_ms(report) is None)
+        over = time.monotonic() - round_["t0"] > self.STEP1_AHEAD_ROUND_S
+        if report.get("capacity_exceeded"):
+            layer.release_to_coarse()               # gives the blocks back
+        if done or over or report.get("failed") or report.get("capacity_exceeded"):
+            perf_trace.mark("step1.ahead.round", paints=round_["paints"],
+                            ms=round((time.monotonic() - round_["t0"]) * 1000.0),
+                            why="done" if done else "deadline" if over else "stopped")
+            self._stop_step1_ahead()
+            return
+        self._step1_ahead_next(self.STEP1_AHEAD_PAINT_MS)
 
     # ── the shared camera (C4.5a) ─────────────────────────────────────
     def _camera_dataset(self, step=None):
@@ -3043,6 +3207,8 @@ class MainWindow(QMainWindow):
         shot = snapshot_from(dataset, camera, f"step{step}:{reason}")
         if shot is None:
             return False
+        if step == 0:
+            self._arm_step1_ahead("step0-camera")     # Step1 follows, once it rests
         owner = self._camera_owner
         return owner.jump(step, shot) if jump else owner.user_navigated(step, shot)
 
@@ -4312,6 +4478,7 @@ class MainWindow(QMainWindow):
         # every other case the existing paths already ask.
         if whole_slide_before and not self._step1_whole_slide_active():
             self._ensure_channels_cached(self._preview_patch_idx)
+        self._arm_step1_ahead("handoff")
         return True
 
     @staticmethod
@@ -6393,7 +6560,11 @@ class MainWindow(QMainWindow):
         if previous is not None and previous != active:
             # (block A7: the step being left is NOT read -- the owner already
             # holds where the user is)
-            self._rm_save_view(active)
+            # AFTER the switch (user ruling 2026-11-03): the drafts are
+            # written once the new step is on screen, not while the user
+            # waits for it -- several session writes, each flushed to disk,
+            # took 0.3-1 s on an HDD.
+            self._queue_rm_save_view(active)
         self._current_step = active
         if active == 1 and previous != 1 and self.__dict__.get("_preseg_run") is not None:
             # F4-2: back in Step1 (perhaps after a Regions Save): the
@@ -8293,6 +8464,27 @@ class MainWindow(QMainWindow):
             self._retire_patch_loader(idx, t)
         self._patch_loaders = {}
 
+    #: after a switch: long enough for the new step to be drawn first
+    RM_SAVE_VIEW_AFTER_MS = 50
+
+    def _queue_rm_save_view(self, step):
+        """`_rm_save_view(step)` once the switch is on screen. Several switches
+        before it runs write once, with the step shown last; a close writes
+        at once itself (`closeEvent`) and drops the pending one."""
+        first = self.__dict__.get("_rm_save_view_pending") is None
+        self._rm_save_view_pending = step
+        if not first:
+            return
+        def run(_ref=weakref.ref(self)):
+            from PyQt5 import sip
+            w = _ref()
+            if w is None or sip.isdeleted(w):
+                return
+            pending = w.__dict__.pop("_rm_save_view_pending", None)
+            if pending is not None:
+                w._rm_save_view(pending)
+        QTimer.singleShot(self.RM_SAVE_VIEW_AFTER_MS, run)
+
     @_perf("switch.rm_save_view")
     def _rm_save_view(self, step):
         """Block RM (§6): on a step change and on close, the Step0, Step2 and
@@ -8393,6 +8585,7 @@ class MainWindow(QMainWindow):
             return
         # Saved on every attempt (a retry writes the newest state); a
         # failure is asked about only once the close is otherwise certain.
+        self.__dict__.pop("_rm_save_view_pending", None)     # written here, now
         save_failures = self._rm_save_view(self.__dict__.get("_current_step"))
         if self._perf_heartbeat is not None:
             self._perf_heartbeat.stop()
@@ -8512,6 +8705,8 @@ class MainWindow(QMainWindow):
         # Accepted: no error notice may pop up behind the closing window,
         # and one already open goes with it.
         error_hook.set_closing(True)
+        self._step1_ahead_off = True         # nothing more is prepared ahead
+        self._stop_step1_ahead()
         # The close is CERTAIN from here: nothing above can refuse it any
         # more. Now the irreversible half -- the compose thread is retired and
         # the two shared windows are closed, once.

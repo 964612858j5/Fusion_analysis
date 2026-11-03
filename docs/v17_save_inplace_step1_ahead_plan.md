@@ -280,3 +280,86 @@ component channels" (user, 2026-11-02).
   refused (saved-stage key, loader identity), so no moved pixels reach the
   screen through it.
 * Rule 7: third round not run; real-machine check next.
+
+## 9. Part B — Step1 prepared ahead, detailed (v1.4, user go-ahead 2026-11-03)
+
+Measured (user's perf log, TMA1 on HDD): first Step1 entry blocks the GUI
+~1.2 s (`step1.entry.mount_open` 433 ms, `switch.rm_save_view` 570 ms), then
+~2 s coarse-to-fine; a later entry after a Save rebuilds the whole view
+(source pending while paused → rebuilt on `resume_requests`) and is coarse
+again.
+
+### 9.1 What runs, and when
+One owner in `MainWindow` (`_step1_ahead_*`), one single-shot timer
+(`STEP1_AHEAD_QUIET_MS` = 700). (Re)armed by: a Step0 camera write
+(`_camera_write` step 0, user or jump), a handoff applied
+(`_load_step0_roi_result` end), a production run ending. Every arm also
+STOPS a round under way. When it fires, it does at most ONE of these steps
+and re-arms itself (short interval) for the next, so the GUI thread never
+holds more than one piece:
+
+1. **Build** (once per slide): the Step1 mount does not exist / has no
+   stack → the existing open path of `_step1_follow_step` (`mount.open()`),
+   then at once `mount.pause_requests()`. The page is not switched.
+2. **Rebuild** (after a Save): the mount has a source pending while paused
+   (`_source_pending`) → new `Step1ViewerMount.rebuild_paused()`: runs the
+   pending `_gpu_source_changed` and stays paused.
+3. **Prepare**: put the owner camera on Step1 (`_apply_owner_camera_to(1)`
+   — what entry does), then new `Step1CoreBinding.prepare_ahead()`: while
+   paused, `core.resume()` + `refresh_display()` + `set_view(snapshot)`,
+   one off-screen paint (`layer.grabFramebuffer()` with `hidden` lifted for
+   that paint only), report `core.idle()`; repeated (≈100 ms apart) until
+   the core is idle, then `end_ahead()` → `core.pause()` again. Nothing is
+   presented on screen; Step1's page stays hidden.
+
+### 9.2 When it does nothing
+* Step1 (or a page that shows the Step1 viewer) is on screen — entry does
+  the normal path, and finds the work done.
+* No published handoff / no window loader (nothing for Step1 to show).
+* A production run: Step0 Save (`production_correction_busy`) or any job
+  in `_busy_reason`.
+* Step0 reading: its full-image scheduler has reads in flight, or a native
+  core of the full image or compare panels is not `idle()`.
+* More than 15 visible Step1 channels (user cap): not prepared at all.
+* GPU memory: the Step1 layer's existing budget; a capacity report from the
+  core during an ahead paint ends the round (no retry until re-armed).
+
+### 9.3 Entry
+Unchanged path. With the mount built and its view prepared,
+`_step1_follow_step` → `sync_source` (nothing moved) → `resume_requests`
+→ `binding.resume()` → the same camera → tiles already resident: the first
+frame is sharp. An ahead round still running is stopped first
+(`end_ahead`).
+
+### 9.4 Files (closed list)
+`ui/main_window.py` (owner, triggers, gates), `ui/step1_viewer_mount.py`
+(`rebuild_paused`), `ui/step1_core_binding.py` (`prepare_ahead`,
+`end_ahead`), `ui/step0/step0_page.py` (read-idle query only), tests,
+this doc. No native change, no new thread.
+
+### 9.5 Tests / acceptance
+Synthetic: arms on a Step0 camera write and stops on the next; builds the
+mount once and leaves it paused; rebuilds a pending source while staying
+paused; prepare paints off screen until idle and pauses the core again;
+refuses during a production run, Step0 reads, >15 channels, Step1 on
+screen. Real machine (TMA1, HDD): Step0 → Step1 with and without Save —
+the first Step1 frame sharp, no GUI block on entry; Step0 interaction not
+slower while a round runs.
+
+### 9.6 As implemented (v1.5)
+* Plan review round 1 (astra, low): CHANGES, all nine taken —
+  `Step1CoreBinding.prepare_ahead/end_ahead` (explicit, controller left
+  disconnected, first 15 channels), `Step1CoreLayer.paint_ahead` (no
+  readback, no capacity/failure callbacks), `Step1WholeSlideMount.
+  open_ahead_stack/open_ahead_backend/rebuild_paused`, completion = core idle
+  AND `CoreGlSession.again_ms(report) is None`, `Step0Page.reads_busy` (both
+  Python schedulers and every native core), dataset match, capacity ends the
+  round and releases blocks, build pieces only after 2 s of Step0 quiet.
+* Measured on the TMA1 copy (HDD, caches dropped): build pieces 0.25–0.9 s
+  (stack) and 0.9–1.26 s (backend), once per slide; rounds 0.1–1.3 s; entry
+  0.23–0.31 s (was ~1.2 s) with the first frame sharp; after a Save the
+  rebuild ran ahead (0.53 s) and the entry's remaining time was
+  `switch.rm_save_view` (session writes, out of scope, reported to the user).
+* Code review round 1 (astra, low): one P2 — an entry between the two build
+  halves left a stack with no picture; the entry now finishes the backend.
+  Also: half-constructed windows (handoff contract tests) are tolerated.

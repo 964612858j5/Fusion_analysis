@@ -3520,6 +3520,33 @@ class Step0Page(QWidget):
         nucleus = self.nucleus_channel
         return bool(nucleus) and self.current_channel == nucleus
 
+    def reads_busy(self):
+        """Is Step0 reading pixels right now -- the full image or the compare
+        panels, their Python schedulers or their native cores? Step1's
+        preparation ahead gives way while it is (docs/v17_save_inplace_
+        step1_ahead_plan.md §9). True when it cannot tell."""
+        try:
+            schedulers, panels = [], []
+            explore = getattr(self, "_explore_tab", None)
+            stack = getattr(explore, "stack", None)
+            schedulers.append(getattr(stack, "scheduler", None))
+            engine = getattr(explore, "engine", None)
+            panels.append(getattr(engine, "panel", None))
+            strip = getattr(self, "_compare_strip_widget", None)
+            schedulers.append(getattr(getattr(strip, "_stacks", None), "scheduler", None))
+            compare = getattr(strip, "engine", None)
+            panels.extend(getattr(compare, "panels", None) or ())
+            for scheduler in schedulers:
+                if scheduler is not None and hasattr(scheduler, "idle") and not scheduler.idle():
+                    return True
+            for panel in panels:
+                for slot in (panel.cores() if panel is not None else ()):
+                    if not slot.core.idle():
+                        return True
+        except Exception:                                   # noqa: BLE001
+            return True
+        return False
+
     def _remembered_ticked_marker(self):
         """The first marker this slide's Step0 display answers have ticked,
         or None (a fresh slide: none)."""

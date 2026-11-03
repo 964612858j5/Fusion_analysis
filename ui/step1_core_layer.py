@@ -257,6 +257,32 @@ class Step1CoreLayer(QtWidgets.QOpenGLWidget, CoreLabelSurface):
         self._a9_pending = session.note_frame(report, int(self.expected_channels() or 0),
                                               getattr(self, "_a9_input_seq", None))
 
+    def paint_ahead(self) -> Optional[Dict[str, Any]]:
+        """One off-screen paint while the layer is hidden (Step1 prepared
+        ahead, docs/v17_save_inplace_step1_ahead_plan.md §9): the core takes
+        its tiles and uploads them at this widget's size; nothing is
+        presented, no readback, and no capacity or failure callback is run
+        (the caller ends the round). The paint report, or None."""
+        if not self._initialized or self._disposed or self._failed:
+            return None
+        view = self._view_rect()
+        if view is None:
+            return None
+        ratio = float(self.devicePixelRatioF()) or 1.0
+        width = max(1, int(round(self.width() * ratio)))
+        height = max(1, int(round(self.height() * ratio)))
+        session = self._session
+        self.makeCurrent()
+        try:
+            report = session.paint(self.defaultFramebufferObject(), width, height, view)
+        finally:
+            self.doneCurrent()
+        failure = session.failure_of(report)
+        if failure:
+            return {"failed": failure}
+        session.note_reads()
+        return report
+
     def _fail(self, why: str) -> None:
         """Stop drawing now (the last complete picture stays on screen);
         the binding swaps to the Python path on the next event-loop turn,

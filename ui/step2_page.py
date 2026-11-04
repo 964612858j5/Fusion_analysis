@@ -9,9 +9,9 @@ import time
 import numpy as np
 import zarr
 
-from PyQt5 import QtWidgets, QtCore
-from PyQt5.QtCore import Qt, QRectF, QThread, pyqtSignal
-from PyQt5.QtWidgets import (
+from ..qt import QtWidgets, QtCore
+from ..qt.QtCore import Qt, QRectF, QThread, Signal
+from ..qt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QSplitter, QProgressBar, QMessageBox, QFileDialog,
     QDoubleSpinBox, QScrollArea, QComboBox, QCheckBox,
@@ -158,13 +158,13 @@ class _ElidedLabel(QLabel):
 class Step2Page(QWidget):
     """Full Step 2 UI: zarr input, tile grid, segmentation params, progress."""
 
-    go_back           = pyqtSignal()
-    segmentation_done = pyqtSignal(str)   # emits output_dir when done
-    open_qc_requested = pyqtSignal(str)   # user explicitly chose Step3/QC
+    go_back           = Signal()
+    segmentation_done = Signal(str)   # emits output_dir when done
+    open_qc_requested = Signal(str)   # user explicitly chose Step3/QC
     # Block RM (§5, §9): the Input drop-down -- a fuse run chosen / its ×.
-    fuse_chosen = pyqtSignal(str)
-    fuse_delete_requested = pyqtSignal(str)
-    _overview_ready = pyqtSignal(object)   # (token, array or None, error)
+    fuse_chosen = Signal(str)
+    fuse_delete_requested = Signal(str)
+    _overview_ready = Signal(object)   # (token, array or None, error)
 
     # Tile status colours
     _COL_IDLE    = (80,  80,  80)
@@ -1520,7 +1520,7 @@ class Step2Page(QWidget):
         dlg.setOption(QFileDialog.DontUseNativeDialog, True)
         dlg.setFileMode(QFileDialog.AnyFile)
         dlg.setNameFilter('Segmentation params index (segmentation_params_index.json);;JSON (*.json);;All files (*)')
-        if dlg.exec_():
+        if dlg.exec():
             selected = dlg.selectedFiles()
             if selected:
                 self.set_segmentation_params_path(selected[0], load=True)
@@ -3280,7 +3280,7 @@ class Step2Page(QWidget):
             f"{lines}\n\nThe run uses the contract instead.")
         run_btn = box.addButton('Run per contract', QMessageBox.AcceptRole)
         box.addButton('Cancel', QMessageBox.RejectRole)
-        box.exec_()
+        box.exec()
         return box.clickedButton() is run_btn
 
     def _confirm_engine_identity(self, seg_config):
@@ -3315,7 +3315,7 @@ class Step2Page(QWidget):
             "result may differ from it. Run anyway? The difference is recorded with the result.")
         run_btn = box.addButton('Run anyway', QMessageBox.AcceptRole)
         box.addButton('Cancel', QMessageBox.RejectRole)
-        box.exec_()
+        box.exec()
         if box.clickedButton() is not run_btn:
             return False, None
         return True, {"differences": cmp["differences"],
@@ -3732,7 +3732,7 @@ class Step2Page(QWidget):
         btn_feat = msg.addButton('→ Feature Extraction (Step 4)',
                                  QMessageBox.AcceptRole)
         msg.addButton('OK', QMessageBox.RejectRole)
-        msg.exec_()
+        msg.exec()
         self._apply_pending_context()          # whichever button was pressed
         if msg.clickedButton() is btn_qc:
             self.open_qc_requested.emit(output_dir)

@@ -27,7 +27,7 @@ of any knowledge of COVERAGE.
 
 from collections import deque
 
-from PyQt5 import QtCore
+from ...qt import QtCore
 
 from .. import prefetch_policy as prefetch_rules
 from ..multichannel_prefetch import HOT_METHODS, MultiChannelPrefetchController
@@ -54,7 +54,7 @@ class CoverageMultiChannelPrefetchController(MultiChannelPrefetchController):
     # maps, generation counters and stats, and sharing one signal would
     # force every handler to first disambiguate HOT vs COVERAGE deliveries
     # from the same (token, generation) namespace.
-    _coverage_tile_delivered = QtCore.pyqtSignal(int, object, object)
+    _coverage_tile_delivered = QtCore.Signal(int, object, object)
 
     def __init__(self, controller, scheduler, specs, grid,
                  coverage_inflight=COVERAGE_INFLIGHT, **kwargs):

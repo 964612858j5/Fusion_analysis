@@ -32,7 +32,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 from block01.core import label_pyramid as lp  # noqa: E402
 from block01.core import step3_masks as sm  # noqa: E402
@@ -55,8 +55,8 @@ def app():
 
 
 class FakeController(QtCore.QObject):
-    interaction_event = QtCore.pyqtSignal(str, object)
-    gesture_quiet = QtCore.pyqtSignal(object)
+    interaction_event = QtCore.Signal(str, object)
+    gesture_quiet = QtCore.Signal(object)
 
     def __init__(self):
         super().__init__()

@@ -37,8 +37,8 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
-from PyQt5 import QtWidgets  # noqa: E402
+pytest.importorskip("block01.qt")
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.core import label_ownership, label_pyramid, step3_masks  # noqa: E402
 from block01.seg_runner import protocol as runner_protocol  # noqa: E402

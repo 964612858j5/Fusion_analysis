@@ -15,9 +15,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 
 @pytest.fixture(scope="module")

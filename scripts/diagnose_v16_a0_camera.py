@@ -260,7 +260,7 @@ def install_hooks(log, MainWindow, extra=()):
 
 
 def pump(ms):
-    from PyQt5 import QtTest, QtWidgets
+    from block01.qt import QtTest, QtWidgets
     QtWidgets.QApplication.processEvents()
     if ms:
         QtTest.QTest.qWait(ms)
@@ -270,7 +270,7 @@ def pump(ms):
 def neutralise_modals(log):
     """An offscreen run must never block on a modal dialog: record it, return
     the default answer. Diagnosis-only, in this process."""
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     for name in ("warning", "information", "critical", "question"):
         def fake(*a, _n=name, **k):
             log.write("modal", which=_n, text=[repr(x)[:200] for x in a[1:3]])
@@ -330,7 +330,7 @@ def cmd_offscreen(args):
     log = Log(os.path.join(out_dir, f"offscreen_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"))
 
     import pyqtgraph as pg
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     pg.setConfigOptions(antialias=True, imageAxisOrder="row-major")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     app.setStyle("Fusion")
@@ -394,11 +394,11 @@ def cmd_offscreen(args):
 
 def qimage_gray(img):
     import numpy as np
-    from PyQt5 import QtGui
+    from block01.qt import QtGui
     img = img.convertToFormat(QtGui.QImage.Format_RGB888)
     w, h, bpl = img.width(), img.height(), img.bytesPerLine()
-    ptr = img.bits()
-    ptr.setsize(h * bpl)
+    from block01.qt import image_bytes
+    ptr = image_bytes(img)
     a = np.frombuffer(ptr, np.uint8).reshape(h, bpl)[:, :w * 3].reshape(h, w, 3)
     return a.astype(np.float32).mean(axis=2)
 
@@ -425,7 +425,7 @@ def cmd_gl_image(args):
     os.makedirs(out_dir, exist_ok=True)
     log = Log(os.path.join(out_dir, f"gl_image_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"))
     import pyqtgraph as pg
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     pg.setConfigOptions(antialias=True, imageAxisOrder="row-major")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     app.setStyle("Fusion")
@@ -557,7 +557,7 @@ def cmd_realapp(args):
     log.write("guard", original_fingerprint=before)
     import multiprocessing as mp
     mp.set_start_method("spawn", force=True)
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
     from block01 import main as app_main
     from block01.ui import main_window as mw
 

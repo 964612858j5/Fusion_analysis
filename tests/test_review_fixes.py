@@ -24,7 +24,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 
 @pytest.fixture(scope="module")

@@ -9,8 +9,8 @@ window), and the list helpers Step0 shares (`TaggedItemDelegate`,
 Controls only: this module reads no file and decides nothing.
 """
 
-from PyQt5 import QtCore, QtGui, QtWidgets
-from PyQt5.QtCore import Qt, pyqtSignal
+from ..qt import QtCore, QtGui, QtWidgets
+from ..qt.QtCore import Qt, Signal
 
 from .step1_button_styles import MODE_BUTTON_QSS
 from .step3_label_binding import CELL, DEFAULT_STYLES, NUCLEUS
@@ -51,7 +51,7 @@ class _TaggedItemDelegate(QtWidgets.QStyledItemDelegate):
     when CLOSE_ROLE is set -- a × at its start; clicking the × emits
     `close_clicked(row)` and does not select the row."""
 
-    close_clicked = pyqtSignal(int)
+    close_clicked = Signal(int)
 
     @staticmethod
     def close_rect(option_rect):
@@ -128,7 +128,7 @@ class MaskPanel(QtWidgets.QFrame):
     Opacity, Width and Solid / Dashed. Emits `changed(dict)` with only what
     changed."""
 
-    changed = pyqtSignal(dict)
+    changed = Signal(dict)
 
     def __init__(self, kind, parent=None, style=None):
         super().__init__(parent)

@@ -19,7 +19,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 from block01.core.display_mapping import build_display_lut, seed_display_range  # noqa: E402
 from block01.core.display_identity import STEP0_TABLE  # noqa: E402

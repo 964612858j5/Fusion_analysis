@@ -17,10 +17,10 @@ import types
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5 import QtCore, QtGui, QtTest, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtGui, QtTest, QtWidgets  # noqa: E402
 
 from block01.ui import main_window as mw  # noqa: E402
 from block01.ui.tma import workers as tma_workers  # noqa: E402

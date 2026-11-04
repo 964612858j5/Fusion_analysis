@@ -33,7 +33,7 @@ import threading
 
 import numpy as np
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from ..qt.QtCore import QObject, Signal
 
 from ..utils import perf_trace
 
@@ -49,7 +49,7 @@ DEFAULT_MAX_BYTES = _tiers.STEP0_PRELOAD_MAX_BYTES  # (block A8 / A5: one place)
 class PreloadScheduler(QObject):
     """On-demand, priority-ordered patch reads with a bounded cache."""
 
-    loaded = pyqtSignal(object)    # {"dataset_gen", "bbox", "channel", ...}
+    loaded = Signal(object)    # {"dataset_gen", "bbox", "channel", ...}
 
     def __init__(self, read=None, max_readers=DEFAULT_MAX_READERS,
                  max_pending=DEFAULT_MAX_PENDING,

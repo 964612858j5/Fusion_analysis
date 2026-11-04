@@ -12,10 +12,10 @@ import shutil
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("tifffile")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from test_v16_project_identity import _write_slide  # noqa: E402
 from block01.utils import roi_project, workspace_session as wsess  # noqa: E402

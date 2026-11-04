@@ -16,8 +16,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pytest
 
-pytest.importorskip("PyQt5")
-from PyQt5 import QtGui, QtWidgets  # noqa: E402
+pytest.importorskip("block01.qt")
+from block01.qt import QtGui, QtWidgets  # noqa: E402
 
 from block01.ui.step1_presegmentation import mask_layers  # noqa: E402
 from block01.ui.step1_presegmentation.montage_view import MontageView  # noqa: E402
@@ -370,7 +370,7 @@ def test_zoomed_out_the_view_asks_for_simpler_paths_and_uses_the_nearest_meanwhi
 
 
 def test_one_tick_shows_every_combinations_cells_and_says_when_they_disagree(app):
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
     panel = ResultsPanel()
     panel.set_combos(_combos(), outputs_of=_outputs)
     panel.show()

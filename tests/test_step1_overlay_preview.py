@@ -25,9 +25,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -1075,10 +1075,10 @@ def test_the_real_start_path_records_what_the_worker_is_reading(app):
 class _SignallingThread(QtCore.QObject):
     """The loader's signal contract, without the thread."""
 
-    done = QtCore.pyqtSignal(int, dict)
-    progress = QtCore.pyqtSignal(int, int, int, str)
-    error = QtCore.pyqtSignal(int, str)
-    finished = QtCore.pyqtSignal()
+    done = QtCore.Signal(int, dict)
+    progress = QtCore.Signal(int, int, int, str)
+    error = QtCore.Signal(int, str)
+    finished = QtCore.Signal()
 
     def isRunning(self):
         return False

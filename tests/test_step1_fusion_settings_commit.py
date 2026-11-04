@@ -20,9 +20,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 
 
@@ -668,7 +668,7 @@ def test_the_saved_run_writes_the_snapshots_mapping(app, tmp_path, monkeypatch):
             def __init__(self, *a, **k):
                 pass
 
-            def exec_(self):
+            def exec(self):
                 return QtWidgets.QDialog.Rejected
         monkeypatch.setattr(mw, "TileSelectDialog", _NoDialog)
 

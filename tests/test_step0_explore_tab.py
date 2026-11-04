@@ -13,9 +13,9 @@ import time
 import numpy as np
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -28,7 +28,7 @@ from block01.ui.step0.step0_explore_tab import (  # noqa: E402
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
@@ -488,7 +488,7 @@ def test_partial_build_failure_after_the_controller_exists_is_unwound(app):
     is constructed, so the failure path must unwind a CONTROLLER -- which
     also stops timers, disconnects signals, joins the floor threads and
     shuts the overview pool down -- not just the two backend objects."""
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
 
     order = []
     provider = FakeProvider("/data/slide_a.ome.tif")
@@ -568,7 +568,7 @@ def test_real_factory_unwinds_when_load_overview_raises(app, tmp_path):
 def test_page_destruction_tears_the_stack_down_exactly_once(app):
     """Destroying the Step0 page must release the stack deterministically,
     not leave 12 worker threads and two open handles to Python GC."""
-    from PyQt5 import QtCore, QtWidgets
+    from block01.qt import QtCore, QtWidgets
 
     order = []
     factory, _record = make_factory(order)
@@ -612,7 +612,7 @@ def test_the_view_is_actually_laid_out_and_visible_after_activation(app):
     for two minutes; every existing test still passed, because none of them
     looked at the widget.
     """
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
 
     factory, record = make_factory()
     tab = Step0ExploreTab(FakePage("CD3"), stack_factory=factory)
@@ -1224,10 +1224,10 @@ def test_a_background_overview_read_that_fails_is_a_failed_build(app):
     that read fails for the channel on screen the tab shows the build-failed
     placeholder and drops the stack, as the synchronous build used to."""
     from types import SimpleNamespace
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
 
     class _Ctl(QtCore.QObject):
-        overview_prepared = QtCore.pyqtSignal(object, object, object, bool)
+        overview_prepared = QtCore.Signal(object, object, object, bool)
         channel = "CD8"
 
         def _overview_matches_selection(self):
@@ -1250,10 +1250,10 @@ def test_only_the_builds_own_first_read_can_fail_the_build(app):
     """After the first overview arrived, a later channel's failed read does
     not discard a working stack (codex round 2)."""
     from types import SimpleNamespace
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
 
     class _Ctl(QtCore.QObject):
-        overview_prepared = QtCore.pyqtSignal(object, object, object, bool)
+        overview_prepared = QtCore.Signal(object, object, object, bool)
         channel = "CD8"
 
     ctl = _Ctl()
@@ -1272,10 +1272,10 @@ def test_moving_on_before_the_first_read_ends_the_builds_watch(app):
     dropped), B arrives; a later failed read of A is not the build's
     (codex round 3)."""
     from types import SimpleNamespace
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
 
     class _Ctl(QtCore.QObject):
-        overview_prepared = QtCore.pyqtSignal(object, object, object, bool)
+        overview_prepared = QtCore.Signal(object, object, object, bool)
         channel = "A"
 
     ctl = _Ctl()

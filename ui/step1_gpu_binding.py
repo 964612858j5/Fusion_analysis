@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Hashable, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
-from PyQt5 import QtCore
+from ..qt import QtCore
 
 from ..viewer.tile_types import RawKey, TileAddress, TileRequest
 from ..utils import perf_trace
@@ -196,8 +196,8 @@ class _Admission:
 class Step1GpuBinding(QtCore.QObject):
     """Public-port-only, test-reachable G2 source-supply adapter."""
 
-    _tile_result_received = QtCore.pyqtSignal(object)
-    _inbox_ready = QtCore.pyqtSignal()
+    _tile_result_received = QtCore.Signal(object)
+    _inbox_ready = QtCore.Signal()
 
     def __init__(self, *, provider, scheduler, controller, layer,
                  build_display_snapshot: Callable[[], DisplaySnapshot],
@@ -1307,7 +1307,7 @@ class Step1GpuBinding(QtCore.QObject):
         while self._inbox:
             self._apply_result(self._inbox.popleft(), publish=True, deferred=True)
 
-    @QtCore.pyqtSlot(object)
+    @QtCore.Slot(object)
     @perf_trace.timed("gpu.accept")
     def _accept_result(self, payload) -> None:
         """The ONLY entry for a result that arrived through the queued signal.

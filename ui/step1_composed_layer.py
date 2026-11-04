@@ -25,7 +25,7 @@ reappear the moment the user pans back. Those clear the pool.
 """
 
 import numpy as np
-from PyQt5 import QtCore
+from ..qt import QtCore
 
 from ..viewer.explore_view import (
     DEFAULT_ITEM_BUDGET, OVERLAY_BASE_Z, ExploreView, TileItemPool,

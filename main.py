@@ -5,7 +5,7 @@ block01/main.py — Entry point for the Fusion GUI application.
 import sys
 import multiprocessing as mp
 
-from PyQt5 import QtGui
+from .qt import QtGui
 import pyqtgraph as pg
 
 pg.setConfigOptions(antialias=True, imageAxisOrder="row-major")
@@ -58,7 +58,7 @@ def main():
     from .ui import gpu_warmup
     win._gpu_warmup = gpu_warmup.start(win)
     try:
-        sys.exit(app.exec_())
+        sys.exit(app.exec())
     finally:
         if watchdog is not None:
             watchdog.stop()

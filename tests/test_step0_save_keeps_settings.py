@@ -274,7 +274,7 @@ def test_the_status_line_says_unsaved_until_the_setting_is_saved(save):
 
 def test_opening_a_workspace_with_an_unsaved_draft_says_which_channels(save, monkeypatch):
     import block01.ui.step0.step0_page as sp
-    from PyQt5 import QtTest
+    from block01.qt import QtTest
     page, path, before, ctx, base = save
     page.rm_save_draft()                             # CD8 r=40 left unsaved, GUI closed
     shown = []
@@ -290,7 +290,7 @@ def test_opening_a_workspace_with_an_unsaved_draft_says_which_channels(save, mon
 
 def test_opening_a_workspace_without_a_draft_says_nothing(save, monkeypatch):
     import block01.ui.step0.step0_page as sp
-    from PyQt5 import QtTest
+    from block01.qt import QtTest
     page, path, before, ctx, base = save
     shown = []
     monkeypatch.setattr(sp.QMessageBox, "information",

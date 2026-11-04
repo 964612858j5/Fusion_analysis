@@ -21,10 +21,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 zarr = pytest.importorskip("zarr")
 
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 import test_step1_fusion_isolation as iso  # noqa: E402
 import test_step1_result_publication as pub  # noqa: E402
@@ -221,11 +221,11 @@ def test_a_new_job_is_refused_while_the_old_thread_is_alive(app, tmp_path, monke
 class _FakeStep2Run(QtCore.QObject):
     """The SegmentMergeWorker signal contract; `start` runs nothing, the test
     emits the answers itself, as late as it likes."""
-    progress = QtCore.pyqtSignal(int, int, str)
-    tile_done = QtCore.pyqtSignal(int, int, int)
-    tile_skipped = QtCore.pyqtSignal(int, int)
-    finished = QtCore.pyqtSignal(str, int)
-    error = QtCore.pyqtSignal(str)
+    progress = QtCore.Signal(int, int, str)
+    tile_done = QtCore.Signal(int, int, int)
+    tile_skipped = QtCore.Signal(int, int)
+    finished = QtCore.Signal(str, int)
+    error = QtCore.Signal(str)
 
     def __init__(self, **kw):
         super().__init__()
@@ -251,7 +251,7 @@ def step2(app, tmp_path, monkeypatch):
     monkeypatch.setattr(s2, "SegmentMergeWorker", _FakeStep2Run)
     monkeypatch.setattr(s2, "mark_roi_step",
                         lambda project, roi, step, state: seen["marked"].append(roi))
-    monkeypatch.setattr(s2.QMessageBox, "exec_",
+    monkeypatch.setattr(s2.QMessageBox, "exec",
                         lambda self: seen["boxes"].append(self.text()) or 0)
     monkeypatch.setattr(s2.QMessageBox, "critical",
                         lambda *a, **k: seen["boxes"].append(a[2]))
@@ -429,9 +429,9 @@ def test_a_late_end_of_an_old_preseg_run_keeps_the_new_run(app, tmp_path, monkey
 class _FakeExtract(QtCore.QThread):
     """FeatureExtractWorker's contract; runs until stopped or released, then
     answers the way the real one does."""
-    progress = QtCore.pyqtSignal(int, int, str)
-    extraction_done = QtCore.pyqtSignal(str, str)
-    error = QtCore.pyqtSignal(str)
+    progress = QtCore.Signal(int, int, str)
+    extraction_done = QtCore.Signal(str, str)
+    error = QtCore.Signal(str)
     made = []
 
     def __init__(self, **kw):
@@ -849,7 +849,7 @@ def test_the_fusion_dialog_is_destroyed_and_not_re_shown(app, tmp_path, monkeypa
     """A closed QProgressDialog emits `canceled` (the Cancel handler ran again
     and re-showed it) and kept its native window, which WSLg can leave on
     screen as an empty black window -- after a successful Save as well."""
-    import sip
+    from block01.qt import is_deleted
     monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *a, **k: None)
     monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *a, **k: None)
     w = iso._window(app, tmp_path)
@@ -876,7 +876,7 @@ def test_the_fusion_dialog_is_destroyed_and_not_re_shown(app, tmp_path, monkeypa
         QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
         _pump()
         assert w._fusion_dialog is None
-        assert sip.isdeleted(dialog)                       # its window is gone too
+        assert is_deleted(dialog)                       # its window is gone too
     finally:
         worker.release()
         if hasattr(worker, "exit_gate"):

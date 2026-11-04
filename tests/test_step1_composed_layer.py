@@ -21,10 +21,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("pyqtgraph")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.ui.step1_composed_layer import (  # noqa: E402
     COMPOSED_BASE_Z, Step1ComposedLayer,
@@ -87,7 +87,7 @@ def _rgba_tile(r=10, g=20, b=30, alpha=255, size=8):
 
 
 def _pixel(item, row, col):
-    from PyQt5.QtGui import QColor
+    from block01.qt.QtGui import QColor
 
     item.render()
     image = item.qimage

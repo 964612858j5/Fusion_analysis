@@ -15,14 +15,14 @@ import os
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 zarr = pytest.importorskip("zarr")
 import numpy as np  # noqa: E402
 
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
@@ -95,7 +95,7 @@ def test_entering_step2_autosyncs_input_data(window, tmp_path, method):
 
 # ── a Step1 index of a retired method: said once, not used ───────────────────
 def test_entering_step2_with_a_retired_method_says_so_once(window, tmp_path, monkeypatch):
-    from PyQt5.QtWidgets import QMessageBox
+    from block01.qt.QtWidgets import QMessageBox
     shown = []
     for name in ("warning", "information"):
         monkeypatch.setattr(QMessageBox, name, staticmethod(lambda *a, **k: shown.append(a[2])))

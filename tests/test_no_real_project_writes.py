@@ -96,7 +96,7 @@ class _Loader:
 
 def _drain(app, ms=1200):
     """Run the event loop past the 500 ms autosave timer."""
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
     clock = QtCore.QElapsedTimer()
     clock.start()
     while clock.elapsed() < ms:
@@ -270,9 +270,9 @@ def test_a_window_s_session_autosave_lands_in_the_redirect(tmp_path):
     landed where it should), never on the real project, which this module
     only ever reads.
     """
-    pytest.importorskip("PyQt5")
+    pytest.importorskip("block01.qt")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
 
     from block01.ui import main_window as main_window_module
 

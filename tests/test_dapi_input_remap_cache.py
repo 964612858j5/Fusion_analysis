@@ -16,7 +16,7 @@ import types
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 import block01.ui.main_window as mw
 

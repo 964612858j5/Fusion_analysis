@@ -24,7 +24,23 @@ import socket
 import sys
 import time
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+# Qt comes through this checkout's `block01.qt`: register the checkout as
+# `block01` first, so the script also runs on its own (no PYTHONPATH).
+def _this_checkout_as_block01():
+    import importlib.util
+    import pathlib as _pl
+    root = _pl.Path(__file__).resolve().parent.parent
+    if "block01" in sys.modules:
+        return
+    spec = importlib.util.spec_from_file_location(
+        "block01", root / "__init__.py", submodule_search_locations=[str(root)])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["block01"] = module
+    spec.loader.exec_module(module)
+
+
+_this_checkout_as_block01()
+from block01.qt import QtCore, QtGui, QtWidgets  # noqa: E402
 
 import fusion_viewer_core as core
 

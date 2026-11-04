@@ -8,7 +8,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.ui import theme  # noqa: E402
 from block01.ui.step0.step0_page import _nucleus_channel_of  # noqa: E402
@@ -102,7 +102,7 @@ def test_a_destructive_choice_is_red_and_never_the_default(app, monkeypatch):
         seen["danger"] = buttons["Delete"].property("ds")
         box._clicked = buttons["Delete"]
         return 0
-    monkeypatch.setattr(QtWidgets.QMessageBox, "exec_", fake_exec)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", fake_exec)
     monkeypatch.setattr(QtWidgets.QMessageBox, "clickedButton", lambda box: box._clicked)
     assert dialogs.confirm_danger(None, "Delete", "Delete 2 patches?") is True
     assert seen == {"default": "Cancel", "escape": "Cancel", "danger": "danger"}

@@ -15,12 +15,12 @@ Qt tests need an offscreen platform (env: QT_QPA_PLATFORM=offscreen).
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     a = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     return a
 

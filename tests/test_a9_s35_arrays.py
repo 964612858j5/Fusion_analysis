@@ -26,7 +26,7 @@ T = 512
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 

@@ -131,8 +131,8 @@ def test_a_shortfall_is_reported_not_made_up(mask):
 
 
 # ── the strip's entry ───────────────────────────────────────────────────────
-pytest.importorskip("PyQt5")
-from PyQt5 import QtWidgets  # noqa: E402
+pytest.importorskip("block01.qt")
+from block01.qt import QtWidgets  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -152,7 +152,7 @@ def test_random_is_there_with_no_patch_and_asks_with_the_dialog_values(app, monk
         dlg.width_px.setValue(640)
         dlg.height_px.setValue(384)
         return QtWidgets.QDialog.Accepted
-    monkeypatch.setattr(pp.RandomPatchesDialog, "exec_", _accept)
+    monkeypatch.setattr(pp.RandomPatchesDialog, "exec", _accept)
     try:
         assert panel._btn_random.isEnabled()
         panel._btn_random.click()

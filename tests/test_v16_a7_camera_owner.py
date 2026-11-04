@@ -18,10 +18,10 @@ import os
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("pyqtgraph")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from camera_write_audit import as_user, camera_writes  # noqa: E402,F401
 from test_step0_compare_tiles import SLIDE_H, SLIDE_W, app  # noqa: E402,F401

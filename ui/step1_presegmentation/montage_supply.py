@@ -38,7 +38,7 @@ import threading
 import time
 
 import numpy as np
-from PyQt5 import QtCore
+from ...qt import QtCore
 
 from ...viewer import step1_compose as compose_core
 from ...core import config_hash
@@ -123,12 +123,12 @@ class MontageSupply(QtCore.QObject):
     have no display window yet (the page asks the shared seed service).
     """
 
-    composed = QtCore.pyqtSignal(object, int, object, int)
-    missing = QtCore.pyqtSignal(object)
-    finished = QtCore.pyqtSignal(int)                # generation, every patch reported
-    plane_ready = QtCore.pyqtSignal(int)             # plane generation: one more plane in
-    outlines_ready = QtCore.pyqtSignal(object)       # key of a result mask's outlines
-    path_ready = QtCore.pyqtSignal(object, object)   # key, detail bucket: a path is built
+    composed = QtCore.Signal(object, int, object, int)
+    missing = QtCore.Signal(object)
+    finished = QtCore.Signal(int)                # generation, every patch reported
+    plane_ready = QtCore.Signal(int)             # plane generation: one more plane in
+    outlines_ready = QtCore.Signal(object)       # key of a result mask's outlines
+    path_ready = QtCore.Signal(object, object)   # key, detail bucket: a path is built
 
     def __init__(self, provider, pixel_key="", parent=None,
                  channel_budget=CHANNEL_CACHE_BYTES, composed_budget=COMPOSED_CACHE_BYTES):

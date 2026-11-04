@@ -13,9 +13,9 @@ import numpy as np
 import tifffile
 import zarr
 
-from PyQt5 import QtWidgets, QtCore
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtWidgets import (
+from ...qt import QtWidgets, QtCore
+from ...qt.QtCore import Qt, QThread, Signal
+from ...qt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QDoubleSpinBox, QProgressBar, QComboBox, QScrollArea,
     QMessageBox, QFileDialog, QDialog, QFrame, QCheckBox,
@@ -96,12 +96,12 @@ class SearchCtrlPanel(QWidget):
       3. Manually fill in the spinboxes and click "Use These Params"
     """
 
-    run_p1       = pyqtSignal(list)   # [diameter_or_None] — single-element list
-    run_p2       = pyqtSignal(dict)   # {diameter, flow, prob}
-    run_preview  = pyqtSignal(dict)   # direct patch preview for non-whole-cell methods
-    stop         = pyqtSignal()
-    params_ready = pyqtSignal(dict)
-    method_changed = pyqtSignal(str)
+    run_p1       = Signal(list)   # [diameter_or_None] — single-element list
+    run_p2       = Signal(dict)   # {diameter, flow, prob}
+    run_preview  = Signal(dict)   # direct patch preview for non-whole-cell methods
+    stop         = Signal()
+    params_ready = Signal(dict)
+    method_changed = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -1563,8 +1563,8 @@ class RawDataPrefetchWorker(QThread):
     """后台IO worker：批量读取指定通道的所有patch原始数据，写入raw_cache。
     不做任何计算，只负责磁盘→内存的IO，尽快完成。
     """
-    finished = pyqtSignal(str, int, object)   # (channel, patch_idx, raw_array)
-    error    = pyqtSignal(str, int, str)      # (channel, patch_idx, msg)
+    finished = Signal(str, int, object)   # (channel, patch_idx, raw_array)
+    error    = Signal(str, int, str)      # (channel, patch_idx, msg)
 
     def __init__(self, loader, channel_name, patch_idx, roi,
                  nucleus_channel=None, parent=None):
@@ -1598,8 +1598,8 @@ class BgComputeWorker(QThread):
     """纯GPU计算worker：接受已读好的raw数组，不做任何IO。
     tophat + cucim + norm + metrics，全部在GPU上完成。
     """
-    finished = pyqtSignal(int, dict)
-    error    = pyqtSignal(int, str)
+    finished = Signal(int, dict)
+    error    = Signal(int, str)
 
     def __init__(self, request_id, channel_name, raw, nuc_raw,
                  tophat_radius, cucim_sigma, parent=None):
@@ -1676,12 +1676,12 @@ class BatchProcessWorker(QThread):
     
     methods参数：{channel: "original"|"tophat"|"cucim"|"both"}
     """
-    channel_patch_done = pyqtSignal(str, int, dict)   # (channel, patch_idx, payload)
-    channel_done       = pyqtSignal(str)               # channel全部patches完成
-    all_done           = pyqtSignal()
-    progress           = pyqtSignal(int, int, str)     # (done, total, msg)
-    error_signal       = pyqtSignal(str, int, str)     # (channel, patch_idx, msg)
-    canceled           = pyqtSignal()
+    channel_patch_done = Signal(str, int, dict)   # (channel, patch_idx, payload)
+    channel_done       = Signal(str)               # channel全部patches完成
+    all_done           = Signal()
+    progress           = Signal(int, int, str)     # (done, total, msg)
+    error_signal       = Signal(str, int, str)     # (channel, patch_idx, msg)
+    canceled           = Signal()
 
     def __init__(self, loader, patches, methods, nucleus_channel,
                  tophat_radius, cucim_sigma, channel_params=None,
@@ -1837,8 +1837,8 @@ class BatchProcessWorker(QThread):
             self.error_signal.emit("__global__", -1, _tb.format_exc())
 
 class BackgroundPreviewWorker(QThread):
-    finished = pyqtSignal(int, dict)
-    error = pyqtSignal(int, str)
+    finished = Signal(int, dict)
+    error = Signal(int, str)
 
     def __init__(self, request_id, loader, channel_name, roi,
                  tophat_radius, cucim_sigma, nucleus_channel=None,
@@ -2147,10 +2147,10 @@ def correction_tile_size(method, impl=None):
 
 
 class WsiCorrectionWorker(QThread):
-    progress = pyqtSignal(int, int, int, int, str, str, int)
-    finished = pyqtSignal(str, dict)
-    canceled = pyqtSignal(str)
-    error = pyqtSignal(str)
+    progress = Signal(int, int, int, int, str, str, int)
+    finished = Signal(str, dict)
+    canceled = Signal(str)
+    error = Signal(str)
 
     def __init__(self, loader, output_dir, correction_config, rois=None, parent=None,
                  process_channels=None, incremental=False):
@@ -2629,7 +2629,7 @@ class WsiCorrectionWorker(QThread):
 
 
 class _WsiCorrectionProgressDialog(QDialog):
-    cancel_requested = pyqtSignal()
+    cancel_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)

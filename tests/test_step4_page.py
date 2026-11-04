@@ -20,7 +20,7 @@ import shutil
 import sys
 import types
 
-from PyQt5.QtWidgets import QApplication
+from block01.qt.QtWidgets import QApplication
 
 sys.path.insert(0, os.path.dirname(__file__))
 from test_quant_sources import build_project  # noqa: E402
@@ -244,7 +244,7 @@ def test_the_page_runs_the_chosen_scope(tmp_path):
 # ── block S4-3: distribution statistics on the page ──────────────────────
 
 def _check_markers(page, names):
-    from PyQt5.QtCore import Qt
+    from block01.qt.QtCore import Qt
     for i in range(page._marker_list.count()):
         item = page._marker_list.item(i)
         if item.text() in names:

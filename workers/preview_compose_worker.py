@@ -20,7 +20,7 @@ because a dict mutated from two threads is a different bug every time.
 
 import threading
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from ..qt.QtCore import QObject, Signal
 
 from ..core import preview_compose
 from ..utils import perf_trace
@@ -38,8 +38,8 @@ class PreviewComposeWorker(QObject):
     the connection to a GUI-thread receiver is queued.
     """
 
-    done = pyqtSignal(object)          # the result dict
-    failed = pyqtSignal(object)        # {"request": ..., "error": str}
+    done = Signal(object)          # the result dict
+    failed = Signal(object)        # {"request": ..., "error": str}
 
     # Named, so `gdb`/`py-spy`/a thread dump can tell the Step1 patch composer
     # from the Block01 whole-slide one. A subclass composing something else

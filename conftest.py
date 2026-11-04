@@ -62,7 +62,7 @@ import pytest as _pytest
 def _collect_qt_garbage_between_tests():
     yield
     try:
-        from PyQt5 import QtWidgets
+        from block01.qt import QtWidgets
     except Exception:
         return
     app = QtWidgets.QApplication.instance()

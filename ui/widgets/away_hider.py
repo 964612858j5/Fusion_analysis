@@ -26,8 +26,8 @@ moved within the last `MOVING_MS` is being dragged; the check waits again.
 
 import time
 
-from PyQt5 import QtCore, QtWidgets
-from PyQt5.QtCore import Qt
+from ...qt import QtCore, QtWidgets
+from ...qt.QtCore import Qt
 
 #: how long the application must stay inactive before the windows hide
 SETTLE_MS = 250

@@ -11,7 +11,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 
 _PROG = r"""
 import time
-from PyQt5 import QtCore
+from block01.qt import QtCore
 from block01.utils import perf_dispatch, perf_trace
 
 app = perf_dispatch.make_application([])
@@ -28,7 +28,7 @@ slow = Slow()
 slow.setObjectName("slowpoke")
 QtCore.QCoreApplication.postEvent(slow, QtCore.QEvent(QtCore.QEvent.User))
 QtCore.QTimer.singleShot(200, app.quit)
-app.exec_()
+app.exec()
 perf_trace.shutdown(final=True)
 """
 

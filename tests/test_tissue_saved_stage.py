@@ -21,9 +21,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.ui import block01_display as bd  # noqa: E402
 from block01.viewer import tissue_grid as tg  # noqa: E402

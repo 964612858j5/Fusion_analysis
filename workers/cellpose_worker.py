@@ -11,7 +11,7 @@ import subprocess
 import traceback
 import numpy as np
 
-from PyQt5.QtCore import QThread, pyqtSignal
+from ..qt.QtCore import QThread, Signal
 
 from ..utils import perf_trace
 from ..core.io_loader import OMETIFFLoader
@@ -39,8 +39,8 @@ from .constrained_donut_segmentation import run_constrained_donut_segmentation
 
 class OverviewLoaderThread(QThread):
     """Background thread to load overview (DAPI full image downsampled)"""
-    done  = pyqtSignal(object)   # float32 ndarray
-    error = pyqtSignal(str)
+    done  = Signal(object)   # float32 ndarray
+    error = Signal(str)
 
     def __init__(self, loader, nuc_ch, downsample):
         super().__init__()
@@ -66,9 +66,9 @@ class PreviewLoaderThread(QThread):
     patch_idx is carried through all signals so multiple concurrent threads
     can be distinguished when their results arrive.
     """
-    done     = pyqtSignal(int, dict)         # (patch_idx, {ch_name: ndarray})
-    progress = pyqtSignal(int, int, int, str) # (patch_idx, done, total, ch_name)
-    error    = pyqtSignal(int, str)           # (patch_idx, msg)
+    done     = Signal(int, dict)         # (patch_idx, {ch_name: ndarray})
+    progress = Signal(int, int, int, str) # (patch_idx, done, total, ch_name)
+    error    = Signal(int, str)           # (patch_idx, msg)
 
     def __init__(self, patch_idx, loader, channels, y0, y1, x0, x1, downsample,
                  normalize=True):
@@ -819,10 +819,10 @@ def run_cellpose_process(args, result_queue, stop_flag):
 class CellposeWorker(QThread):
     # rgb_overlay is kept for legacy signal/API compatibility.
     # Viewers render masks from rgb_raw + masks through utils.mask_renderer.
-    result_ready   = pyqtSignal(int, dict, object, object, object)  # patch_idx, params, rgb_overlay, rgb_raw, masks
-    progress       = pyqtSignal(int, int, str)               # done, total, msg
-    finished_all   = pyqtSignal()
-    error_occurred = pyqtSignal(str)
+    result_ready   = Signal(int, dict, object, object, object)  # patch_idx, params, rgb_overlay, rgb_raw, masks
+    progress       = Signal(int, int, str)               # done, total, msg
+    finished_all   = Signal()
+    error_occurred = Signal(str)
 
     def __init__(self, tasks, loader, fusion,
                  groups, group_weights, nuc_ch, nuc_w):

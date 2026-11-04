@@ -92,7 +92,7 @@ def test_main_passes_the_check_to_the_exit_wait_and_utils_imports_no_ui():
 
 
 def test_fusion_falls_back_to_python_on_an_incompatible_core(tmp_path, monkeypatch, capsys):
-    pytest.importorskip("PyQt5")
+    pytest.importorskip("block01.qt")
     f5 = pytest.importorskip("test_f5_rust_fusion")
     if f5.core is None or not hasattr(f5.core, "FuseJob"):
         pytest.skip("fusion_viewer_core without FuseJob")

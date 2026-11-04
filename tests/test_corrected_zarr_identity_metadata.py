@@ -10,7 +10,7 @@ import hashlib
 import numpy as np
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 zarr = pytest.importorskip("zarr")
 
 
@@ -25,7 +25,7 @@ def _settle(worker):
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     a = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     return a
 

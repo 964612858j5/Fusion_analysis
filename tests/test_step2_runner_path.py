@@ -33,8 +33,8 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+pytest.importorskip("block01.qt")
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 from block01.core import nuclei_pairing, preseg_contract, preseg_input  # noqa: E402
 from block01.seg_runner import engines as seg_engines  # noqa: E402

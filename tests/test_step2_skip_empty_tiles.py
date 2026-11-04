@@ -16,10 +16,10 @@ import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 tifffile = pytest.importorskip("tifffile")
 zarr = pytest.importorskip("zarr")
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.core import tile_tissue as tt  # noqa: E402
 from block01.utils.tile_scheduler import TileScheduler  # noqa: E402
@@ -413,7 +413,7 @@ def test_a_run_with_skipped_tiles_opens_in_step3_and_quantifies(app, tmp_path):
 # ── Shift+click picks several tiles: one question (user 2026-10-25) ───────
 
 def _shift_release(page):
-    from PyQt5 import QtCore, QtGui, QtWidgets
+    from block01.qt import QtCore, QtGui, QtWidgets
     ev = QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, QtCore.Qt.Key_Shift, QtCore.Qt.NoModifier)
     QtWidgets.QApplication.sendEvent(page, ev)
     QtWidgets.QApplication.processEvents()
@@ -472,7 +472,7 @@ def test_a_new_grid_drops_the_picked_tiles(page, monkeypatch):
 
 
 def test_returning_to_the_app_without_shift_applies_the_pick(page, monkeypatch):
-    from PyQt5 import QtCore, QtWidgets
+    from block01.qt import QtCore, QtWidgets
     page._skip_empty_cb.setChecked(True)
     auto = page.skip_tiles_config()["auto"]
     monkeypatch.setattr(page, "_shift_held", lambda: True)

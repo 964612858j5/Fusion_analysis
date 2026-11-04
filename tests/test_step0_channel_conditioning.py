@@ -12,12 +12,12 @@ import os
 import numpy as np
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     a = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     return a
 
@@ -309,7 +309,7 @@ def test_patch_switch_highlight_only_new_button_checked(app):
     p, ld = _fresh_page_with_counting_loader(app)
     p._rebuild_patch_buttons()
     p._select_patch(1)
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     checked = []
     for i in range(p._patch_buttons_row.count()):
         w = p._patch_buttons_row.itemAt(i).widget()
@@ -420,7 +420,7 @@ def test_dapi_lazy_loads_like_a_marker(app):
 
 # ── step0-conditioning-cleanup-and-all-toggle: Step0-host integration ────────
 def test_internal_conditioning_host_has_no_visible_load_buttons(app):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
     assert s._conditioning_host.isHidden()
@@ -447,7 +447,7 @@ def test_step0_workbench_has_all_toggle(app):
 
 # ── step0-all-toggle-perf-and-save-position: Save right-aligned ──────────────
 def test_background_save_replaces_the_separate_conditioning_save(app):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
     assert s._btn_continue.text() == "Save"
@@ -471,7 +471,7 @@ def _page_with_patches(app, n=3):
 
 
 def _row_buttons(row):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     return [row.itemAt(i).widget() for i in range(row.count())
             if isinstance(row.itemAt(i).widget(), QtWidgets.QPushButton)]
 

@@ -11,7 +11,7 @@ on the GUI thread through `finished`.
 import threading
 import traceback
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from ...qt.QtCore import QObject, Signal
 
 from ...core import random_patches
 
@@ -58,7 +58,7 @@ def run_generation(request):
 class RandomPatchJob(QObject):
     """Runs `run_generation` on a thread; `finished(dict)` on the GUI thread."""
 
-    finished = pyqtSignal(object)
+    finished = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)

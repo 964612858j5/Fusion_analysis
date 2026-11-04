@@ -28,10 +28,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("pyqtgraph")
 
-from PyQt5 import QtTest, QtWidgets  # noqa: E402
+from block01.qt import QtTest, QtWidgets  # noqa: E402
 
 from block01.ui.step0.step0_explore_tab import Step0ExploreTab  # noqa: E402
 from block01.viewer import prefetch_policy as prefetch_rules  # noqa: E402

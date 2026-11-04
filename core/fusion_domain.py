@@ -46,7 +46,7 @@ does that.
 import contextlib
 import copy
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from ..qt.QtCore import QObject, Signal
 
 # Provenance of a channel's scientific weight. See the module docstring.
 ABSENT = "absent"
@@ -119,18 +119,18 @@ class FusionDomainModel(QObject):
     """
 
     #: The scientific draft moved: weights, groups, nucleus or participation.
-    draft_changed = pyqtSignal()
+    draft_changed = Signal()
     #: One channel entered or left the scientific input set.
-    participation_changed = pyqtSignal(str, bool)
+    participation_changed = Signal(str, bool)
     #: One channel's scientific weight moved.
-    weight_changed = pyqtSignal(str)
+    weight_changed = Signal(str)
     #: A whole draft was installed at once (restore/handoff). One notice.
-    draft_restored = pyqtSignal()
+    draft_restored = Signal()
     #: The immutable committed snapshot was replaced.
-    committed_changed = pyqtSignal()
+    committed_changed = Signal()
     #: The draft was bound to another dataset (or to none). Carries the
     #: `DatasetIdentity`, or None.
-    dataset_bound = pyqtSignal(object)
+    dataset_bound = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)

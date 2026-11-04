@@ -11,7 +11,7 @@ import dataclasses
 import threading
 from typing import Any, Dict, List, Optional
 
-from PyQt5 import QtCore
+from ..qt import QtCore
 
 from ..core import step3_masks
 from ..utils import closing_threads
@@ -34,8 +34,8 @@ class CoreLabelBinding(QtCore.QObject):
     stay HERE in both cases -- one writer per destination across every
     switch -- and the inner binding is handed the built sources."""
 
-    status_changed = QtCore.pyqtSignal()
-    _built = QtCore.pyqtSignal(object)
+    status_changed = QtCore.Signal()
+    _built = QtCore.Signal(object)
 
     def __init__(self, *, controller, layer, level_shapes, tile_size: int, parent=None):
         super().__init__(parent)

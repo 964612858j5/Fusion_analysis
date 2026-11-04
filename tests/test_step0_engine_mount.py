@@ -18,7 +18,7 @@ pytest.importorskip("fusion_viewer_core")
 tifffile = pytest.importorskip("tifffile")
 zarr = pytest.importorskip("zarr")
 
-from PyQt5 import QtGui, QtWidgets  # noqa: E402
+from block01.qt import QtGui, QtWidgets  # noqa: E402
 
 from block01.core import saved_correction  # noqa: E402
 from block01.ui.step0 import engine_mount as em  # noqa: E402
@@ -146,7 +146,7 @@ def _whole_slide(app, tab):
 
 def _at(tab, picture, x, y, r=6):
     """The presented pixels around slide point (x, y) (level 0)."""
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
     view = tab.stack.view
     host = tab.engine.host
     scene = view.view_box.mapViewToScene(QtCore.QPointF(x, y))
@@ -532,7 +532,7 @@ def test_the_first_published_frame_is_whole(app, window, slide):
         # the FIRST frame Qt presents: right after the real blit of the first
         # visible `paintGL`, the widget's own framebuffer is copied out (in
         # the same paint; nothing paints again in between)
-        from PyQt5 import QtCore
+        from block01.qt import QtCore
         first = []
         real_present = host._present
 
@@ -544,8 +544,8 @@ def test_the_first_published_frame_is_whole(app, window, slide):
             rect = QtCore.QRect(0, 0, width, height)
             QtGui.QOpenGLFramebufferObject.blitFramebuffer(copy, rect, None, rect)
             image = copy.toImage().convertToFormat(QtGui.QImage.Format_RGBA8888)
-            ptr = image.constBits()
-            ptr.setsize(image.byteCount())
+            from block01.qt import image_bytes
+            ptr = image_bytes(image)
             first.append(np.frombuffer(ptr, np.uint8).reshape(
                 image.height(), image.bytesPerLine() // 4, 4)[:, :image.width()].copy())
         host._present = capture

@@ -33,7 +33,7 @@ GUI thread decides what any of them means for the screen.
 
 import threading
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from ..qt.QtCore import QObject, Signal
 
 from ..core import step0_handoff
 from ..utils import perf_trace
@@ -47,9 +47,9 @@ class GeometryPersistWorker(QObject):
     waiting when its owner is deleted aborts the process.
     """
 
-    published = pyqtSignal(object)     # {"task", "outcome", "result"}
-    skipped = pyqtSignal(object)       # {"task", "outcome", "reason"}
-    failed = pyqtSignal(object)        # {"task", "error"}
+    published = Signal(object)     # {"task", "outcome", "result"}
+    skipped = Signal(object)       # {"task", "outcome", "reason"}
+    failed = Signal(object)        # {"task", "error"}
 
     def __init__(self, commit=None, parent=None):
         super().__init__(parent)

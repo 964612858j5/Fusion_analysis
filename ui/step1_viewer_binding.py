@@ -32,7 +32,7 @@ THE RULES IT KEEPS, each one a gate:
 * with no patch at all the viewer still opens, on the whole slide.
 """
 
-from PyQt5 import QtCore
+from ..qt import QtCore
 
 from .step1_viewer_host import Step1ViewerHost
 

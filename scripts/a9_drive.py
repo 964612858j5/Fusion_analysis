@@ -33,7 +33,7 @@ import subprocess
 import sys
 import time
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from block01.qt import QtCore, QtGui, QtWidgets
 
 from block01.utils import perf_trace
 from block01.viewer import coverage_probe, read_ledger
@@ -124,8 +124,8 @@ _VIEWER_CACHE = {"key": None, "best": None}
 
 def _alive_visible(w):
     try:
-        from PyQt5 import sip
-        if w is None or sip.isdeleted(w):
+        from block01.qt import is_deleted
+        if w is None or is_deleted(w):
             return False
         return bool(w.isVisible() and w.window().isVisible())
     except Exception:                                        # noqa: BLE001
@@ -639,7 +639,7 @@ class Driver(QtCore.QObject):
     def _do_s0click(self, a, _t):
         """A REAL mouse click in Step0's channel list: on the row's name, or
         (`box: true`) on its checkbox -- the user's gesture, not a setter."""
-        from PyQt5 import QtTest, QtWidgets as _W
+        from block01.qt import QtTest, QtWidgets as _W
         row = self.w._step0._channel_rows[a["channel"]]
         if a.get("box"):
             target = row["checkbox"]
@@ -1130,7 +1130,7 @@ def _event_timeline(path):
     Consecutive stamps partition the thread's time: an event runs until
     the next event starts or the thread blocks. Written at exit (TSV)."""
     import atexit
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
     app = QtCore.QCoreApplication.instance()
     clock = time.monotonic
     rows = []
@@ -1174,7 +1174,7 @@ def _input_stamps():
     from block01.utils import tile_trace
     if not tile_trace.ON:
         return
-    from PyQt5 import QtCore, QtGui
+    from block01.qt import QtCore, QtGui
     app = QtCore.QCoreApplication.instance()
 
     class _Filter(QtCore.QObject):

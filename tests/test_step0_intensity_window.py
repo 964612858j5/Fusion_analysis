@@ -25,11 +25,11 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
-from PyQt5.QtCore import Qt  # noqa: E402
-from PyQt5.QtGui import QColor  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
+from block01.qt.QtCore import Qt  # noqa: E402
+from block01.qt.QtGui import QColor  # noqa: E402
 
 from block01.ui.step0 import step0_page as sp  # noqa: E402
 from block01.core.display_mapping import build_display_lut  # noqa: E402
@@ -545,7 +545,7 @@ def _await_pixels(page, *channels, ms=3000):
     does.
     """
     import time as _time
-    from PyQt5 import QtWidgets as _QW
+    from block01.qt import QtWidgets as _QW
     wb = page._cond_workbench
     end = _time.monotonic() + ms / 1000.0
     while _time.monotonic() < end:

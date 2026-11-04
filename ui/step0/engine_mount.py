@@ -38,7 +38,7 @@ import logging
 import os
 import time
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from ...qt import QtCore, QtGui, QtWidgets
 
 from ...core import resource_tiers as _tiers
 from ...utils import perf_trace
@@ -84,7 +84,7 @@ class Step0EngineMount(QtCore.QObject):
     acts again for this stack)."""
 
     #: S0-C: the full image's first engine picture is on screen (once)
-    first_picture = QtCore.pyqtSignal()
+    first_picture = QtCore.Signal()
 
     def __init__(self, stack, parent=None):
         super().__init__(parent)

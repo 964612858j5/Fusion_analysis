@@ -16,8 +16,8 @@ expanded combinations. `Edit` may change a block's method; a change onto a
 method another block has asks the same question.
 """
 
-from PyQt5 import QtWidgets
-from PyQt5.QtCore import Qt, pyqtSignal
+from ...qt import QtWidgets
+from ...qt.QtCore import Qt, Signal
 
 from ..theme import widgets as theme_widgets
 from ...utils import segmentation_param_schema as ps
@@ -31,8 +31,8 @@ def block_frame_qss(name, color="#555"):
 
 
 class MethodBlock(QtWidgets.QFrame):
-    edit_clicked = pyqtSignal(int)            # block uid
-    remove_clicked = pyqtSignal(int)          # block uid
+    edit_clicked = Signal(int)            # block uid
+    remove_clicked = Signal(int)          # block uid
     _next_uid = 1
 
     def __init__(self, method, values, parent=None):
@@ -118,11 +118,11 @@ class ConflictDialog(QtWidgets.QDialog):
 
 
 class MethodsPanel(QtWidgets.QWidget):
-    plan_changed = pyqtSignal()
-    save_plan_requested = pyqtSignal()
-    load_plan_requested = pyqtSignal()
-    run_requested = pyqtSignal()
-    stop_requested = pyqtSignal()
+    plan_changed = Signal()
+    save_plan_requested = Signal()
+    load_plan_requested = Signal()
+    run_requested = Signal()
+    stop_requested = Signal()
 
     #: Seams for the dialogs (tests drive them; the product opens them).
     editor_class = MethodEditorDialog
@@ -250,7 +250,7 @@ class MethodsPanel(QtWidgets.QWidget):
     # ── gestures ─────────────────────────────────────────────────────
     def add_method(self):
         dlg = self.editor_class(self)
-        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
             return None
         return self.adopt(dlg.method(), dlg.values())
 
@@ -284,7 +284,7 @@ class MethodsPanel(QtWidgets.QWidget):
         merged, conflicts = ps.merge(method, existing.values, values)
         if conflicts:
             dlg = self.conflict_class(method, conflicts, self)
-            if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            if dlg.exec() != QtWidgets.QDialog.Accepted:
                 return None
             for key, value in dlg.chosen().items():
                 merged[key] = [value]
@@ -297,7 +297,7 @@ class MethodsPanel(QtWidgets.QWidget):
             return
         # The method may be changed too (user ruling, 2026-09-24).
         dlg = self.editor_class(self, method=blk.method, values=blk.values, lock_method=False)
-        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
         method, values = dlg.method(), dlg.values()
         if method != blk.method:

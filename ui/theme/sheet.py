@@ -25,7 +25,7 @@ changes their metrics (codex review: scroll bar 14 -> 10 px, the Save menu's
 size), and geometry is not this phase's to change (plan §8).
 """
 
-from PyQt5 import QtGui
+from ...qt import QtGui
 
 from . import tokens as T
 

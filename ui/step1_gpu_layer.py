@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Hashable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
-from PyQt5 import QtCore, QtGui, QtWidgets
+from ..qt import QtCore, QtGui, QtWidgets
 
 #: moved to `step1_display_types` (block A6); imported back, the same objects
 from .step1_display_types import (  # noqa: F401 -- re-exported

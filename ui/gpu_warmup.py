@@ -21,7 +21,7 @@ BLOCK01_GPU_WARMUP=0 turns it off.
 import os
 import threading
 
-from PyQt5 import QtCore, QtGui
+from ..qt import QtCore, QtGui
 
 from ..utils import perf_trace
 
@@ -48,7 +48,7 @@ def configure_surface_format():
 class GpuWarmup(QtCore.QObject):
     """Import `OpenGL.GL` on a thread; `imported` says how it went."""
 
-    _imported = QtCore.pyqtSignal(bool)
+    _imported = QtCore.Signal(bool)
 
     def __init__(self, window):
         super().__init__(window)

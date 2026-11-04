@@ -49,13 +49,13 @@ import contextlib
 import os
 import json
 
-from PyQt5.QtWidgets import (
+from ...qt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QMessageBox, QFileDialog, QCheckBox, QSlider,
     QDoubleSpinBox, QColorDialog,
 )
-from PyQt5.QtCore import pyqtSignal, Qt, QSize
-from PyQt5.QtGui import QColor
+from ...qt.QtCore import Signal, Qt, QSize
+from ...qt.QtGui import QColor
 
 from ..theme import widgets as theme_widgets
 from ...config import NUCLEUS_CONFIG
@@ -81,10 +81,10 @@ class ConfigPanel(QWidget):
     `FusionDomainModel`. This panel draws them and sends commands.
     """
 
-    config_changed = pyqtSignal()                 # the configuration moved
-    visibility_changed = pyqtSignal(str, bool)    # DISPLAY visibility only
-    current_channel_changed = pyqtSignal(str)     # what Intensity should edit
-    color_changed = pyqtSignal(str, str)          # overlay colour changed
+    config_changed = Signal()                 # the configuration moved
+    visibility_changed = Signal(str, bool)    # DISPLAY visibility only
+    current_channel_changed = Signal(str)     # what Intensity should edit
+    color_changed = Signal(str, str)          # overlay colour changed
 
     def __init__(self, all_channels, fusion=None, channel_dock=None):
         """`channel_dock` is Block01's ONE public channel dock.

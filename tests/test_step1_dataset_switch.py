@@ -17,9 +17,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -45,9 +45,9 @@ class _Loader:
 class _FakeLoaderThread(QtCore.QObject):
     """Stands in for PreviewLoaderThread with the same signal contract."""
 
-    done = QtCore.pyqtSignal(int, object)
-    progress = QtCore.pyqtSignal(int, int, int, str)
-    error = QtCore.pyqtSignal(int, str)
+    done = QtCore.Signal(int, object)
+    progress = QtCore.Signal(int, int, int, str)
+    error = QtCore.Signal(int, str)
 
     def __init__(self, idx):
         super().__init__()

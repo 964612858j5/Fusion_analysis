@@ -29,7 +29,7 @@ import traceback
 
 import numpy as np
 
-from PyQt5.QtCore import QThread, pyqtSignal
+from ..qt.QtCore import QThread, Signal
 
 from ..core import quant_engine as qe
 from ..core import quant_sources as qs
@@ -614,10 +614,10 @@ class FeatureExtractWorker(QThread):
         error(message)   -- a reason for the user, or a traceback
     """
 
-    progress = pyqtSignal(int, int, str)
+    progress = Signal(int, int, str)
     # Named `extraction_done` so it does NOT shadow QThread's finished().
-    extraction_done = pyqtSignal(str, str)
-    error = pyqtSignal(str)
+    extraction_done = Signal(str, str)
+    error = Signal(str)
 
     def __init__(self, run_path, output_dir, roi_name=None, statistics=None,
                  file_prefix=None, open_slide=None, settings=None, regions=None,

@@ -18,7 +18,7 @@ import socket
 from typing import Any, Dict, Optional
 
 import numpy as np
-from PyQt5 import QtCore, QtGui, QtWidgets
+from ..qt import QtCore, QtGui, QtWidgets
 
 from ..utils import perf_trace
 from ..utils import tile_trace

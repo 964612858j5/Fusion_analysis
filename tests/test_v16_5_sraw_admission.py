@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from PyQt5 import QtCore, QtWidgets
+from block01.qt import QtCore, QtWidgets
 
 fvc = pytest.importorskip("fusion_viewer_core")
 
@@ -70,8 +70,8 @@ class _Provider:
 
 
 class _Controller(QtCore.QObject):
-    interaction_event = QtCore.pyqtSignal(str, object)
-    gesture_quiet = QtCore.pyqtSignal(object)
+    interaction_event = QtCore.Signal(str, object)
+    gesture_quiet = QtCore.Signal(object)
 
     def __init__(self, provider):
         super().__init__()

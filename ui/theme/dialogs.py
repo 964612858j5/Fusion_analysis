@@ -7,7 +7,7 @@ something: the destructive button is red (`ds=danger`) and is NEVER the
 default -- Enter or Esc keep things as they are.
 """
 
-from PyQt5 import QtWidgets
+from ...qt import QtWidgets
 
 
 def confirm_danger(parent, title, text, action="Delete", cancel="Cancel"):
@@ -19,5 +19,5 @@ def confirm_danger(parent, title, text, action="Delete", cancel="Cancel"):
     go.setProperty("ds", "danger")
     box.setDefaultButton(keep)
     box.setEscapeButton(keep)
-    box.exec_()
+    box.exec()
     return box.clickedButton() is go

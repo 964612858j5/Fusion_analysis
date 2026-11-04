@@ -26,7 +26,7 @@ What this file adds to three mounts is what makes them one instrument:
 
 import time
 
-from PyQt5 import QtCore
+from ...qt import QtCore
 
 from ...utils import perf_trace
 from .engine_mount import ENGINE, PREPARE_BUDGET_S, PREPARE_POLL_S, Step0EngineMount
@@ -57,13 +57,13 @@ class CompareEngine(QtCore.QObject):
 
     #: a paint published pictures that made all three panels show their
     #: controllers' selections (inside that paint's turn, queued)
-    committed = QtCore.pyqtSignal()
+    committed = QtCore.Signal()
     #: the frame of such a publication reached the screen
-    presented = QtCore.pyqtSignal()
+    presented = QtCore.Signal()
     #: any frame of this layout reached the screen
-    frame_presented = QtCore.pyqtSignal()
+    frame_presented = QtCore.Signal()
     #: (why) the engine failed: the Python panels are the picture from now on
-    failed = QtCore.pyqtSignal(str)
+    failed = QtCore.Signal(str)
 
     def __init__(self, strip, host, stacks, parent=None):
         super().__init__(parent)

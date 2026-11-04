@@ -30,7 +30,7 @@ import gc
 import os
 import time
 
-from PyQt5 import QtCore
+from ..qt import QtCore
 
 from . import perf_trace
 

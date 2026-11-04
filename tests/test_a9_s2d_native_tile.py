@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 import test_step1_viewer_host as h  # noqa: E402
 from block01.ui.step1_viewer_host import Step1TileProvider  # noqa: E402

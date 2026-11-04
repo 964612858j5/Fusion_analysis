@@ -28,7 +28,7 @@ editing. What a job runs on is `committed_snapshot()`, which only a successful
 Save replaces -- nothing here writes to the domain model at all.
 """
 
-from PyQt5 import QtCore
+from ..qt import QtCore
 
 from . import step1_draft_spec as draft_spec
 from .step1_draft_spec import MODE_FUSION, MODE_OVERLAY, STEP1_SCOPE

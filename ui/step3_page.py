@@ -16,9 +16,9 @@ Right-hand side: one row over the viewer slot -- the mask controls (block
 the Overlay / Fusion pair at its right end.
 """
 
-from PyQt5 import QtWidgets
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import (
+from ..qt import QtWidgets
+from ..qt.QtCore import Qt, Signal
+from ..qt.QtWidgets import (
     QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -33,7 +33,7 @@ VIEWER_PENDING_TEXT = "The whole-slide view is closed; it reopens when Step 3 is
 class Step3Page(QWidget):
     """The Step3 page: a container the window fills (`assemble`)."""
 
-    go_back = pyqtSignal()
+    go_back = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)

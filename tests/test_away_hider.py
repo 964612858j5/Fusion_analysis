@@ -18,8 +18,8 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5 import QtWidgets  # noqa: E402
-from PyQt5.QtCore import Qt  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
+from block01.qt.QtCore import Qt  # noqa: E402
 
 from block01.ui.widgets import away_hider as ah  # noqa: E402
 

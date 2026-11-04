@@ -28,10 +28,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("pyqtgraph")
 
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 import test_downstream_display_seed as ds  # noqa: E402
 import test_step1_navigator_policy as nav  # noqa: E402
@@ -234,7 +234,7 @@ def test_one_camera_across_step1_and_step3(app, tmp_path, monkeypatch):
 
 
 class _Overview(QtCore.QObject):
-    navigate_requested = QtCore.pyqtSignal(int, int)
+    navigate_requested = QtCore.Signal(int, int)
 
     def set_current_view_rect(self, rect):
         pass

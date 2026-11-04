@@ -56,7 +56,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import benchmark_step1_gpu_cold_landing as rig4  # noqa: E402
 
-from PyQt5 import QtCore  # noqa: E402
+from block01.qt import QtCore  # noqa: E402
 
 from block01.ui.block01_display import ChannelDisplayState  # noqa: E402
 from block01.ui.step1_draft_spec import STEP1_SCOPE  # noqa: E402

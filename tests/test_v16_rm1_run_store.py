@@ -146,26 +146,26 @@ def test_records_round_trip(ws, tmp_path):
 
 # ═══ RM-1 acceptance (application §13, §16.5) ═══════════════════════════════
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import shutil  # noqa: E402
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from test_v16_a6_workspace import (  # noqa: E402,F401  (fixtures)
     app, slides, page, _project, _commit_step0, _tree)
-from PyQt5 import QtCore  # noqa: E402
+from block01.qt import QtCore  # noqa: E402
 
 
 class _FakeWsi(QtCore.QThread):
     """WsiCorrectionWorker's contract (a QThread whose business `finished`
     shadows the base one); records what it was asked to do, runs nothing.
     (Moved here from the DV tests, removed with DV in block RM-3.)"""
-    progress = QtCore.pyqtSignal(int, int, int, int, str, str, int)
-    finished = QtCore.pyqtSignal(str, dict)
-    canceled = QtCore.pyqtSignal(str)
-    error = QtCore.pyqtSignal(str)
+    progress = QtCore.Signal(int, int, int, int, str, str, int)
+    finished = QtCore.Signal(str, dict)
+    canceled = QtCore.Signal(str)
+    error = QtCore.Signal(str)
     made = []
 
     def __init__(self, loader, output_dir, config, rois=None, parent=None,
@@ -191,7 +191,7 @@ def dv_page(page, monkeypatch, tmp_path, slides):
     monkeypatch.setattr(sp, "_WsiCorrectionProgressDialog",
                         lambda parent: type("D", (), {"cancel_requested": type(
                             "S", (), {"connect": lambda *a, **k: None})(),
-                            "show": lambda self: None, "exec_": lambda self: 0,
+                            "show": lambda self: None, "exec": lambda self: 0,
                             "set_progress": lambda self, *a: None,
                             "allow_close": lambda self: None,
                             "accept": lambda self: None,
@@ -205,7 +205,7 @@ from block01.ui.step0.step0_page import read_corrected_zarr_state as _REAL_READ_
 def _prepared(page, ms=5000):
     """Block CS P2: a Save that copies a run, or hands the viewer off,
     finishes its preparation off the GUI thread; wait for it."""
-    from PyQt5 import QtTest
+    from block01.qt import QtTest
     for _ in range(ms // 10):
         if page.__dict__.get("_save_prep") is None:
             return

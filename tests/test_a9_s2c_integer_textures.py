@@ -25,7 +25,7 @@ RECT = (0.0, float(W), 0.0, float(H))
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 

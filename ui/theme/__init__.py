@@ -9,7 +9,7 @@ switch until the user says where one goes -- UI_SURFACE_RULES).
 
 import os
 
-from PyQt5 import QtCore
+from ...qt import QtCore
 
 from . import tokens
 from .sheet import palette, stylesheet

@@ -22,10 +22,10 @@ import types
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 from block01.core import provenance as prov  # noqa: E402
 from block01.core.regions import document, quant_apply  # noqa: E402

@@ -49,7 +49,7 @@ import inspect
 import logging
 import math
 
-from PyQt5 import QtCore, QtWidgets
+from ..qt import QtCore, QtWidgets
 
 from ..utils import perf_trace
 from ..viewer import step1_compose as compose_core
@@ -151,7 +151,7 @@ class Step1WholeSlideMount(QtCore.QObject):
     #: Block 4c: what `mask_status()` answers may have changed (the label
     #: binding planned, a pyramid build started or ended, a read failed, or
     #: the binding came or went). Step3's hint line follows it.
-    mask_status_changed = QtCore.pyqtSignal()
+    mask_status_changed = QtCore.Signal()
 
     def __init__(self, window, host=None, parent=None, *, gpu=True,
                  gpu_layer_factory=None, camera_reason="step1", labels=False,

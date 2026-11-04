@@ -22,10 +22,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 zarr = pytest.importorskip("zarr")
 
-from PyQt5 import QtCore, QtTest, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtTest, QtWidgets  # noqa: E402
 
 from block01.ui.step0 import search_ctrl as sc  # noqa: E402
 from block01.ui.step0 import step0_page as sp  # noqa: E402
@@ -180,7 +180,7 @@ def test_the_save_path_shows_the_dialog_instead_of_running_a_modal_loop(
     worker = page._wsi_worker
     try:
         assert "dialog.show" in timeline
-        assert "dialog.exec_" not in timeline
+        assert "dialog.exec" not in timeline
     finally:
         worker.may_exit.set()
         worker.wait(5000)

@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
-from PyQt5 import QtWidgets  # noqa: E402
+pytest.importorskip("block01.qt")
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.ui.regions.page import RegionsPage  # noqa: E402
 
@@ -48,7 +48,7 @@ def test_choosing_line_without_cores_shows_the_message_and_sets_no_tool(app, mon
 def test_the_annotate_menu_closes_and_stays_closed_after_the_message(app, monkeypatch):
     """The real menu: opening it with nothing to number closes it, then shows
     the message once; it is not open again afterwards."""
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
     shown = []
 
     def real_modal(parent, title, text):
@@ -57,7 +57,7 @@ def test_the_annotate_menu_closes_and_stays_closed_after_the_message(app, monkey
         shown.append(text)
         box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Information, title, text, parent=parent)
         QtCore.QTimer.singleShot(50, box.accept)
-        return box.exec_()
+        return box.exec()
     monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(real_modal))
     page = RegionsPage()
     page.show()

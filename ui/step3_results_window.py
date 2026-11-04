@@ -22,8 +22,8 @@ turns `ticks_changed` / `style_changed` / `use_requested` /
 
 import dataclasses
 
-from PyQt5 import QtCore, QtGui, QtWidgets
-from PyQt5.QtCore import Qt, pyqtSignal
+from ..qt import QtCore, QtGui, QtWidgets
+from ..qt.QtCore import Qt, Signal
 
 from .theme import widgets as theme_widgets
 from .step1_button_styles import MODE_BUTTON_QSS
@@ -152,11 +152,11 @@ class ResultRow(QtWidgets.QFrame):
 class Step3ResultsWindow(QtWidgets.QWidget):
     """The floating results window (plan §3.1)."""
 
-    ticks_changed = pyqtSignal()                  # any record's Cells / Nuclei tick
-    style_changed = pyqtSignal(str, str, dict)    # entry key, kind, the fields that changed
-    use_requested = pyqtSignal(str)               # entry key
-    delete_requested = pyqtSignal(str)            # run folder
-    load_requested = pyqtSignal()
+    ticks_changed = Signal()                  # any record's Cells / Nuclei tick
+    style_changed = Signal(str, str, dict)    # entry key, kind, the fields that changed
+    use_requested = Signal(str)               # entry key
+    delete_requested = Signal(str)            # run folder
+    load_requested = Signal()
 
     def __init__(self, parent=None):
         # A normal top-level window with its own minimize / close (Qt.Tool

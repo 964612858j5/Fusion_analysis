@@ -58,7 +58,7 @@ if "block01" not in sys.modules:
     _spec.loader.exec_module(_module)
 sys.path.insert(0, str(ROOT.parent))
 
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 from block01.core.display_identity import DatasetIdentity  # noqa: E402
 from block01.core.fusion_domain import FusionDomainModel  # noqa: E402

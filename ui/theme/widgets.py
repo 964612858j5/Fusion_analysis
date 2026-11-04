@@ -16,7 +16,7 @@ Roles (closed set):
   seg     one-of-N (Original / TopHat / cuCIM): checked = active grey
 """
 
-from PyQt5 import QtGui
+from ...qt import QtGui
 
 from . import current_name, tokens
 
@@ -101,7 +101,7 @@ def button_qss(role, metrics="", cls="QPushButton"):
 
 def button(widget, role, metrics=""):
     """Give `widget` (a QPushButton / QToolButton) a role's look."""
-    from PyQt5 import QtWidgets
+    from ...qt import QtWidgets
     cls = "QToolButton" if isinstance(widget, QtWidgets.QToolButton) else "QPushButton"
     widget.setStyleSheet(button_qss(role, metrics, cls))
     return widget

@@ -16,7 +16,7 @@ import os
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from PyQt5 import QtCore
+from ..qt import QtCore
 
 from ..core import resource_tiers as _tiers
 from . import step1_core_adapter as adapter

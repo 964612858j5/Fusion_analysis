@@ -91,7 +91,7 @@ def test_c4_an_outside_result_is_current_but_not_recorded(chain, tmp_path, monke
     other = tmp_path / "other"
     other_w, other_ws = None, None
     from test_v16_rm1_run_store import _rm_window as _win
-    ow, ows = _win(w.__class__ and pytest.importorskip("PyQt5").QtWidgets.QApplication.instance(),
+    ow, ows = _win(w.__class__ and pytest.importorskip("block01.qt").QtWidgets.QApplication.instance(),
                    other)
     try:
         oc = _correct_run(ows)

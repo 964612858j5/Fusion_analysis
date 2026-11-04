@@ -39,7 +39,7 @@ try:
     import OpenGL  # noqa: F401
     import tifffile
     import zarr
-    from PyQt5 import QtCore, QtWidgets
+    from block01.qt import QtCore, QtWidgets
 except ImportError as exc:
     pytest.fail(f"required G1 GPU runtime dependency is unavailable: {exc}",
                 pytrace=False)
@@ -311,8 +311,8 @@ def _frames(mount):
     fbo = mount.gpu_layer.readback_rgba_for_test()
     image = mount.gpu_layer.grabFramebuffer()
     image = image.convertToFormat(image.Format_RGBA8888)
-    pointer = image.constBits()
-    pointer.setsize(image.byteCount())
+    from block01.qt import image_bytes
+    pointer = image_bytes(image)
     shown = np.frombuffer(pointer, np.uint8).reshape(
         (image.height(), image.bytesPerLine() // 4, 4))[:, :image.width(), :]
     viewport = mount._gpu_viewport_snapshot()

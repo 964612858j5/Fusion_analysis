@@ -10,7 +10,7 @@ import os
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("zarr")
 
 from test_f4_step2 import _snapshot, _with_regions  # noqa: E402

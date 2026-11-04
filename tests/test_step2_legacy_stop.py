@@ -24,8 +24,8 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+pytest.importorskip("block01.qt")
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 H, W = 176, 208
 ROWS, COLS, OVERLAP = 2, 2, 32

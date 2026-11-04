@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 
 class Loader:
@@ -56,7 +56,7 @@ def make_panel(channels, fusion, state):
     asserted on. Recording WRAPS the production method here -- the real one
     runs, and the log says it ran.
     """
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     from block01.ui.step0.config_panel import ConfigPanel
     # A real widget needs a real application. Tests that never asked for the
     # `app` fixture used a panel that was not a widget at all; the panel is
@@ -281,7 +281,7 @@ def run(tmp_path):
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 

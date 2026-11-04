@@ -16,13 +16,13 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("zarr")
 import numpy as np  # noqa: E402
 
-from PyQt5 import QtWidgets  # noqa: E402
-from PyQt5.QtCore import Qt  # noqa: E402
-from PyQt5.QtTest import QTest  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
+from block01.qt.QtCore import Qt  # noqa: E402
+from block01.qt.QtTest import QTest  # noqa: E402
 
 from block01.ui.step0.roi_context_model import Patch  # noqa: E402
 from block01.ui.step1_presegmentation import patches_panel as pp  # noqa: E402
@@ -54,8 +54,8 @@ def _double_click(widget):
     """The event sequence a real double-click produces in Qt 5: press,
     release, DOUBLE-CLICK, release -- one press only. (QTest.mouseDClick
     sends a second press, which would hide a tick the first press flipped.)"""
-    from PyQt5.QtCore import QEvent, QPointF
-    from PyQt5.QtGui import QMouseEvent
+    from block01.qt.QtCore import QEvent, QPointF
+    from block01.qt.QtGui import QMouseEvent
     pos = QPointF(widget.width() / 3.0, widget.height() / 2.0)
     for kind, buttons in ((QEvent.MouseButtonPress, Qt.LeftButton),
                           (QEvent.MouseButtonRelease, Qt.NoButton),

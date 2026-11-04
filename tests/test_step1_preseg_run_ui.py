@@ -19,8 +19,8 @@ os.environ.setdefault("KERAS_BACKEND", "tensorflow")
 import numpy as np
 import pytest
 
-pytest.importorskip("PyQt5")
-from PyQt5 import QtWidgets  # noqa: E402
+pytest.importorskip("block01.qt")
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.utils import segmentation_param_schema as ps  # noqa: E402
 
@@ -329,7 +329,7 @@ def test_save_plan_and_save_fusion_settings_say_they_worked(app, tmp_path, monke
 
 
 def _boxes():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     return [b for b in QtWidgets.QApplication.topLevelWidgets()
             if isinstance(b, QtWidgets.QMessageBox) and b.isVisible()
             and b.windowTitle() == "Fusion settings"]
@@ -337,7 +337,7 @@ def _boxes():
 
 def _settled(w, ms=3000):
     """Wait for the Save Fusion Settings box to finish; its visible texts."""
-    from PyQt5 import QtTest
+    from block01.qt import QtTest
     for _ in range(ms // 10):
         if getattr(w, "_fusion_saving_box", None) is None:
             break

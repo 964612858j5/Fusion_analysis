@@ -26,10 +26,10 @@ WORLD = (3.3, 1003.3, 11.0, 811.0)
 def grab(layer):
     """Qt's own picture of the widget (`grabFramebuffer`), RGBA rows top first."""
     import numpy as np
-    from PyQt5 import QtGui
+    from block01.qt import QtGui
     image = layer.grabFramebuffer().convertToFormat(QtGui.QImage.Format_RGBA8888)
-    ptr = image.constBits()
-    ptr.setsize(image.byteCount())
+    from block01.qt import image_bytes
+    ptr = image_bytes(image)
     return np.frombuffer(ptr, np.uint8).reshape(image.height(), image.bytesPerLine() // 4, 4)[:, :image.width()].copy()
 CONCAVE = ((100.0, 60.0), (900.0, 60.0), (900.0, 300.0), (420.0, 420.0),
            (900.0, 560.0), (900.0, 760.0), (100.0, 760.0))

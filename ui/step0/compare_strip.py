@@ -47,7 +47,7 @@ import math
 import threading
 import weakref
 
-from PyQt5 import QtCore, QtWidgets
+from ...qt import QtCore, QtWidgets
 
 from ...viewer.tile_types import (CorrectionKey, RawKey, TileAddress,
                                   TileRequest, effective_param)
@@ -319,18 +319,17 @@ class _OpenRelay(QtCore.QObject):
     thread -- or closes it, when the strip is gone by then. One for the
     application, never deleted."""
 
-    opened = QtCore.pyqtSignal(object)
+    opened = QtCore.Signal(object)
 
     def __init__(self):
         super().__init__()
         self.opened.connect(self._deliver, QtCore.Qt.QueuedConnection)
 
     def _deliver(self, payload):
-        from PyQt5 import sip
-
+        from ...qt import is_deleted
         ref, serial, path, provider = payload
         strip = ref()
-        if strip is None or sip.isdeleted(strip):
+        if strip is None or is_deleted(strip):
             _close_quietly(provider)
             return
         strip._on_source_opened((serial, path, provider))
@@ -409,7 +408,7 @@ class CompareStrip(QtWidgets.QWidget):
     # down, so a listener that reads the camera reads the settled one, and
     # the two followers' own range signals (which the guard swallows) do not
     # each produce a page-level redraw.
-    camera_changed = QtCore.pyqtSignal()
+    camera_changed = QtCore.Signal()
 
     # ONE notification per COMMITTED channel switch, emitted after all three
     # panels have been moved and before the event loop gets a chance to
@@ -417,27 +416,27 @@ class CompareStrip(QtWidgets.QWidget):
     # switch is pending the three panels are showing the PREVIOUS channel,
     # and a measurement taken then would be the previous channel's numbers
     # under the new channel's labels.
-    publication_changed = QtCore.pyqtSignal()
+    publication_changed = QtCore.Signal()
 
     # The pending state was entered, re-planned or left. Carries nothing:
     # `pending_text()` is the question a listener actually has.
-    pending_changed = QtCore.pyqtSignal()
+    pending_changed = QtCore.Signal()
 
     # A pending tile came back. Scheduler callbacks fire on a COMPUTE WORKER
     # thread; every other path in this viewer marshals such a callback to
     # the GUI thread through a queued signal before touching state, and this
     # one must too -- `_on_pending_tile` re-runs the readiness probe and can
     # publish, which touches three views.
-    _pending_tile = QtCore.pyqtSignal(int, object)
+    _pending_tile = QtCore.Signal(int, object)
 
     # S0-C (plan §16.14 1): the engine published a parameter edit's picture
     # (no channel moved, so no `publication_changed`): the page measures again
-    params_published = QtCore.pyqtSignal()
+    params_published = QtCore.Signal()
     # S0-C: the frame on which the engine's three panels show the selection
     # reached the screen (measurement)
-    engine_done = QtCore.pyqtSignal()
+    engine_done = QtCore.Signal()
     # S0-C (Fable 5b): the slide opened ahead (`open_source_ahead`) is ready
-    source_ready = QtCore.pyqtSignal()
+    source_ready = QtCore.Signal()
 
     def __init__(self, page=None, stack_factory=build_compare_stacks,
                  parent=None):

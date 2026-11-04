@@ -16,9 +16,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtCore, QtGui, QtTest, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtGui, QtTest, QtWidgets  # noqa: E402
 
 from block01.core.fusion_domain import FusionDomainModel  # noqa: E402
 from block01.ui.widgets.channel_dock.global_dock import GlobalChannelDock  # noqa: E402

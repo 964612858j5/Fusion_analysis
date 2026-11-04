@@ -21,7 +21,7 @@ import numpy as np
 import tifffile
 import zarr
 
-from PyQt5.QtCore import QThread, pyqtSignal
+from ..qt.QtCore import QThread, Signal
 
 from ..core import (label_ownership, label_pyramid, nuclei_pairing, preseg_contract,
                     preseg_input, seam_merge)
@@ -145,11 +145,11 @@ class SegmentMergeWorker(QThread):
       <project_output_dir>/segmentation_results/<timestamp>_<method>/...
     """
 
-    tile_done  = pyqtSignal(int, int, int)   # tile_idx, n_tiles, n_cells_this_tile
-    tile_skipped = pyqtSignal(int, int)      # tile_idx, n_tiles (block S2T: no tissue / user)
-    progress   = pyqtSignal(int, int, str)   # done, total, message
-    finished   = pyqtSignal(str, int)        # output_dir, total_cells
-    error      = pyqtSignal(str)
+    tile_done  = Signal(int, int, int)   # tile_idx, n_tiles, n_cells_this_tile
+    tile_skipped = Signal(int, int)      # tile_idx, n_tiles (block S2T: no tissue / user)
+    progress   = Signal(int, int, str)   # done, total, message
+    finished   = Signal(str, int)        # output_dir, total_cells
+    error      = Signal(str)
 
     def __init__(self, zarr_path, seg_config=None, n_rows=1, n_cols=1,
                  overlap_px=200, output_dir=None, recovery_npy_dir=None,

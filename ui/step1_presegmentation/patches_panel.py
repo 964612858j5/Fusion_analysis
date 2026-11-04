@@ -18,8 +18,8 @@ right corner that deletes the patch; double-clicking a tile renames it.
 
 import time
 
-from PyQt5 import QtWidgets
-from PyQt5.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
+from ...qt import QtWidgets
+from ...qt.QtCore import QPoint, QRect, QSize, Qt, Signal
 
 from ..theme import dialogs as theme_dialogs, widgets as theme_widgets
 from ..step0.roi_context_model import patch_color, patch_id, patch_name
@@ -103,9 +103,9 @@ class FlowLayout(QtWidgets.QLayout):
 class PatchTile(QtWidgets.QFrame):
     """One patch: its name, a tick (the whole tile), and a `×` while ticked."""
 
-    toggled = pyqtSignal(int, bool)           # patch id, ticked
-    delete_clicked = pyqtSignal(int)          # patch id
-    rename_asked = pyqtSignal(int)            # patch id
+    toggled = Signal(int, bool)           # patch id, ticked
+    delete_clicked = Signal(int)          # patch id
+    rename_asked = Signal(int)            # patch id
 
     def __init__(self, pid, name, color, checked=True, parent=None):
         super().__init__(parent)
@@ -199,11 +199,11 @@ class PatchTile(QtWidgets.QFrame):
 class PatchesPanel(QtWidgets.QWidget):
     """The Patches strip: tiles, `Select all` / `Select none`, `k/n selected`."""
 
-    selection_changed = pyqtSignal(list)      # ticked patch ids, in patch order
-    delete_requested = pyqtSignal(int)        # patch id
-    rename_requested = pyqtSignal(int, str)   # patch id, new name
-    random_requested = pyqtSignal(int, int, int)   # count, height, width (level-0 px)
-    delete_selected_requested = pyqtSignal(list)   # ids of the ticked patches
+    selection_changed = Signal(list)      # ticked patch ids, in patch order
+    delete_requested = Signal(int)        # patch id
+    rename_requested = Signal(int, str)   # patch id, new name
+    random_requested = Signal(int, int, int)   # count, height, width (level-0 px)
+    delete_selected_requested = Signal(list)   # ids of the ticked patches
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -352,7 +352,7 @@ class PatchesPanel(QtWidgets.QWidget):
 
     def _ask_random(self):
         dlg = RandomPatchesDialog(self)
-        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+        if dlg.exec() == QtWidgets.QDialog.Accepted:
             n, h, w = dlg.values()
             self.random_requested.emit(n, h, w)
 

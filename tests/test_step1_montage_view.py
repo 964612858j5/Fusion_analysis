@@ -16,8 +16,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pytest
 
-pytest.importorskip("PyQt5")
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+pytest.importorskip("block01.qt")
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 from block01.ui.step1_presegmentation import montage_supply as ms  # noqa: E402
 from block01.ui.step1_presegmentation.montage_view import (  # noqa: E402

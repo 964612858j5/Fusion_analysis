@@ -8,7 +8,7 @@ every field is checked as it is typed against the parameter table (plan
 field is refused.
 """
 
-from PyQt5 import QtWidgets
+from ...qt import QtWidgets
 
 from ...utils import segmentation_param_schema as ps
 

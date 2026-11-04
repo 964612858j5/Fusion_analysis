@@ -24,7 +24,7 @@ the source table's, unchanged.
 
 import os
 import numpy as np
-from PyQt5 import QtCore, QtWidgets
+from ..qt import QtCore, QtWidgets
 
 from ..utils import perf_trace
 from ..utils import tile_trace
@@ -320,7 +320,7 @@ class Step1ViewerHost(QtWidgets.QWidget):
     #: Emitted when the camera moves in or out of the analysis region. A
     #: LOCAL signal for C's information layer -- not a bus, and nothing in
     #: block B listens to it.
-    status_changed = QtCore.pyqtSignal(str)
+    status_changed = QtCore.Signal(str)
 
     @property
     def status(self):

@@ -11,9 +11,9 @@ import numpy as np
 import tifffile
 import zarr
 
-from PyQt5 import QtWidgets, QtCore, QtGui
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtWidgets import (
+from ..qt import QtWidgets, QtCore, QtGui
+from ..qt.QtCore import Qt, QTimer, Signal
+from ..qt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QSlider, QDoubleSpinBox, QProgressBar,
     QComboBox, QSplitter, QScrollArea, QSizePolicy,
@@ -42,8 +42,8 @@ from .widgets.channel_workbench import ChannelWorkbench
 from ..utils.channel_remap_config import save_channel_remap_config
 
 class Step15BackgroundCorrectionPage(QWidget):
-    go_back = pyqtSignal()
-    saved_and_continue = pyqtSignal(dict, str)
+    go_back = Signal()
+    saved_and_continue = Signal(dict, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)

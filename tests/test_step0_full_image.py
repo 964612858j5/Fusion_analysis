@@ -26,7 +26,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 from test_step0_background_correction_tab import (  # noqa: E402
     _GpuPathLoader,

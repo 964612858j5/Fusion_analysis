@@ -11,9 +11,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.utils.channel_remap_config import (  # noqa: E402
     load_channel_remap_config,
@@ -658,7 +658,7 @@ def test_step15_config_passes_basic_but_rejected_by_step2(app, tmp_path, monkeyp
 
 
 def test_step15_workbench_has_no_step3_button_text(app, tmp_path):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     page = _make_step15(app, tmp_path)
     wb = page._cond_workbench
     labels = [b.text() for b in wb.findChildren(QtWidgets.QPushButton)]
@@ -920,8 +920,8 @@ def test_overlay_multichannel_composite_changes(app):
 
 
 def test_overlay_color_change_updates_composite(app, monkeypatch):
-    from PyQt5.QtGui import QColor
-    from PyQt5 import QtWidgets
+    from block01.qt.QtGui import QColor
+    from block01.qt import QtWidgets
     wb = _mc_workbench(app)
     before = wb._canvas._composite.copy()
     monkeypatch.setattr(QtWidgets.QColorDialog, "getColor",
@@ -965,8 +965,8 @@ def test_overlay_lazy_load_on_check(app):
 
 def test_overlay_swatch_color_clicked_signal(app, monkeypatch):
     """The color swatch is clickable: the row emits color_clicked(name)."""
-    from PyQt5 import QtWidgets
-    from PyQt5.QtGui import QColor
+    from block01.qt import QtWidgets
+    from block01.qt.QtGui import QColor
     # the workbench is already wired to open a real QColorDialog on this signal;
     # stub it (invalid color = "cancelled") so the click stays non-modal.
     monkeypatch.setattr(QtWidgets.QColorDialog, "getColor",
@@ -1025,13 +1025,13 @@ def test_all_toggle_exists_only_in_multichannel(app):
 
 
 def test_all_toggle_default_partial_with_dapi_only(app):
-    from PyQt5.QtCore import Qt
+    from block01.qt.QtCore import Qt
     wb = _mc_workbench(app)                         # only DAPI visible
     assert wb._chk_all.checkState() == Qt.PartiallyChecked
 
 
 def test_all_toggle_check_shows_all(app):
-    from PyQt5.QtCore import Qt
+    from block01.qt.QtCore import Qt
     wb = _mc_workbench(app, names=("DAPI", "CD68", "CK19"))
     wb._on_all_toggled(True)
     assert wb.visible_channels() == ["DAPI", "CD68", "CK19"]
@@ -1040,7 +1040,7 @@ def test_all_toggle_check_shows_all(app):
 
 
 def test_all_toggle_uncheck_clears(app):
-    from PyQt5.QtCore import Qt
+    from block01.qt.QtCore import Qt
     wb = _mc_workbench(app)
     wb._on_all_toggled(True)
     wb._on_all_toggled(False)
@@ -1050,7 +1050,7 @@ def test_all_toggle_uncheck_clears(app):
 
 
 def test_all_toggle_reflects_individual_toggles(app):
-    from PyQt5.QtCore import Qt
+    from block01.qt.QtCore import Qt
     wb = _mc_workbench(app, names=("DAPI", "CD68", "CK19"))
     for n in ("DAPI", "CD68", "CK19"):
         wb._on_visibility_changed(n, True)
@@ -1324,7 +1324,7 @@ def _search_wb(app, names=("DAPI", "CD68", "CD45", "CK19", "PanCK")):
 
 def _visible_rows(wb):
     ll = wb._layer_list
-    from PyQt5.QtCore import Qt
+    from block01.qt.QtCore import Qt
     return [str(ll._list.item(i).data(Qt.UserRole))
             for i in range(ll._list.count()) if not ll._list.item(i).isHidden()]
 

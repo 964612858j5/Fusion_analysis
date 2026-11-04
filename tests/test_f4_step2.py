@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 zarr = pytest.importorskip("zarr")
 
 from block01.core import seam_merge  # noqa: E402
@@ -318,7 +318,7 @@ def test_the_hand_overs_regions_no_longer_tie_the_fused_input(tmp_path, monkeypa
     (the cores are frozen at Run with the input's own settings)."""
     import json
     import types
-    from PyQt5.QtWidgets import QMessageBox
+    from block01.qt.QtWidgets import QMessageBox
     from block01.core import preseg_contract
     from block01.ui.step2_page import Step2Page
     shown = []

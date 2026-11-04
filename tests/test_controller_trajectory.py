@@ -25,7 +25,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 from block01.viewer.tile_types import CorrectionKey, RawKey  # noqa: E402
 

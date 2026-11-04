@@ -29,7 +29,7 @@ The remapped stage runs the PRODUCTION algorithm
 (:func:`core.channel_remap.apply_channel_remap`) on the corrected stage.
 """
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from ...qt.QtCore import QObject, Signal
 
 import numpy as np
 
@@ -51,7 +51,7 @@ class Step0PreviewSourceProvider(QObject):
         consumers should drop cached pixels for that channel and re-pull.
     """
 
-    stage_invalidated = pyqtSignal(str, str)
+    stage_invalidated = Signal(str, str)
 
     def __init__(self, page):
         super().__init__(page)

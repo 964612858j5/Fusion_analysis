@@ -17,9 +17,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -744,7 +744,7 @@ def test_a_first_tick_composes_once_and_reads_nothing_twice(app):
     the GUI thread. Waited out past the coalescing window rather than only
     pumping events, so a pending timer is not simply missed.
     """
-    from PyQt5 import QtTest
+    from block01.qt import QtTest
     w = _window(app)
     try:
         # Building the panel already scheduled one coalesced redraw

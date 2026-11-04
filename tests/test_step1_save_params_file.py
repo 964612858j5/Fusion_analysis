@@ -17,7 +17,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 from test_step1_preseg_run_ui import _quiet, _window, app  # noqa: E402,F401
 

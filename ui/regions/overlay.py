@@ -23,8 +23,9 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence
 
-from PyQt5 import QtCore, QtGui, QtWidgets
-from PyQt5.QtCore import Qt
+from ...qt import QtCore, QtGui, QtWidgets
+from ...qt import flag_value
+from ...qt.QtCore import Qt
 
 from ...core.regions import transform as T
 
@@ -194,7 +195,7 @@ class RegionsOverlay(QtWidgets.QWidget):
             return claimed
         if t == QtCore.QEvent.MouseMove and self._press is not None and self._press[1]:
             y, x = self.to_level0(event.pos())
-            c.drag(y, x, mods=int(event.modifiers()))
+            c.drag(y, x, mods=flag_value(event.modifiers()))
             return True
         if t == QtCore.QEvent.MouseMove and self._press is None:
             y, x = self.to_level0(event.pos())
@@ -208,7 +209,7 @@ class RegionsOverlay(QtWidgets.QWidget):
             y, x = self.to_level0(event.pos())
             ctrl = bool(event.modifiers() & Qt.ControlModifier)
             if claimed:
-                c.drag(y, x, finish=True, mods=int(event.modifiers()))
+                c.drag(y, x, finish=True, mods=flag_value(event.modifiers()))
                 if not moved:
                     c.click(y, x, ctrl)
                 c.released()
@@ -296,7 +297,7 @@ class RegionsOverlay(QtWidgets.QWidget):
     def _label(self, p, it, br, fm):
         text = self.order_labels.get(it["id"]) or it.get("label")
         if text and max(br.width(), br.height()) >= self.label_min_px:
-            box = QtCore.QRectF(br.right() - 4, br.top() - fm.height(), fm.width(text) + 8, fm.height() + 2)
+            box = QtCore.QRectF(br.right() - 4, br.top() - fm.height(), fm.horizontalAdvance(text) + 8, fm.height() + 2)
             p.setPen(Qt.NoPen)
             p.setBrush(QtGui.QColor(0, 0, 0, 170))
             p.drawRoundedRect(box, 3, 3)

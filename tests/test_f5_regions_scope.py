@@ -9,7 +9,7 @@ import os
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("pyqtgraph")
 
 from test_regions_r2 import _enter_regions, _pump  # noqa: E402
@@ -187,7 +187,7 @@ def test_regions_intensity_button_is_step0s_in_step0s_place(app, monkeypatch, tm
         assert w._regions_cb_all.styleSheet() == w._step0._cb_all.styleSheet()
         assert w._regions_cb_all.sizeHint().width() >= (
             w._step0._method_all.width() if w._step0._method_all.testAttribute(
-                __import__("PyQt5.QtCore", fromlist=["Qt"]).Qt.WA_Resized)
+                __import__("block01.qt.QtCore", fromlist=["Qt"]).Qt.WA_Resized)
             else w._step0._method_all.sizeHint().width())
         assert head.spacing() == w._step0._channels_host.itemAt(0).layout().spacing()
     finally:

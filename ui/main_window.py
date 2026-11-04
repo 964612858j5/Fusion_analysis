@@ -22,9 +22,9 @@ import numpy as np
 import pyqtgraph as pg
 import zarr
 
-from PyQt5 import QtWidgets, QtCore, QtGui
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtWidgets import (
+from ..qt import QtWidgets, QtCore, QtGui
+from ..qt.QtCore import Qt, QTimer, Signal
+from ..qt.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QStackedWidget, QMessageBox, QProgressBar,
     QApplication, QSplitter, QCheckBox, QDialog, QSizePolicy,
@@ -554,8 +554,8 @@ def ps_display_name(method):
 class _PresegSignals(QtCore.QObject):
     """The run's thread reports through these, so the page updates on its own
     thread (queued across threads by Qt)."""
-    record = QtCore.pyqtSignal(object)
-    finished = QtCore.pyqtSignal(object)    # (run_id, records)
+    record = QtCore.Signal(object)
+    finished = QtCore.Signal(object)    # (run_id, records)
 
 
 
@@ -568,7 +568,7 @@ def _preseg_parts(current):
 class MainWindow(QMainWindow):
     #: docs/f5_tma_display_plan.md §10: (seq, key, items, error) of a Step1
     #: core-outline computation done off the GUI thread after a Regions Save.
-    _step1_cores_ready = pyqtSignal(object)
+    _step1_cores_ready = Signal(object)
 
     #: The one public channel panel takes its width from the STEP's own
     #: Channels panel -- Step0's is the master -- so the window fixes no
@@ -7581,7 +7581,7 @@ class MainWindow(QMainWindow):
         replace = box.addButton("Replace current patches", QMessageBox.AcceptRole)
         both = box.addButton("Keep both", QMessageBox.AcceptRole)
         box.addButton(QMessageBox.Cancel)
-        box.exec_()
+        box.exec()
         clicked = box.clickedButton()
         return "replace" if clicked is replace else "both" if clicked is both else None
 
@@ -7635,7 +7635,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(box)
         _fill()
         dlg.resize(620, 340)
-        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
             return None
         row = lst.currentRow()
         return entries[row] if 0 <= row < len(entries) else None
@@ -8466,9 +8466,9 @@ class MainWindow(QMainWindow):
         if not first:
             return
         def run(_ref=weakref.ref(self)):
-            from PyQt5 import sip
+            from ..qt import is_deleted
             w = _ref()
-            if w is None or sip.isdeleted(w):
+            if w is None or is_deleted(w):
                 return
             pending = w.__dict__.pop("_rm_save_view_pending", None)
             if pending is not None:

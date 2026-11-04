@@ -8,12 +8,12 @@ the step names. Qt offscreen.
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     a = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     return a
 
@@ -95,7 +95,7 @@ def test_save_button_is_save_only_label(window):
 
 # ── #11: Next button removed; step-name navigation still works ───────────────
 def test_next_button_removed(window):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     # not shown in the top nav bar
     assert window._btn_next.isVisible() is False
     # the handler it served is gone

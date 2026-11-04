@@ -19,9 +19,9 @@ from queue import Empty
 import numpy as np
 import zarr
 
-from PyQt5 import QtWidgets, QtCore, QtGui
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
-from PyQt5.QtWidgets import (
+from ...qt import QtWidgets, QtCore, QtGui
+from ...qt.QtCore import Qt, QTimer, QThread, Signal
+from ...qt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QGroupBox, QSlider,
     QInputDialog, QMessageBox, QFileDialog,
@@ -303,33 +303,33 @@ def _nucleus_channel_of(names):
     return None
 
 class Step0Page(QWidget):
-    step0_complete = pyqtSignal(dict)
+    step0_complete = Signal(dict)
     # A dataset switch that has been COMMITTED (not a load attempt, not a path
     # edit, not a failed rollback).  Emitted once per committed generation from
     # the tail of `_reload_from_paths`'s commit block, carrying the generation
     # and the normalized identity of the dataset that is now current.  This is
     # deliberately NOT `step0_complete`: "the dataset changed" and "Step0 Save
     # published a handoff" are different events with different consumers.
-    dataset_committed = pyqtSignal(dict)
+    dataset_committed = Signal(dict)
     #: Block DV-D: the current data version was deleted and no other was
     #: loaded -- the window goes back to its initial, empty state.
     # A geometry-only update of the ALREADY published handoff: ROI/patch edits
     # made anywhere (this page, the navigator popup, Step1) have been written
     # through the one Step0 writer and a new manifest has been published.
-    geometry_committed = pyqtSignal(dict)
+    geometry_committed = Signal(dict)
     # One channel's display mapping (Min/Max/Gamma) changed.  Narrow on
     # purpose: it names the channel and nothing else, so another step can drop
     # exactly that channel's derived pixels instead of everything it holds.
-    display_mapping_changed = pyqtSignal(str)
+    display_mapping_changed = Signal(str)
     # The published handoff no longer matches the geometry in memory and a
     # matching new manifest could NOT be published.  Separate from
     # `geometry_committed` (which means the opposite) and from
     # `dataset_committed` (a different slide entirely).
-    handoff_invalidated = pyqtSignal(dict)
+    handoff_invalidated = Signal(dict)
     # A channel's colour changed HERE — the swatch, the Intensity window, the
     # dock. Step1 draws the same channels and holds the same colours, so it
     # follows this rather than keeping a second palette that drifts.
-    channel_color_changed = pyqtSignal(str, str)
+    channel_color_changed = Signal(str, str)
 
     #: Where each PREVIEW method sits in the Method combos -- the row's and
     #: the bulk box's. FOUR entries, because a preview may prepare both
@@ -2928,10 +2928,9 @@ class Step0Page(QWidget):
                           wait=False)
 
             def _next(_ref=weakref.ref(self)):
-                from PyQt5 import sip
-
+                from ...qt import is_deleted
                 page = _ref()
-                if (page is None or sip.isdeleted(page)
+                if (page is None or is_deleted(page)
                         or not page._compare_ahead_between):
                     return
                 page._compare_ahead_between = False
@@ -7273,7 +7272,7 @@ class Step0Page(QWidget):
 
     def _pick_channel_color(self, ch, btn=None):
         """弹颜色对话框，让用户选择通道显示颜色。"""
-        from PyQt5.QtWidgets import QColorDialog
+        from ...qt.QtWidgets import QColorDialog
         if not ch:
             return
         rgb = self._channel_color(ch)
@@ -7293,7 +7292,7 @@ class Step0Page(QWidget):
 
     def _pick_nucleus_color(self):
         """弹颜色对话框，让用户选择 nucleus 叠加显示颜色。"""
-        from PyQt5.QtWidgets import QColorDialog
+        from ...qt.QtWidgets import QColorDialog
         rgb = self._channel_color(self.nucleus_channel)
         init_color = QtGui.QColor(int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255))
         color = QColorDialog.getColor(init_color, self, "Color for nucleus")
@@ -11360,7 +11359,7 @@ class Step0Page(QWidget):
         lay.addWidget(box)
         _fill()
         dlg.resize(760, 380)
-        accepted = dlg.exec_() == QtWidgets.QDialog.Accepted
+        accepted = dlg.exec() == QtWidgets.QDialog.Accepted
         if "chosen" in state:
             return state["chosen"]
         if not accepted:
@@ -11827,7 +11826,7 @@ class Step0Page(QWidget):
         overwrite = box.addButton("Overwrite this workspace", QMessageBox.DestructiveRole)
         box.addButton(QMessageBox.Cancel)
         box.setDefaultButton(save_as)
-        box.exec_()
+        box.exec()
         clicked = box.clickedButton()
         if clicked is save_as:
             return "save_as"
@@ -12113,11 +12112,11 @@ class Step0Page(QWidget):
         """A problem the hidden Load-row line used to carry (user ruling
         2026-11-03: the line is not shown, a problem is said in a box).
         Non-modal, one at a time -- a newer problem replaces the text."""
-        from PyQt5 import sip
-        if sip.isdeleted(self):
+        from ...qt import is_deleted
+        if is_deleted(self):
             return
         box = self.__dict__.get("_load_row_box")
-        if box is not None and not sip.isdeleted(box) and box.isVisible():
+        if box is not None and not is_deleted(box) and box.isVisible():
             box.setText(text)
             return
         box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Warning, "Step0", text,
@@ -12130,8 +12129,8 @@ class Step0Page(QWidget):
     def _warn_slide_id_unavailable(self, run, why):
         """Non-modal (a modal box here would hold a nested event loop inside
         whatever runs next), and not for a page already gone."""
-        from PyQt5 import sip
-        if sip.isdeleted(self):
+        from ...qt import is_deleted
+        if is_deleted(self):
             return
         box = QtWidgets.QMessageBox(
             QtWidgets.QMessageBox.Warning, "Step0 — slide not identified",
@@ -12532,7 +12531,7 @@ class Step0Page(QWidget):
         self._watch_production_worker(self._wsi_worker)
         self._wsi_worker.start()
         # (the dialog is already up: `_rm_prepare_save` showed it -- `show()`,
-        # not `exec_()`, so no other window is frozen for the whole run)
+        # not `exec()`, so no other window is frozen for the whole run)
 
     def _on_wsi_progress(self, channel_idx, channel_total, tile_idx, tile_total, ch_name, method, eta_s):
         pct = int(((channel_idx - 1) + tile_idx / max(1, tile_total)) / max(1, channel_total) * 100)
@@ -13031,7 +13030,7 @@ class _CompareMetricFill(QtCore.QObject):
     and, when the last one has come back, one new measurement plan on the
     page. A newer ask for the same panel cancels the older one."""
 
-    _landed = pyqtSignal()
+    _landed = Signal()
     _live = {}
     _serial = 0
     #: behind the visible work and HOT (`HOT_PRIORITY_BASE` 5000)

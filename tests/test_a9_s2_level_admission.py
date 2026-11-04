@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 from block01.viewer import request_planning as planning  # noqa: E402
 from block01.ui.step1_gpu_binding import BindingBudgets  # noqa: E402
@@ -27,7 +27,7 @@ TILE_BYTES = 4 * 4 * 4                  # one 4x4 float32 tile of the fakes
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 

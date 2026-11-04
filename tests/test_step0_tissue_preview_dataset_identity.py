@@ -42,9 +42,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.ui.step0 import overview_panel as op  # noqa: E402
 from block01.ui.step0 import step0_page as sp  # noqa: E402
@@ -888,8 +888,7 @@ def test_a_destroyed_panel_is_never_reached_by_its_own_read(app, tmp_path,
     happens to do. The panel is also kept referenced here, which is the worse
     case: a weak reference alone would have gone quiet on its own.
     """
-    from PyQt5 import sip
-
+    from block01.qt import delete_cpp, is_deleted
     class _Boom(_Loader):
         def __init__(self, gate):
             super().__init__(11.0)
@@ -913,8 +912,8 @@ def test_a_destroyed_panel_is_never_reached_by_its_own_read(app, tmp_path,
     capfd.readouterr()
     try:
         panel.close()
-        sip.delete(panel)
-        assert sip.isdeleted(panel), "the C++ object was not destroyed"
+        delete_cpp(panel)
+        assert is_deleted(panel), "the C++ object was not destroyed"
         assert worker.isRunning(), "the read was abandoned with the panel"
 
         gate.set()
@@ -943,8 +942,7 @@ def test_a_panel_whose_cpp_object_died_without_closing_is_still_safe(
     into a deleted object: "wrapped C/C++ object of type OverviewPanel has
     been deleted". The relay touches the object before it delivers anything.
     """
-    from PyQt5 import sip
-
+    from block01.qt import delete_cpp, is_deleted
     gate = threading.Event()
     loader = _BarrierLoader(11.0, gate)
     before = set(op.live_overview_workers())
@@ -955,8 +953,8 @@ def test_a_panel_whose_cpp_object_died_without_closing_is_still_safe(
     assert loader.entered.wait(10)
     capfd.readouterr()
     try:
-        sip.delete(panel)                     # no close(), no dispose flag
-        assert sip.isdeleted(panel)
+        delete_cpp(panel)                     # no close(), no dispose flag
+        assert is_deleted(panel)
         assert panel._disposed is False, (
             "this test is about the case the dispose flag does NOT cover")
 
@@ -1034,7 +1032,7 @@ def test_a_hidden_panel_still_takes_the_current_slides_result(app, tmp_path):
 def test_closing_the_application_waits_for_an_overview_read(app, tmp_path):
     """A read cannot be interrupted, so keeping its thread alive only moves
     the crash to interpreter teardown unless the application waits too."""
-    from PyQt5 import QtGui
+    from block01.qt import QtGui
     from block01.ui.main_window import MainWindow
 
     gate = threading.Event()

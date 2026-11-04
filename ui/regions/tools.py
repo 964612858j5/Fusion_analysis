@@ -28,7 +28,8 @@ from __future__ import annotations
 import math
 from typing import List, Optional
 
-from PyQt5.QtCore import Qt
+from ...qt.QtCore import Qt
+from ...qt import flag_value
 
 from ...core.regions import document as D
 from ...core.regions import geometry as G
@@ -278,8 +279,9 @@ class ToolController:
             return
         page, kind = self.page, self._drag[0]
         shape = page.shape()
-        mods = int(mods or 0)
-        shift, alt = bool(mods & int(Qt.ShiftModifier)), bool(mods & int(Qt.AltModifier))
+        mods = flag_value(mods)
+        shift = bool(mods & flag_value(Qt.ShiftModifier))
+        alt = bool(mods & flag_value(Qt.AltModifier))
         if kind == "xf":
             if self.transform is None:            # applied meanwhile (an edit during the drag)
                 self._drag = None

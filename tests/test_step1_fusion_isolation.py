@@ -23,9 +23,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -36,9 +36,9 @@ def app():
 class _FakeFusion(QtCore.QThread):
     """Same signal contract as FullFusionWorker, including the shadowing."""
 
-    progress = QtCore.pyqtSignal(int, int, str)
-    finished = QtCore.pyqtSignal(str)      # shadows QThread.finished()
-    error = QtCore.pyqtSignal(str)
+    progress = QtCore.Signal(int, int, str)
+    finished = QtCore.Signal(str)      # shadows QThread.finished()
+    error = QtCore.Signal(str)
 
     def __init__(self, obeys_stop=True):
         super().__init__()

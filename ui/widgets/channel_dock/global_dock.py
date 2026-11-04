@@ -32,8 +32,8 @@ copy is what let two lists disagree.
 
 import weakref
 
-from PyQt5 import QtGui, QtWidgets
-from PyQt5.QtCore import Qt, QEvent, QObject, pyqtSignal
+from ....qt import QtGui, QtWidgets
+from ....qt.QtCore import Qt, QEvent, QObject, Signal
 
 from . import template
 from ..activation_quiet import quiet_activation
@@ -95,14 +95,14 @@ class GlobalChannelRow(QtWidgets.QWidget):
     of a public field.
     """
 
-    visibility_toggled = pyqtSignal(str, bool)
-    weight_edited = pyqtSignal(str, float)
-    method_changed = pyqtSignal(str, str)
-    color_clicked = pyqtSignal(str)
+    visibility_toggled = Signal(str, bool)
+    weight_edited = Signal(str, float)
+    method_changed = Signal(str, str)
+    color_clicked = Signal(str)
     #: A REAL mouse click, told apart from a programmatic selection: a
     #: restore and a dataset switch move the selection too, and "show me this
     #: one" is a thing only a click means.
-    row_clicked = pyqtSignal(str)
+    row_clicked = Signal(str)
 
     def __init__(self, cid, name="", parent=None):
         super().__init__(parent)
@@ -495,12 +495,12 @@ class GlobalChannelDock(QtWidgets.QWidget):
 
     #: A swatch was clicked. The host opens the colour dialog: which dialog,
     #: and what a nucleus colour means, is a page's business.
-    color_edit_requested = pyqtSignal(str)
+    color_edit_requested = Signal(str)
     #: A real click on a row (after the dock has moved the selection).
-    row_clicked = pyqtSignal(str)
+    row_clicked = Signal(str)
     #: Step0's correction decision moved in a row. The Step0 controller is
     #: the only thing that may act on it.
-    correction_method_changed = pyqtSignal(str, str)
+    correction_method_changed = Signal(str, str)
 
     def __init__(self, state, fusion, parent=None, title="",
                  show_search=True, show_bulk_buttons=False):

@@ -69,7 +69,7 @@ REMAP = {"DAPI": {"min": 0.0, "max": 255.0, "gamma": 1.0},
 
 
 def _fuse(p, out, *, sources, loader=None, rois=None, decisions=None, zpath=None, hook=None):
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
     QtCore.QCoreApplication.instance() or QtCore.QCoreApplication([])
     from block01.core.io_loader import OMETIFFLoader
     from block01.ui.step0.overview_panel import FullFusionWorker

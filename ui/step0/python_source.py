@@ -33,7 +33,7 @@ import time
 from typing import Dict
 
 import numpy as np
-from PyQt5 import QtCore
+from ...qt import QtCore
 
 from ...utils import perf_trace
 from ...viewer.tile_types import CorrectionKey, TileAddress, TileRequest
@@ -78,7 +78,7 @@ class PythonSourceAdapter(QtCore.QObject):
     """Computes one core's Python sources. `pump()` on every paint and
     every notice; `on_progress()` is asked for a repaint when a tile went in."""
 
-    _ended = QtCore.pyqtSignal(object, object)          # token, TileResult
+    _ended = QtCore.Signal(object, object)          # token, TileResult
 
     def __init__(self, core, controller, scheduler, *, on_progress=None, parent=None):
         super().__init__(parent)
@@ -298,7 +298,7 @@ class PythonSourceAdapter(QtCore.QObject):
             method=source.method, params=params, algorithm_version=algorithm, quality=quality)
 
     # ── ends (queued to the GUI thread) ──────────────────────────────
-    @QtCore.pyqtSlot(object, object)
+    @QtCore.Slot(object, object)
     def _on_ended(self, token, result) -> None:
         req = self._requests.get(token)
         try:

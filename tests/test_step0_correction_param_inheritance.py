@@ -16,9 +16,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 from block01.core.bg_correction import (  # noqa: E402
     BG_CORRECTION_ALGO_VERSION,
@@ -215,7 +215,7 @@ def test_a_new_schema_preserves_an_intentional_override_equal_to_old_defaults(
 
 def _until_started(captured, ms=3000):
     """Block CS P2: Save starts its worker once its hand-off is done."""
-    from PyQt5 import QtTest
+    from block01.qt import QtTest
     for _ in range(ms // 10):
         if captured.get("started"):
             return
@@ -322,10 +322,10 @@ def test_a_global_change_dirties_only_channels_that_still_inherit_it(
     captured = {}
 
     class _Worker(QtCore.QThread):
-        progress = QtCore.pyqtSignal(int, int, int, int, str, str, int)
-        finished = QtCore.pyqtSignal(str, dict)
-        canceled = QtCore.pyqtSignal(str)
-        error = QtCore.pyqtSignal(str)
+        progress = QtCore.Signal(int, int, int, int, str, str, int)
+        finished = QtCore.Signal(str, dict)
+        canceled = QtCore.Signal(str)
+        error = QtCore.Signal(str)
 
         def __init__(self, *args, process_channels=None, incremental=False,
                      **kwargs):
@@ -340,7 +340,7 @@ def test_a_global_change_dirties_only_channels_that_still_inherit_it(
             pass
 
     class _Dialog(QtCore.QObject):
-        cancel_requested = QtCore.pyqtSignal()
+        cancel_requested = QtCore.Signal()
 
         def show(self):
             pass
@@ -450,10 +450,10 @@ def test_no_patch_background_change_processes_the_full_wsi_region(
     captured = {}
 
     class _Worker(QtCore.QThread):
-        progress = QtCore.pyqtSignal(int, int, int, int, str, str, int)
-        finished = QtCore.pyqtSignal(str, dict)
-        canceled = QtCore.pyqtSignal(str)
-        error = QtCore.pyqtSignal(str)
+        progress = QtCore.Signal(int, int, int, int, str, str, int)
+        finished = QtCore.Signal(str, dict)
+        canceled = QtCore.Signal(str)
+        error = QtCore.Signal(str)
 
         def __init__(self, loader, out, cfg, rois=None, parent=None,
                      process_channels=None, incremental=False):
@@ -469,7 +469,7 @@ def test_no_patch_background_change_processes_the_full_wsi_region(
             pass
 
     class _Dialog(QtCore.QObject):
-        cancel_requested = QtCore.pyqtSignal()
+        cancel_requested = QtCore.Signal()
 
         def __init__(self, parent=None):
             super().__init__(parent)

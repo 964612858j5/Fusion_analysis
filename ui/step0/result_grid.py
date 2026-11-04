@@ -6,9 +6,9 @@ import json
 
 import numpy as np
 
-from PyQt5 import QtWidgets, QtCore, QtGui
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import (
+from ...qt import QtWidgets, QtCore, QtGui
+from ...qt.QtCore import Qt, Signal
+from ...qt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QSizePolicy, QMainWindow, QDialog,
     QProgressBar, QSlider, QCheckBox,
@@ -19,7 +19,7 @@ from ...config import PATCH_COLORS
 from ...utils.mask_renderer import render_mask_overlay
 
 class ResultGridPanel(QWidget):
-    param_selected = pyqtSignal(dict)
+    param_selected = Signal(dict)
 
     IMG_W = 190   # display width for each cell (px)
 

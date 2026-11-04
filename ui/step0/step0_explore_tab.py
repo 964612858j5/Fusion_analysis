@@ -46,7 +46,7 @@ existing patch preview.
 import time
 import traceback
 
-from PyQt5 import QtCore, QtWidgets
+from ...qt import QtCore, QtWidgets
 
 from ...core import resource_tiers as _tiers
 from ...utils import perf_trace
@@ -346,7 +346,7 @@ class Step0ExploreTab(QtWidgets.QWidget):
     """Hosts the Explore stack for the currently loaded dataset."""
 
     #: S0-C: the engine's first picture of this stack is on screen
-    engine_first_picture = QtCore.pyqtSignal()
+    engine_first_picture = QtCore.Signal()
 
     def __init__(self, page=None, stack_factory=build_default_stack,
                  parent=None, busy_probe=None):

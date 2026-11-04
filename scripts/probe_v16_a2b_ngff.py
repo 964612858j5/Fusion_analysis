@@ -666,7 +666,7 @@ class _LoaderShim:
 
 
 def cmd_fusion(args):
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
     QtCore.QCoreApplication.instance() or QtCore.QCoreApplication([])
     from block01.core.io_loader import OMETIFFLoader
     from block01.ui.step0.overview_panel import FullFusionWorker

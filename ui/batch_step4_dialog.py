@@ -15,9 +15,9 @@ import csv
 import glob
 import os
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import (
+from ..qt.QtCore import Qt
+from ..qt.QtGui import QColor
+from ..qt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QTableWidget, QTableWidgetItem, QCheckBox, QWidget, QFileDialog,
     QMessageBox, QStyledItemDelegate, QHeaderView, QGroupBox, QProgressBar,

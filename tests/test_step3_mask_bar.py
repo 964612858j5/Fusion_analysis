@@ -24,7 +24,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5 import QtCore, QtGui, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from block01.ui import step3_mask_bar as mb  # noqa: E402
 from block01.ui import step3_results_window as rw  # noqa: E402

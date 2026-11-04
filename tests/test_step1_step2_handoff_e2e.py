@@ -18,7 +18,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 zarr = pytest.importorskip("zarr")
 import numpy as np  # noqa: E402
 
@@ -113,7 +113,7 @@ def test_the_old_panel_and_patch_results_are_off_the_screen(app, tmp_path, monke
     w = _window(app, tmp_path, monkeypatch)
     try:
         w.show()
-        from PyQt5 import QtWidgets
+        from block01.qt import QtWidgets
         QtWidgets.QApplication.processEvents()
         assert not w.search.isVisibleTo(w)                   # kept, not shown
         tabs = w.right_tabs

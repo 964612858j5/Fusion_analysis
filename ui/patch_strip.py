@@ -11,9 +11,9 @@ the menu's minimum width rule); the window keeps its old attribute names as
 aliases of this object's widgets and lists.
 """
 
-from PyQt5 import QtCore
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import QHBoxLayout, QMenu, QPushButton, QToolButton, QWidget
+from ..qt import QtCore
+from ..qt.QtCore import Qt, Signal
+from ..qt.QtWidgets import QHBoxLayout, QMenu, QPushButton, QToolButton, QWidget
 
 # The inline strip is capped: measured before the cap, twenty patches made
 # the strip 916 px wide and put the last button's right edge at 1309 px, i.e.
@@ -54,7 +54,7 @@ class PatchStrip(QtCore.QObject):
     whole life (they are refilled, never replaced), so an alias taken once
     stays true."""
 
-    chosen = pyqtSignal(int)
+    chosen = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)

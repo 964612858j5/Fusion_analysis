@@ -25,9 +25,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtWidgets, QtTest  # noqa: E402
+from block01.qt import QtWidgets, QtTest  # noqa: E402
 
 from block01.core.bg_correction import BG_CORRECTION_ALGO_VERSION  # noqa: E402
 from block01.viewer.tile_types import (  # noqa: E402
@@ -274,7 +274,7 @@ def test_view_enables_smooth_pixmap_transform(app):
     so the hint has to be on the QGraphicsView that supplies the painter.
     Antialiasing is deliberately NOT required -- it buys nothing for
     drawImage and is only measured noise on the tile rect's edge."""
-    from PyQt5 import QtGui
+    from block01.qt import QtGui
 
     view = ExploreView()
     hints = view.graphics.renderHints()
@@ -300,7 +300,7 @@ def test_smooth_pixmap_transform_actually_smooths_a_zoomed_out_frame(app):
     neighbour keeps the full-contrast source rows; bilinear averages
     them)."""
     import pyqtgraph as pg
-    from PyQt5 import QtCore, QtGui
+    from block01.qt import QtCore, QtGui
 
     def render(smooth):
         view = ExploreView()
@@ -325,8 +325,8 @@ def test_smooth_pixmap_transform_actually_smooths_a_zoomed_out_frame(app):
         img = view.graphics.grab().toImage().convertToFormat(
             QtGui.QImage.Format_Grayscale8)
         w, h = img.width(), img.height()
-        ptr = img.bits()
-        ptr.setsize(img.byteCount())
+        from block01.qt import image_bytes
+        ptr = image_bytes(img)
         out = np.frombuffer(ptr, dtype=np.uint8).reshape(
             h, img.bytesPerLine())[:, :w].astype(np.float64).copy()
         view.hide()
@@ -871,7 +871,7 @@ def test_level_switch_keeps_old_tiles_and_orders_z(app):
 # ── T7. Item pool budget: over-cap prunes off-level farthest-first ────────
 
 def test_item_pool_budget_prunes_offlevel_farthest_first():
-    from PyQt5.QtCore import QRectF as _QRectF
+    from block01.qt.QtCore import QRectF as _QRectF
 
     class FakeViewBox:
         def __init__(self):
@@ -2011,7 +2011,7 @@ def test_fallback_never_covers_current_level(app):
     level-0 item's in the same pool -- the pre-existing z-order guarantee
     (module docstring "Level switching without clearing") that makes a
     fallback tile unable to ever draw above the current level."""
-    from PyQt5.QtCore import QRectF as _QRectF
+    from block01.qt.QtCore import QRectF as _QRectF
 
     class FakeViewBox:
         def __init__(self):

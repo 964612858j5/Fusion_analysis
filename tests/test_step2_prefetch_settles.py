@@ -25,7 +25,7 @@ import pytest
 
 from test_step2_legacy_stop import COLS, _worker, app, roi_dir  # noqa: F401 -- fixtures
 
-from PyQt5 import QtCore  # noqa: E402
+from block01.qt import QtCore  # noqa: E402
 
 MODES = {"roi": [{"name": "A"}], "full": None}
 

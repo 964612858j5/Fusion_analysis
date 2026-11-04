@@ -9,7 +9,7 @@ P4   Step1's GPU viewer refreshes once per whole-state install, not once per
 
 import numpy as np
 import pytest
-from PyQt5 import QtWidgets
+from block01.qt import QtWidgets
 
 
 @pytest.fixture(scope="module")

@@ -22,8 +22,8 @@ tifffile = pytest.importorskip("tifffile")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pyqtgraph as pg  # noqa: E402
-from PyQt5 import QtCore  # noqa: E402
-from PyQt5.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from block01.qt import QtCore  # noqa: E402
+from block01.qt.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from block01.core.regions import document as D  # noqa: E402
 from block01.core.regions import lock as K  # noqa: E402
@@ -130,7 +130,7 @@ def _page(app, env, monkeypatch, find=True):
     page.set_context(ctx)
     page.show()
     page.viewer = _Viewer(page)
-    from PyQt5.QtWidgets import QFileDialog
+    from block01.qt.QtWidgets import QFileDialog
     monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (xlsx, "")))
     if find:
         page.cores.btn_map.click()
@@ -259,7 +259,7 @@ def test_select_drag_moves_the_selected_piece_as_a_preview_until_enter(app, env,
 
 
 def test_the_overlay_routes_a_left_drag_to_the_tool_or_to_the_view(app, env, monkeypatch):
-    from PyQt5.QtGui import QMouseEvent
+    from block01.qt.QtGui import QMouseEvent
     page = _page(app, env, monkeypatch)
     ov = page.viewer.overlay
     vp = page.viewer.graphics.viewport()
@@ -294,7 +294,7 @@ def test_single_number_conflict_and_draft_restored_on_reopen(app, env, monkeypat
     page.cores.numbering.btn_bind.click()
     uid = page.selected_core()
     assert _label_of(page, uid) == "X1-Y02"
-    monkeypatch.setattr(QMessageBox, "exec_", lambda self: (setattr(self, "_clicked", self.buttons()[0]), 0)[1])
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: (setattr(self, "_clicked", self.buttons()[0]), 0)[1])
     monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: getattr(self, "_clicked", None))
     page.ctl.click(*_centre(1, 2))
     page.cores.numbering.number.setText("X1-Y02")
@@ -360,7 +360,7 @@ def test_row_clicks_jump_the_shared_camera(app, env, monkeypatch):
 # ── R2 review fixes (codex_regions_r2_1.out) ───────────────────────────
 
 def test_the_overlay_is_shown_and_stays_above_a_new_picture_layer(app, env, monkeypatch):
-    from PyQt5.QtWidgets import QWidget
+    from block01.qt.QtWidgets import QWidget
     page = _page(app, env, monkeypatch)
     ov = page.viewer.overlay
     assert ov.isVisible()
@@ -484,7 +484,7 @@ def test_the_transform_box_works_as_photoshops_and_autosave_waits_for_enter(app,
     assert abs(p2[:, 0].max() - (x1 + 10)) < 1 and abs(p2[:, 1].max() - (y1 + 30)) < 1
     page.undo()
     # Shift keeps the ratio, Alt scales about the centre
-    from PyQt5.QtCore import Qt
+    from block01.qt.QtCore import Qt
     assert page.ctl.press(y1, x1)
     page.ctl.drag(y1 + 40, x1 + 40, finish=True, mods=int(Qt.ShiftModifier | Qt.AltModifier))
     page.ctl.released()

@@ -587,7 +587,7 @@ class Heartbeat:
 
     def __init__(self, parent=None, interval_ms=HEARTBEAT_INTERVAL_MS,
                  gap_ms=HEARTBEAT_GAP_MS, label=""):
-        from PyQt5 import QtCore
+        from ..qt import QtCore
 
         self._gap_ms = float(gap_ms)
         self._label = str(label or "")

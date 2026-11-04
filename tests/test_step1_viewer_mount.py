@@ -25,11 +25,11 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("pyqtgraph")
 
-from PyQt5 import QtWidgets  # noqa: E402
-from PyQt5.QtGui import QColor  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
+from block01.qt.QtGui import QColor  # noqa: E402
 
 from block01.core.display_identity import DatasetIdentity  # noqa: E402
 from block01.core.fusion_domain import FusionDomainModel  # noqa: E402
@@ -512,7 +512,7 @@ def test_coming_back_composes_once_with_what_moved_while_away(app):
 # ── 6. the tab, and the rollback path ─────────────────────────────────
 
 def test_installing_takes_the_picture_slot_and_keeps_the_old_one(app):
-    from PyQt5.QtWidgets import QVBoxLayout, QWidget
+    from block01.qt.QtWidgets import QVBoxLayout, QWidget
 
     rig = _mount(app)
     try:

@@ -25,7 +25,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.ui import step1_core_binding as cb  # noqa: E402
 from block01.ui.main_window import MainWindow  # noqa: E402
@@ -52,11 +52,11 @@ class _Core:
 
 class _Controller:
     def __init__(self):
-        from PyQt5 import QtCore
+        from block01.qt import QtCore
 
         class _Sig(QtCore.QObject):
-            interaction_event = QtCore.pyqtSignal(object, object)
-            gesture_quiet = QtCore.pyqtSignal(object)
+            interaction_event = QtCore.Signal(object, object)
+            gesture_quiet = QtCore.Signal(object)
         self._s = _Sig()
         self.interaction_event = self._s.interaction_event
         self.gesture_quiet = self._s.gesture_quiet
@@ -303,7 +303,7 @@ def test_the_session_is_written_after_the_switch_not_during_it(app, monkeypatch)
     step is on screen (several session writes flushed to an HDD took 0.3-1 s
     of the switch). Two quick switches write once, with the last step; a
     close writes at once itself and drops the pending write."""
-    from PyQt5 import QtTest
+    from block01.qt import QtTest
     w = MainWindow()
     try:
         wrote = []

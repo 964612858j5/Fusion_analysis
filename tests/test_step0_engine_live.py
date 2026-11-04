@@ -17,7 +17,7 @@ if os.environ.get("BLOCK01_REQUIRE_STEP1_GPU") != "1":
 pytest.importorskip("fusion_viewer_core")
 tifffile = pytest.importorskip("tifffile")
 
-from PyQt5 import QtCore, QtGui, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from block01.ui.step0 import engine_mount as em  # noqa: E402
 from block01.ui.step0 import python_source as ps  # noqa: E402
@@ -121,8 +121,8 @@ def _capture(host):
         rect = QtCore.QRect(0, 0, width, height)
         QtGui.QOpenGLFramebufferObject.blitFramebuffer(copy, rect, None, rect)
         image = copy.toImage().convertToFormat(QtGui.QImage.Format_RGBA8888)
-        ptr = image.constBits()
-        ptr.setsize(image.byteCount())
+        from block01.qt import image_bytes
+        ptr = image_bytes(image)
         frames.append(np.frombuffer(ptr, np.uint8).reshape(
             image.height(), image.bytesPerLine() // 4, 4)[:, :image.width()].copy())
     host._present = capture
@@ -791,7 +791,7 @@ def test_paints_beside_the_host_still_reach_the_viewport(app, monkeypatch):
     painted; the margin around it is, pixel for pixel as before, and
     without painting the image items the host hides."""
     import pyqtgraph as pg
-    from PyQt5 import QtTest
+    from block01.qt import QtTest
     widget = pg.GraphicsLayoutWidget()
     view_box = widget.addViewBox()
     view_box.addItem(pg.ImageItem(np.random.default_rng(0).random((300, 300))))

@@ -35,7 +35,7 @@ import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 from block01.core.channel_remap import apply_channel_remap  # noqa: E402
 from block01.ui.step0.overview_panel import FullFusionWorker  # noqa: E402

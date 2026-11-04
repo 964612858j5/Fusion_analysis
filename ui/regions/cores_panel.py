@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from ...qt.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from ...core.regions import display as DISPLAY
 from ...core.regions import document as D

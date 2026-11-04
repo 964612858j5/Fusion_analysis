@@ -4,8 +4,8 @@ import gc
 
 import pytest
 
-pytest.importorskip("PyQt5")
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+pytest.importorskip("block01.qt")
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 from block01.utils import gc_pacer  # noqa: E402
 

@@ -73,7 +73,7 @@ def test_the_read_window_is_the_patch_plus_halo_cut_to_the_region():
 
 
 def test_the_polygon_zeroes_the_same_pixels_as_step2s_fused_zarr():
-    pytest.importorskip("PyQt5")
+    pytest.importorskip("block01.qt")
     from block01.ui.step0.overview_panel import FullFusionWorker
     roi_bbox = (13, 263, 7, 297)
     poly = [(20.7, 15.2), (290.4, 40.9), (250.5, 260.1), (60.3, 200.8), (9.9, 120.5)]

@@ -17,8 +17,8 @@ import os
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
-from PyQt5 import QtWidgets  # noqa: E402
+pytest.importorskip("block01.qt")
+from block01.qt import QtWidgets  # noqa: E402
 
 import test_fusion_domain_model as fdm  # noqa: E402  (the Step1 window harness)
 

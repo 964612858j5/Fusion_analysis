@@ -33,9 +33,9 @@ unchanged by it and belongs to the pages and to `ChannelDisplayState`.
 
 import os
 
-from PyQt5 import QtCore, QtWidgets
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QWIDGETSIZE_MAX
+from ....qt import QtCore, QtWidgets
+from ....qt.QtCore import Qt
+from ....qt.QtWidgets import QWIDGETSIZE_MAX
 
 # ── the stamp ────────────────────────────────────────────────────────────
 # Identity, not a boolean: a host cannot set it by accident, and a row that

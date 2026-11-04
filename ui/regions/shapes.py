@@ -8,8 +8,8 @@ mixin of `RegionsPage`.
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication, QMessageBox
+from ...qt.QtCore import Qt
+from ...qt.QtWidgets import QApplication, QMessageBox
 
 from ...core.regions import document as D
 

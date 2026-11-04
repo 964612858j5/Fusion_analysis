@@ -27,7 +27,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 import pyqtgraph as pg  # noqa: E402
 
@@ -162,7 +162,7 @@ class _Ctl:
 
 
 def _tab(monkeypatch):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     from block01.ui.step0 import step0_explore_tab as et
 
     made = {}
@@ -282,7 +282,7 @@ def test_set_tint_colours_every_layer_the_controller_owns(app):
     """Overview, corrected floor and BOTH pools -- and the pools must keep
     the table for tiles that arrive later, which is the case a caller that
     only walked the existing items would miss."""
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
 
     class _Item:
         def __init__(self):
@@ -339,7 +339,7 @@ def test_a_tile_arriving_after_the_tint_is_coloured_too(app):
     land: a caller that walked only the existing entries would leave every
     later tile grey."""
     from block01.viewer.explore_view import TileItemPool
-    from PyQt5.QtCore import QRectF
+    from block01.qt.QtCore import QRectF
 
     class _Box:
         def __init__(self):

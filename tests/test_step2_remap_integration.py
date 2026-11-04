@@ -396,8 +396,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 @pytest.fixture(scope="module")
 def _qapp():
-    pytest.importorskip("PyQt5")
-    from PyQt5 import QtWidgets
+    pytest.importorskip("block01.qt")
+    from block01.qt import QtWidgets
     try:
         return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     except Exception as exc:  # no usable Qt platform -> skip
@@ -441,7 +441,7 @@ def _roi_with_remap(tmp_path):
 
 def test_step2_no_box_widgets(_step2):
     # the manual-remap box is gone
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     assert not hasattr(_step2, "_remap_config_edit")
     titles = [b.title() for b in _step2.findChildren(QtWidgets.QGroupBox)]
     assert not any("Manual channel remap" in t for t in titles)

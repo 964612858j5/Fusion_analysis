@@ -80,7 +80,7 @@ either.
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
-from PyQt5 import QtCore
+from ..qt import QtCore
 
 from ..viewer import step1_compose as compose_core
 from ..viewer.caches import LRUByteCache
@@ -143,17 +143,17 @@ class Step1ComposeCoordinator(QtCore.QObject):
     """
 
     #: A composed tile is ready: `(level, tx, ty, rgba, valid)`.
-    tile_composed = QtCore.pyqtSignal(int, int, int, object, object)
+    tile_composed = QtCore.Signal(int, int, int, object, object)
     #: The channels the CURRENT generation cannot compose for want of a
     #: window. Empty when there are none left, which clears the notice.
-    windows_missing = QtCore.pyqtSignal(object)
+    windows_missing = QtCore.Signal(object)
     #: Private: a worker finished. Queued, so the payload lands on this
     #: object's thread and is checked against the live generation there.
-    _frame_ready = QtCore.pyqtSignal(object)
+    _frame_ready = QtCore.Signal(object)
     #: Private: a read landed. THE SCHEDULER CALLS BACK ON ITS READ WORKER
     #: (`viewer/scheduler.py`), so the callback does nothing but hand the
     #: result over this queued signal; everything after it runs here.
-    _tile_landed = QtCore.pyqtSignal(object)
+    _tile_landed = QtCore.Signal(object)
 
     def __init__(self, host, seed_port=None, executor=None,
                  max_bytes=DEFAULT_COMPOSE_CACHE_BYTES, parent=None):

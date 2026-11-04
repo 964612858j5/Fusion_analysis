@@ -5,8 +5,8 @@
 - Step3Inspector: Min/Max/Gamma explicitly labeled display/QC only.
 """
 
-from PyQt5 import QtWidgets
-from PyQt5.QtCore import Qt, pyqtSignal
+from ....qt import QtWidgets
+from ....qt.QtCore import Qt, Signal
 
 _LBL = "color:#879bb1;font-size:10px;"
 _VAL = ("QDoubleSpinBox,QSpinBox{background:#182230;color:#dce5ef;"
@@ -16,7 +16,7 @@ _VAL = ("QDoubleSpinBox,QSpinBox{background:#182230;color:#dce5ef;"
 class MinMaxGammaEditor(QtWidgets.QWidget):
     """Aligned Min / Max / Gamma rows: 52px label | slider | 64px value."""
 
-    params_changed = pyqtSignal(float, float, float)   # (min, max, gamma)
+    params_changed = Signal(float, float, float)   # (min, max, gamma)
 
     def __init__(self, parent=None, value_range=(0.0, 65535.0)):
         super().__init__(parent)
@@ -119,8 +119,8 @@ class Step0Inspector(QtWidgets.QWidget):
     """Selected-channel tools for Step0: Min/Max/Gamma, background-method
     parameters, and the Compare entry point."""
 
-    bg_params_changed = pyqtSignal(dict)     # {"tophat_radius":int,"cucim_sigma":int}
-    compare_requested = pyqtSignal()
+    bg_params_changed = Signal(dict)     # {"tophat_radius":int,"cucim_sigma":int}
+    compare_requested = Signal()
 
     def __init__(self, parent=None, tophat_range=(1, 200), cucim_range=(1, 500)):
         super().__init__(parent)

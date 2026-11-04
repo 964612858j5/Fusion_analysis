@@ -7,8 +7,8 @@ of `CoresPanel`.
 
 from __future__ import annotations
 
-from PyQt5.QtGui import QCursor
-from PyQt5.QtWidgets import QFileDialog, QInputDialog, QMenu, QMessageBox
+from ...qt.QtGui import QCursor
+from ...qt.QtWidgets import QFileDialog, QInputDialog, QMenu, QMessageBox
 
 from ...core.regions import document as D
 from ...core.regions import geometry as G
@@ -88,7 +88,7 @@ class CoresActions:
             rebind = box.addButton("Rebind", QMessageBox.AcceptRole)
             swap = box.addButton("Exchange", QMessageBox.ActionRole) if (held and own) else None
             box.addButton(QMessageBox.Cancel)
-            box.exec_()
+            box.exec()
             if swap is not None and box.clickedButton() is swap:
                 page.edit(N.swap, plan["pairs"][0]["core"], held[0]["core"])
                 return
@@ -157,7 +157,7 @@ class CoresActions:
         else:
             m.addAction("Exclude…", lambda: self._ask_exclude(ident))
             m.addAction("Accept", lambda: page.edit(D.set_qc, ident, "accepted"))
-        m.exec_(pos)
+        m.exec(pos)
 
     def _ask_missing(self, key):
         reason, ok = QInputDialog.getText(self.page, "Confirm missing", "Reason (optional):")
@@ -195,7 +195,7 @@ class CoresActions:
             sub = m.addMenu("Make exclusion" if len(ids) == 1 else f"Make {len(ids)} exclusions")
             for reason, text in (("blur", "Blur"), ("fold", "Fold"), ("other", "Other")):
                 sub.addAction(text, lambda r=reason: page.pieces_to_exclusions(ids, r))
-        m.exec_(QCursor.pos())
+        m.exec(QCursor.pos())
 
     # ── study, cores ──
     def choose_map(self):

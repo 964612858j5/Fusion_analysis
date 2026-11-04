@@ -26,10 +26,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtWidgets  # noqa: E402
-from PyQt5.QtCore import Qt  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
+from block01.qt.QtCore import Qt  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -232,7 +232,7 @@ def test_each_step_shows_the_fields_it_works_with(app):
     in these tests, so everything answers False to `isVisible` and a control
     that is still reachable would pass unnoticed.
     """
-    from PyQt5.QtCore import Qt as _Qt
+    from block01.qt.QtCore import Qt as _Qt
 
     w = _window(app)
     try:
@@ -611,7 +611,7 @@ def test_a_weight_edited_in_step1_survives_the_walk(app):
     window is the other one, and it writes the same model), so what is pinned
     here is that the ANSWER travels, not the control.
     """
-    from PyQt5.QtWidgets import QListWidget
+    from block01.qt.QtWidgets import QListWidget
 
     w = _window(app)
     try:
@@ -800,7 +800,7 @@ def _destroy_step0(w):
     dangling provider survives. `sip.delete` is what makes "the page is
     gone" true.
     """
-    import sip
+    from block01.qt import delete_cpp
     page = w._step0
     page.release_block01_display()
     idx = w._stack.indexOf(page)
@@ -809,7 +809,7 @@ def _destroy_step0(w):
     page.setParent(None)
     w._step0 = None
     ref = weakref.ref(page)
-    sip.delete(page)
+    delete_cpp(page)
     del page
     # The page's own children reference it back (the preview provider, the
     # compare strip, its parameter-box connections), so it dies in a CYCLIC
@@ -823,7 +823,7 @@ def _destroy_step0(w):
 
 def test_the_public_swatch_writes_colour_without_step0(app, monkeypatch,
                                                       capsys):
-    from PyQt5 import QtGui
+    from block01.qt import QtGui
 
     w = _window(app)
     try:
@@ -936,7 +936,7 @@ def test_the_detach_of_a_stale_adapter_leaves_the_current_one(app):
 # ── P1: the production window never builds the old private list ─────────────
 
 def test_the_production_window_builds_no_legacy_channel_list(app):
-    from PyQt5.QtWidgets import QListWidget
+    from block01.qt.QtWidgets import QListWidget
     from block01.ui.widgets.channel_dock.global_dock import (
         GlobalChannelDock, GlobalChannelRow)
 
@@ -977,7 +977,7 @@ def _click_row(dock, cid, control=None):
     up selecting the row as well. Posting straight at the viewport would skip
     the row and prove nothing about that.
     """
-    from PyQt5.QtTest import QTest
+    from block01.qt.QtTest import QTest
     row = dock.row(cid)
     # Offscreen, a row's children keep their pre-layout positions until the
     # layout is activated; a click computed from those lands nowhere.
@@ -1004,7 +1004,7 @@ def test_a_real_click_on_the_swatch_changes_only_the_colour(app, monkeypatch):
     `QTest.mouseClick` rather than by emitting the row's signal, because the
     order the press and the release arrive in IS the bug.
     """
-    from PyQt5 import QtGui
+    from block01.qt import QtGui
 
     w = _window(app, names=("DAPI", "CD3", "CD8"))
     try:
@@ -1048,8 +1048,8 @@ def test_a_press_delivered_to_the_row_over_the_swatch_still_selects_nothing(
     that began elsewhere, or an event delivered to the row directly. It must
     answer the same way: a colour, and no selection.
     """
-    from PyQt5 import QtGui
-    from PyQt5.QtTest import QTest
+    from block01.qt import QtGui
+    from block01.qt.QtTest import QTest
 
     w = _window(app, names=("DAPI", "CD3", "CD8"))
     try:

@@ -14,9 +14,9 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import (QComboBox, QCompleter, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+from ...qt.QtCore import Qt, Signal
+from ...qt.QtGui import QColor
+from ...qt.QtWidgets import (QComboBox, QCompleter, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                              QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget)
 
 
@@ -25,7 +25,7 @@ class RecordBox(QComboBox):
     matches (the first match is taken when typing ends); unmatched text
     goes back to the current record."""
 
-    picked = pyqtSignal()
+    picked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -60,12 +60,12 @@ class RecordBox(QComboBox):
 
 
 class NumberingPanel(QWidget):
-    target_changed = pyqtSignal()
-    confirm = pyqtSignal()
-    reverse = pyqtSignal()
-    cancel = pyqtSignal()
-    bind_single = pyqtSignal(str)         # the text in the number box
-    custom_single = pyqtSignal(str)
+    target_changed = Signal()
+    confirm = Signal()
+    reverse = Signal()
+    cancel = Signal()
+    bind_single = Signal(str)         # the text in the number box
+    custom_single = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)

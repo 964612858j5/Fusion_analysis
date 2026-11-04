@@ -22,9 +22,9 @@ from __future__ import annotations
 import os
 
 import numpy as np
-from PyQt5 import QtWidgets
-from PyQt5.QtCore import QEvent, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor
+from ...qt import QtWidgets
+from ...qt.QtCore import QEvent, Qt, QTimer, Signal
+from ...qt.QtGui import QColor
 
 from ...core.channel_remap import (
     apply_channel_remap,
@@ -72,18 +72,18 @@ class ChannelWorkbench(QtWidgets.QWidget):
         calls set_channel_images(). The workbench stays ignorant of Step3.
     """
 
-    refresh_requested = pyqtSignal()
+    refresh_requested = Signal()
     # A channel's display colour was changed HERE (the layer list's swatch).
     # Hosts that keep their own channel list (Step0's Background Correction
     # rows) listen so both lists show one colour per channel.
-    channel_color_changed = pyqtSignal(str, str)   # channel name, "#rrggbb"
+    channel_color_changed = Signal(str, str)   # channel name, "#rrggbb"
     # v15: a channel's remap params changed via the controls (live mutual
     # visibility with the background-correction side).
-    params_changed = pyqtSignal(str)
+    params_changed = Signal(str)
     # A channel's pixels were filed (`_install_loaded`), whether or not that
     # seeded its params -- `params_changed` is the USER's signal and a lazy
     # load emits none. A host that keeps the params elsewhere listens here.
-    pixels_installed = pyqtSignal(str)
+    pixels_installed = Signal(str)
 
     def __init__(self, parent=None, *, show_reference_bar=True,
                  show_enabled_checkbox=True, multichannel_overlay=False,

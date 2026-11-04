@@ -47,9 +47,9 @@ import time
 import weakref
 
 import numpy as np
-from PyQt5.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import QVBoxLayout, QWidget
+from ..qt.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from ..qt.QtGui import QColor
+from ..qt.QtWidgets import QVBoxLayout, QWidget
 
 from ..core import display_identity as _identity
 from ..core import tissue_compose
@@ -119,20 +119,20 @@ class ChannelDisplayState(QObject):
     "who emitted last" race left to lose.
     """
 
-    color_changed = pyqtSignal(str, str)        # channel, "#rrggbb"
-    mapping_changed = pyqtSignal(str)           # channel (SHARED table)
-    step0_mapping_changed = pyqtSignal(str)     # channel (STEP0 table)
-    dataset_changed = pyqtSignal(object)        # DatasetIdentity
-    selection_changed = pyqtSignal(str)         # channel, "" = nothing
-    visibility_changed = pyqtSignal(str, bool)  # channel, visible
+    color_changed = Signal(str, str)        # channel, "#rrggbb"
+    mapping_changed = Signal(str)           # channel (SHARED table)
+    step0_mapping_changed = Signal(str)     # channel (STEP0 table)
+    dataset_changed = Signal(object)        # DatasetIdentity
+    selection_changed = Signal(str)         # channel, "" = nothing
+    visibility_changed = Signal(str, bool)  # channel, visible
     # The step being drawn changed which tick and which current channel this
     # state answers with. NOT a user command and NOT a field write: views
     # redraw from it, and nothing acts on it. See `set_scope`.
-    scope_changed = pyqtSignal(str)             # scope name, "" = shared
+    scope_changed = Signal(str)             # scope name, "" = shared
     # ONE completion notice per transaction. An observer that only wants to
     # know "the state is now whole" listens here rather than counting field
     # signals -- which is what made a restore look like a run of user actions.
-    state_installed = pyqtSignal(object)        # DisplayBinding
+    state_installed = Signal(object)        # DisplayBinding
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1236,7 +1236,7 @@ class TissuePreviewCoordinator(QObject):
     step's context.
     """
 
-    frame_published = pyqtSignal(object)        # the result dict, after drawing
+    frame_published = Signal(object)        # the result dict, after drawing
 
     def __init__(self, state, parent=None):
         super().__init__(parent)
@@ -2112,10 +2112,10 @@ class Block01DisplayServices(QObject):
     another step, and this object never calls a step's private method.
     """
 
-    navigator_created = pyqtSignal(object)      # the popup, once
+    navigator_created = Signal(object)      # the popup, once
     #: A session restore finished: BOTH owners are final. The one notice a
     #: host follows to refresh once for a restore, whichever half moved.
-    session_restored = pyqtSignal(object)      # a `SessionRestore`
+    session_restored = Signal(object)      # a `SessionRestore`
 
     def __init__(self, parent=None):
         super().__init__(parent)

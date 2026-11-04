@@ -19,11 +19,11 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("zarr")
 import numpy as np  # noqa: E402
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -110,7 +110,7 @@ def _window(app, tmp_path):
 def _settle(w, timeout=20.0):
     """Let the background geometry write finish and be announced."""
     import time
-    from PyQt5 import QtWidgets as _Qt
+    from block01.qt import QtWidgets as _Qt
     deadline = time.monotonic() + timeout
     worker = getattr(w._step0, "_geometry_persist_worker", None)
     while time.monotonic() < deadline:

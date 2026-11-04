@@ -96,6 +96,6 @@ def qpath(polys, ox, oy):
     import pyqtgraph as pg
     x, y, connect = path_arrays(polys, ox, oy)
     if not len(x):
-        from PyQt5 import QtGui
+        from ...qt import QtGui
         return QtGui.QPainterPath()
     return pg.arrayToQPath(x, y, connect=connect.astype(np.int32))

@@ -6,8 +6,8 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtGui import QColor
+from block01.qt.QtWidgets import QApplication
+from block01.qt.QtGui import QColor
 
 from block01.ui.batch_step4_dialog import (
     BatchStep4Dialog, discover_samples,

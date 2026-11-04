@@ -47,7 +47,7 @@ def _register_block01_alias():
 _register_block01_alias()
 
 import pyqtgraph as pg  # noqa: E402
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 # Match main.py's global config (imageAxisOrder="row-major"): standalone use
 # of this demo must not render transposed just because it never touched
@@ -670,7 +670,7 @@ def main():
         driver.timeout.connect(_drive)
         driver.start()
 
-    code = app.exec_()
+    code = app.exec()
     if hot is not None:
         hot.stop()
         print(f"[hot] {hot.stats}")

@@ -20,7 +20,7 @@ if os.environ.get("BLOCK01_REQUIRE_STEP1_GPU") != "1":
 try:
     import OpenGL  # noqa: F401
     import pyqtgraph  # noqa: F401
-    from PyQt5 import QtCore, QtWidgets
+    from block01.qt import QtCore, QtWidgets
 except ImportError as exc:  # required mode must fail, not skip
     pytest.fail(f"required G1 GPU runtime dependency is unavailable: {exc}", pytrace=False)
 

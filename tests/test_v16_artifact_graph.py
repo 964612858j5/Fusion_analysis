@@ -284,7 +284,7 @@ def _nuclei_slide(root):
 
 
 def _fuse(ctx, slide, *, sources=True, remap=REMAP):
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
     QtCore.QCoreApplication.instance() or QtCore.QCoreApplication([])
     from block01.core.io_loader import OMETIFFLoader
     from block01.ui.step0.overview_panel import FullFusionWorker
@@ -361,7 +361,7 @@ def _segment(ctx, fused_path):
     pytest.importorskip("stardist")
     import test_step2_runner_path as t2
     from block01.workers.segment_merge_worker import SegmentMergeWorker
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     cfg = t2._contract_config(__import__("pathlib").Path(ctx["roi_dir"]) / "future",
                               "stardist_nuclei_expansion")

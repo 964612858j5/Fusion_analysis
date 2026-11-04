@@ -20,7 +20,7 @@ def type_name(kind):
     if kind == -2:
         return "awake"
     try:
-        from PyQt5 import QtCore
+        from block01.qt import QtCore
         for name in dir(QtCore.QEvent):
             if getattr(QtCore.QEvent, name) == kind and name[0].isupper():
                 return name

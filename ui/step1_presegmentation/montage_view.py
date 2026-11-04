@@ -15,7 +15,7 @@ import math
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5 import QtCore, QtGui, QtWidgets
+from ...qt import QtCore, QtGui, QtWidgets
 
 from ...viewer import request_planning as planning
 from ..step1_button_styles import MODE_BUTTON_QSS, layer_button_qss
@@ -219,11 +219,11 @@ class MontageView(QtWidgets.QWidget):
     `set_image`; it tells the page which level it wants (`level_wanted`)
     and which patch was clicked (`patch_clicked`)."""
 
-    level_wanted = QtCore.pyqtSignal(int, int)       # level, stride
-    patch_clicked = QtCore.pyqtSignal(object)        # patch id, or None
-    mode_requested = QtCore.pyqtSignal(str)          # "overlay" | "fusion"
-    layers_changed = QtCore.pyqtSignal()             # the Fusion-mode signal / nucleus toggles
-    paths_wanted = QtCore.pyqtSignal(object)         # [(outline key, detail bucket)] to build
+    level_wanted = QtCore.Signal(int, int)       # level, stride
+    patch_clicked = QtCore.Signal(object)        # patch id, or None
+    mode_requested = QtCore.Signal(str)          # "overlay" | "fusion"
+    layers_changed = QtCore.Signal()             # the Fusion-mode signal / nucleus toggles
+    paths_wanted = QtCore.Signal(object)         # [(outline key, detail bucket)] to build
 
     LABEL_COLOR = "#ffffff"
     SEPARATOR = QtGui.QColor(110, 110, 110)

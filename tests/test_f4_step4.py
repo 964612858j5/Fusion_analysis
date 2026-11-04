@@ -20,7 +20,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(__file__))
 from test_quant_sources import NAMES, ROI_BBOX, SLIDE_SHAPE, build_project  # noqa: E402
 
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+from block01.qt.QtWidgets import QApplication  # noqa: E402
 
 from block01.core import quant_sources as qs  # noqa: E402
 from block01.core.regions import analysis as RA  # noqa: E402

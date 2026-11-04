@@ -25,9 +25,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.core import fusion_domain  # noqa: E402
 from block01.core.fusion_domain import (  # noqa: E402
@@ -155,7 +155,7 @@ def test_a_weight_written_before_step1_is_adopted_by_the_first_group(app):
 def test_the_answers_outlive_the_step1_page(app):
     """A destroyed panel takes no scientific state with it, and nothing falls
     back to reading its rows."""
-    import sip
+    from block01.qt import delete_cpp
     w = _window(app)
     try:
         w.config.set_fusion_enabled("CD3", True)
@@ -163,7 +163,7 @@ def test_the_answers_outlive_the_step1_page(app):
         w._display.fusion.edit_channel_weight("CD3", 0.42)
         panel = w.config
         panel.setParent(None)
-        sip.delete(panel)
+        delete_cpp(panel)
         _pump()
 
         assert w._display.render_weight("CD3") == pytest.approx(0.42)

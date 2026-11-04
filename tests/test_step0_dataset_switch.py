@@ -33,9 +33,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtCore  # noqa: E402
+from block01.qt import QtCore  # noqa: E402
 
 from block01.ui.step0 import step0_page as sp  # noqa: E402
 
@@ -394,12 +394,12 @@ def test_every_batch_worker_signal_is_connected_through_a_generation_slot(
     page = _fresh_page(tmp_path, monkeypatch)
 
     class _IdleBatch(QtCore.QThread):
-        channel_patch_done = QtCore.pyqtSignal(str, int, dict)
-        channel_done = QtCore.pyqtSignal(str)
-        all_done = QtCore.pyqtSignal()
-        progress = QtCore.pyqtSignal(int, int, str)
-        error_signal = QtCore.pyqtSignal(str, int, str)
-        canceled = QtCore.pyqtSignal()
+        channel_patch_done = QtCore.Signal(str, int, dict)
+        channel_done = QtCore.Signal(str)
+        all_done = QtCore.Signal()
+        progress = QtCore.Signal(int, int, str)
+        error_signal = QtCore.Signal(str, int, str)
+        canceled = QtCore.Signal()
 
         def __init__(self, *_a, **kw):
             super().__init__(kw.get("parent"))
@@ -587,12 +587,12 @@ class _EmitOnceBatch(QtCore.QThread):
     pumps it -- which is exactly the window under test.
     """
 
-    channel_patch_done = QtCore.pyqtSignal(str, int, dict)
-    channel_done = QtCore.pyqtSignal(str)
-    all_done = QtCore.pyqtSignal()
-    progress = QtCore.pyqtSignal(int, int, str)
-    error_signal = QtCore.pyqtSignal(str, int, str)
-    canceled = QtCore.pyqtSignal()
+    channel_patch_done = QtCore.Signal(str, int, dict)
+    channel_done = QtCore.Signal(str)
+    all_done = QtCore.Signal()
+    progress = QtCore.Signal(int, int, str)
+    error_signal = QtCore.Signal(str, int, str)
+    canceled = QtCore.Signal()
 
     PAYLOAD = {"original_disp": None, "tophat_disp": None, "cucim_disp": None,
                "original_metrics": {"snr": 8.0, "bg_cv": 8.0},

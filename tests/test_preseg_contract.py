@@ -22,8 +22,8 @@ import pytest
 from block01.core import preseg_contract as pc
 from block01.core import preseg_run
 
-pytest.importorskip("PyQt5")
-from PyQt5 import QtWidgets  # noqa: E402
+pytest.importorskip("block01.qt")
+from block01.qt import QtWidgets  # noqa: E402
 
 IDENT = {
     "cellpose": {"engine": "cellpose", "lock_hash": "L1", "lib_versions": {"cellpose": "4.0.1"},

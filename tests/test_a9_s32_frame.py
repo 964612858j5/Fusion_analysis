@@ -26,7 +26,7 @@ SIZE = (37, 29)                      # odd, so pixel centres fall off-grid
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 

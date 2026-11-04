@@ -8,10 +8,10 @@ from datetime import datetime
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.utils import run_store as rs  # noqa: E402
 from block01.utils import trash  # noqa: E402
@@ -759,9 +759,9 @@ def test_a_step2_draft_keeps_its_parameters(app, tmp_path, before):
 
 
 def _click_close(combo, row):
-    from PyQt5 import QtCore
-    from PyQt5.QtCore import Qt
-    from PyQt5.QtTest import QTest
+    from block01.qt import QtCore
+    from block01.qt.QtCore import Qt
+    from block01.qt.QtTest import QTest
     combo.showPopup()
     QtWidgets.QApplication.processEvents()
     view = combo.view()

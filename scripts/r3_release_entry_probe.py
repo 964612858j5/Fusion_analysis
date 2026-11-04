@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "tests"))
 def _step2_run(work):
     import numpy as np
     import zarr
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     from block01.ui import step2_page as s2
     zp = os.path.join(work, "fused_Full WSI.zarr")
     z = zarr.open(zp, mode="w", shape=(64, 64, 2), chunks=(64, 64, 2), dtype=np.uint16)
@@ -31,7 +31,7 @@ def _step2_run(work):
     from test_v16_a6_async import _FakeStep2Run    # the worker that does nothing
     s2.SegmentMergeWorker = _FakeStep2Run
     s2.mark_roi_step = lambda *a, **k: None
-    s2.QMessageBox.exec_ = lambda self: 0
+    s2.QMessageBox.exec = lambda self: 0
     s2.QMessageBox.critical = lambda *a, **k: None
     p = s2.Step2Page()
     p._promote_step0_remap = lambda cfg: None

@@ -114,7 +114,7 @@ def environment_block(offscreen):
 def run_scripted_sequence(ctrl, view, provider, seed=0):
     """load overview; 30 pan steps of 1/8 viewport; 5 zoom in; 5 zoom out;
     3 jumps to random corners (seeded). Returns timing sample dicts."""
-    from PyQt5 import QtTest
+    from block01.qt import QtTest
 
     rng = random.Random(seed)
 
@@ -216,7 +216,7 @@ def main():
 
     os.makedirs(args.out, exist_ok=True)
 
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
 
     import block01.core.bg_correction as bg_correction  # noqa: F401
     from block01.viewer.caches import LRUByteCache

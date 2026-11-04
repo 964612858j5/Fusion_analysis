@@ -308,7 +308,7 @@ def test_marquees_select_by_centre_and_delete_removes_several_in_one_step(app, e
 
 
 def test_merge_keeps_the_smallest_number_after_asking_and_ids_are_never_reused(app, env, monkeypatch):
-    from PyQt5.QtWidgets import QMessageBox
+    from block01.qt.QtWidgets import QMessageBox
     from block01.core.regions import document as D
     page = _page(app, env, monkeypatch)
     _set_target(page, "X1-Y01", "X1-Y03", "Along column")
@@ -343,8 +343,8 @@ def test_merge_keeps_the_smallest_number_after_asking_and_ids_are_never_reused(a
 
 
 def test_space_held_pans_whatever_the_tool(app, env, monkeypatch):
-    from PyQt5.QtCore import QEvent, QPointF, Qt
-    from PyQt5.QtGui import QKeyEvent, QMouseEvent
+    from block01.qt.QtCore import QEvent, QPointF, Qt
+    from block01.qt.QtGui import QKeyEvent, QMouseEvent
     page = _page(app, env, monkeypatch)
     ov = page.viewer.overlay
     vp, gw = page.viewer.graphics.viewport(), page.viewer.graphics
@@ -457,8 +457,8 @@ def test_a_numbered_merge_leaves_unselected_pieces_and_undoes_in_one_step(app, e
 
 
 def test_ctrl_z_or_a_tab_switch_while_the_button_is_down_drops_that_click(app, env, monkeypatch):
-    from PyQt5.QtCore import QEvent, QPointF, Qt
-    from PyQt5.QtGui import QMouseEvent
+    from block01.qt.QtCore import QEvent, QPointF, Qt
+    from block01.qt.QtGui import QMouseEvent
     page = _page(app, env, monkeypatch)
     _open_exclusions(page)
     ov, vp = page.viewer.overlay, page.viewer.graphics.viewport()
@@ -484,8 +484,8 @@ def test_ctrl_z_or_a_tab_switch_while_the_button_is_down_drops_that_click(app, e
 
 
 def test_a_double_click_closes_a_polygon_or_counts_as_a_press(app, env, monkeypatch):
-    from PyQt5.QtCore import QEvent, QPointF, Qt
-    from PyQt5.QtGui import QKeyEvent, QMouseEvent
+    from block01.qt.QtCore import QEvent, QPointF, Qt
+    from block01.qt.QtGui import QKeyEvent, QMouseEvent
     page = _page(app, env, monkeypatch)
     _open_exclusions(page)
     ov, vp, gw = page.viewer.overlay, page.viewer.graphics.viewport(), page.viewer.graphics
@@ -512,28 +512,28 @@ def test_a_double_click_closes_a_polygon_or_counts_as_a_press(app, env, monkeypa
     assert ov.eventFilter(vp, ev(QEvent.MouseButtonDblClick, 680, 180)) is False
     assert len(page.holder.d["exclusions"]) == 2 and len(page.ctl.poly_pts) == 3
     ov.eventFilter(vp, ev(QEvent.MouseButtonRelease, 680, 180))
-    from PyQt5.QtGui import QFocusEvent
+    from block01.qt.QtGui import QFocusEvent
     ov.eventFilter(gw, QFocusEvent(QEvent.FocusOut))                  # Space released elsewhere
     assert ov._space is False
     page.shutdown()
 
 
 def test_an_old_left_out_piece_can_be_restored_or_deleted(app, env, monkeypatch):
-    from PyQt5.QtWidgets import QMenu
+    from block01.qt.QtWidgets import QMenu
     from block01.core.regions import document as D
     page = _page(app, env, monkeypatch)
     pid = next(iter(page.holder.d["pieces"]))
     page.edit(D.drop_piece, pid, "dust")                              # as old data has it
     seen = []
-    monkeypatch.setattr(QMenu, "exec_", lambda self, *a: seen.extend(x.text() for x in self.actions()))
+    monkeypatch.setattr(QMenu, "exec", lambda self, *a: seen.extend(x.text() for x in self.actions()))
     page.cores.piece_menu(pid)
     assert "Restore" in seen and "Delete" in seen and not any("Leave out" in t for t in seen)
     page.shutdown()
 
 
 def test_ctrl_z_on_a_first_press_cancels_only_that_press(app, env, monkeypatch):
-    from PyQt5.QtCore import QEvent, QPointF, Qt
-    from PyQt5.QtGui import QMouseEvent
+    from block01.qt.QtCore import QEvent, QPointF, Qt
+    from block01.qt.QtGui import QMouseEvent
     page = _page(app, env, monkeypatch)
     _open_exclusions(page)
     _square(page, 100, 100, 50)
@@ -561,8 +561,8 @@ def test_find_cores_on_an_old_draft_keeps_its_highest_piece_id(app, env, monkeyp
 # ── second real-machine round (docs/regions_tools_redesign.md §10) ──────
 
 def test_a_polygon_point_goes_down_with_the_button_even_if_the_mouse_moves(app, env, monkeypatch):
-    from PyQt5.QtCore import QEvent, QPointF, Qt
-    from PyQt5.QtGui import QMouseEvent
+    from block01.qt.QtCore import QEvent, QPointF, Qt
+    from block01.qt.QtGui import QMouseEvent
     page = _page(app, env, monkeypatch)
     ov, vp = page.viewer.overlay, page.viewer.graphics.viewport()
 
@@ -582,7 +582,7 @@ def test_a_polygon_point_goes_down_with_the_button_even_if_the_mouse_moves(app, 
 def test_circle_keeps_the_press_on_its_outline_however_far_the_drag_goes(app, env, monkeypatch):
     import math
     import numpy as np
-    from PyQt5.QtCore import Qt
+    from block01.qt.QtCore import Qt
     page = _page(app, env, monkeypatch)
     _open_exclusions(page)
     page._set_tool("circle")
@@ -860,7 +860,7 @@ def test_a_pending_transform_is_hit_where_it_is_shown_keeps_its_label_and_a_retu
 
 def test_the_circle_rule_holds_for_every_modifier_and_direction(app, env, monkeypatch):
     import itertools
-    from PyQt5.QtCore import Qt
+    from block01.qt.QtCore import Qt
     page = _page(app, env, monkeypatch)
     _open_exclusions(page)
     page._set_tool("circle")

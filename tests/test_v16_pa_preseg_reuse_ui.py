@@ -115,5 +115,5 @@ def test_the_question_counts_only_what_will_run(app, tmp_path, monkeypatch):  # 
 
 
 def QtWidgets_box():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     return QtWidgets.QMessageBox

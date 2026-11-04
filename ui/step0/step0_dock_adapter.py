@@ -21,7 +21,7 @@ No correction/remap math, worker behaviour or config semantics change here.
 
 import weakref
 
-from PyQt5.QtCore import QObject
+from ...qt.QtCore import QObject
 
 from ...core.display_identity import ChannelCapabilities
 

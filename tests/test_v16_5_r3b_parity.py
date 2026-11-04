@@ -26,7 +26,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 fvc = pytest.importorskip("fusion_viewer_core")
 zarr = pytest.importorskip("zarr")
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 from block01.core import label_pyramid as lp  # noqa: E402
 from block01.core import step3_masks as sm  # noqa: E402
@@ -89,8 +89,8 @@ def test_a_reading_matches_python_tile_for_tile(source):
 
 
 class _Controller(QtCore.QObject):
-    interaction_event = QtCore.pyqtSignal(str, object)
-    gesture_quiet = QtCore.pyqtSignal(object)
+    interaction_event = QtCore.Signal(str, object)
+    gesture_quiet = QtCore.Signal(object)
 
     def snapshot(self):
         return SimpleNamespace(level=0, visible_tiles=frozenset(), epoch=0)

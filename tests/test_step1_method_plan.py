@@ -85,8 +85,8 @@ def test_same_name_merge_is_the_union_and_names_single_value_conflicts():
 
 
 # ── the dialog ──────────────────────────────────────────────────────────────
-pytest.importorskip("PyQt5")
-from PyQt5 import QtWidgets  # noqa: E402
+pytest.importorskip("block01.qt")
+from block01.qt import QtWidgets  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -136,7 +136,7 @@ class _Editor:
         self.opened_with = (method, values, lock_method)
         _Editor.last = self
 
-    def exec_(self):
+    def exec(self):
         return QtWidgets.QDialog.Accepted
 
     def method(self):
@@ -199,7 +199,7 @@ def test_a_same_name_method_merges_on_yes_and_is_kept_apart_on_no(app, monkeypat
         def __init__(self, method, conflicts, parent=None):
             self.conflicts = conflicts
 
-        def exec_(self):
+        def exec(self):
             return QtWidgets.QDialog.Accepted
 
         def chosen(self):

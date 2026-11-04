@@ -21,8 +21,8 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5 import QtWidgets  # noqa: E402
-from PyQt5.QtCore import Qt  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
+from block01.qt.QtCore import Qt  # noqa: E402
 
 from block01.utils import error_hook as eh  # noqa: E402
 
@@ -42,7 +42,7 @@ SCRIPT = textwrap.dedent(r'''
     pkg = importlib.util.module_from_spec(spec)
     sys.modules["block01"] = pkg
     spec.loader.exec_module(pkg)
-    from PyQt5 import QtCore, QtWidgets
+    from block01.qt import QtCore, QtWidgets
     from block01.utils import error_hook as eh
     assert os.path.dirname(os.path.dirname(eh.__file__)) == repo, eh.__file__
     app = QtWidgets.QApplication([])
@@ -71,7 +71,7 @@ SCRIPT = textwrap.dedent(r'''
     for i, step in enumerate(steps):
         QtCore.QTimer.singleShot(100 + 150 * i, step)
     QtCore.QTimer.singleShot(1400, app.quit)
-    app.exec_()
+    app.exec()
     worker.wait()
     print("RESULT " + json.dumps(shown))
 ''')

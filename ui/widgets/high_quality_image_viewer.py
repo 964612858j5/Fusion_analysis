@@ -41,8 +41,8 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5 import QtCore, QtWidgets
-from PyQt5.QtCore import pyqtSignal
+from ...qt import QtCore, QtWidgets
+from ...qt.QtCore import Signal
 
 from ...utils.mask_renderer import extract_mask_boundaries
 
@@ -126,7 +126,7 @@ class HighQualityImageViewer(QtWidgets.QWidget):
 
     # Debounced — fires after pan/zoom settles, not on every ViewBox range tick.
     # Consumers (Step0 viewport sync) read get_viewport_rect() when it fires.
-    viewport_changed = pyqtSignal()
+    viewport_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)

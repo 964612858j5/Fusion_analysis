@@ -12,10 +12,10 @@ from types import SimpleNamespace
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("pyqtgraph")
 
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 from test_step1_gpu_takeover import (  # noqa: E402
     _Window, _domain, _settle, _stack_factory, _state, app,  # noqa: F401

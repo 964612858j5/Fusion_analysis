@@ -27,7 +27,7 @@ import threading
 import time
 import traceback
 
-from PyQt5 import QtCore
+from ..qt import QtCore
 
 ENV_SWITCH = "BLOCK01_GUI_WATCHDOG"
 

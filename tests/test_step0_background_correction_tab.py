@@ -7,14 +7,14 @@ Qt tests need an offscreen platform (env: QT_QPA_PLATFORM=offscreen).
 import os
 
 import pytest
-from PyQt5 import QtCore, QtTest
+from block01.qt import QtCore, QtTest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     a = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     return a
 
@@ -139,7 +139,7 @@ def test_tissue_navigator_hosts_roi_patch(app):
 
 
 def test_preview_patch_still_in_background_correction(app):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
     # The per-patch SELECTOR is still in Background Correction: since
@@ -215,7 +215,7 @@ def test_auto_open_no_loader_no_popup(app):
 
 # ── step0-fix-title-occlusion (#3): _box_style reserves room for the title ────
 def test_box_style_title_not_occluded_by_body(app):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     from block01.ui.step0.step0_page import Step0Page
 
     gb = QtWidgets.QGroupBox("Quantitative Metrics")
@@ -242,7 +242,7 @@ def test_box_style_title_not_occluded_by_body(app):
 
 # ── step0-layout-and-save-restructure (#4 layout + #5 one-tab-one-Save) ───────
 def _gb(s):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     return {b.title(): b for b in s.findChildren(QtWidgets.QGroupBox)}
 
 
@@ -307,7 +307,7 @@ def test_preview_patch_relocated_to_c_right(app):
 
 
 def test_background_correction_has_the_only_step0_save_button(app):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
     assert s._btn_continue.text() == "Save"
@@ -461,7 +461,7 @@ def test_navigator_overview_above_lists_with_proportions(app):
 
 
 def test_navigator_no_full_wsi_message(app):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     from block01.ui.step0.step0_page import Step0Page
     s = Step0Page()
     # the redundant "Full WSI mode" banner label is gone entirely
@@ -628,8 +628,8 @@ def _install_gpu_path_recorders(monkeypatch, timeline):
         def __init__(self, *_a, **_k):
             pass
 
-        def exec_(self):
-            timeline.append("dialog.exec_")
+        def exec(self):
+            timeline.append("dialog.exec")
 
         def show(self):
             timeline.append("dialog.show")

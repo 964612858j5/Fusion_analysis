@@ -39,7 +39,23 @@ if "--platform" in sys.argv:
     if _platform_index + 1 < len(sys.argv) and sys.argv[_platform_index + 1] == "offscreen":
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5 import QtCore, QtGui, QtWidgets  # noqa: E402
+# Qt comes through this checkout's `block01.qt`: register the checkout as
+# `block01` first, so the script also runs on its own (no PYTHONPATH).
+def _this_checkout_as_block01():
+    import importlib.util
+    import pathlib as _pl
+    root = _pl.Path(__file__).resolve().parent.parent
+    if "block01" in sys.modules:
+        return
+    spec = importlib.util.spec_from_file_location(
+        "block01", root / "__init__.py", submodule_search_locations=[str(root)])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["block01"] = module
+    spec.loader.exec_module(module)
+
+
+_this_checkout_as_block01()
+from block01.qt import QtCore, QtGui, QtWidgets  # noqa: E402
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -268,7 +284,7 @@ def _require_no_gl_error(gl, operation: str) -> None:
 class GpuProbeWidget(QtWidgets.QOpenGLWidget):
     """Qt-owned context with G0.1's minimal PyOpenGL resource lifecycle."""
 
-    initialized = QtCore.pyqtSignal()
+    initialized = QtCore.Signal()
 
     def __init__(self, source: ProbeSource, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)

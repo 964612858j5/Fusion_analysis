@@ -15,7 +15,7 @@ import collections
 from typing import Any, Dict
 
 import numpy as np
-from PyQt5 import QtGui
+from ..qt import QtGui
 
 from .step1_core_adapter import CORE_ERRORS
 

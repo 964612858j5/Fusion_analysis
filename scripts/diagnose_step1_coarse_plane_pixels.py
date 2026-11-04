@@ -57,8 +57,8 @@ def to_array(image):
     """A QImage from `grabFramebuffer()` as HxWx4 uint8 (RGBA)."""
     image = image.convertToFormat(image.Format_RGBA8888)
     width, height = image.width(), image.height()
-    pointer = image.constBits()
-    pointer.setsize(image.byteCount())
+    from block01.qt import image_bytes
+    pointer = image_bytes(image)
     return np.frombuffer(pointer, np.uint8).reshape(
         (height, image.bytesPerLine() // 4, 4))[:, :width, :].copy()
 

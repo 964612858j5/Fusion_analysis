@@ -24,9 +24,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.core.fusion_domain import FusionDomainModel  # noqa: E402
 
@@ -118,7 +118,7 @@ def test_the_state_slot_keeps_its_width_when_it_is_empty(app):
 
 
 def test_the_list_uses_the_template_stylesheet_and_scroll_policy(app):
-    from PyQt5.QtCore import Qt
+    from block01.qt.QtCore import Qt
 
     dock = _dock(app)
     try:

@@ -4,10 +4,10 @@ block01/ui/step4_page.py — Step4Page (Cell Feature Extraction).
 
 import os
 
-from PyQt5 import QtWidgets
-from PyQt5 import sip
-from PyQt5.QtCore import QProcess, QTimer, Qt, pyqtSignal
-from PyQt5.QtWidgets import (
+from ..qt import QtWidgets
+from ..qt import is_deleted
+from ..qt.QtCore import QProcess, QTimer, Qt, Signal
+from ..qt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QProgressBar, QMessageBox, QFileDialog, QComboBox,
 )
@@ -31,7 +31,7 @@ _TK = theme_widgets.t()
 
 class Step4Page(QWidget):
 
-    go_back = pyqtSignal()
+    go_back = Signal()
 
     def __init__(self, parent=None, metrics=None, title_bar=None):
         super().__init__(parent)
@@ -569,7 +569,7 @@ class Step4Page(QWidget):
     def _open_batch(self):
         from .batch_step4_dialog import BatchStep4Dialog
         dlg = BatchStep4Dialog(parent=self)
-        dlg.exec_()
+        dlg.exec()
 
     # ── SpatialData export (docs/v17_spatialdata_export_plan.md §2) ──
 
@@ -615,7 +615,7 @@ class Step4Page(QWidget):
 
     def _sd_proc_done(self, proc, python, code):
         from ..utils import spatialdata_python as sdp
-        if sip.isdeleted(self):
+        if is_deleted(self):
             return                                 # the page is being destroyed
         state = self._sd_check
         if state is None or state["proc"] is not proc:
@@ -631,7 +631,7 @@ class Step4Page(QWidget):
         self._sd_next()
 
     def _sd_proc_failed(self, proc, python):
-        if sip.isdeleted(self) or proc.error() != QProcess.FailedToStart:
+        if is_deleted(self) or proc.error() != QProcess.FailedToStart:
             return                                 # finished() follows
         from ..utils import spatialdata_python as sdp
         state = self._sd_check

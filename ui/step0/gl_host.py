@@ -44,7 +44,7 @@ the full-image panel's.
 import time
 from typing import Any, Callable, Dict, Optional
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from ...qt import QtCore, QtGui, QtWidgets
 
 from ...utils import perf_trace
 from ...utils import tile_trace
@@ -1266,8 +1266,8 @@ class Step0GlHost(QtWidgets.QOpenGLWidget):
         """What the widget shows now (`grabFramebuffer`), as an RGBA array."""
         import numpy as np
         image = self.grabFramebuffer().convertToFormat(QtGui.QImage.Format_RGBA8888)
-        ptr = image.constBits()
-        ptr.setsize(image.byteCount())
+        from ...qt import image_bytes
+        ptr = image_bytes(image)
         return np.frombuffer(ptr, np.uint8).reshape(image.height(), image.bytesPerLine() // 4, 4)[
             :, :image.width()].copy()
 

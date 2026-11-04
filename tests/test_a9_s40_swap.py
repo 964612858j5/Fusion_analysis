@@ -8,9 +8,9 @@ import os
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtGui, QtWidgets  # noqa: E402
+from block01.qt import QtGui, QtWidgets  # noqa: E402
 
 from block01.ui import gpu_warmup  # noqa: E402
 

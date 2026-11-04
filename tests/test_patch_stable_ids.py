@@ -16,11 +16,11 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("zarr")
 import numpy as np  # noqa: E402
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.ui.step0.roi_context_model import (  # noqa: E402
     Patch, RoiContextModel, with_patch_ids)

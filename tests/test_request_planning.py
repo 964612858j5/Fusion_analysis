@@ -15,7 +15,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 # `block01.viewer...`, NOT `viewer...`: this repo can be imported under
 # both spellings, and they produce SEPARATE module objects. The controller

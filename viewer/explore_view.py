@@ -775,8 +775,8 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5 import QtCore, QtGui, QtWidgets
-from PyQt5.QtCore import QRectF
+from ..qt import QtCore, QtGui, QtWidgets
+from ..qt.QtCore import QRectF
 
 # Called through the module, never bound at import time, so a test can
 # patch a rule and watch the controller's output follow -- the same
@@ -1094,7 +1094,7 @@ class SharedOverviewStore(QtCore.QObject):
 
     # Worker thread -> GUI thread. On the STORE, so a controller being torn
     # down cannot take the delivery for the other waiters down with it.
-    _delivered = QtCore.pyqtSignal(object)
+    _delivered = QtCore.Signal(object)
 
     def __init__(self, max_workers: int = 1):
         super().__init__()
@@ -1562,7 +1562,7 @@ class RightClickViewBox(pg.ViewBox):
     """
 
     # `(x, y)` of the click in this ViewBox's world coordinates.
-    sigRightClicked = QtCore.pyqtSignal(float, float)
+    sigRightClicked = QtCore.Signal(float, float)
 
     def mouseClickEvent(self, ev):
         if ev.button() == QtCore.Qt.RightButton:
@@ -1605,7 +1605,7 @@ class ExploreView(QtWidgets.QWidget):
     # marker. Deciding what a right-click means belongs to the host -- in
     # Step0 it takes a compare snapshot -- and this widget must stay usable
     # by a host that ignores it entirely.
-    sigRightClicked = QtCore.pyqtSignal(float, float)
+    sigRightClicked = QtCore.Signal(float, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1789,12 +1789,12 @@ class RawOverlayLayer(QtCore.QObject):
     where they overlap.
     """
 
-    _delivered = QtCore.pyqtSignal(object)
-    _calibrated = QtCore.pyqtSignal(object)
+    _delivered = QtCore.Signal(object)
+    _calibrated = QtCore.Signal(object)
     #: Public (docs/v17_step0_engine_plan.md §10.2): what this layer shows
     #: may have changed -- switch, suppression, colour, mapping, or a failed
     #: calibration. A notice only: the reader asks for the state itself.
-    display_changed = QtCore.pyqtSignal()
+    display_changed = QtCore.Signal()
 
     def __init__(self, provider, scheduler, grid, view, channel, *,
                  item_budget: int = DEFAULT_ITEM_BUDGET,
@@ -2266,18 +2266,18 @@ class ExploreController(QtCore.QObject):
     gates any interactive request.
     """
 
-    provisional_changed = QtCore.pyqtSignal(bool)
-    floor_preparing_changed = QtCore.pyqtSignal(bool)
+    provisional_changed = QtCore.Signal(bool)
+    floor_preparing_changed = QtCore.Signal(bool)
     # Emitted from `_handle_floor_result`: True when a floor result was
     # accepted (current generation/context, no error), False when it was
     # dropped as stale or failed to compute. Lets a host (or this class
     # itself, for the in-view status badge) know the floor's outcome
     # without polling `_floor_ready`.
-    floor_ready_changed = QtCore.pyqtSignal(bool)
+    floor_ready_changed = QtCore.Signal(bool)
     #: S0-B (docs/v17_step0_engine_plan.md §11.6): a gain table installed
     #: for the live selection while the engine owns the picture --
     #: `(ctx, gains per level)` (`current_gains`)
-    gains_ready = QtCore.pyqtSignal(object, object)
+    gains_ready = QtCore.Signal(object, object)
 
     # ── public, read-only interaction contract ──
     #
@@ -2303,27 +2303,27 @@ class ExploreController(QtCore.QObject):
     #
     # `selection_context_changed(snapshot)` fires whenever channel, method
     # or params change.
-    interaction_event = QtCore.pyqtSignal(str, object)
-    gesture_quiet = QtCore.pyqtSignal(object)
-    selection_context_changed = QtCore.pyqtSignal(object)
+    interaction_event = QtCore.Signal(str, object)
+    gesture_quiet = QtCore.Signal(object)
+    selection_context_changed = QtCore.Signal(object)
 
     # Internal cross-thread delivery signals (scheduler callbacks fire on
     # worker threads; Qt widgets must only be touched on the GUI thread).
-    _raw_delivered = QtCore.pyqtSignal(object)
-    _precise_delivered = QtCore.pyqtSignal(object)
-    _floor_delivered = QtCore.pyqtSignal(object)
-    _dirprefetch_delivered = QtCore.pyqtSignal(object)
+    _raw_delivered = QtCore.Signal(object)
+    _precise_delivered = QtCore.Signal(object)
+    _floor_delivered = QtCore.Signal(object)
+    _dirprefetch_delivered = QtCore.Signal(object)
 
     # Public: an overview record for (source, channel, level) finished
     # preparing; the bool is success. A background consumer needs this to
     # know a neighbour is genuinely switch-ready, and must not read the
     # cache dict directly.
-    overview_prepared = QtCore.pyqtSignal(object, str, int, bool)
+    overview_prepared = QtCore.Signal(object, str, int, bool)
     # Public (docs/v17_step0_engine_plan.md §10.2): what the marker layer
     # shows may have changed -- colour, mapping, visibility, selection or a
     # newly installed overview record (with its range). A notice only:
     # the reader asks for the state itself.
-    display_changed = QtCore.pyqtSignal()
+    display_changed = QtCore.Signal()
 
     def __init__(self, provider, scheduler, compute, grid: TileGridSpec,
                  view: ExploreView, channel: str, settle_ms: int = 80,

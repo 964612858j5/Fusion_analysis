@@ -13,7 +13,7 @@ import time
 import pytest
 
 core = pytest.importorskip("fusion_viewer_core")
-from PyQt5 import QtCore  # noqa: E402
+from block01.qt import QtCore  # noqa: E402
 
 
 @pytest.fixture(scope="module")

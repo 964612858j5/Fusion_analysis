@@ -12,9 +12,9 @@ import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.core import display_identity as di  # noqa: E402
 from block01.core.display_identity import SHARED_TABLE, STEP0_TABLE  # noqa: E402

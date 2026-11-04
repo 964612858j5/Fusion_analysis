@@ -16,9 +16,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtTest  # noqa: E402
+from block01.qt import QtTest  # noqa: E402
 
 from block01.viewer.experimental.coverage_prefetch import (  # noqa: E402
     COVERAGE_BATCH_CHANNELS,
@@ -468,7 +468,7 @@ def test_coverage_inflight_is_configurable_and_defaults_to_one(app):
 
 
 def test_both_signals_deliver_on_the_subclass(app):
-    """A `pyqtSignal` declared on the subclass and one inherited from the
+    """A `Signal` declared on the subclass and one inherited from the
     base must BOTH connect and deliver -- if the metaclass dropped either,
     HOT or COVERAGE would silently never report a completion."""
     controller, scheduler, hot = _make_coverage()

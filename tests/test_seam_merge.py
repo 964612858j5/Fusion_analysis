@@ -396,7 +396,7 @@ def test_step2_recovers_a_cell_both_tiles_drop_and_keeps_its_contract(tmp_path, 
     _sys.path.insert(0, _os.path.dirname(__file__))
     import test_step2_keeps_nuclei as kn
     import test_step2_runner_path as rp
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     from block01.workers import segment_merge_worker as smw
     _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     a, b, nuclei = _seam_truths()

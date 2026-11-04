@@ -4,7 +4,7 @@ The GL paths are the Step1 / Step3 / Regions engine tests' (real GL)."""
 
 import socket
 
-from PyQt5 import QtWidgets
+from block01.qt import QtWidgets
 
 from block01.ui.core_gl_session import FRAME_MS, CoreGlSession
 

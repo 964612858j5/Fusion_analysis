@@ -31,10 +31,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("pyqtgraph")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 import test_step1_viewer_mount as vm  # noqa: E402
 import test_step3_viewer as sv  # noqa: E402
@@ -396,7 +396,7 @@ def test_the_results_window_can_be_minimized_and_follows_step3(app, tmp_path, mo
     """User acceptance: the window stayed on Step4 and could not be
     minimized. It has a minimize button, hides on another step and comes
     back on Step3 only if it was open."""
-    from PyQt5.QtCore import Qt
+    from block01.qt.QtCore import Qt
     rdir, _runs = _project(tmp_path, active="seg_old")
     rig = _window(app, tmp_path, monkeypatch, rdir)
     w = rig.w

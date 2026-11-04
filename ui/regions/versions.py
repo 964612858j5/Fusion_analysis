@@ -9,7 +9,7 @@ from __future__ import annotations
 import itertools
 import os
 
-from PyQt5.QtWidgets import QMessageBox
+from ...qt.QtWidgets import QMessageBox
 
 from ...core.regions import document as D
 from ...core.regions import lock as K

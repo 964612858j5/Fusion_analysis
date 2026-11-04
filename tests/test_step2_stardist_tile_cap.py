@@ -7,8 +7,8 @@ import os
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
-from PyQt5 import QtWidgets  # noqa: E402
+pytest.importorskip("block01.qt")
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.utils.segmentation_config import STARDIST_NUCLEI_EXPANSION, CELLPOSE_WHOLECELL_FUSION  # noqa: E402
 
@@ -85,7 +85,7 @@ def test_every_region_of_a_multi_roi_run_is_checked(app, tmp_path):
 
 
 def test_the_run_guard_refuses_on_no_and_applies_on_yes_before_the_config(app, monkeypatch):
-    from PyQt5.QtWidgets import QMessageBox
+    from block01.qt.QtWidgets import QMessageBox
     p = _page(STARDIST_NUCLEI_EXPANSION)
     p._set_grid(3, 4)
     monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.No))

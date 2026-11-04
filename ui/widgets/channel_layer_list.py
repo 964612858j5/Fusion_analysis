@@ -17,8 +17,8 @@ of Step3 or any page.
 
 from __future__ import annotations
 
-from PyQt5 import QtCore, QtWidgets
-from PyQt5.QtCore import Qt, pyqtSignal
+from ...qt import QtCore, QtWidgets
+from ...qt.QtCore import Qt, Signal
 
 from .activation_quiet import quiet_activation
 
@@ -26,8 +26,8 @@ from .activation_quiet import quiet_activation
 class _ChannelRow(QtWidgets.QWidget):
     """Compact single-channel row widget. Fixed, never needs horizontal scroll."""
 
-    visibility_toggled = pyqtSignal(str, bool)
-    color_clicked = pyqtSignal(str)
+    visibility_toggled = Signal(str, bool)
+    color_clicked = Signal(str)
 
     def __init__(self, name, color="#888888", visible=True, mini_value=1.0,
                  mini_label="w", parent=None):
@@ -118,9 +118,9 @@ class ChannelLayerList(QtWidgets.QWidget):
     visibility_changed(str, bool)  : a row's visibility checkbox toggled
     """
 
-    active_changed = pyqtSignal(str)
-    visibility_changed = pyqtSignal(str, bool)
-    color_clicked = pyqtSignal(str)
+    active_changed = Signal(str)
+    visibility_changed = Signal(str, bool)
+    color_clicked = Signal(str)
 
     def __init__(self, parent=None, *, show_header=True):
         super().__init__(parent)

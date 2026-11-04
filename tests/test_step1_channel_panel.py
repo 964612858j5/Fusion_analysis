@@ -21,10 +21,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 from block01.ui.widgets.channel_dock import template  # noqa: E402
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -75,7 +75,7 @@ def _window(app):
 
 
 def test_step1_holds_exactly_one_channel_panel(app):
-    from PyQt5.QtWidgets import QListWidget
+    from block01.qt.QtWidgets import QListWidget
     from block01.ui.step0.config_panel import ConfigPanel
     from block01.ui.widgets.channel_dock.global_dock import GlobalChannelDock
 
@@ -392,7 +392,7 @@ def test_the_tool_strip_is_the_weight_buttons_alone(app):
     the screen since 2026-09-23 (user ruling: it repeated the nucleus row),
     so the strip is Reset/Load weights and nothing else.
     """
-    from PyQt5.QtWidgets import QPushButton, QSpacerItem
+    from block01.qt.QtWidgets import QPushButton, QSpacerItem
 
     w = _shown_window(app)
     try:
@@ -442,7 +442,7 @@ def test_the_channel_list_still_takes_the_expanding_space(app):
 
 def test_the_weight_row_and_the_buttons_kept_their_look(app):
     """Nothing was restyled to close the gap."""
-    from PyQt5.QtWidgets import QPushButton
+    from block01.qt.QtWidgets import QPushButton
 
     w = _shown_window(app)
     try:

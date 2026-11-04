@@ -5,9 +5,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtCore, QtTest, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtTest, QtWidgets  # noqa: E402
 
 from block01.viewer.multichannel_prefetch import (  # noqa: E402
     HOT_PRIORITY_BASE,
@@ -36,10 +36,10 @@ class FakeProvider:
 
 
 class FakeController(QtCore.QObject):
-    interaction_event = QtCore.pyqtSignal(str, object)
-    gesture_quiet = QtCore.pyqtSignal(object)
-    selection_context_changed = QtCore.pyqtSignal(object)
-    overview_prepared = QtCore.pyqtSignal(object, str, int, bool)
+    interaction_event = QtCore.Signal(str, object)
+    gesture_quiet = QtCore.Signal(object)
+    selection_context_changed = QtCore.Signal(object)
+    overview_prepared = QtCore.Signal(object, str, int, bool)
 
     def __init__(self, channels):
         super().__init__()

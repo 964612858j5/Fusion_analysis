@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from PyQt5 import QtCore, QtWidgets
+from block01.qt import QtCore, QtWidgets
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 if "block01" not in sys.modules:
@@ -197,8 +197,8 @@ class _Provider:
 
 
 class _Controller(QtCore.QObject):
-    interaction_event = QtCore.pyqtSignal(str, object)
-    gesture_quiet = QtCore.pyqtSignal(object)
+    interaction_event = QtCore.Signal(str, object)
+    gesture_quiet = QtCore.Signal(object)
 
     def __init__(self, provider, *, visible_tiles=((0, 0),), level=0, epoch=1):
         super().__init__()

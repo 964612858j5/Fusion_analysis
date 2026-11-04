@@ -29,8 +29,8 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
-from PyQt5 import QtWidgets  # noqa: E402
+pytest.importorskip("block01.qt")
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.core import preseg_contract  # noqa: E402
 from block01.seg_runner import engines as seg_engines  # noqa: E402
@@ -313,11 +313,11 @@ def _old_mesmer_index(tmp_path):
 def _answer(monkeypatch, button):
     shown = []
 
-    def exec_(box):
+    def exec(box):
         shown.append(box.text())
         [b for b in box.buttons() if b.text() == button][0].click()
         return 0
-    monkeypatch.setattr(QtWidgets.QMessageBox, "exec_", exec_)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", exec)
     return shown
 
 

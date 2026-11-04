@@ -109,8 +109,8 @@ def test_the_union_outline_of_a_real_multi_piece_core_splits_back_without_bridge
 @pytest.fixture(scope="module")
 def app():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    pytest.importorskip("PyQt5")
-    from PyQt5 import QtWidgets
+    pytest.importorskip("block01.qt")
+    from block01.qt import QtWidgets
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
@@ -127,8 +127,8 @@ def _view(app):
 
 
 def test_the_outlines_are_read_only_and_follow_the_switch(app):
-    from PyQt5 import QtCore
-    from PyQt5.QtCore import Qt
+    from block01.qt import QtCore
+    from block01.qt.QtCore import Qt
     from block01.ui.regions.core_outlines import CORE_LABEL_MIN_PX, CoreOutlines
     view = _view(app)
     items = [{"id": "u#0", "polygon": [[10, 10], [50, 10], [50, 50]], "color": RD.GREEN, "label": "N"}]

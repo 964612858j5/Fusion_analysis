@@ -44,9 +44,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtCore, QtGui, QtTest, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtGui, QtTest, QtWidgets  # noqa: E402
 
 from block01.ui.step0 import step0_page as sp  # noqa: E402
 from block01.viewer.explore_view import ExploreView  # noqa: E402
@@ -859,7 +859,7 @@ def test_a_double_right_click_is_one_gesture(app):
     """S0-C (2026-10-30): the second half of a double right-click must not
     act again -- it undid the first (compare opened and shut at once)."""
     import pyqtgraph as pg
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
     from block01.viewer.explore_view import RightClickViewBox
 
     box = RightClickViewBox()

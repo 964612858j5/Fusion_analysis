@@ -13,7 +13,7 @@ active and inactive groups -- then it would draw the same pixels. A theme
 that tells the two apart gets Qt's behaviour back.
 """
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from ...qt import QtCore, QtGui, QtWidgets
 
 _ACTIVATION = (QtCore.QEvent.WindowActivate, QtCore.QEvent.WindowDeactivate)
 

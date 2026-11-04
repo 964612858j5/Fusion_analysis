@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import List, Optional, Tuple
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from ...qt.QtCore import QObject, Signal
 
 # Rest interval after pan/zoom before recomputing compare results (ms).
 COMPARE_DEBOUNCE_MS = 100          # contract: ~80–120 ms
@@ -110,7 +110,7 @@ class SharedViewportState(QObject):
     which fans out to the others. A monotonically increasing generation
     implements latest-request-wins for downstream compute."""
 
-    viewport_changed = pyqtSignal(object)      # ViewportState
+    viewport_changed = Signal(object)      # ViewportState
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -140,10 +140,10 @@ class CompareModeState(QObject):
     modify correction/remap/fusion/segmentation configs.
     """
 
-    mode_changed = pyqtSignal(object)       # ViewerMode
-    scope_changed = pyqtSignal(object)      # CompareScope
-    roi_changed = pyqtSignal(object)        # ComparisonROI | None
-    pinned_changed = pyqtSignal(list)       # list[PinnedLocation]
+    mode_changed = Signal(object)       # ViewerMode
+    scope_changed = Signal(object)      # CompareScope
+    roi_changed = Signal(object)        # ComparisonROI | None
+    pinned_changed = Signal(list)       # list[PinnedLocation]
 
     MAX_PINNED = 8
 

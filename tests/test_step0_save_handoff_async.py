@@ -9,7 +9,7 @@ import time
 import types
 
 import pytest
-from PyQt5 import QtTest, QtWidgets
+from block01.qt import QtTest, QtWidgets
 
 from block01.utils import run_store as rs
 

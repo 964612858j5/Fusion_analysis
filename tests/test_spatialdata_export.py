@@ -14,7 +14,7 @@ import sys
 
 import numpy as np
 import pytest
-from PyQt5.QtWidgets import QApplication
+from block01.qt.QtWidgets import QApplication
 
 sys.path.insert(0, os.path.dirname(__file__))
 from test_quant_sources import build_project  # noqa: E402

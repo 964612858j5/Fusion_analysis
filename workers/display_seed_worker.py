@@ -27,7 +27,7 @@ namespace rather than shown as B's.
 import collections
 import threading
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from ..qt.QtCore import QObject, Signal
 
 from ..core.display_mapping import seed_display_range
 from ..utils import perf_trace
@@ -36,8 +36,8 @@ from ..utils import perf_trace
 class DisplaySeedWorker(QObject):
     """Compute automatic display windows off the GUI thread."""
 
-    done = pyqtSignal(object)          # {"token", "channel", "nucleus", ...}
-    failed = pyqtSignal(object)
+    done = Signal(object)          # {"token", "channel", "nucleus", ...}
+    failed = Signal(object)
 
     THREAD_NAME = "display-seed"
 
@@ -176,8 +176,8 @@ class LowresReadWorker(QObject):
     switch is refused rather than installed as the new slide's.
     """
 
-    done = pyqtSignal(object)          # {"token", "channel", "array"}
-    failed = pyqtSignal(object)
+    done = Signal(object)          # {"token", "channel", "array"}
+    failed = Signal(object)
 
     THREAD_NAME = "lowres-read"
 

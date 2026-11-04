@@ -34,10 +34,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtCore, QtGui, QtTest, QtWidgets  # noqa: E402
-from PyQt5.QtCore import Qt  # noqa: E402
+from block01.qt import QtCore, QtGui, QtTest, QtWidgets  # noqa: E402
+from block01.qt.QtCore import Qt  # noqa: E402
 
 from block01.ui.step0 import overview_panel as ovp  # noqa: E402
 

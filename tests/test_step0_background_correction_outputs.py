@@ -15,7 +15,7 @@ import os
 import numpy as np
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 zarr = pytest.importorskip("zarr")
 
@@ -36,7 +36,7 @@ def _settle(worker):
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     a = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     return a
 
@@ -521,7 +521,7 @@ def _step0_dispatch_capture(tmp_path, monkeypatch, existing_sigs):
     existing_sigs is what read_corrected_zarr_state returns for the zarr."""
     import block01.ui.step0.step0_page as sp
     from block01.ui.step0.step0_page import Step0Page
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
 
     class _L:
         shape = (80, 100)
@@ -541,10 +541,10 @@ def _step0_dispatch_capture(tmp_path, monkeypatch, existing_sigs):
     # this class shadows it with, exactly as the real worker does), so a
     # stand-in that is not a QThread cannot be watched at all.
     class _FakeWorker(QtCore.QThread):
-        progress = QtCore.pyqtSignal(int, int, int, int, str, str, int)
-        finished = QtCore.pyqtSignal(str, dict)
-        canceled = QtCore.pyqtSignal(str)
-        error = QtCore.pyqtSignal(str)
+        progress = QtCore.Signal(int, int, int, int, str, str, int)
+        finished = QtCore.Signal(str, dict)
+        canceled = QtCore.Signal(str)
+        error = QtCore.Signal(str)
         def __init__(self, loader, out, cfg, rois=None, parent=None,
                      process_channels=None, incremental=False):
             super().__init__(parent)
@@ -556,10 +556,10 @@ def _step0_dispatch_capture(tmp_path, monkeypatch, existing_sigs):
             pass
 
     class _FakeDialog(QtCore.QObject):
-        cancel_requested = QtCore.pyqtSignal()
+        cancel_requested = QtCore.Signal()
         def __init__(self, parent=None):
             super().__init__(parent)
-        def exec_(self):
+        def exec(self):
             return 0
         def show(self):
             pass
@@ -590,7 +590,7 @@ def _step0_dispatch_capture(tmp_path, monkeypatch, existing_sigs):
                         lambda self, *a, **k: None)
     p._save_and_continue()
     # Block CS P2: the worker starts once Save's preparation is done.
-    from PyQt5 import QtTest
+    from block01.qt import QtTest
     for _ in range(300):
         if p.__dict__.get("_save_prep") is None:
             break
@@ -652,7 +652,7 @@ def test_dispatch_empty_zarr_reprocesses_all(app, tmp_path, monkeypatch):
 def test_dispatch_roi_bbox_mismatch_reprocesses_all(app, tmp_path, monkeypatch):
     import block01.ui.step0.step0_page as sp
     from block01.ui.step0.step0_page import Step0Page
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
 
     class _L:
         shape = (80, 100); filepath = "/t.ome.tif"
@@ -667,10 +667,10 @@ def test_dispatch_roi_bbox_mismatch_reprocesses_all(app, tmp_path, monkeypatch):
     # every production worker off `QThread.finished`, reaching past the
     # business `finished` this class shadows it with.
     class _FW(QtCore.QThread):
-        progress = QtCore.pyqtSignal(int, int, int, int, str, str, int)
-        finished = QtCore.pyqtSignal(str, dict)
-        canceled = QtCore.pyqtSignal(str)
-        error = QtCore.pyqtSignal(str)
+        progress = QtCore.Signal(int, int, int, int, str, str, int)
+        finished = QtCore.Signal(str, dict)
+        canceled = QtCore.Signal(str)
+        error = QtCore.Signal(str)
         def __init__(self, *a, process_channels=None, incremental=False, **k):
             super().__init__()
             cap["process"] = process_channels
@@ -679,8 +679,8 @@ def test_dispatch_roi_bbox_mismatch_reprocesses_all(app, tmp_path, monkeypatch):
         def stop_after_current_channel(self): pass
 
     class _FD(QtCore.QObject):
-        cancel_requested = QtCore.pyqtSignal()
-        def exec_(self): return 0
+        cancel_requested = QtCore.Signal()
+        def exec(self): return 0
         def show(self): pass
         def show(self):
             pass
@@ -702,7 +702,7 @@ def test_dispatch_roi_bbox_mismatch_reprocesses_all(app, tmp_path, monkeypatch):
     monkeypatch.setattr(sp, "_WsiCorrectionProgressDialog", _FD)
     monkeypatch.setattr(Step0Page, "_emit_complete", lambda self, *a, **k: None)
     p._save_and_continue()
-    from PyQt5 import QtTest                     # (block CS P2: started after
+    from block01.qt import QtTest                     # (block CS P2: started after
     for _ in range(300):                         # Save's preparation)
         if p.__dict__.get("_save_prep") is None:
             break
@@ -1479,7 +1479,7 @@ def test_the_compute_entry_asks_for_what_the_preview_method_says(
     Not a dictionary read: what is pinned is the method the run is dispatched
     with, and that `Original` dispatches no run at all.
     """
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
 
     import block01.ui.step0.step0_page as sp
 
@@ -1489,12 +1489,12 @@ def test_the_compute_entry_asks_for_what_the_preview_method_says(
 
     class _Worker(QtCore.QThread):
         """A real QThread that records the dispatch and computes nothing."""
-        channel_patch_done = QtCore.pyqtSignal(object, object, object)
-        channel_done = QtCore.pyqtSignal(object)
-        all_done = QtCore.pyqtSignal()
-        progress = QtCore.pyqtSignal(int)
-        error_signal = QtCore.pyqtSignal(object)
-        canceled = QtCore.pyqtSignal()
+        channel_patch_done = QtCore.Signal(object, object, object)
+        channel_done = QtCore.Signal(object)
+        all_done = QtCore.Signal()
+        progress = QtCore.Signal(int)
+        error_signal = QtCore.Signal(object)
+        canceled = QtCore.Signal()
 
         def __init__(self, loader, patches, methods, *a, **k):
             super().__init__()
@@ -1597,7 +1597,7 @@ def test_the_preview_source_provider_reports_both_layers_apart(app, tmp_path):
 
 def test_the_method_button_replaces_the_combo_and_the_parameters_box(app,
                                                                      tmp_path):
-    from PyQt5 import QtWidgets as _QW
+    from block01.qt import QtWidgets as _QW
 
     page = _fresh_page(app, tmp_path)
     try:
@@ -1673,7 +1673,7 @@ def test_opening_the_popup_shows_what_is_in_force(app, tmp_path):
 
         # ...and a number the user typed and walked away from
         panel = page._method_all.menu().actions()[0].defaultWidget()
-        from PyQt5 import QtWidgets as _QW
+        from block01.qt import QtWidgets as _QW
         spins = panel.findChildren(_QW.QSpinBox)
         in_force = (page._tophat_slider.value(), page._cucim_slider.value())
         spins[0].setValue(in_force[0] + 13)
@@ -1696,7 +1696,7 @@ def test_the_popup_parameters_are_a_draft_until_save(app, tmp_path):
     radius went straight into the signature and the compare panels and the
     full image recomputed while the user was still deciding.
     """
-    from PyQt5 import QtWidgets as _QW
+    from block01.qt import QtWidgets as _QW
 
     page = _fresh_page(app, tmp_path)
     try:
@@ -1737,7 +1737,7 @@ def test_an_unlit_methods_parameter_is_saved_but_not_computed(app, tmp_path):
     waiting for the moment TopHat is lit -- but nothing computes a TopHat
     candidate because of it.
     """
-    from PyQt5 import QtWidgets as _QW
+    from block01.qt import QtWidgets as _QW
 
     page = _fresh_page(app, tmp_path)
     try:
@@ -1779,7 +1779,7 @@ def test_changing_the_method_and_its_parameter_in_one_visit_takes_effect(
     sigma was judged against TopHat. The second Save then worked, since by
     then the method had moved.
     """
-    from PyQt5 import QtWidgets as _QW
+    from block01.qt import QtWidgets as _QW
 
     page = _fresh_page(app, tmp_path)
     try:

@@ -28,9 +28,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtCore, QtTest, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtTest, QtWidgets  # noqa: E402
 
 from block01.ui.step0 import step0_explore_tab as et  # noqa: E402
 from block01.ui.step0 import step0_page as sp  # noqa: E402
@@ -403,7 +403,7 @@ def test_no_placeholder_talks_about_a_released_view(app):
 
 # ── 4. the real Save path: resume only once the thread has exited ────────
 #
-# `WsiCorrectionWorker` declares `finished = pyqtSignal(str, dict)`, which
+# `WsiCorrectionWorker` declares `finished = Signal(str, dict)`, which
 # SHADOWS `QThread.finished`. That business signal is emitted from inside
 # `run()`, while `isRunning()` is still true, so a resume started from it
 # would be refused by the busy gate and never retried. The watcher must
@@ -441,10 +441,10 @@ def _drive_real_save(app, monkeypatch, tmp_path, tab):
     class _FakeWsiWorker(QtCore.QThread):
         # Mirrors the real worker's signal surface, including the business
         # `finished(str, dict)` that SHADOWS `QThread.finished`.
-        finished = QtCore.pyqtSignal(str, dict)
-        progress = QtCore.pyqtSignal(int, int, int, int, str, str, int)
-        canceled = QtCore.pyqtSignal(str)
-        error = QtCore.pyqtSignal(str)
+        finished = QtCore.Signal(str, dict)
+        progress = QtCore.Signal(int, int, int, int, str, str, int)
+        canceled = QtCore.Signal(str)
+        error = QtCore.Signal(str)
 
         def __init__(self, *_a, **_kw):
             super().__init__()
@@ -471,8 +471,8 @@ def _drive_real_save(app, monkeypatch, tmp_path, tab):
         def __init__(self, *_a, **_k):
             pass
 
-        def exec_(self):
-            timeline.append("dialog.exec_")
+        def exec(self):
+            timeline.append("dialog.exec")
 
         def show(self):
             timeline.append("dialog.show")
@@ -642,8 +642,8 @@ def test_a_cancelled_or_failed_run_still_resumes_exactly_once(app):
     page = _page(app, tab)
 
     class _Cancelled(QtCore.QThread):
-        canceled = QtCore.pyqtSignal(str)
-        finished = QtCore.pyqtSignal(str, dict)      # SHADOWS QThread's
+        canceled = QtCore.Signal(str)
+        finished = QtCore.Signal(str, dict)      # SHADOWS QThread's
 
         def run(self):
             self.canceled.emit("/tmp/partial.zarr")

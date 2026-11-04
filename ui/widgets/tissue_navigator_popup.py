@@ -27,8 +27,8 @@ Viewport rectangle uses the EXACT v14.3 HighQualityImageViewer representation:
 
 from __future__ import annotations
 
-from PyQt5 import QtCore, QtWidgets
-from PyQt5.QtCore import Qt
+from ...qt import QtCore, QtWidgets
+from ...qt.QtCore import Qt
 
 from ..step0.overview_panel import OverviewPanel
 

@@ -1,7 +1,7 @@
 """Block A9 (first Step1 entry): which Qt event the GUI thread was busy in.
 
 The GUI watchdog showed the unexplained part of the first Step1 entry with
-no Python frame on the stack -- the thread was inside `app.exec_()`, in Qt
+no Python frame on the stack -- the thread was inside `app.exec()`, in Qt
 or the driver. Python spans cannot split that. This times event DELIVERY
 instead: an application whose `notify` records every dispatch that took
 longer than a threshold, with its receiver and event type, as a
@@ -21,8 +21,8 @@ import os
 import threading
 import time
 
-from PyQt5.QtCore import QEvent
-from PyQt5.QtWidgets import QApplication
+from ..qt.QtCore import QEvent
+from ..qt.QtWidgets import QApplication
 
 from . import perf_trace
 
@@ -75,8 +75,8 @@ class TimedApplication(QApplication):
         self._dispatch_on = True
         self.aboutToQuit.connect(self._dispatch_stop)
         try:
-            from PyQt5 import sip
-            sip.setdestroyonexit(False)
+            from ..qt import keep_wrappers_at_exit
+            keep_wrappers_at_exit()
         except Exception:                               # noqa: BLE001
             pass
 

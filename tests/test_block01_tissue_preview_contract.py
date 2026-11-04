@@ -27,9 +27,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.core import tissue_compose  # noqa: E402
 from block01.core.display_identity import STEP0_TABLE, table_for_scope  # noqa: E402
@@ -1117,7 +1117,7 @@ def test_the_shared_windows_survive_step0_being_destroyed(app):
     """
     import gc
     import weakref
-    import sip
+    from block01.qt import delete_cpp, is_deleted
 
     w = _window(app)
     try:
@@ -1135,13 +1135,13 @@ def test_the_shared_windows_survive_step0_being_destroyed(app):
         w._stack.removeWidget(page)
         page.setParent(None)
         w._step0 = None
-        sip.delete(page)
+        delete_cpp(page)
         del page
         QtWidgets.QApplication.processEvents()
         gc.collect()
         QtWidgets.QApplication.processEvents()
 
-        assert ref() is None or sip.isdeleted(ref()), "Step0 was not destroyed"
+        assert ref() is None or is_deleted(ref()), "Step0 was not destroyed"
         # Block01's own, all still here and all still answering.
         assert w._display.navigator() is popup
         assert w._display.intensity_window() is intensity
@@ -1537,7 +1537,7 @@ def test_a_channel_still_loading_is_not_lost_by_walking_downstream(app):
 # ── P1-1. a refused close leaves everything alive ────────────────────────
 
 def test_a_close_that_is_refused_does_not_kill_the_display_services(app):
-    from PyQt5.QtGui import QCloseEvent
+    from block01.qt.QtGui import QCloseEvent
     w = _window(app)
     try:
         _goto(w, 1)

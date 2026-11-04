@@ -12,9 +12,9 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
+from ...qt.QtCore import Qt, Signal
+from ...qt.QtGui import QColor
+from ...qt.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
                              QLineEdit, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
                              QWidget)
 
@@ -31,10 +31,10 @@ def status_en(text: str) -> str:
 
 
 class CoreTable(QWidget):
-    row_clicked = pyqtSignal(str, str, bool)      # kind ("position" / "core" / "piece"), id, ctrl held
-    run_toggled = pyqtSignal(str, bool)
-    runs_set = pyqtSignal(list, bool)                 # Run all / Run none on the rows shown
-    context_requested = pyqtSignal(str, str, object)   # kind, id, global position
+    row_clicked = Signal(str, str, bool)      # kind ("position" / "core" / "piece"), id, ctrl held
+    run_toggled = Signal(str, bool)
+    runs_set = Signal(list, bool)                 # Run all / Run none on the rows shown
+    context_requested = Signal(str, str, object)   # kind, id, global position
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -152,7 +152,7 @@ class CoreTable(QWidget):
     def _clicked(self, row, col):
         if col == 0 or not (0 <= row < len(self._rows)):
             return
-        from PyQt5.QtWidgets import QApplication
+        from ...qt.QtWidgets import QApplication
         ctrl = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
         r = self._rows[row]
         self.row_clicked.emit(r["kind"], r["id"], ctrl)

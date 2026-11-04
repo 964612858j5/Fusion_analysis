@@ -18,11 +18,11 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("pyqtgraph")
 pytest.importorskip("OpenGL")
 
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 _SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "benchmark_step1_gpu_demo.py"
 _SPEC = importlib.util.spec_from_file_location("step1_gpu_g0_1_probe", _SCRIPT)

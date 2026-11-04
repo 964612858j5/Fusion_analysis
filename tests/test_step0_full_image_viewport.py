@@ -28,11 +28,11 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 import numpy as np  # noqa: E402
 import pyqtgraph as pg  # noqa: E402
-from PyQt5 import QtCore  # noqa: E402
+from block01.qt import QtCore  # noqa: E402
 
 from block01.ui.step0 import step0_page as sp  # noqa: E402
 from block01.ui.step0 import step0_explore_tab as et  # noqa: E402
@@ -109,7 +109,7 @@ class _FakeController:
 def _tab_with_factory(app, order):
     """A tab whose factory records the build ORDER against a shared list, so
     'the camera moved after the overview was installed' is checkable."""
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
 
     class _Stack:
         def __init__(self, controller):
@@ -243,7 +243,7 @@ def test_a_busy_refusal_leaves_no_target_behind(app):
 
 def test_build_default_stack_moves_the_camera_after_load_overview(monkeypatch):
     import importlib
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
 
     order = []
 
@@ -318,7 +318,7 @@ def test_build_default_stack_moves_the_camera_after_load_overview(monkeypatch):
 def test_build_default_stack_falls_back_to_the_whole_slide(monkeypatch):
     """Same drive, no viewport: the pre-existing whole-slide open."""
     import importlib
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
 
     order = []
     boxes = []

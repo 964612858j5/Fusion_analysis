@@ -5,7 +5,7 @@ from __future__ import annotations
 import itertools
 from collections import deque
 
-from PyQt5 import QtCore
+from ..qt import QtCore
 
 # The ordering rules are called THROUGH the module, never bound at import
 # time: `prefetch_rules.hot_order(...)`, not `hot_order(...)`. That is what
@@ -69,7 +69,7 @@ class MultiChannelPrefetchController(QtCore.QObject):
     # `_on_tile_result` mutates the in-flight map, the stats and the queue,
     # and re-enters `scheduler.request`. The queued hop can only DELAY a
     # slot release, never advance it, so the physical cap stays conservative.
-    _tile_delivered = QtCore.pyqtSignal(int, object, object)
+    _tile_delivered = QtCore.Signal(int, object, object)
 
     def __init__(self, controller, scheduler, specs, grid,
                  settle_confirm_ms=SETTLE_CONFIRM_MS,

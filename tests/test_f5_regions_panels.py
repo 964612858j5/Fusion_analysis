@@ -10,10 +10,10 @@ import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("pyqtgraph")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from test_regions_r2 import _enter_regions, _pump  # noqa: E402
 from test_step0_compare_tiles import app  # noqa: E402,F401
@@ -28,8 +28,8 @@ def _grab(widget, name):
     if SHOTS:
         img.save(os.path.join(SHOTS, name))
     ptr = img.convertToFormat(img.Format_RGB32)
-    b = ptr.bits()
-    b.setsize(ptr.byteCount())
+    from block01.qt import image_bytes
+    b = image_bytes(ptr)
     return np.frombuffer(b, np.uint8).reshape(ptr.height(), ptr.bytesPerLine() // 4, 4)[:, :ptr.width(), :3].copy()
 
 

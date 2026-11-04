@@ -33,10 +33,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("pyqtgraph")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 _RIG_PATH = pathlib.Path(__file__).with_name("test_step1_gpu_takeover.py")
 _spec = importlib.util.spec_from_file_location("g3_takeover_rig", _RIG_PATH)

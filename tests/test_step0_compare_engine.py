@@ -16,7 +16,7 @@ if os.environ.get("BLOCK01_REQUIRE_STEP1_GPU") != "1":
 pytest.importorskip("fusion_viewer_core")
 tifffile = pytest.importorskip("tifffile")
 
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 from block01.ui.step0 import engine_mount as em  # noqa: E402
 from block01.ui.step0.compare_strip import CompareStrip  # noqa: E402

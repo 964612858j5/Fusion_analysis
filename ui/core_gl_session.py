@@ -14,7 +14,7 @@ those belong to whatever reaches the screen), and Step3's masks.
 
 from typing import Callable, Optional
 
-from PyQt5 import QtCore
+from ..qt import QtCore
 
 from ..utils import perf_trace
 from ..utils import tile_trace

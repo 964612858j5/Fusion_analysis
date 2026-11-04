@@ -30,7 +30,7 @@ CORNER = ViewportSnapshot((500.0, 524.0, 500.0, 515.0), SIZE, 1.0)
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
@@ -215,7 +215,7 @@ def test_the_setting_redraws_every_layer_and_back_to_the_same_bytes(app):
 def test_the_setting_redraws_shown_layers_through_qt(app):
     """Two shown layers (Viewer-like and montage-like); the public setter
     alone, then Qt's own paint, gives each its smoothed picture."""
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     hosts, layers = [], []
     try:
         for _ in range(2):

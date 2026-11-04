@@ -20,9 +20,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.viewer.step1_source import Step1SourceTable  # noqa: E402
 from block01.viewer.tile_types import (  # noqa: E402
@@ -523,7 +523,7 @@ def _pooled_item(host, tile, values):
 
 
 def _rgba(image, row, col):
-    from PyQt5.QtGui import QColor
+    from block01.qt.QtGui import QColor
     colour = QColor.fromRgba(image.pixel(col, row))
     return (colour.red(), colour.green(), colour.blue(), colour.alpha())
 
@@ -569,7 +569,7 @@ def test_a_boundary_tile_shows_the_colour_underneath_it_outside_the_region(app):
     Outside the region the magenta must come through; inside, the channel's
     own pixels must cover it.
     """
-    from PyQt5 import QtCore, QtGui
+    from block01.qt import QtCore, QtGui
 
     host, raw, _table_ = _host(app, channel="CD3")
     try:

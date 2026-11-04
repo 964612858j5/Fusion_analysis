@@ -173,7 +173,7 @@ def test_no_heartbeat_exists_with_the_switch_off():
 
 def test_the_heartbeat_reports_a_gap_longer_than_its_interval(capsys,
                                                               monkeypatch):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
 
     monkeypatch.setenv(perf_trace.PERF_ENV, "1")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -194,7 +194,7 @@ def test_the_heartbeat_reports_a_gap_longer_than_its_interval(capsys,
 
 
 def test_a_heartbeat_within_its_interval_says_nothing(capsys, monkeypatch):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
 
     monkeypatch.setenv(perf_trace.PERF_ENV, "1")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -534,7 +534,7 @@ def test_a_step1_frame_is_traced_end_to_end(capsys, monkeypatch):
     with its revision, the slot it was scheduled into, the hand-off to the
     frame worker, what the per-channel mapping and the composite cost, and
     which revision was finally published."""
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     import numpy as np
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -579,7 +579,7 @@ def test_a_step1_frame_is_traced_end_to_end(capsys, monkeypatch):
 
 
 def test_the_instrumented_paths_are_silent_with_the_switch_off(capsys):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     import sys
@@ -676,7 +676,7 @@ def test_the_window_closes_the_sink_after_the_loaders(monkeypatch, tmp_path):
     closed -- so the sink closes once, last, and only when the window is
     actually closing.
     """
-    from PyQt5 import QtWidgets, QtGui
+    from block01.qt import QtWidgets, QtGui
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from test_step1_channel_state_contract import _window
@@ -716,7 +716,7 @@ def test_a_close_that_is_refused_keeps_the_writer_alive(monkeypatch,
     """`closeEvent` can end in `event.ignore()` and retry in 500 ms. Stopping
     the sink on every attempt would restart the writer as often as the user's
     loaders take to stop."""
-    from PyQt5 import QtWidgets, QtGui
+    from block01.qt import QtWidgets, QtGui
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from test_step1_channel_state_contract import _window

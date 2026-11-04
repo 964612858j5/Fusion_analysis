@@ -28,9 +28,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtGui  # noqa: E402
+from block01.qt import QtGui  # noqa: E402
 
 from block01.viewer.explore_view import (  # noqa: E402
     ExploreView, OVERLAY_RAW_BASE_PRIORITY, RawOverlayLayer, TileItemPool,
@@ -223,7 +223,7 @@ def test_a_level_change_hides_the_old_level_before_new_tiles_arrive(app):
 # ── 7. additive composition, measured on a real ExploreView ──────────────
 
 def _render_centre(view, w=64, h=64):
-    from PyQt5 import QtGui as _G
+    from block01.qt import QtGui as _G
     img = _G.QImage(w, h, _G.QImage.Format_RGB32)
     img.fill(0)
     painter = _G.QPainter(img)
@@ -237,7 +237,7 @@ def _two_layer_view(app, marker_val, nucleus_val):
     """A real ExploreView with one marker tile and one overlay tile at the
     same place, coloured the way Step0 colours them."""
     import pyqtgraph as pg
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
     from block01.viewer.explore_view import ExploreController
 
     view = ExploreView()
@@ -303,7 +303,7 @@ def test_a_dark_overlay_pixel_adds_nothing(app):
 # ── 8. the pool owns the composition mode ────────────────────────────────
 
 def test_the_pool_applies_the_composition_mode_to_late_items(app):
-    from PyQt5.QtCore import QRectF
+    from block01.qt.QtCore import QRectF
 
     class _Box:
         def __init__(self):
@@ -329,7 +329,7 @@ def test_the_pool_applies_the_composition_mode_to_late_items(app):
 
 
 def test_the_default_composition_mode_is_unchanged_for_existing_callers(app):
-    from PyQt5.QtCore import QRectF
+    from block01.qt.QtCore import QRectF
 
     class _Box:
         def addItem(self, item):

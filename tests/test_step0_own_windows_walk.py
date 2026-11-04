@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 from block01.core.display_identity import STEP0_TABLE  # noqa: E402
 from block01.utils import run_store as rs  # noqa: E402

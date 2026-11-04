@@ -20,9 +20,10 @@ import numpy as np
 import tifffile
 import zarr
 
-from PyQt5 import QtWidgets, QtCore, QtGui
-from PyQt5.QtCore import Qt, QRectF, QThread, pyqtSignal
-from PyQt5.QtWidgets import (
+from ...qt import QtWidgets, QtCore, QtGui
+from ...qt import flag_value
+from ...qt.QtCore import Qt, QRectF, QThread, Signal
+from ...qt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QSizePolicy,
     QDialog, QTableWidget, QTableWidgetItem, QHeaderView,
@@ -263,9 +264,9 @@ class FullFusionWorker(QThread):
     fused image never lives in RAM simultaneously.
     """
 
-    progress   = pyqtSignal(int, int, str)   # done, total, msg
-    finished   = pyqtSignal(str)             # zarr_path on success
-    error      = pyqtSignal(str)             # traceback string
+    progress   = Signal(int, int, str)   # done, total, msg
+    finished   = Signal(str)             # zarr_path on success
+    error      = Signal(str)             # traceback string
 
     # Block PA-3 (G1): the work is cut into UNITS on the output store's own
     # chunk grid -- one chunk high, this many chunks wide, from the region's
@@ -1148,15 +1149,15 @@ def _mid_pan_log_sink(line):
 
 def _mid_pan_button_name(buttons):
     try:
-        buttons = int(buttons)
+        buttons = flag_value(buttons)
     except (TypeError, ValueError):
         return repr(buttons)
     if not buttons:
         return "NoButton"
     names = []
-    for bit, name in ((int(Qt.LeftButton), "Left"),
-                      (int(Qt.RightButton), "Right"),
-                      (int(Qt.MiddleButton), "Middle")):
+    for bit, name in ((flag_value(Qt.LeftButton), "Left"),
+                      (flag_value(Qt.RightButton), "Right"),
+                      (flag_value(Qt.MiddleButton), "Middle")):
         if buttons & bit:
             names.append(name)
             buttons &= ~bit
@@ -1404,19 +1405,19 @@ class OverviewPanel(QWidget):
     `_selected_patch_hit_test` and `_commit_patch_geometry`.
     """
 
-    patches_changed = pyqtSignal(list)   # [(y0,y1,x0,x1), ...]
-    rois_changed    = pyqtSignal(list)   # [roi_dict, ...]
+    patches_changed = Signal(list)   # [(y0,y1,x0,x1), ...]
+    rois_changed    = Signal(list)   # [roi_dict, ...]
     # A plain click (press + release without a drag) in patch mode, or a
     # Ctrl+click in ROI mode: "take me there". (y, x) in FULL-IMAGE pixels.
     # Emitted only; what "there" means is the host's business (Step 0 jumps
     # the full image to it). Neither gesture had a meaning before: a
     # drag shorter than 3 overview pixels was discarded as too small for a
     # patch, and Ctrl+click added no vertex.
-    navigate_requested = pyqtSignal(int, int)
+    navigate_requested = Signal(int, int)
     # The patch the thumbnail highlights changed (index, or -1 for none).
     # Selection is a VIEW state, not part of the patch model, so it travels
     # on its own signal and never disturbs `patches_changed`.
-    patch_selection_changed = pyqtSignal(int)
+    patch_selection_changed = Signal(int)
 
     def __init__(self, loader, nuc_ch: str, lazy: bool = False):
         super().__init__()

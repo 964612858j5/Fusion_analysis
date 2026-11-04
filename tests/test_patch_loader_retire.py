@@ -18,13 +18,13 @@ import threading
 import numpy as np
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 tifffile = pytest.importorskip("tifffile")
 zarr = pytest.importorskip("zarr")
 
-from PyQt5 import QtCore, QtGui, QtTest, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtGui, QtTest, QtWidgets  # noqa: E402
 
 from block01.core import io_loader  # noqa: E402
 from block01.core.io_loader import OMETIFFLoader  # noqa: E402
@@ -132,9 +132,9 @@ def test_a_save_during_a_held_read_shows_B_and_never_waits(app, tmp_path, monkey
 
 class _Held(QtCore.QThread):
     """A loader blocked in a read; emits a late `done` when let go."""
-    done = QtCore.pyqtSignal(int, dict)
-    progress = QtCore.pyqtSignal(int, int, int, str)
-    error = QtCore.pyqtSignal(int, str)
+    done = QtCore.Signal(int, dict)
+    progress = QtCore.Signal(int, int, int, str)
+    error = QtCore.Signal(int, str)
 
     def __init__(self, idx):
         super().__init__()

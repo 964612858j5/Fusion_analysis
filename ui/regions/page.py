@@ -16,10 +16,10 @@ The window only wires: `set_context`, `jump_box`, `intensity_requested`.
 
 from __future__ import annotations
 
-from PyQt5 import QtWidgets
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QKeySequence
-from PyQt5.QtWidgets import (QHBoxLayout, QLabel, QMenu, QPushButton, QShortcut, QToolButton,
+from ...qt import QtWidgets
+from ...qt.QtCore import Qt, QTimer, Signal
+from ...qt.QtGui import QKeySequence
+from ...qt.QtWidgets import (QHBoxLayout, QLabel, QMenu, QPushButton, QShortcut, QToolButton,
                              QVBoxLayout, QWidget)
 
 from ...core.regions import document as D
@@ -83,8 +83,8 @@ class _NoView:
 
 
 class RegionsPage(QWidget, VersionsMixin, ShapesMixin):
-    intensity_requested = pyqtSignal()
-    saved = pyqtSignal()                       # a Regions Save was written
+    intensity_requested = Signal()
+    saved = Signal()                       # a Regions Save was written
 
     def __init__(self, parent=None, metrics=None, title_bar=None):
         super().__init__(parent)

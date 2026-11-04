@@ -29,8 +29,8 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from PyQt5 import QtCore, QtWidgets
-from PyQt5.QtCore import Qt
+from ..qt import QtCore, QtWidgets
+from ..qt.QtCore import Qt
 
 #: past this size the log is rotated (one old file kept)
 LOG_LIMIT_BYTES = 5 * 1024 * 1024
@@ -76,7 +76,7 @@ def signature(exc_type, tb):
 class Notifier(QtCore.QObject):
     """Lives on the GUI thread; shows the notices the hooks ask for."""
 
-    requested = QtCore.pyqtSignal(object, str, bool)    # signature, text, logged
+    requested = QtCore.Signal(object, str, bool)    # signature, text, logged
 
     def __init__(self, parent=None):
         super().__init__(parent)

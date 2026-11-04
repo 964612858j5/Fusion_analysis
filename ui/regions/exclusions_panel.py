@@ -15,9 +15,9 @@ change, stored as drawn (never clipped), one polygon each.
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout,
+from ...qt.QtCore import Qt, Signal
+from ...qt.QtGui import QColor
+from ...qt.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout,
                              QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
                              QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
@@ -29,7 +29,7 @@ COLUMNS = ("#", "Reasons", "Channels", "Area", "Core")
 
 
 class ExclusionsPanel(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, page):
         super().__init__()
@@ -156,7 +156,7 @@ class ExclusionsPanel(QWidget):
         box.accepted.connect(dlg.accept)
         box.rejected.connect(dlg.reject)
         lay.addWidget(box)
-        if dlg.exec_() != QDialog.Accepted:
+        if dlg.exec() != QDialog.Accepted:
             return
         chosen = [lst.item(i).text() for i in range(lst.count()) if lst.item(i).checkState() == Qt.Checked]
         self.set_channel_choice(chosen)
@@ -274,8 +274,8 @@ class ExclusionsPanel(QWidget):
         return out
 
     def menu(self, uid):
-        from PyQt5.QtGui import QCursor
-        from PyQt5.QtWidgets import QMenu
+        from ...qt.QtGui import QCursor
+        from ...qt.QtWidgets import QMenu
         h = self.page.holder
         if h is None or h.read_only:
             return
@@ -283,4 +283,4 @@ class ExclusionsPanel(QWidget):
         m.addAction("Delete exclusion", lambda: self.page.edit(D.delete_exclusions, [uid]))
         if self.page.cores_editable():
             m.addAction("Make core mask", lambda: self.page.exclusion_to_core(uid))
-        m.exec_(QCursor.pos())
+        m.exec(QCursor.pos())

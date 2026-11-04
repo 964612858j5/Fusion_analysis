@@ -25,9 +25,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 from block01.ui.step1_compose_coordinator import (  # noqa: E402
     ComposedTile, Step1ComposeCoordinator, tile_identity,

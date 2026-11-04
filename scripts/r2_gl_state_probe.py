@@ -34,7 +34,7 @@ def main():
     import numpy as np
     from sraw_rig import open_rig, stable
     import r0_gl_probe as r0
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
 
     project = json.load(open(args.project))
     rig = open_rig("rust", project["slide"], channels=["a", "b", "c", "f"], roi=project["roi"],

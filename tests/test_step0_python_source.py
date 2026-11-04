@@ -10,9 +10,9 @@ import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.ui.step0 import python_source as ps  # noqa: E402
 from block01.viewer.tile_types import PixelBuffer, TileGridSpec, TileResult  # noqa: E402
@@ -247,7 +247,7 @@ def test_retire_and_close_leave_nothing(app):
 
 
 def test_a_closed_adapter_lets_go_of_its_core_and_goes_once_its_work_ended(app):
-    from PyQt5 import QtCore, sip
+    from block01.qt import QtCore, is_deleted
     a, core, sched = _adapter(app)
     a.setParent(None)
     sid = a.register("CD3", "tophat", (15,))
@@ -255,12 +255,12 @@ def test_a_closed_adapter_lets_go_of_its_core_and_goes_once_its_work_ended(app):
     a.pump()
     a.close()
     assert a.core is None and a.controller is None
-    assert not sip.isdeleted(a), "deleted while a cancelled request still runs"
+    assert not is_deleted(a), "deleted while a cancelled request still runs"
     for token in list(sched.pending):
         sched.finish(token, "stale")
     _settle(app)
     QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
-    assert sip.isdeleted(a)
+    assert is_deleted(a)
 
 
 def test_paused_work_under_way_finishes_and_is_cached_but_nothing_new_starts(app):

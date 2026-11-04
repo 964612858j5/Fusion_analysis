@@ -11,10 +11,10 @@ import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("tifffile")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.utils import perf_trace  # noqa: E402
 from block01.viewer import read_ledger  # noqa: E402
@@ -71,8 +71,8 @@ def _frame(app, slide, monkeypatch, perf):
             time.sleep(0.02)
         assert (stack.controller._a9_probe is not None) == perf
         image = stack.view.graphics.grab().toImage()
-        ptr = image.constBits()
-        ptr.setsize(image.byteCount())
+        from block01.qt import image_bytes
+        ptr = image_bytes(image)
         pixels = np.frombuffer(ptr, np.uint8).copy()
         camera = stack.view.view_box.viewRange()
         return pixels, camera, read_ledger.snapshot().get("raw", 0)

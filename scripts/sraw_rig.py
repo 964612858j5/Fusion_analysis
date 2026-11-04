@@ -30,7 +30,7 @@ def open_rig(backend, slide, *, channels=(), roi=None, size=530, smooth=1,
     os.environ["BLOCK01_SMOOTH"] = str(int(smooth))
     sys.path[:0] = [os.path.dirname(_REPO), _REPO]
     import conftest  # noqa: F401 -- maps `block01` to this checkout
-    from PyQt5 import QtCore, QtWidgets
+    from block01.qt import QtCore, QtWidgets
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(["sraw"])
     from block01.core.display_identity import DatasetIdentity

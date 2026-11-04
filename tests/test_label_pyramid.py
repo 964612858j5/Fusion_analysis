@@ -149,8 +149,8 @@ def test_read_accepts_only_a_whole_pyramid_of_the_same_mask(tmp_path):
 
 @pytest.fixture(scope="module")
 def app():
-    pytest.importorskip("PyQt5")
-    from PyQt5 import QtWidgets
+    pytest.importorskip("block01.qt")
+    from block01.qt import QtWidgets
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
@@ -232,7 +232,7 @@ def test_the_whole_image_run_records_its_pyramid(app, tmp_path):
 
 def test_a_stop_in_the_second_roi_keeps_the_first_pyramid_only(app, tmp_path):
     rp = _stardist()
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
     d = _roi_project(tmp_path)
     worker = _worker(d, [{"name": "A", "bbox_fullres": BBOX}, {"name": "B", "bbox_fullres": BBOX}])
     got = rp._collect(worker)

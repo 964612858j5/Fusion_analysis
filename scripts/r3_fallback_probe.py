@@ -88,7 +88,7 @@ def s_falls_back(rig, out):
 
 
 def s_reinit(rig, out):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     from sraw_rig import stable
     scheduler = rig.mount.host.stack.scheduler
     _shot, out["stable_rust"] = stable(rig)

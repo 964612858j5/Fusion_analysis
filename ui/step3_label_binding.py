@@ -49,7 +49,7 @@ import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-from PyQt5 import QtCore
+from ..qt import QtCore
 
 from ..core import step3_masks
 from ..utils import closing_threads
@@ -153,8 +153,8 @@ class SlotStamps:
 class Step3LabelBinding(QtCore.QObject):
     """Label tiles for one viewer's GPU layer, one slot per drawn mask."""
 
-    _delivered = QtCore.pyqtSignal(object)
-    status_changed = QtCore.pyqtSignal()
+    _delivered = QtCore.Signal(object)
+    status_changed = QtCore.Signal()
 
     def __init__(self, *, controller, layer, level_shapes, tile_size: int,
                  budget_bytes: int = LABEL_TEXTURE_BYTES,

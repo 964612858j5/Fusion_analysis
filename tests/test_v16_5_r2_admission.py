@@ -11,7 +11,7 @@ the fine bytes and the stand-in allowance.
 
 import numpy as np
 import pytest
-from PyQt5 import QtWidgets
+from block01.qt import QtWidgets
 
 fvc = pytest.importorskip("fusion_viewer_core")
 

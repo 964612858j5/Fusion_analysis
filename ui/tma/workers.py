@@ -8,7 +8,7 @@ so none is destroyed while running; `shutdown` asks them to stop and waits
 
 from __future__ import annotations
 
-from PyQt5.QtCore import QThread, pyqtSignal
+from ...qt.QtCore import QThread, Signal
 
 LIVE = set()
 
@@ -33,8 +33,8 @@ def shutdown(timeout_ms: int = 15000) -> bool:
 
 
 class DetectWorker(QThread):
-    done = pyqtSignal(int, object)       # generation, saved candidate record
-    failed = pyqtSignal(int, str)
+    done = Signal(int, object)       # generation, saved candidate record
+    failed = Signal(int, str)
 
     def __init__(self, gen, project_dir, slide_path, slide_id, kw):
         super().__init__()

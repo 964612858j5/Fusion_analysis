@@ -30,9 +30,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtGui, QtTest, QtWidgets  # noqa: E402
+from block01.qt import QtGui, QtTest, QtWidgets  # noqa: E402
 
 from block01.ui.step0.step0_explore_tab import Step0ExploreTab  # noqa: E402
 from block01.viewer import raw_tile_provider as rtp  # noqa: E402
@@ -172,8 +172,8 @@ class _Harness:
     def render(self):
         img = self.tab.stack.view.grab().toImage().convertToFormat(
             QtGui.QImage.Format_Grayscale8)
-        ptr = img.constBits()
-        ptr.setsize(img.byteCount())
+        from block01.qt import image_bytes
+        ptr = image_bytes(img)
         return np.frombuffer(ptr, np.uint8).reshape(
             img.height(), img.bytesPerLine())[:, :img.width()].astype(np.float32)
 

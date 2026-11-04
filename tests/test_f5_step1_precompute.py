@@ -10,8 +10,8 @@ import types
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+pytest.importorskip("block01.qt")
+from block01.qt import QtCore, QtWidgets  # noqa: E402
 
 from test_regions_r1 import SID, _finished, project  # noqa: F401,E402
 
@@ -43,7 +43,7 @@ def _window(project, monkeypatch, calls):
     monkeypatch.setattr(MainWindow, "_compute_step1_core_items", staticmethod(counted))
 
     class W(QtCore.QObject):
-        _step1_cores_ready = QtCore.pyqtSignal(object)
+        _step1_cores_ready = QtCore.Signal(object)
     w = W()
     for name in ("_regions_ids", "_step1_core_parent", "_saved_core_items", "_on_regions_saved",
                  "_on_step1_cores_ready"):

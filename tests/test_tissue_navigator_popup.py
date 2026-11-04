@@ -10,12 +10,12 @@ Qt tests need an offscreen platform (env: QT_QPA_PLATFORM=offscreen).
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     a = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     return a
 
@@ -220,7 +220,7 @@ def test_overview_completion_clears_loading(app):
 
 # B: native window controls — windowType is a real Window (not Tool) with min/max/close.
 def test_window_has_native_min_max_close(app):
-    from PyQt5.QtCore import Qt
+    from block01.qt.QtCore import Qt
     p = _mk(app)
     assert p.windowType() == Qt.Window               # NOT Qt.Tool (no min/max on X11)
     f = int(p.windowFlags())
@@ -231,7 +231,7 @@ def test_window_has_native_min_max_close(app):
 
 # C: redundant toolbar minimize button removed; header content (label) kept.
 def test_toolbar_minimize_button_removed(app):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     p = _mk(app)
     assert not hasattr(p, "_btn_min")
     # no push-buttons left in the header bar
@@ -276,7 +276,7 @@ def _load_overview(app, panel, rows=48, cols=34):
 
 def _band_in_popup(popup, widget):
     """A widget's rectangle in the popup's own coordinates."""
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
     rect = widget.geometry()
     top_left = widget.mapTo(popup, QtCore.QPoint(0, 0))
     return QtCore.QRect(top_left, rect.size())
@@ -325,7 +325,7 @@ def test_hiding_the_success_line_gives_the_canvas_its_room_back(app):
 
 def test_a_real_click_on_the_old_status_band_asks_to_navigate(app):
     """Gate 3: a real Qt click there, through the product's own event path."""
-    from PyQt5 import QtCore, QtTest
+    from block01.qt import QtCore, QtTest
 
     popup = _shown_popup(app)
     try:
@@ -378,7 +378,7 @@ def test_everything_the_user_has_to_read_stays_visible(app, message):
 
 def test_the_status_line_comes_and_goes_with_the_message(app):
     """Gate 5: a round trip, with the canvas following it each way."""
-    from PyQt5 import QtCore
+    from block01.qt import QtCore
 
     popup = _shown_popup(app)
     try:
@@ -433,7 +433,7 @@ def test_step0_s_own_overview_panel_still_shows_the_line(app):
 
 def _real_shaped_toolbar():
     """The ROI/patch toolbar's shape: mode switches, as Step0 mounts them."""
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     w = QtWidgets.QWidget()
     lay = QtWidgets.QHBoxLayout(w)
     lay.setContentsMargins(0, 0, 0, 0)
@@ -444,7 +444,7 @@ def _real_shaped_toolbar():
 
 def _real_shaped_lists():
     """The ROI/Patch lists' shape: the two lists Step0 mounts under the view."""
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     w = QtWidgets.QWidget()
     lay = QtWidgets.QVBoxLayout(w)
     lay.setContentsMargins(0, 0, 0, 0)
@@ -504,7 +504,7 @@ def test_the_popup_drops_the_info_row_the_lists_already_show(app):
     canvas. It is dropped only while the popup's own ROI/Patch lists -- which
     say the same thing -- are mounted.
     """
-    from PyQt5 import QtCore, QtWidgets
+    from block01.qt import QtCore, QtWidgets
 
     bare = _step1_popup(app, with_lists=False)
     try:
@@ -562,7 +562,7 @@ def test_the_bottom_edge_of_the_canvas_navigates_in_the_real_hierarchy(app):
     """The gate the first round got wrong: the REAL popup, clicked at its
     very bottom edge, with the toolbar, the lists, Step1's edit policy and
     real ROI/Patch information all in place."""
-    from PyQt5 import QtCore, QtTest
+    from block01.qt import QtCore, QtTest
 
     popup = _step1_popup(app, with_lists=True)
     try:

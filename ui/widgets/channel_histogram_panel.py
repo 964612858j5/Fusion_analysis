@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5 import QtWidgets
-from PyQt5.QtCore import pyqtSignal
+from ...qt import QtWidgets
+from ...qt.QtCore import Signal
 
 
 class ChannelHistogramPanel(QtWidgets.QWidget):
@@ -27,7 +27,7 @@ class ChannelHistogramPanel(QtWidgets.QWidget):
     window_changed(float, float) : emitted while the user drags a window line
     """
 
-    window_changed = pyqtSignal(float, float)
+    window_changed = Signal(float, float)
 
     # A 256-bin density curve does not get more accurate past a few hundred
     # thousand samples, but `arr[np.isfinite(arr)]` over a whole preview patch

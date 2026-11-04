@@ -26,9 +26,9 @@ page's splitter.
 
 from dataclasses import dataclass
 
-from PyQt5 import QtWidgets
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QHBoxLayout, QSizePolicy, QSplitter, QVBoxLayout, QWidget
+from ..qt import QtWidgets
+from ..qt.QtCore import Qt
+from ..qt.QtWidgets import QHBoxLayout, QSizePolicy, QSplitter, QVBoxLayout, QWidget
 
 # One tab look for every framed page's two tab widgets, so each page reads as
 # one surface rather than two (moved here from `main_window` in S2: Step0

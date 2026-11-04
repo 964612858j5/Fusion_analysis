@@ -28,9 +28,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 import test_block01_tissue_preview_contract as tp  # noqa: E402
 import test_downstream_display_seed as ds  # noqa: E402

@@ -43,7 +43,7 @@ class RegionsViewerHost:
             self.mount = mount
             # the Navigator click must not depend on Step1's or Step3's viewer
             # having been built (a direct Step0 -> Regions entry builds neither)
-            from PyQt5.QtCore import Qt
+            from ...qt.QtCore import Qt
             try:
                 w._display.navigator_created.connect(w._wire_step1_tissue_navigation, Qt.UniqueConnection)
             except TypeError:

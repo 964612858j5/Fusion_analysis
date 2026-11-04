@@ -17,12 +17,12 @@ Qt tests need an offscreen platform (env: QT_QPA_PLATFORM=offscreen).
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
@@ -260,7 +260,7 @@ def test_step0_prior_decisions_not_seeded_and_no_swatch(app, tmp_path):
 # ── Step0 rows: names stay left-aligned at a fixed x through state changes ───
 
 def test_step0_row_name_position_stable_after_done(app):
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     from block01.ui.step0.step0_page import Step0Page
 
     class _Loader:

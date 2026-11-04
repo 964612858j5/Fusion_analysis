@@ -22,10 +22,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("pyqtgraph")
 
-from PyQt5 import QtCore, QtGui, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from block01.core.display_identity import DatasetIdentity  # noqa: E402
 from block01.core.fusion_domain import FusionDomainModel  # noqa: E402
@@ -312,8 +312,8 @@ def _grab(rig):
     image = layer.grabFramebuffer()
     image = image.convertToFormat(QtGui.QImage.Format_RGBA8888)
     width, height = image.width(), image.height()
-    buffer = image.constBits()
-    buffer.setsize(image.byteCount())
+    from block01.qt import image_bytes
+    buffer = image_bytes(image)
     array = np.frombuffer(bytes(buffer), dtype=np.uint8)
     array = array.reshape(height, image.bytesPerLine() // 4, 4)
     return array[:, :width, :].copy()
@@ -1884,7 +1884,7 @@ def _real_event_loop(seconds, on_tick, interval_ms=10):
     stopper.timeout.connect(loop.quit)
     stepper.start()
     stopper.start(int(seconds * 1000))
-    loop.exec_()
+    loop.exec()
     stepper.stop()
 
 

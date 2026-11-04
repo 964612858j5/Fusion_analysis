@@ -130,7 +130,7 @@ LOOPS = ["segment_one_zarr", "run"]
 @pytest.mark.parametrize("loop", LOOPS)
 def test_a_manual_run_follows_the_snapshot_step2_froze(tmp_path, monkeypatch, loop):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    pytest.importorskip("PyQt5")
+    pytest.importorskip("block01.qt")
     import numpy as np
     from test_f4_step2 import _cells, _snapshot
     from test_step2_ownership_move import _labels
@@ -160,7 +160,7 @@ def test_a_manual_run_follows_the_snapshot_step2_froze(tmp_path, monkeypatch, lo
 
 def test_the_worker_refuses_a_broken_or_mismatched_request(tmp_path, monkeypatch):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    pytest.importorskip("PyQt5")
+    pytest.importorskip("block01.qt")
     from test_f4_step2 import _snapshot
     from test_step2_ownership_move import _labels
     from test_step2_skip_empty_tiles import _worker
@@ -236,7 +236,7 @@ def test_index_parameters_are_decoupled_from_the_cores_step1_froze():
     the cores of the last Regions Save at its start; the hand-over's own
     frozen cores are dropped, the rest of the hand-over is kept."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    pytest.importorskip("PyQt5")
+    pytest.importorskip("block01.qt")
     from block01.core import preseg_contract as pc
     from block01.ui.step2_page import Step2Page
     cfg = {"method": "stardist_nuclei_expansion",
@@ -252,7 +252,7 @@ def test_an_index_hand_over_starts_with_the_cores_frozen_at_run(tmp_path, monkey
     page) plus Step2's freshly frozen snapshot is accepted, and the run's
     source is Step2's freeze (the run itself is covered above)."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    pytest.importorskip("PyQt5")
+    pytest.importorskip("block01.qt")
     from test_f4_step2 import _snapshot
     from test_step2_ownership_move import _labels
     from test_step2_skip_empty_tiles import _worker
@@ -384,7 +384,7 @@ BOX = (30, 50, 80, 100)                     # in the tissue (columns 60..112)
 @pytest.mark.parametrize("loop", LOOPS)
 def test_an_object_touching_a_blur_exclusion_is_dropped_whole(tmp_path, monkeypatch, loop):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    pytest.importorskip("PyQt5")
+    pytest.importorskip("block01.qt")
     import numpy as np
     from test_f4_step2 import _cells
     plain, _n = _roi_run(tmp_path, monkeypatch, loop, None, "plain")
@@ -410,7 +410,7 @@ def test_an_object_touching_a_blur_exclusion_is_dropped_whole(tmp_path, monkeypa
 @pytest.mark.parametrize("loop", LOOPS)
 def test_a_measurement_only_exclusion_keeps_the_cells_and_marks_them(tmp_path, monkeypatch, loop):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    pytest.importorskip("PyQt5")
+    pytest.importorskip("block01.qt")
     import numpy as np
     from test_f4_step2 import _cells
     plain, _n = _roi_run(tmp_path, monkeypatch, loop, None, "plain")

@@ -24,10 +24,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("pyqtgraph")
 
-from PyQt5 import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets  # noqa: E402
 
 from block01.viewer.explore_view import ExploreController  # noqa: E402
 
@@ -322,7 +322,7 @@ def test_the_historical_eight_element_payload_still_means_foreground():
 import importlib.util  # noqa: E402
 import pathlib  # noqa: E402
 
-from PyQt5 import QtTest  # noqa: E402
+from block01.qt import QtTest  # noqa: E402
 
 from block01.ui.step0.step0_explore_tab import Step0ExploreTab  # noqa: E402
 

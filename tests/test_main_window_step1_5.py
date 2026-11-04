@@ -18,12 +18,12 @@ import os
 import numpy as np
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
 
 @pytest.fixture(scope="module")
 def app():
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     a = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     return a
 
@@ -58,7 +58,7 @@ def _top_nav_buttons(window):
     """Push-buttons in the top workflow nav bar only — i.e. NOT inside any page
     of the QStackedWidget (page-internal controls like the Step1.5 "Save remap
     config" button are intentionally kept and live inside the stack)."""
-    from PyQt5 import QtWidgets
+    from block01.qt import QtWidgets
     stack = window._stack
     out = []
     for b in window.findChildren(QtWidgets.QPushButton):

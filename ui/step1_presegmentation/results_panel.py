@@ -8,7 +8,7 @@ until the user presses `Use` (plan 4.4 / 7.7); a row that may not be chosen
 says why in the row itself.
 """
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from ...qt import QtCore, QtGui, QtWidgets
 
 from ...utils import segmentation_param_schema as ps
 from . import mask_layers
@@ -20,8 +20,8 @@ _BAD = "color:#ff6b6b;font-size:10px;"
 
 
 class ResultRow(QtWidgets.QFrame):
-    use_clicked = QtCore.pyqtSignal(str)
-    style_changed = QtCore.pyqtSignal(str, object)   # combo id, its outline style
+    use_clicked = QtCore.Signal(str)
+    style_changed = QtCore.Signal(str, object)   # combo id, its outline style
 
     def __init__(self, combo, parent=None, index=0, outputs=("cell", "nucleus")):
         super().__init__(parent)
@@ -157,8 +157,8 @@ class _AllCheck(QtWidgets.QCheckBox):
 
 
 class ResultsPanel(QtWidgets.QWidget):
-    use_requested = QtCore.pyqtSignal(str)
-    style_changed = QtCore.pyqtSignal(str, object)
+    use_requested = QtCore.Signal(str)
+    style_changed = QtCore.Signal(str, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)

@@ -39,7 +39,7 @@ if "block01" not in sys.modules:
     _spec.loader.exec_module(_mod)
 sys.path.insert(0, str(_ROOT.parent))
 
-from PyQt5 import QtCore, QtGui, QtWidgets                  # noqa: E402
+from block01.qt import QtCore, QtGui, QtWidgets                  # noqa: E402
 
 MANIFEST = pathlib.Path(os.environ.get(
     "G32C_MANIFEST",
@@ -58,8 +58,8 @@ def note(kind, **fields):
 
 def to_array(image):
     image = image.convertToFormat(QtGui.QImage.Format_RGBA8888)
-    pointer = image.constBits()
-    pointer.setsize(image.byteCount())
+    from block01.qt import image_bytes
+    pointer = image_bytes(image)
     return np.frombuffer(pointer, np.uint8).reshape(
         (image.height(), image.bytesPerLine() // 4, 4))[:, :image.width(), :].copy()
 

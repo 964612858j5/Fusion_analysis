@@ -31,9 +31,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 
-from PyQt5 import QtCore, QtTest, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtTest, QtWidgets  # noqa: E402
 
 from block01.ui.step0 import step0_page as sp  # noqa: E402
 from block01.ui.step0.step0_page import (  # noqa: E402
@@ -526,12 +526,12 @@ def test_a_recompute_computes_exactly_its_own_channel(app, monkeypatch):
     asked = {}
 
     class _Worker(QtCore.QThread):
-        channel_patch_done = QtCore.pyqtSignal(str, int, dict)
-        channel_done = QtCore.pyqtSignal(str)
-        all_done = QtCore.pyqtSignal()
-        progress = QtCore.pyqtSignal(int, int, str)
-        error_signal = QtCore.pyqtSignal(str, int, str)
-        canceled = QtCore.pyqtSignal()
+        channel_patch_done = QtCore.Signal(str, int, dict)
+        channel_done = QtCore.Signal(str)
+        all_done = QtCore.Signal()
+        progress = QtCore.Signal(int, int, str)
+        error_signal = QtCore.Signal(str, int, str)
+        canceled = QtCore.Signal()
 
         def __init__(self, _loader, _patches, channels, *_a, **_k):
             super().__init__()

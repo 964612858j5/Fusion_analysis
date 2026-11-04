@@ -8,10 +8,10 @@ import os
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("block01.qt")
 pytest.importorskip("pyqtgraph")
 
-from PyQt5 import QtCore, QtGui, QtTest, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtGui, QtTest, QtWidgets  # noqa: E402
 
 from test_regions_r2 import _enter_regions, _pump  # noqa: E402
 from test_step0_compare_tiles import app  # noqa: E402,F401

@@ -30,11 +30,14 @@ STEP1_PATCH_BTN_W = 42
 STEP1_PATCH_BTN_H = 22
 STEP1_PATCH_BTN_SPACING = 4
 
+from .theme import widgets as _theme_widgets  # noqa: E402
+
+#: `Patch ▾` -- one definition for Step0's and Step1's (a test holds them
+#: equal): a "ghost" tool button in the theme (docs/v17_desktop_ui_plan.md §10)
 MENU_BUTTON_QSS = (
-    "QToolButton{color:#9bd0ff;background:#182230;"
-    "border:1px solid #354a63;border-radius:3px;"
-    "font-size:10px;font-weight:bold;padding:2px 8px;}"
-    "QToolButton::menu-indicator{subcontrol-position:right center;"
+    _theme_widgets.button_qss("ghost", "font-size:10px;font-weight:bold;padding:2px 8px;",
+                              "QToolButton")
+    + "QToolButton::menu-indicator{subcontrol-position:right center;"
     "subcontrol-origin:padding;left:-4px;}")
 
 

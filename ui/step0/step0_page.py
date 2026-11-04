@@ -51,6 +51,8 @@ from ...core.bg_correction import (
     CREATED_FROM_STEP0_BACKGROUND_CORRECTION,
 )
 from ...core import product_swap, step0_handoff
+from .. import theme
+from ..theme import widgets as theme_widgets
 from ...core.io_loader import OMETIFFLoader
 from ...core.provenance import write_json_atomic
 from ...core.fusion_engine import FusionEngine
@@ -129,10 +131,14 @@ def patch_button_qss(color):
     which the whole-slide viewer never does). Load state is the label's
     glyph, not the colour.
     """
+    from ..theme import widgets as _tw
+    k = _tw.t()
+    # the patch's colour is data and stays; hover is the theme's (plan §10)
     return (f"QPushButton{{color:{color};border:1px solid {color};"
-            f"border-radius:3px;font-size:10px;font-weight:bold;background:#1a1a1a;}}"
+            f"border-radius:3px;font-size:10px;font-weight:bold;background:transparent;}}"
+            f"QPushButton:hover{{background:{k['hover']};}}"
             f"QPushButton:checked{{background:{color};color:#111;}}"
-            f"QPushButton:hover{{background:#2a2a2a;}}")
+            f"QPushButton:checked:hover{{background:{color};}}")
 from ...utils.channel_remap_config import (
     save_channel_remap_config,
     load_channel_remap_config,
@@ -278,6 +284,23 @@ class _FixedWidthStatusLabel(QLabel):
             self._full_text, Qt.ElideRight, max(1, width)) if width > 0 else self._full_text
         super().setText(shown)
 
+
+
+def _nucleus_channel_of(names):
+    """The slide's nucleus channel by its name, or None: DAPI exactly first,
+    then a name that starts with DAPI or Hoechst (DAPI_1, DAPI-01, Hoechst
+    33342), case aside. What the panel file used to settle for slides whose
+    nucleus is not named plainly "DAPI" (codex review 2026-11-03)."""
+    names = list(names or ())
+    for want in ("dapi",):
+        for name in names:
+            if str(name).strip().lower() == want:
+                return name
+    for name in names:
+        low = str(name).strip().lower()
+        if low.startswith("dapi") or low.startswith("hoechst"):
+            return name
+    return None
 
 class Step0Page(QWidget):
     step0_complete = pyqtSignal(dict)
@@ -585,72 +608,69 @@ class Step0Page(QWidget):
 
         # ══ Section A — 单行横排 file_bar ══════════════════════════════
         file_bar = QWidget()
-        file_bar.setStyleSheet("background:#1a1a2a;border-radius:4px;")
+        file_bar.setAttribute(Qt.WA_StyledBackground, True)
+        theme.role(file_bar, "bar")
+        # (the geometry of each control stays its own, inline -- plan §8;
+        # the theme gives colours, radii and the hover / pressed feel)
+        _field_geometry = ("QLineEdit{font-size:11px;padding:2px 4px;"
+                           "border-width:1px;border-style:solid;}")
+        _browse_geometry = ("QPushButton{font-size:10px;padding:2px 6px;"
+                            "border-width:1px;border-style:solid;}")
         file_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         fb = QHBoxLayout(file_bar)
         fb.setContentsMargins(8, 4, 8, 4)
         fb.setSpacing(6)
 
-        _edit_style = (
-            "font-size:11px;background:#111;color:#ddd;"
-            "border:1px solid #444;border-radius:3px;padding:2px 4px;"
-        )
-        _btn_style = (
-            "QPushButton{font-size:10px;color:#8cf;border:1px solid #8cf;"
-            "border-radius:3px;padding:2px 6px;}"
-            "QPushButton:hover{background:#1a2a4a;}"
-        )
 
         # OME-TIFF
         fb.addWidget(QLabel("OME-TIFF:"))
         self._ome_path_edit = QtWidgets.QLineEdit(OME_TIFF_FILE)
-        self._ome_path_edit.setStyleSheet(_edit_style)
+        theme.role(self._ome_path_edit, "field")
+        self._ome_path_edit.setStyleSheet(_field_geometry)
         self._ome_path_edit.setMinimumWidth(260)
         fb.addWidget(self._ome_path_edit, stretch=3)
         _btn_ome = QPushButton("Browse")
         _btn_ome.setFixedWidth(58)
-        _btn_ome.setStyleSheet(_btn_style)
+        theme.role(_btn_ome, "outline")
+        _btn_ome.setStyleSheet(_browse_geometry)
         _btn_ome.clicked.connect(self._browse_ome)
         fb.addWidget(_btn_ome)
 
         # Output dir
         fb.addWidget(QLabel("Output dir:"))
         self._out_path_edit = QtWidgets.QLineEdit(OUTPUT_DIR)
-        self._out_path_edit.setStyleSheet(_edit_style)
+        theme.role(self._out_path_edit, "field")
+        self._out_path_edit.setStyleSheet(_field_geometry)
         self._out_path_edit.setMinimumWidth(180)
         fb.addWidget(self._out_path_edit, stretch=2)
         _btn_out = QPushButton("Browse")
         _btn_out.setFixedWidth(58)
-        _btn_out.setStyleSheet(_btn_style)
+        theme.role(_btn_out, "outline")
+        _btn_out.setStyleSheet(_browse_geometry)
         _btn_out.clicked.connect(self._browse_out_dir)
         fb.addWidget(_btn_out)
 
-        # Panel CSV
-        fb.addWidget(QLabel("Panel CSV:"))
-        self._panel_csv_edit = QtWidgets.QLineEdit()
-        self._panel_csv_edit.setPlaceholderText("panel.csv  (optional)")
-        self._panel_csv_edit.setStyleSheet(_edit_style)
-        self._panel_csv_edit.setMinimumWidth(160)
-        fb.addWidget(self._panel_csv_edit, stretch=2)
-        _btn_panel = QPushButton("Browse")
-        _btn_panel.setFixedWidth(58)
-        _btn_panel.setStyleSheet(_btn_style)
-        _btn_panel.clicked.connect(self._browse_panel_csv)
-        fb.addWidget(_btn_panel)
+        # (No Panel CSV box: removed, user ruling 2026-11-03 -- the panel file
+        # was no longer used. The nucleus channel is found from the slide's
+        # names and Step1 starts with one "markers" group, as with no file.)
 
         # Load button + status
         self._btn_load = QPushButton("▶  Load")
         self._btn_load.setFixedWidth(72)
+        theme.role(self._btn_load, "primary")
         self._btn_load.setStyleSheet(
-            "QPushButton{background:#2a5;color:white;font-weight:bold;"
-            "font-size:11px;border-radius:3px;padding:3px 8px;}"
-            "QPushButton:hover{background:#3b6;}"
-        )
+            "QPushButton{font-size:11px;font-weight:bold;padding:3px 8px;border:none;}")
         self._btn_load.clicked.connect(self._reload_from_paths)
         fb.addWidget(self._btn_load)
 
         self._load_status = QLabel("No project loaded.")
-        self._load_status.setStyleSheet("color:#aaa;font-size:11px;")
+        theme.role(self._load_status, "caption")
+        self._load_status.setStyleSheet("font-size:11px;")
+        # NOT SHOWN (user ruling 2026-11-03): the "Loaded: … px | … channels
+        # | Workspace: …" line said nothing the user needs and, appearing after
+        # Load, squeezed the Output dir box. Kept, hidden, as the text the
+        # page still writes.
+        self._load_status.setVisible(False)
         fb.addWidget(self._load_status)
 
         fb.addStretch()
@@ -660,10 +680,9 @@ class Step0Page(QWidget):
         self._btn_tissue_nav = QPushButton("Tissue Navigator")
         self._btn_tissue_nav.setToolTip(
             "Show/hide the floating Tissue Preview / ROI Navigator popup.")
+        theme.role(self._btn_tissue_nav, "outline")
         self._btn_tissue_nav.setStyleSheet(
-            "QPushButton{font-size:10px;color:#8cf;border:1px solid #8cf;"
-            "border-radius:3px;padding:2px 8px;}"
-            "QPushButton:hover{background:#1a2a4a;}")
+            "QPushButton{font-size:10px;padding:2px 8px;border-width:1px;border-style:solid;}")
         self._btn_tissue_nav.clicked.connect(self.toggle_tissue_navigator)
         fb.addWidget(self._btn_tissue_nav)
 
@@ -909,7 +928,7 @@ class Step0Page(QWidget):
 
         # ── 通道列表（勾选 + 方法下拉 + 状态图标）─────────────────────
         ch_box = QGroupBox("Channels")
-        ch_box.setStyleSheet(self._box_style("#61afef"))
+        ch_box.setStyleSheet(self._box_style(channel_template.COLOR_FRAME))
         chl = QVBoxLayout(ch_box)
         # Step1's and Step3's Channels frame margins (block A1b S2, ruling
         # 4): the one dock sits at the same x and width in every step.
@@ -966,10 +985,8 @@ class Step0Page(QWidget):
             "Open the floating Intensity window: histogram, Min/Max, "
             "Gamma, Auto and Reset for the selected "
             "channel. Display only — it never changes the h5ad.")
-        self._btn_intensity_window.setStyleSheet(
-            "QPushButton{color:#c678dd;border:1px solid #c678dd;border-radius:3px;"
-            "padding:1px 6px;font-size:10px;background:#1a1a1a;}"
-            "QPushButton:hover{background:#2a1a33;}")
+        theme_widgets.button(self._btn_intensity_window, "panel",
+                             "padding:1px 6px;font-size:10px;")
         self._btn_intensity_window.clicked.connect(self.show_intensity_window)
 
         # `Method ▾` LEADS THE ROW (user ruling, 2026-09-23), in the place the
@@ -1404,12 +1421,8 @@ class Step0Page(QWidget):
 
         self._apply_btn = QPushButton("Apply")
         self._apply_btn.setToolTip("Save this channel's method + params (no run).")
-        self._apply_btn.setStyleSheet(
-            "QPushButton{background:#255;color:white;border-radius:4px;"
-            "padding:5px 12px;font-weight:bold;}"
-            "QPushButton:hover{background:#377;}"
-            "QPushButton:disabled{background:#333;color:#555;}"
-        )
+        # (padding one less than before: the role's 1 px border keeps the height)
+        theme_widgets.button(self._apply_btn, "panel", "padding:4px 12px;font-weight:bold;")
         self._apply_btn.clicked.connect(self._apply_current_channel_decision)
         btn_row.addWidget(self._apply_btn)
         dl.addLayout(btn_row)
@@ -1449,13 +1462,9 @@ class Step0Page(QWidget):
             "Validate and save the current Intensity remap, run background "
             "correction on assigned channels, write corrected_channels.zarr "
             "+ the Step0->Step1 handoff, and mark Step0 complete.")
+        theme.role(self._btn_continue, "primary", corner="left")
         self._btn_continue.setStyleSheet(
-            "QPushButton{background:#2a5;color:white;border-radius:4px;"
-            "border-top-right-radius:0px;border-bottom-right-radius:0px;"
-            "padding:8px 22px;font-size:13px;font-weight:bold;}"
-            "QPushButton:hover{background:#3b6;}"
-            "QPushButton:disabled{background:#333;color:#666;}"
-        )
+            "QPushButton{padding:8px 22px;font-size:13px;font-weight:bold;}")
         self._btn_continue.setFixedHeight(38)
         self._btn_continue.clicked.connect(self._save_and_continue)
         # Block A6 W3: Save writes the CURRENT workspace; the triangle beside
@@ -1465,14 +1474,9 @@ class Step0Page(QWidget):
         self._btn_save_menu.setToolTip("More ways to save")
         self._btn_save_menu.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self._btn_save_menu.setFixedHeight(38)
+        theme.role(self._btn_save_menu, "split")
         self._btn_save_menu.setStyleSheet(
-            "QToolButton{background:#2a5;color:white;border-radius:4px;"
-            "border-top-left-radius:0px;border-bottom-left-radius:0px;"
-            "border-left:1px solid #1d7a3d;padding:0px 8px;font-size:13px;"
-            "font-weight:bold;}"
-            "QToolButton:hover{background:#3b6;}"
-            "QToolButton:disabled{background:#333;color:#666;}"
-            "QToolButton::menu-indicator{image:none;width:0px;}")
+            "QToolButton{padding:0px 8px;font-size:13px;font-weight:bold;}")
         self._save_menu = QtWidgets.QMenu(self._btn_save_menu)
         self._save_as_action = self._save_menu.addAction(
             "Save as new workspace")
@@ -1671,12 +1675,7 @@ class Step0Page(QWidget):
         bar = QHBoxLayout(bar_widget)
         bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(6)
-        btn_style = (
-            "QPushButton{color:#ddd;border:1px solid #555;border-radius:3px;"
-            "padding:2px 8px;font-size:10px;background:#1a1a1a;}"
-            "QPushButton:hover{border-color:#aaa;}"
-            "QPushButton:disabled{color:#555;border-color:#333;}"
-        )
+        btn_style = theme_widgets.button_qss("ghost", "padding:2px 8px;font-size:10px;")
         # ── the patch selector, Step1's, at the bar's left end ───────────
         #
         # Moved here from the `Preview Patch` box (user ruling, 2026-09-23):
@@ -1688,12 +1687,8 @@ class Step0Page(QWidget):
         self._patch_menu_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self._patch_menu_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self._patch_menu_btn.setFixedHeight(PATCH_BTN_H)
-        self._patch_menu_btn.setStyleSheet(
-            "QToolButton{color:#9bd0ff;background:#182230;"
-            "border:1px solid #354a63;border-radius:3px;"
-            "font-size:10px;font-weight:bold;padding:2px 8px;}"
-            "QToolButton::menu-indicator{subcontrol-position:right center;"
-            "subcontrol-origin:padding;left:-4px;}")
+        from ..patch_strip import MENU_BUTTON_QSS
+        self._patch_menu_btn.setStyleSheet(MENU_BUTTON_QSS)     # Step1's, the one definition
         self._patch_menu = QtWidgets.QMenu(self._patch_menu_btn)
         self._patch_menu.setMinimumWidth(patch_menu_width())
         self._patch_menu_btn.setMenu(self._patch_menu)
@@ -1714,15 +1709,10 @@ class Step0Page(QWidget):
         # "computed", and no checkbox or Method combo is consulted -- every
         # marker channel can be looked at corrected before deciding whether
         # to correct it, which is the whole point of a full-image-first page.
-        method_style = (
-            "QPushButton{color:#9aa7b4;border:1px solid #3a4a5c;"
-            "border-left-width:0px;padding:2px 10px;font-size:10px;"
-            "background:#161c25;}"
-            "QPushButton:hover{color:#dce5ef;border-color:#61afef;}"
-            "QPushButton:checked{color:#0f1620;background:#61afef;"
-            "border-color:#61afef;font-weight:bold;}"
-            "QPushButton:disabled{color:#4a545e;border-color:#2a323c;}"
-        )
+        # one-of-N in the theme's "seg" (ruling 4: checked = active grey)
+        method_style = theme_widgets.button_qss(
+            "seg", "border-left-width:0px;padding:2px 10px;font-size:10px;border-radius:0px;"
+        ) + "QPushButton:checked{font-weight:bold;}"
         self._full_method_group = QButtonGroup(self)
         self._full_method_group.setExclusive(True)
         self._full_method_buttons = {}
@@ -1778,14 +1768,11 @@ class Step0Page(QWidget):
         # was a black canvas with two buttons that looked switched on. The
         # glyph changes too (● on / ○ off, see `_set_layer_toggle_text`),
         # so the state is readable without relying on colour alone.
-        toggle_style = (
-            "QPushButton{color:#777;border:1px solid #444;border-radius:3px;"
-            "padding:2px 8px;font-size:10px;background:#1a1a1a;}"
-            "QPushButton:hover{border-color:#aaa;}"
-            "QPushButton:checked{color:#eee;background:#264d26;"
-            "border-color:#6bffa0;font-weight:bold;}"
-            "QPushButton:disabled{color:#555;border-color:#333;}"
-        )
+        # on / off in the theme's "toggle" (ruling 4: checked = active grey,
+        # not green; the glyph ● / ○ still says the state without colour)
+        toggle_style = theme_widgets.button_qss(
+            "toggle", "padding:2px 8px;font-size:10px;"
+        ) + "QPushButton:checked{font-weight:bold;}"
         # Marker on/off. A checkable button rather than a menu entry: it is
         # a two-state thing the user flips while looking at the image.
         self._btn_full_marker = QPushButton("● Marker")
@@ -1814,7 +1801,7 @@ class Step0Page(QWidget):
         bar.addWidget(self._btn_full_nucleus)
 
         self._full_source_lbl = QLabel("—")
-        self._full_source_lbl.setStyleSheet("color:#61afef;font-size:10px;")
+        self._full_source_lbl.setStyleSheet(theme_widgets.caption_qss(tone="accent"))
         # What the label says about the SOURCE, kept apart from the hidden-
         # layer hint that `_update_full_source_label` may append to it.
         self._full_source_base_text = "—"
@@ -5408,6 +5395,10 @@ class Step0Page(QWidget):
     def _set_geometry_status(self, text):
         if hasattr(self, "_load_status"):
             self._load_status.setText(text)
+        if str(text).startswith("\u26a0"):
+            # the Load row's line is not shown (user ruling 2026-11-03): a
+            # problem is said in a box instead
+            self._warn_load_row(str(text)[1:].strip())
         popup = getattr(self, "_tissue_navigator_popup", None)
         if popup is not None and hasattr(popup, "_bar_label"):
             popup._bar_label.setText(text)
@@ -6191,61 +6182,6 @@ class Step0Page(QWidget):
         row.addWidget(btn)
         return row
 
-    @staticmethod
-    def _parse_panel_csv(path):
-        import csv
-        groups = {}
-        nucleus_rows = []
-        dapi_fallback = None
-
-        def _norm_key(v):
-            return (v or "").strip().lower()
-
-        def _is_dapi(*values):
-            return any(_norm_key(v) == "dapi" for v in values)
-
-        with open(path, newline="", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            if not reader.fieldnames:
-                return {}, None
-            for row in reader:
-                row = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
-                ch_name = (
-                    row.get("channel_name")
-                    or row.get("channel")
-                    or row.get("name")
-                    or row.get("marker")
-                    or ""
-                ).strip()
-                marker = (row.get("marker") or "").strip()
-                role = _norm_key(row.get("role"))
-                group = (
-                    row.get("group")
-                    or row.get("category")
-                    or row.get("class")
-                    or ""
-                ).strip()
-                if not ch_name:
-                    continue
-                group_norm = _norm_key(group)
-                is_nucleus = role == "nucleus" or group_norm in ("nucleus", "dapi", "nuclear")
-                if is_nucleus:
-                    nucleus_rows.append((ch_name, marker))
-                if dapi_fallback is None and _is_dapi(ch_name, marker):
-                    dapi_fallback = ch_name
-                if group and not is_nucleus:
-                    groups.setdefault(group, {})[ch_name] = 1.0
-
-        selected_nuc = None
-        dapi_nucleus = [ch for ch, marker in nucleus_rows if _is_dapi(ch, marker)]
-        if dapi_nucleus:
-            selected_nuc = dapi_nucleus[0]
-        elif nucleus_rows:
-            selected_nuc = nucleus_rows[0][0]
-        elif dapi_fallback:
-            selected_nuc = dapi_fallback
-        return groups, selected_nuc
-
     def _browse_ome(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -6255,12 +6191,6 @@ class Step0Page(QWidget):
         )
         if path:
             self._ome_path_edit.setText(path)
-
-    def _browse_panel_csv(self):
-        csv_dir = os.path.dirname(self._panel_csv_edit.text()) if self._panel_csv_edit.text().strip() else os.path.dirname(self._ome_path_edit.text())
-        path, _ = QFileDialog.getOpenFileName(self, "Select Panel CSV", csv_dir or os.getcwd(), "CSV (*.csv)")
-        if path:
-            self._panel_csv_edit.setText(path)
 
     def _browse_out_dir(self):
         path = QFileDialog.getExistingDirectory(self, "Select Output Directory", self._out_path_edit.text() or os.getcwd())
@@ -6288,7 +6218,6 @@ class Step0Page(QWidget):
 
         ome = self._ome_path_edit.text().strip()
         outd = self._out_path_edit.text().strip()
-        panel_csv = self._panel_csv_edit.text().strip()
 
         if not ome or not os.path.exists(ome):
             QMessageBox.warning(self, "File not found", f"OME-TIFF not found:\n{ome}")
@@ -6383,36 +6312,15 @@ class Step0Page(QWidget):
         # overview rebuild, or in the popup feed -- made the previous slide's
         # departure depend on every step in between running.
         unbound = self._bind_panels_to_dataset()
-        self.panel_csv_path = panel_csv
+        # No panel file any more (user ruling 2026-11-03): no groups from
+        # one, and no template panel.csv written into the output folder.
+        self.panel_csv_path = ""
         self.panel_groups = {}
         self.nucleus_channel = NUCLEUS_CONFIG["channel"]
 
-        if panel_csv and os.path.exists(panel_csv):
-            try:
-                self.panel_groups, parsed_nuc = self._parse_panel_csv(panel_csv)
-                if parsed_nuc:
-                    self.nucleus_channel = parsed_nuc
-            except Exception as e:
-                QMessageBox.warning(self, "Panel CSV error", f"Failed to parse panel CSV:\n{e}")
-        else:
-            template_path = os.path.join(OUTPUT_DIR, "panel.csv")
-            try:
-                import csv as _csv
-                with open(template_path, "w", newline="", encoding="utf-8") as f:
-                    w = _csv.writer(f)
-                    w.writerow(["channel_name", "marker", "role", "group"])
-                    for ch in self.loader.channel_names():
-                        w.writerow([ch, ch, "", ""])
-                self._panel_csv_edit.setText(template_path)
-                self.panel_csv_path = template_path
-            except Exception:
-                pass
-
         if self.nucleus_channel not in self.loader.ch_map:
-            if "DAPI" in self.loader.ch_map:
-                self.nucleus_channel = "DAPI"
-            else:
-                self.nucleus_channel = next(iter(self.loader.ch_map.keys()), NUCLEUS_CONFIG["channel"])
+            self.nucleus_channel = _nucleus_channel_of(self.loader.ch_map) \
+                or next(iter(self.loader.ch_map.keys()), NUCLEUS_CONFIG["channel"])
 
         self.loader.set_correction_config(
             _load_correction_config(os.path.join(OUTPUT_DIR, "correction_config.json"))
@@ -6485,6 +6393,8 @@ class Step0Page(QWidget):
                 f"⚠ Loaded: {self.loader.shape[0]:,}x{self.loader.shape[1]:,} px"
                 f"  |  {len(self.loader.ch_map)} channels — "
                 f"{len(unbound)} tissue preview(s) could not be emptied.")
+            self._warn_load_row(f"{len(unbound)} tissue preview(s) could not be emptied; "
+                                "the previous slide may still be shown there.")
             print("[Step0] WARNING: a tissue preview could not be emptied")
         else:
             self._load_status.setText(self._project_status_text())
@@ -12198,6 +12108,24 @@ class Step0Page(QWidget):
             # after the Save has finished, not inside it
             QtCore.QTimer.singleShot(0, lambda why=unavailable, run=os.path.basename(run_dir):
                                      self._warn_slide_id_unavailable(run, why))
+
+    def _warn_load_row(self, text):
+        """A problem the hidden Load-row line used to carry (user ruling
+        2026-11-03: the line is not shown, a problem is said in a box).
+        Non-modal, one at a time -- a newer problem replaces the text."""
+        from PyQt5 import sip
+        if sip.isdeleted(self):
+            return
+        box = self.__dict__.get("_load_row_box")
+        if box is not None and not sip.isdeleted(box) and box.isVisible():
+            box.setText(text)
+            return
+        box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Warning, "Step0", text,
+                                    QtWidgets.QMessageBox.Ok, self)
+        box.setAttribute(Qt.WA_DeleteOnClose)
+        box.setWindowModality(Qt.NonModal)
+        self._load_row_box = box
+        box.show()
 
     def _warn_slide_id_unavailable(self, run, why):
         """Non-modal (a modal box here would hold a nested event loop inside

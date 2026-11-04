@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QProgressBar, QMessageBox, QFileDialog, QComboBox,
 )
 
+from .theme import widgets as theme_widgets
 from ..config import OUTPUT_DIR
 from .step_frame import FRAME_TAB_QSS, StepFrame, StepFrameMetrics, free_tab_bar
 from ..core import quant_engine as qe
@@ -23,6 +24,10 @@ from ..workers.feature_extract_worker import (
 # ══════════════════════════════════════════════════════════════════════
 #  Step 4 Page  — Cell Feature Extraction
 # ══════════════════════════════════════════════════════════════════════
+
+
+#: the theme's colours for status and hint text (docs/v17_desktop_ui_plan.md §10)
+_TK = theme_widgets.t()
 
 class Step4Page(QWidget):
 
@@ -286,10 +291,9 @@ class Step4Page(QWidget):
 
         def _box(label, color):
             b = QGroupBox(label)
-            b.setStyleSheet(
-                f'QGroupBox{{border:1px solid {color};border-radius:5px;'
-                f'margin-top:4px;font-weight:bold;color:{color};font-size:11px;}}'
-            )
+            b.setStyleSheet(theme_widgets.panel_box_qss(
+                color, geometry="border-radius:5px;margin-top:4px;font-weight:bold;font-size:11px;",
+                title=""))
             return b
 
         def _file_row(parent_lay, label, placeholder, btn_slot):
@@ -326,17 +330,17 @@ class Step4Page(QWidget):
         slide_row = QHBoxLayout()
         slide_row.addWidget(QLabel('Slide:'))
         self._slide_lbl = QLabel('—')
-        self._slide_lbl.setStyleSheet('color:#ccc;font-size:11px;')
+        self._slide_lbl.setStyleSheet(f'color:{_TK["text2"]};font-size:11px;')
         self._slide_lbl.setToolTip("The run's own slide: intensities are read from it, and "
                                    "from Step 0's saved correction for corrected channels")
         slide_row.addWidget(self._slide_lbl, stretch=1)
         il.addLayout(slide_row)
         self._source_lbl = QLabel('')
-        self._source_lbl.setStyleSheet('color:#888;font-size:10px;')
+        self._source_lbl.setStyleSheet(f'color:{_TK["text3"]};font-size:10px;')
         il.addWidget(self._source_lbl)
         self._reason_lbl = QLabel('Choose a Step 2 result (its run folder).')
         self._reason_lbl.setWordWrap(True)
-        self._reason_lbl.setStyleSheet('color:#e06c75;font-size:11px;')
+        self._reason_lbl.setStyleSheet(f'color:{_TK["danger"]};font-size:11px;')
         il.addWidget(self._reason_lbl)
         root.addWidget(inp)
 
@@ -434,7 +438,7 @@ class Step4Page(QWidget):
             cb.setToolTip('Always computed / written')
         self._risk_lbl = QLabel('')
         self._risk_lbl.setWordWrap(True)
-        self._risk_lbl.setStyleSheet('color:#e5a050;font-size:11px;')
+        self._risk_lbl.setStyleSheet(f'color:{_TK["warning"]};font-size:11px;')
         self._risk_lbl.setVisible(False)
         sl.addWidget(self._risk_lbl)
         root.addWidget(scope)
@@ -458,7 +462,7 @@ class Step4Page(QWidget):
         ol.addLayout(prefix_row)
 
         self._prefix_info = QLabel('')
-        self._prefix_info.setStyleSheet('color:#888;font-size:10px;')
+        self._prefix_info.setStyleSheet(f'color:{_TK["text3"]};font-size:10px;')
         ol.addWidget(self._prefix_info)
         self._prefix_edit.textChanged.connect(lambda _t: self._update_scope())
         root.addWidget(out)
@@ -474,14 +478,14 @@ class Step4Page(QWidget):
         root.addWidget(self._prog_bar)
 
         self._prog_lbl = QLabel('—')
-        self._prog_lbl.setStyleSheet('color:#ccc;font-size:11px;padding:2px;')
+        self._prog_lbl.setStyleSheet(f'color:{_TK["text2"]};font-size:11px;padding:2px;')
         self._prog_lbl.setWordWrap(True)
         root.addWidget(self._prog_lbl)
 
         # Block A6 (user ruling 2026-10-02, option b): a run handed over
         # while this page computes is opened when the extraction ends.
         self._pending_lbl = QLabel('')
-        self._pending_lbl.setStyleSheet('color:#e5c07b;font-size:10px;padding:2px;')
+        self._pending_lbl.setStyleSheet(f'color:{_TK["warning"]};font-size:10px;padding:2px;')
         self._pending_lbl.setWordWrap(True)
         self._pending_lbl.setVisible(False)
         root.addWidget(self._pending_lbl)
@@ -491,22 +495,12 @@ class Step4Page(QWidget):
         # ── Navigation ────────────────────────────────────────────────
         nav = QHBoxLayout()
 
-        btn_back = QPushButton('← Back to Step 3')
-        btn_back.setStyleSheet(
-            'QPushButton{color:#fa8;border:1px solid #fa8;'
-            'border-radius:4px;padding:6px 16px;}'
-            'QPushButton:hover{background:#321;}'
-        )
-        btn_back.clicked.connect(self.go_back.emit)
-        nav.addWidget(btn_back)
+        # (no "Back to Step 3": the step bar is the way back -- user ruling
+        # 2026-11-03)
         nav.addStretch()
 
         self._batch_btn = QPushButton('Batch...')
-        self._batch_btn.setStyleSheet(
-            'QPushButton{color:#61afef;border:1px solid #61afef;'
-            'border-radius:4px;padding:6px 16px;}'
-            'QPushButton:hover{background:#123;}'
-        )
+        theme_widgets.button(self._batch_btn, "panel", "padding:6px 16px;")
         self._batch_btn.clicked.connect(self._open_batch)
         nav.addWidget(self._batch_btn)
         # Hidden (user ruling 2026-10-31, docs/v17_review_fixes_plan.md §2):
@@ -517,21 +511,13 @@ class Step4Page(QWidget):
 
         self._btn_stop = QPushButton('⏹ Stop')
         self._btn_stop.setEnabled(False)
-        self._btn_stop.setStyleSheet(
-            'QPushButton{background:#722;color:white;border-radius:4px;padding:7px 14px;}'
-            'QPushButton:hover{background:#944;}'
-            'QPushButton:disabled{background:#333;color:#555;}'
-        )
+        theme_widgets.button(self._btn_stop, "danger", "padding:7px 14px;")
         self._btn_stop.clicked.connect(self._stop)
         nav.addWidget(self._btn_stop)
 
         self._btn_run = QPushButton('▶  Extract Features')
-        self._btn_run.setStyleSheet(
-            'QPushButton{background:#2a5;color:white;border-radius:4px;'
-            'padding:7px 22px;font-size:13px;font-weight:bold;}'
-            'QPushButton:hover{background:#3b6;}'
-            'QPushButton:disabled{background:#333;color:#555;}'
-        )
+        theme_widgets.button(self._btn_run, "run",
+                             "padding:7px 22px;font-size:13px;font-weight:bold;")
         self._btn_run.clicked.connect(self._run)
         self._btn_run.setEnabled(False)
         nav.addWidget(self._btn_run)
@@ -545,7 +531,7 @@ class Step4Page(QWidget):
             title slot   `Step 4 — Cell Feature Extraction`
             tab row      blank
             merged slot  the page's one column, as before
-            bottom slot  ← Back to Step 3 | stretch | Batch... | Stop | Extract
+            bottom slot  stretch | Batch... | Stop | Extract
         """
         title_bar = self._title_bar_in
         if title_bar is None:

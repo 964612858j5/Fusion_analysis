@@ -448,7 +448,6 @@ class Driver(QtCore.QObject):
         page = self.w._step0
         page._ome_path_edit.setText(a["ome"])
         page._out_path_edit.setText(a["out"])
-        page._panel_csv_edit.setText(a.get("panel", ""))
         wanted = a.get("workspace")
         real = page._choose_workspace
 

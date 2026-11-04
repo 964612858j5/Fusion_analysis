@@ -448,10 +448,11 @@ def test_the_weight_row_and_the_buttons_kept_their_look(app):
     try:
         cfg, dock = w.config, w._channel_dock
         buttons = {b.text(): b for b in cfg.findChildren(QPushButton)}
-        assert buttons["Reset weights"].styleSheet().startswith(
-            "QPushButton{color:#e5c07b;background:#182230;")
-        assert buttons["Load weights"].styleSheet().startswith(
-            "QPushButton{color:#9bd0ff;background:#182230;")
+        # the theme's in-panel button (docs/v17_desktop_ui_plan.md §10, ruling 1)
+        from block01.ui.theme import widgets as theme_widgets
+        want = theme_widgets.button_qss("panel", "padding:2px 8px;font-size:10px;")
+        assert buttons["Reset weights"].styleSheet() == want
+        assert buttons["Load weights"].styleSheet() == want
         assert buttons["Reset weights"].height() == 20
         assert buttons["Load weights"].height() == 20
         # the public row's Step1 fields are the shared template's, untouched

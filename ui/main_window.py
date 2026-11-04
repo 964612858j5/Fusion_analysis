@@ -89,7 +89,8 @@ from .block01_display import (
 from .step0.config_panel import ConfigPanel
 from .widgets.away_hider import hide_when_away
 from .step_frame import FRAME_TAB_QSS, StepFrame, StepFrameMetrics, free_tab_bar
-from . import step_frame
+from . import step_frame, theme
+from .theme import widgets as theme_widgets
 from .widgets.channel_dock import template as channel_template
 from .step0.search_ctrl import SearchCtrlPanel
 from .step0.result_grid import ResultGridPanel
@@ -793,34 +794,21 @@ class MainWindow(QMainWindow):
         step_bar = QHBoxLayout()
         step_bar.setObjectName("block01_step_bar")
         step_bar.setContentsMargins(8, 4, 8, 4)
+        # The step bar (docs/v17_desktop_ui_plan.md phase 1): each step is a
+        # themed label, the current one flagged `on` (`_set_step_active`).
         self._step0_lbl = QLabel("● Step 0: Setup & Preprocessing")
-        self._step0_lbl.setStyleSheet(
-            "font-size:12px;font-weight:bold;color:#61afef;padding:4px 12px;"
-            "background:#1a2a3a;border-radius:4px;"
-        )
         self._step1_lbl = QLabel("○ Step 1: Fusion")
-        self._step1_lbl.setStyleSheet(
-            "font-size:12px;color:#555;padding:4px 12px;"
-        )
         self._step2_lbl = QLabel("○ Step 2: Segmentation & Merge")
-        self._step2_lbl.setStyleSheet(
-            "font-size:12px;color:#555;padding:4px 12px;"
-        )
         self._step3_lbl = QLabel("○ Step 3: QC Viewer")
-        self._step3_lbl.setStyleSheet(
-            "font-size:12px;color:#555;padding:4px 12px;"
-        )
         self._step4_lbl = QLabel("○ Step 4: Feature Extraction")
-        self._step4_lbl.setStyleSheet(
-            "font-size:12px;color:#555;padding:4px 12px;"
-        )
         # Regions (docs/region_qc_module_plan.md, user ruling 2026-10-18):
         # "Step 0.5" between Step0 and Step1 -- TMA cores and blur / fold
         # exclusion annotation; a label like the steps'.
         self._regions_lbl = QLabel("○ Step 0.5: Regions")
-        self._regions_lbl.setStyleSheet(
-            "font-size:12px;color:#555;padding:4px 12px;"
-        )
+        for lbl in (self._step0_lbl, self._step1_lbl, self._step2_lbl, self._step3_lbl,
+                    self._step4_lbl, self._regions_lbl):
+            theme.role(lbl, "step", on="1" if lbl is self._step0_lbl else "0")
+            lbl.setStyleSheet("font-size:12px;padding:4px 12px;")   # geometry: its own
         for lbl, handler in (
             (self._step0_lbl, self._go_to_step0),
             (self._step1_lbl, self._go_to_step1),
@@ -831,16 +819,18 @@ class MainWindow(QMainWindow):
         ):
             lbl.setCursor(Qt.PointingHandCursor)
             lbl.mousePressEvent = lambda _ev, fn=handler: fn()
+        def _arrow():
+            return theme.role(QLabel("  →  "), "stepsep")
         step_bar.addWidget(self._step0_lbl)
-        step_bar.addWidget(QLabel("  →  "))
+        step_bar.addWidget(_arrow())
         step_bar.addWidget(self._regions_lbl)
-        step_bar.addWidget(QLabel("  →  "))
+        step_bar.addWidget(_arrow())
         step_bar.addWidget(self._step1_lbl)
-        step_bar.addWidget(QLabel("  →  "))
+        step_bar.addWidget(_arrow())
         step_bar.addWidget(self._step2_lbl)
-        step_bar.addWidget(QLabel("  →  "))
+        step_bar.addWidget(_arrow())
         step_bar.addWidget(self._step3_lbl)
-        step_bar.addWidget(QLabel("  →  "))
+        step_bar.addWidget(_arrow())
         step_bar.addWidget(self._step4_lbl)
         step_bar.addStretch()
 
@@ -926,7 +916,6 @@ class MainWindow(QMainWindow):
 
         self._ome_path_edit = self._step0._ome_path_edit
         self._out_path_edit = self._step0._out_path_edit
-        self._panel_csv_edit = self._step0._panel_csv_edit
 
         # THE PAGE FRAME (block A1b): one geometry for every step page --
         # margins, title slot, tab row, columns, tool row, bottom slot. Step0
@@ -940,12 +929,12 @@ class MainWindow(QMainWindow):
         # The title line IS the step's bar: the name on the left, the entry to
         # the one shared Tissue Preview on its right. The button is the same
         # object it has always been -- only where it sits changed.
-        title_bar = _HeightTwinBar(self._step0._file_bar)
+        title_bar = self._themed_title_bar()
         self._step1_title_bar = title_bar
         title_row = QHBoxLayout(title_bar)
         title_row.setContentsMargins(8, 4, 8, 4)     # Step0's bar's insets
-        title = self._make_label(
-            "Step 1 — Channel Fusion + Preliminary Segmentation", bold=True)
+        title = self._step_title_label(
+            "Step 1 — Channel Fusion + Preliminary Segmentation")
         title_row.addWidget(title)
         title_row.addStretch()
         # The ONE Tissue Preview / ROI Navigator belongs to Block01: the
@@ -959,8 +948,7 @@ class MainWindow(QMainWindow):
             "Open the shared Tissue Preview. One window for the whole "
             "session: the same ROI and patches, and the picture follows "
             "whichever step you are in.")
-        self._btn_step1_tissue_nav.setStyleSheet(
-            self._step0._btn_tissue_nav.styleSheet())
+        theme.adopt(self._btn_step1_tissue_nav, self._step0._btn_tissue_nav)
         self._btn_step1_tissue_nav.clicked.connect(self._show_tissue_navigator)
         title_row.addWidget(self._btn_step1_tissue_nav)
         page1_w.set_title(title_bar)
@@ -1133,12 +1121,8 @@ class MainWindow(QMainWindow):
             "Freeze the ticked channels, their weights and their Min/Max/Gamma "
             "as the settings segmentation and fused.zarr will run on. The "
             "preview keeps following what you change afterwards.")
-        self._btn_save_fusion_settings.setStyleSheet(
-            "QPushButton{color:#8cf;font-size:11px;"
-            "border:1px solid #8cf;border-radius:3px;padding:3px 8px;}"
-            "QPushButton:hover{background:#122333;}"
-            "QPushButton:disabled{color:#666;border-color:#444;}"
-        )
+        theme_widgets.button(self._btn_save_fusion_settings, "panel",
+                             "font-size:11px;padding:3px 8px;")
         self._btn_save_fusion_settings.clicked.connect(self._on_save_fusion_settings_clicked)
         # Laid out in the page's bottom bar, where `← Back to Step 0` was
         # (user ruling, 2026-09-23); the Channels frame takes this column's
@@ -1268,39 +1252,23 @@ class MainWindow(QMainWindow):
         self.prev_status.setVisible(False)
 
         btn_load_step0 = QPushButton("Load Step0 ROI Result")
-        btn_load_step0.setStyleSheet(
-            "QPushButton{color:#6bcb77;font-size:10px;"
-            "border:1px solid #6bcb77;border-radius:3px;padding:2px 8px;}"
-            "QPushButton:hover{background:#13251a;}"
-        )
+        theme_widgets.button(btn_load_step0, "panel", "font-size:10px;padding:2px 8px;")
         btn_load_step0.clicked.connect(self._load_step0_roi_result)
         status_row.addWidget(btn_load_step0)
 
         btn_load_session = QPushButton("Load Previous Step1 Session")
-        btn_load_session.setStyleSheet(
-            "QPushButton{color:#8cf;font-size:10px;"
-            "border:1px solid #8cf;border-radius:3px;padding:2px 8px;}"
-            "QPushButton:hover{background:#122333;}"
-        )
+        theme_widgets.button(btn_load_session, "panel", "font-size:10px;padding:2px 8px;")
         btn_load_session.clicked.connect(self._on_load_previous_session_clicked)
         status_row.addWidget(btn_load_session)
 
         btn_save_session = QPushButton("Save Session")
-        btn_save_session.setStyleSheet(
-            "QPushButton{color:#aaa;font-size:10px;"
-            "border:1px solid #555;border-radius:3px;padding:2px 8px;}"
-            "QPushButton:hover{background:#222;}"
-        )
+        theme_widgets.button(btn_save_session, "panel", "font-size:10px;padding:2px 8px;")
         btn_save_session.clicked.connect(lambda _checked=False: self._save_step1_session())
         status_row.addWidget(btn_save_session)
 
         btn_update = QPushButton("⟳ Update")
         btn_update.setFixedWidth(72)
-        btn_update.setStyleSheet(
-            "QPushButton{color:#fa8;font-size:10px;"
-            "border:1px solid #fa8;border-radius:3px;padding:2px;}"
-            "QPushButton:hover{background:#321;}"
-        )
+        theme_widgets.button(btn_update, "panel", "font-size:10px;padding:2px;")
         btn_update.setToolTip(
             "Force reload all patch channel data from disk.\n"
             "Use when you have changed channel groups/weights\n"
@@ -1513,16 +1481,11 @@ class MainWindow(QMainWindow):
         self._step1_save_slot = save_slot
         bot.addWidget(save_slot)
         bot.addStretch()
-        self.btn_save = QPushButton("💾  Save Config  &  Generate fused.zarr")
+        self.btn_save = QPushButton("Save Config  &&  Generate fused.zarr")
         self.btn_save.setEnabled(False)
-        self.btn_save.setStyleSheet(
-            "QPushButton{background:#246;color:white;"
-            "border-radius:5px;padding:8px 20px;"
-            "font-size:13px;font-weight:bold;}"
-            "QPushButton:enabled{background:#258;}"
-            "QPushButton:enabled:hover{background:#36a;}"
-            "QPushButton:disabled{background:#333;color:#555;}"
-        )
+        # Step2's Run colours (user ruling 2026-11-03), no floppy-disk glyph
+        theme_widgets.button(self.btn_save, "run",
+                             "padding:8px 20px;font-size:13px;font-weight:bold;")
         self.btn_save.clicked.connect(self._save)
         self._force_dapi_zarr = QCheckBox("force_overwrite_zarr")
         self._force_dapi_zarr.setChecked(False)
@@ -1639,7 +1602,7 @@ class MainWindow(QMainWindow):
         # a click jumps the Regions viewer whatever tool is in use
         nav = QPushButton("Tissue Navigator")
         nav.setToolTip(self._btn_step1_tissue_nav.toolTip())
-        nav.setStyleSheet(self._step0._btn_tissue_nav.styleSheet())
+        theme.adopt(nav, self._step0._btn_tissue_nav)
         nav.clicked.connect(self._show_regions_tissue_navigator)
         regions_bar.layout().addWidget(nav)
         self._btn_regions_tissue_nav = nav
@@ -1722,25 +1685,45 @@ class MainWindow(QMainWindow):
     def _frame_title_bar(self, text):
         """A framed page's title bar, as Step3's (block A1b S3 / S4, ruling
         1): Step0's load bar's height, the step's name on the left."""
-        title_bar = _HeightTwinBar(self._step0._file_bar)
+        title_bar = self._themed_title_bar()
         title_row = QHBoxLayout(title_bar)
         title_row.setContentsMargins(8, 4, 8, 4)
-        title_row.addWidget(self._make_label(text, bold=True))
+        title_row.addWidget(self._step_title_label(text))
         title_row.addStretch()
         return title_bar
+
+    def _themed_title_bar(self):
+        """A step's title band: Step0's load bar's height and its band colour
+        (docs/v17_desktop_ui_plan.md §10, ruling 6)."""
+        title_bar = _HeightTwinBar(self._step0._file_bar)
+        title_bar.setAttribute(Qt.WA_StyledBackground, True)
+        theme.role(title_bar, "bar")
+        return title_bar
+
+    @staticmethod
+    def _step_title_label(text):
+        """"Step 2 — Segmentation & Merge": the number grey, the name bright."""
+        from .theme import widgets as theme_widgets
+        step, _sep, name = str(text).partition(" — ")
+        lbl = QLabel(theme_widgets.step_title_html(step, name) if name else text)
+        lbl.setTextFormat(Qt.RichText)
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet("font-size:12px;padding:4px;background:transparent;")
+        lbl.setAccessibleName(str(text))
+        return lbl
 
     def _build_step3_page(self, page):
         """Step1's controls, built from Step1's style sources, handed to the
         Step3 page to lay out. Each one is the Step1 action: Step3 shares
         Step1's scope, draft and mode (block 2b)."""
-        title_bar = _HeightTwinBar(self._step0._file_bar)
+        title_bar = self._themed_title_bar()
         title_row = QHBoxLayout(title_bar)
         title_row.setContentsMargins(8, 4, 8, 4)
-        title_row.addWidget(self._make_label("Step 3 — QC Viewer", bold=True))
+        title_row.addWidget(self._step_title_label("Step 3 — QC Viewer"))
         title_row.addStretch()
         nav = QPushButton("Tissue Navigator")
         nav.setToolTip(self._btn_step1_tissue_nav.toolTip())
-        nav.setStyleSheet(self._step0._btn_tissue_nav.styleSheet())
+        theme.adopt(nav, self._step0._btn_tissue_nav)
         nav.clicked.connect(self._show_step3_tissue_navigator)
         title_row.addWidget(nav)
         self._btn_step3_tissue_nav = nav
@@ -1765,16 +1748,10 @@ class MainWindow(QMainWindow):
         # Step1's weight tools, calling Step1's panel (never a second panel:
         # a ConfigPanel rebuilds the shared dock when it is constructed).
         reset = QPushButton("Reset weights")
-        reset.setStyleSheet(
-            "QPushButton{color:#e5c07b;background:#182230;border:1px solid #354a63;"
-            "border-radius:4px;padding:2px 8px;font-size:10px;}"
-            "QPushButton:hover{background:#23354a;}")
+        theme_widgets.button(reset, "panel", "padding:2px 8px;font-size:10px;")
         reset.clicked.connect(lambda _c=False: self.config.zero_marker_weights())
         load = QPushButton("Load weights")
-        load.setStyleSheet(
-            "QPushButton{color:#9bd0ff;background:#182230;border:1px solid #354a63;"
-            "border-radius:4px;padding:2px 8px;font-size:10px;}"
-            "QPushButton:hover{background:#23354a;}")
+        theme_widgets.button(load, "panel", "padding:2px 8px;font-size:10px;")
         load.clicked.connect(lambda _c=False: self._load_weights_dialog(page))
 
         # The Overlay / Fusion pair: the SAME mode as Step1's pair.
@@ -2417,6 +2394,7 @@ class MainWindow(QMainWindow):
         if mount.host.stack is not None:
             try:
                 mount.sync_source("handoff")
+                mount.set_mode(self._step1_preview_mode)   # as Step1's entry
                 if mount.paused:
                     mount.resume_requests()
                 else:
@@ -2978,6 +2956,11 @@ class MainWindow(QMainWindow):
             # identity says so; the viewer rebinds and keeps the viewport.
             with perf_trace.span("step1.entry.sync_source"):
                 mount.sync_source("handoff")
+            # THE MODE IT IS SHOWN IN. A viewer built ahead (or kept from
+            # before) may predate the session's mode: a restore sets the mode
+            # with no reconcile, which tells no viewer. Paused, this only
+            # records it; the resume composes it. Same mode: nothing happens.
+            mount.set_mode(self._step1_preview_mode)
             with perf_trace.span("step1.entry.activate"):
                 if mount.paused:
                     mount.resume_requests()
@@ -5273,6 +5256,14 @@ class MainWindow(QMainWindow):
         else:
             self._on_display_state_restored()
 
+    def _tell_viewers_mode(self):
+        """Every resident whole-slide viewer takes the window's mode."""
+        mode = self._step1_preview_mode
+        for name in ("_step1_mount", "_step3_mount", "_regions_view"):
+            viewer = self.__dict__.get(name)
+            if viewer is not None:
+                viewer.set_mode(mode)
+
     @_perf("restore.on_display_restored")
     def _on_display_state_restored(self, schedule_save=True,
                                    request_frame=False):
@@ -5285,6 +5276,10 @@ class MainWindow(QMainWindow):
         self._restore_fusion_settings()
         self._ensure_channels_cached(self._preview_patch_idx)
         self._refresh_patch_preview(reset_view=False)
+        # A restore sets the mode with no reconcile (one redraw, at the end:
+        # here), so the viewers already built are told now. Same mode: no-op;
+        # a paused one records it for its resume.
+        self._tell_viewers_mode()
         if request_frame:
             self._display.coordinator.request_frame(kind="mode")
         if schedule_save:
@@ -6661,16 +6656,11 @@ class MainWindow(QMainWindow):
         # by the same rule: one window, one set of numbers, and what changes
         # with the step is only what may be edited.
         self._display.apply_intensity_policy()
-        _on = ("font-size:12px;font-weight:bold;color:#61afef;padding:4px 12px;"
-               "background:#1a2a3a;border-radius:4px;")
-        _off = "font-size:12px;color:#555;padding:4px 12px;"
-        self._step0_lbl.setStyleSheet(_on if active == 0 else _off)
-        self._step1_lbl.setStyleSheet(_on  if active == 1 else _off)
-        self._step2_lbl.setStyleSheet(_on  if active == 2 else _off)
-        self._step3_lbl.setStyleSheet(_on  if active == 3 else _off)
-        self._step4_lbl.setStyleSheet(_on  if active == 4 else _off)
-        if self.__dict__.get("_regions_lbl") is not None:
-            self._regions_lbl.setStyleSheet(_on if active == self.REGIONS_STEP else _off)
+        for lbl, step in ((self._step0_lbl, 0), (self._step1_lbl, 1), (self._step2_lbl, 2),
+                          (self._step3_lbl, 3), (self._step4_lbl, 4),
+                          (self.__dict__.get("_regions_lbl"), self.REGIONS_STEP)):
+            if lbl is not None:
+                theme.set_flag(lbl, "on", "1" if active == step else "0")
         self._update_next_button()
         if active == 1:
             self._match_step1_bottom_bar()
@@ -10139,9 +10129,9 @@ class MainWindow(QMainWindow):
         self.config.setEnabled(True)
         self.result_grid.setVisible(True)
         if is_whole:
-            self.btn_save.setText("💾  Save Config  &  Generate fused.zarr")
+            self.btn_save.setText("Save Config  &&  Generate fused.zarr")
         else:
-            self.btn_save.setText("💾  Save segmentation config  &  Generate DAPI input zarr")
+            self.btn_save.setText("Save segmentation config  &&  Generate DAPI input zarr")
 
         if phase_required:
             if self._p2_params is not None and self._p2_params.get("method") != method:
@@ -11987,11 +11977,10 @@ class MainWindow(QMainWindow):
                     run_store.roi_dir_of(run_dir)).get("editing") or "."):
             more += ("\n\nThis is the Step0 result being edited: Step1 and Step2 cannot "
                      "be used until Step0 is saved again.")
-        answer = QMessageBox.question(
-            parent or self, "Delete",
-            f"Move into the project's trash (kept 30 days):\n\n{listed}{more}",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
+        from .theme import dialogs as theme_dialogs
+        if not theme_dialogs.confirm_danger(
+                parent or self, "Delete",
+                f"Move into the project's trash (kept 30 days):\n\n{listed}{more}"):
             return False
         roi = run_store.roi_dir_of(run_dir)
         project = run_store.project_dir_of(roi)

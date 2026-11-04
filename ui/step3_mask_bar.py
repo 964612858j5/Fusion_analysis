@@ -105,9 +105,11 @@ class _TaggedItemDelegate(QtWidgets.QStyledItemDelegate):
 #: The preset swatches, RGB 0..1: green, cyan, yellow, magenta, orange, red, white.
 PRESET_COLOURS = ((0.0, 1.0, 0.0), (0.0, 0.8, 1.0), (1.0, 1.0, 0.0), (1.0, 0.0, 1.0),
                   (1.0, 0.6, 0.0), (1.0, 0.3, 0.3), (1.0, 1.0, 1.0))
-_PANEL_QSS = ("QFrame{background:#1c1c1c;color:#ddd;}"
-              "QLabel{color:#bbb;font-size:10px;}"
-              "QCheckBox,QRadioButton{color:#ddd;font-size:10px;}")
+from .theme import widgets as _theme_widgets  # noqa: E402
+_TK = _theme_widgets.t()
+_PANEL_QSS = (f"QFrame{{background:{_TK['layer1']};color:{_TK['text2']};}}"
+              f"QLabel{{color:{_TK['text3']};font-size:10px;}}"
+              f"QCheckBox,QRadioButton{{color:{_TK['text2']};font-size:10px;}}")
 
 
 def _qcolor(rgb):

@@ -98,6 +98,8 @@ class RegionsViewerHost:
         if mount.host.stack is not None:
             try:
                 mount.sync_source("handoff")
+                # the window's mode: a restore may have moved it unseen
+                mount.set_mode(getattr(w, "_step1_preview_mode", None))
                 if mount.paused:
                     mount.resume_requests()
                 else:

@@ -8,11 +8,14 @@ the colour that layer has in the Fusion picture (cyto red, nucleus blue) so
 they read as "which part of the picture", not as a third mode.
 """
 
-MODE_BUTTON_QSS = (
-    "QPushButton{color:#9bd0ff;background:#182230;"
-    "border:1px solid #354a63;border-radius:4px;"
-    "padding:2px 10px;font-size:10px;}"
-    "QPushButton:checked{background:#2a5;color:#111;font-weight:bold;}")
+from .theme import widgets as _theme_widgets
+
+# On/off in the theme's neutral "toggle" (docs/v17_desktop_ui_plan.md §10,
+# ruling 4: checked is the active grey, not green -- green is the run
+# buttons'). Metrics as before.
+MODE_BUTTON_QSS = _theme_widgets.button_qss(
+    "toggle", "padding:2px 10px;font-size:10px;",
+) + "QPushButton:checked{font-weight:bold;}"
 
 #: The colour a Fusion layer has on screen (`FusionEngine.to_rgb`: cyto in
 #: red, nucleus in blue).
@@ -20,21 +23,17 @@ LAYER_COLORS = {"membrane": "#d9534f", "nucleus": "#4a7bd6"}
 
 
 def layer_button_qss(layer):
+    """The toggle's look, lit in the layer's own colour when on -- a data
+    colour, kept (plan §10)."""
     lit = LAYER_COLORS[layer]
-    return (
-        "QPushButton{color:#8a96a6;background:#182230;"
-        "border:1px solid #354a63;border-radius:4px;"
-        "padding:2px 10px;font-size:10px;}"
-        f"QPushButton:checked{{background:{lit};color:#fff;font-weight:bold;"
-        f"border:1px solid {lit};}}")
+    return (_theme_widgets.button_qss("toggle", "padding:2px 10px;font-size:10px;")
+            + f"QPushButton:checked{{background:{lit};color:#fff;font-weight:bold;"
+            f"border:1px solid {lit};}}"
+            f"QPushButton:checked:hover{{background:{lit};}}")
 
 
 #: The titled frame of a section of the Pre-segmentation tab -- Patches,
 #: Methods, Results (user ruling 2026-09-25, design A) -- the very look of
 #: the "Segmentation Method" box of the controls below them
 #: (`ui/step0/search_ctrl.py`; a test holds the two equal).
-SECTION_BOX_QSS = (
-    "QGroupBox{border:1px solid #666;border-radius:4px;margin-top:16px;"
-    "font-weight:bold;color:#ccc;font-size:11px;}"
-    "QGroupBox::title{subcontrol-origin:margin;subcontrol-position:"
-    "top left;left:8px;padding:0 4px;}")
+SECTION_BOX_QSS = _theme_widgets.neutral_box_qss()

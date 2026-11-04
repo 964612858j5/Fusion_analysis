@@ -415,9 +415,7 @@ def test_the_three_parts_are_titled_frames_like_the_controls_below(app, tmp_path
     import inspect
     # the same look as the "Segmentation Method" box of the old controls
     src = inspect.getsource(search_ctrl)
-    flat = "".join(part.strip().strip('"') for part in
-                   src.split('method_box.setStyleSheet(')[1].split(')')[0].splitlines())
-    assert flat == SECTION_BOX_QSS
+    assert "method_box.setStyleSheet(SECTION_BOX_QSS)" in src    # one definition
     w = _page(app, tmp_path, monkeypatch)
     try:
         boxes = [w._preseg_patches.section_box, w._preseg_methods.section_box,

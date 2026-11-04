@@ -38,17 +38,10 @@ def main():
     from .utils import error_hook
     error_hook.install(app)
 
-    pal = QtGui.QPalette()
-    pal.setColor(QtGui.QPalette.Window,          QtGui.QColor(28, 28, 28))
-    pal.setColor(QtGui.QPalette.WindowText,      QtGui.QColor(220, 220, 220))
-    pal.setColor(QtGui.QPalette.Base,            QtGui.QColor(18, 18, 18))
-    pal.setColor(QtGui.QPalette.AlternateBase,   QtGui.QColor(38, 38, 38))
-    pal.setColor(QtGui.QPalette.Text,            QtGui.QColor(220, 220, 220))
-    pal.setColor(QtGui.QPalette.Button,          QtGui.QColor(48, 48, 48))
-    pal.setColor(QtGui.QPalette.ButtonText,      QtGui.QColor(220, 220, 220))
-    pal.setColor(QtGui.QPalette.Highlight,       QtGui.QColor(42, 130, 218))
-    pal.setColor(QtGui.QPalette.HighlightedText, QtGui.QColor(0, 0, 0))
-    app.setPalette(pal)
+    # The theme (docs/v17_desktop_ui_plan.md): DeepSeek Harness's colours,
+    # dark by default (BLOCK01_THEME / the `ui/theme` setting choose light).
+    from .ui import theme
+    theme.apply(app)
 
     # Reports, with the GUI thread's stack, whenever the event loop stops
     # for 2 s or more -- see utils/gui_watchdog.py. A diagnostic for freezes

@@ -128,12 +128,8 @@ class SearchCtrlPanel(QWidget):
         method_box = QGroupBox("Segmentation Method")
         method_box.setMinimumHeight(86)
         method_box.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        method_box.setStyleSheet(
-            "QGroupBox{border:1px solid #666;border-radius:4px;margin-top:16px;"
-            "font-weight:bold;color:#ccc;font-size:11px;}"
-            "QGroupBox::title{subcontrol-origin:margin;subcontrol-position:"
-            "top left;left:8px;padding:0 4px;}"
-        )
+        from ..step1_button_styles import SECTION_BOX_QSS
+        method_box.setStyleSheet(SECTION_BOX_QSS)       # the theme's neutral box
         method_lay = QVBoxLayout(method_box)
         method_lay.setContentsMargins(8, 8, 8, 6)
         method_lay.setSpacing(4)

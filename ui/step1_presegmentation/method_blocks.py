@@ -19,6 +19,7 @@ method another block has asks the same question.
 from PyQt5 import QtWidgets
 from PyQt5.QtCore import Qt, pyqtSignal
 
+from ..theme import widgets as theme_widgets
 from ...utils import segmentation_param_schema as ps
 from .method_editor import MethodEditorDialog
 
@@ -171,9 +172,10 @@ class MethodsPanel(QtWidgets.QWidget):
         row_run = QtWidgets.QHBoxLayout()
         self.btn_run = QtWidgets.QPushButton("Run", self)
         self.btn_stop = QtWidgets.QPushButton("Stop", self)
-        for b in (self.btn_run, self.btn_stop):
+        for b, role in ((self.btn_run, "run"), (self.btn_stop, "danger")):
             b.setMinimumWidth(44)
-            b.setStyleSheet("font-size:11px;")
+            # Run is a run action (green), Stop a danger one (ruling 3)
+            theme_widgets.button(b, role, "font-size:11px;padding:3px 10px;")
             row_run.addWidget(b)
         row_run.addStretch(1)
         outer.addLayout(row_run)

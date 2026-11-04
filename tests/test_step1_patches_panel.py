@@ -163,13 +163,11 @@ def test_delete_asks_once_and_names_only_the_ticked_patches(app, monkeypatch):
         QTest.mouseClick(panel.tiles()[2], Qt.LeftButton)
         assert panel._btn_delete.isEnabled()
         questions = []
-        monkeypatch.setattr(pp.QtWidgets.QMessageBox, "question",
-                            staticmethod(lambda *a, **k: (questions.append(a[2]),
-                                                          pp.QtWidgets.QMessageBox.No)[1]))
+        monkeypatch.setattr(pp.theme_dialogs, "confirm_danger",
+                            lambda *a, **k: (questions.append(a[2]), False)[1])
         QTest.mouseClick(panel._btn_delete, Qt.LeftButton)
         assert asked == [] and questions == ["Delete 2 selected patches?"]
-        monkeypatch.setattr(pp.QtWidgets.QMessageBox, "question",
-                            staticmethod(lambda *a, **k: pp.QtWidgets.QMessageBox.Yes))
+        monkeypatch.setattr(pp.theme_dialogs, "confirm_danger", lambda *a, **k: True)
         QTest.mouseClick(panel._btn_delete, Qt.LeftButton)
         assert asked == [[1, 3]]
     finally:
@@ -392,8 +390,7 @@ def test_delete_removes_the_ticked_patches_in_one_edit(app, tmp_path, monkeypatc
     try:
         w._show_tissue_navigator()
         nav = w._step0._tissue_navigator_popup.overview
-        monkeypatch.setattr(pp.QtWidgets.QMessageBox, "question",
-                            staticmethod(lambda *a, **k: pp.QtWidgets.QMessageBox.Yes))
+        monkeypatch.setattr(pp.theme_dialogs, "confirm_danger", lambda *a, **k: True)
         strip = w._preseg_patches
         emitted = []
         w._step0.overview.patches_changed.connect(lambda *_: emitted.append(1))

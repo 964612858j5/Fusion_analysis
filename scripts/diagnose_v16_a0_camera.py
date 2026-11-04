@@ -295,8 +295,6 @@ def open_copy(w, dest, log):
     page = w._step0
     page._ome_path_edit.setText(slide)
     page._out_path_edit.setText(dest)
-    if os.path.exists(os.path.join(dest, "panel.csv")):
-        page._panel_csv_edit.setText(os.path.join(dest, "panel.csv"))
     log.write("phase", name="step0.load", slide=slide, project=dest)
     page._reload_from_paths()
     pump(2000)

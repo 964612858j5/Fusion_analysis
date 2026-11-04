@@ -320,3 +320,54 @@ def test_the_session_is_written_after_the_switch_not_during_it(app, monkeypatch)
         assert wrote == [2]
     finally:
         w.close()
+
+
+def test_the_entry_gives_a_viewer_built_ahead_the_current_mode(app, monkeypatch):
+    """User report (2026-11-04): Step1 opened with Fusion lit but an Overlay
+    picture. The viewer was built ahead while the window still said Overlay;
+    the session then restored Fusion without a reconcile (it tells no viewer),
+    and the entry reused the built viewer without telling it either."""
+    from block01.ui.main_window import STEP1_PREVIEW_FUSION, STEP1_PREVIEW_OVERLAY
+    mount = _Mount()
+    modes = []
+    mount.set_mode = modes.append
+    mount.sync_source = lambda _why: None
+    mount.resume_requests = lambda: mount.done.append("resume")
+    w = _window(app, monkeypatch, mount)
+    try:
+        w._step1_preview_mode = STEP1_PREVIEW_OVERLAY
+        w._step1_ahead_step()
+        w._step1_ahead_step()                          # stack, then backend
+        assert mount.host.stack is not None and modes == [STEP1_PREVIEW_OVERLAY]
+        w.set_preview_mode(STEP1_PREVIEW_FUSION, force=True, reconcile=False)
+        assert modes == [STEP1_PREVIEW_OVERLAY]       # the restore told no viewer
+        w.loader = SimpleNamespace(filepath="/x/slide.ome.tiff")
+        w._step1_mount_refused_for = None
+        w._step1_follow_step(1)
+        assert modes[-1] == STEP1_PREVIEW_FUSION
+        assert mount.done[-1] == "resume"              # told before it is shown
+    finally:
+        w.close()
+
+
+def test_a_finished_restore_tells_every_resident_viewer_the_mode(app, monkeypatch):
+    """Codex review: Load weights with a session in the other mode moved the
+    buttons but not the viewers already built (Step1, Step3, Regions)."""
+    from block01.ui.main_window import STEP1_PREVIEW_FUSION
+    w = MainWindow()
+    try:
+        told = {}
+        for name in ("_step1_mount", "_step3_mount", "_regions_view"):
+            w.__dict__[name] = SimpleNamespace(
+                set_mode=lambda m, n=name: told.__setitem__(n, m))
+        for stub in ("_restore_fusion_settings", "_ensure_channels_cached",
+                     "_refresh_patch_preview", "_schedule_step1_session_save"):
+            monkeypatch.setattr(w, stub, lambda *a, **k: None)
+        w.set_preview_mode(STEP1_PREVIEW_FUSION, force=True, reconcile=False)
+        assert told == {}
+        w._on_display_state_restored()
+        assert told == dict.fromkeys(told, STEP1_PREVIEW_FUSION) and len(told) == 3
+    finally:
+        for name in ("_step1_mount", "_step3_mount", "_regions_view"):
+            w.__dict__.pop(name, None)
+        w.close()

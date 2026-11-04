@@ -324,9 +324,10 @@ def test_the_regions_page_keeps_its_ruled_entry_and_tabs(app):
         assert [f.right_tabs.tabText(i) for i in range(f.right_tabs.count())] == ["Viewer"]
         _enter_regions(w)
         assert w._current_step == w.REGIONS_STEP and w._stack.currentWidget() is w._regions
-        assert "bold" in w._regions_lbl.styleSheet() and "bold" not in w._step0_lbl.styleSheet()
+        # the current step is the themed label flagged `on` (docs/v17_desktop_ui_plan.md)
+        assert w._regions_lbl.property("on") == "1" and w._step0_lbl.property("on") == "0"
         w._go_to_step0()
-        assert "bold" not in w._regions_lbl.styleSheet()
+        assert w._regions_lbl.property("on") == "0" and w._step0_lbl.property("on") == "1"
     finally:
         _close(w)
 

@@ -169,7 +169,6 @@ def _switch_to_b(page, tmp_path, monkeypatch, *, value=99.0, raises=None,
                             lambda self: None)
     page._ome_path_edit.setText(str(b))
     page._out_path_edit.setText(str(tmp_path / "out"))
-    page._panel_csv_edit.setText("")
     page._reload_from_paths()
     return made
 

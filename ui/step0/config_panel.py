@@ -57,6 +57,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import pyqtSignal, Qt, QSize
 from PyQt5.QtGui import QColor
 
+from ..theme import widgets as theme_widgets
 from ...config import NUCLEUS_CONFIG
 from ...core.fusion_domain import ABSENT
 from ..widgets.channel_dock import template
@@ -200,7 +201,7 @@ class ConfigPanel(QWidget):
         nuc_row = QHBoxLayout()
         nuc_row.setSpacing(4)
         nuc_lbl = QLabel("Nucleus:")
-        nuc_lbl.setStyleSheet("color:#9bd0ff;font-size:10px;")
+        nuc_lbl.setStyleSheet(theme_widgets.caption_qss(tone="accent"))
         nuc_row.addWidget(nuc_lbl)
         # Read-only on purpose.  The nucleus channel and its weight come from
         # the Step0 handoff; a flat per-channel list cannot express "this
@@ -208,7 +209,7 @@ class ConfigPanel(QWidget):
         # Step1 shows the authoritative answer rather than inventing a second
         # one.  Changing the nucleus is a Step0 decision.
         self._nuc_value = QLabel("—")
-        self._nuc_value.setStyleSheet("color:#dce5ef;font-size:10px;")
+        self._nuc_value.setStyleSheet(theme_widgets.caption_qss(tone="text"))
         self._nuc_value.setToolTip(
             "The nucleus channel and weight come from Step0's handoff and are "
             "read-only here.")
@@ -232,18 +233,12 @@ class ConfigPanel(QWidget):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(4)
         btn_reset = QPushButton("Reset weights")
-        btn_reset.setStyleSheet(
-            "QPushButton{color:#e5c07b;background:#182230;border:1px solid #354a63;"
-            "border-radius:4px;padding:2px 8px;font-size:10px;}"
-            "QPushButton:hover{background:#23354a;}")
+        theme_widgets.button(btn_reset, "panel", "padding:2px 8px;font-size:10px;")
         btn_reset.clicked.connect(self._reset_all_channel_weights)
         btn_row.addWidget(btn_reset)
 
         btn_load_weights = QPushButton("Load weights")
-        btn_load_weights.setStyleSheet(
-            "QPushButton{color:#9bd0ff;background:#182230;border:1px solid #354a63;"
-            "border-radius:4px;padding:2px 8px;font-size:10px;}"
-            "QPushButton:hover{background:#23354a;}")
+        theme_widgets.button(btn_load_weights, "panel", "padding:2px 8px;font-size:10px;")
         btn_load_weights.clicked.connect(self._load_weights_from_file)
         btn_row.addWidget(btn_load_weights)
         btn_row.addStretch()

@@ -178,7 +178,6 @@ def _load(app, monkeypatch, tmp_path, name="slideA", hold=False):
     page = w._step0
     page._ome_path_edit.setText(str(ome))
     page._out_path_edit.setText(str(out))
-    page._panel_csv_edit.setText("")
     timeline = _Timeline(w)
     page._btn_load.click()                       # THE REAL ENTRY
     QtWidgets.QApplication.processEvents()

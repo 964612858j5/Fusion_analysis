@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
 )
 import pyqtgraph as pg
 
+from .theme import widgets as theme_widgets
 from ..config import OUTPUT_DIR
 
 #: Step2's Tile Status overview: the longest side in pixels (block S2T).
@@ -71,6 +72,10 @@ from .step_frame import FRAME_TAB_QSS, StepFrame, StepFrameMetrics, free_tab_bar
 # ══════════════════════════════════════════════════════════════════════
 #  Step 2 Page  (Segmentation & Merge)
 # ══════════════════════════════════════════════════════════════════════
+
+
+#: the theme's colours for status and hint text (docs/v17_desktop_ui_plan.md §10)
+_TK = theme_widgets.t()
 
 class _CompactCombo(QComboBox):
     """Sized by a short minimum instead of its longest item (block L2): the
@@ -327,7 +332,7 @@ class Step2Page(QWidget):
             self._core_items, self.btn_tma_cores.isChecked, to_view=self._ov_map)
 
         self._ov_status = QLabel('No zarr loaded')
-        self._ov_status.setStyleSheet('color:#888;font-size:10px;')
+        self._ov_status.setStyleSheet(f'color:{_TK["text3"]};font-size:10px;')
         self._ov_status.setAlignment(Qt.AlignCenter)
         self._ov_status.setWordWrap(True)
         ll.addWidget(self._ov_status)
@@ -362,7 +367,7 @@ class Step2Page(QWidget):
         ll.addWidget(self._prog_bar)
 
         self._cells_lbl = QLabel('Total cells detected: —')
-        self._cells_lbl.setStyleSheet('color:#aaa;font-size:11px;')
+        self._cells_lbl.setStyleSheet(f'color:{_TK["text3"]};font-size:11px;')
         ll.addWidget(self._cells_lbl)
 
         # ── THE public Channels panel's host ──────────────────────────
@@ -441,16 +446,14 @@ class Step2Page(QWidget):
         inl.addWidget(self._seg_params_row)
         self._seg_params_row.setVisible(False)
 
-        btn_load = QPushButton('Load zarr info & overview')
-        btn_load.setStyleSheet(
-            'QPushButton{background:#255;color:white;border-radius:3px;padding:4px;}'
-            'QPushButton:hover{background:#377;}'
-        )
+        btn_load = QPushButton('Load zarr info && overview')
+        # only Run is green; padding one less: the role's 1 px border keeps the size
+        theme_widgets.button(btn_load, "panel", "padding:3px;")
         btn_load.clicked.connect(self._load_zarr_info)
         inl.addWidget(btn_load)
 
         self._zarr_info = QLabel('—')
-        self._zarr_info.setStyleSheet('color:#aaa;font-size:10px;')
+        self._zarr_info.setStyleSheet(f'color:{_TK["text3"]};font-size:10px;')
         self._zarr_info.setWordWrap(True)
         inl.addWidget(self._zarr_info)
         rl.addWidget(inp_box)
@@ -470,7 +473,7 @@ class Step2Page(QWidget):
         til.addWidget(self._auto_tile_strategy)
 
         self._tile_suggestion_lbl = QLabel('Suggested: —')
-        self._tile_suggestion_lbl.setStyleSheet('color:#aaa;font-size:10px;')
+        self._tile_suggestion_lbl.setStyleSheet(f'color:{_TK["text3"]};font-size:10px;')
         self._tile_suggestion_lbl.setWordWrap(True)
         til.addWidget(self._tile_suggestion_lbl)
 
@@ -509,18 +512,18 @@ class Step2Page(QWidget):
         self._skip_empty_cb.stateChanged.connect(self._on_skip_toggled)
         til.addWidget(self._skip_empty_cb)
         self._skip_hint_lbl = QLabel('')
-        self._skip_hint_lbl.setStyleSheet('color:#aaa;font-size:10px;')
+        self._skip_hint_lbl.setStyleSheet(f'color:{_TK["text3"]};font-size:10px;')
         self._skip_hint_lbl.setWordWrap(True)
         self._skip_hint_lbl.setVisible(False)
         til.addWidget(self._skip_hint_lbl)
 
         self._tile_ram_lbl = QLabel('')
-        self._tile_ram_lbl.setStyleSheet('color:#aaa;font-size:10px;')
+        self._tile_ram_lbl.setStyleSheet(f'color:{_TK["text3"]};font-size:10px;')
         til.addWidget(self._tile_ram_lbl)
 
         # While a run computes: which grid shows its progress.
         self._run_grid_lbl = QLabel('')
-        self._run_grid_lbl.setStyleSheet('color:#e5c07b;font-size:10px;')
+        self._run_grid_lbl.setStyleSheet(f'color:{_TK["warning"]};font-size:10px;')
         self._run_grid_lbl.setVisible(False)
         til.addWidget(self._run_grid_lbl)
 
@@ -568,10 +571,7 @@ class Step2Page(QWidget):
 
         self._apply_index_btn = QPushButton('Apply Selected Params')
         self._apply_index_btn.clicked.connect(self._apply_selected_index_params)
-        self._apply_index_btn.setStyleSheet(
-            'QPushButton{background:#3a5;color:white;border-radius:3px;padding:4px;}'
-            'QPushButton:hover{background:#4b6;}'
-        )
+        theme_widgets.button(self._apply_index_btn, "panel", "padding:3px;")
         cpl.addWidget(self._apply_index_btn)
 
         self._resolved_param_edit = QtWidgets.QLineEdit()
@@ -738,7 +738,7 @@ class Step2Page(QWidget):
             return w
 
         self._hq2_base_section = QLabel('HQ2: HQ proposal inputs')
-        self._hq2_base_section.setStyleSheet('color:#7dd3fc;font-size:11px;font-weight:bold;padding-top:4px;')
+        self._hq2_base_section.setStyleSheet(f'color:{_TK["accent"]};font-size:11px;font-weight:bold;padding-top:4px;')
         cpl.addWidget(self._hq2_base_section)
         self._hq2_widgets.append(self._hq2_base_section)
 
@@ -780,7 +780,7 @@ class Step2Page(QWidget):
         self._hq2_min_signal.setValue(0.08)
 
         self._hq2_section = QLabel('HQ2: ImageJ-style proposal')
-        self._hq2_section.setStyleSheet('color:#7dd3fc;font-size:11px;font-weight:bold;padding-top:4px;')
+        self._hq2_section.setStyleSheet(f'color:{_TK["accent"]};font-size:11px;font-weight:bold;padding-top:4px;')
         cpl.addWidget(self._hq2_section)
         self._hq2_widgets.append(self._hq2_section)
 
@@ -872,7 +872,7 @@ class Step2Page(QWidget):
             return w
 
         self._csd_section = QLabel('CDS: constrained donut segmentation')
-        self._csd_section.setStyleSheet('color:#7dd3fc;font-size:11px;font-weight:bold;padding-top:4px;')
+        self._csd_section.setStyleSheet(f'color:{_TK["accent"]};font-size:11px;font-weight:bold;padding-top:4px;')
         cpl.addWidget(self._csd_section)
         self._csd_widgets.append(self._csd_section)
 
@@ -1052,7 +1052,7 @@ class Step2Page(QWidget):
         self._mesmer_min_size.setRange(0, 100000)
         self._mesmer_min_size.setValue(0)
         self._method_hint = QLabel('')
-        self._method_hint.setStyleSheet('color:#999;font-size:10px;')
+        self._method_hint.setStyleSheet(f'color:{_TK["text3"]};font-size:10px;')
         self._method_hint.setWordWrap(True)
         cpl.addWidget(self._method_hint)
 
@@ -1081,7 +1081,7 @@ class Step2Page(QWidget):
             'Global: global_mask.zarr | global_mask.ome.tiff | global_dapi.ome.tiff\n'
             'Per-tile: tile_masks/tile_r*_c*_dapi.ome.tiff | tile_r*_c*_raw_mask.ome.tiff'
         )
-        out_info.setStyleSheet('color:#888;font-size:10px;')
+        out_info.setStyleSheet(f'color:{_TK["text3"]};font-size:10px;')
         out_info.setWordWrap(True)      # block L2: fits the shared column
         outl.addWidget(out_info)
         rl.addWidget(out_box)
@@ -1099,7 +1099,7 @@ class Step2Page(QWidget):
             'Use this if a previous run saved tile masks to disk.\n'
             'Select the directory containing tile_r_c.npy files.'
         )
-        rec_info.setStyleSheet('color:#aaa;font-size:10px;')
+        rec_info.setStyleSheet(f'color:{_TK["text3"]};font-size:10px;')
         rec_info.setWordWrap(True)      # block L2: fits the shared column
         recl.addWidget(rec_info)
 
@@ -1131,34 +1131,20 @@ class Step2Page(QWidget):
         # ── Bottom navigation: the frame's bottom slot ───────────────
         nav = QHBoxLayout()
 
-        self._btn_back = QPushButton('← Back to Step 1')
-        self._btn_back.setStyleSheet(
-            'QPushButton{color:#fa8;border:1px solid #fa8;'
-            'border-radius:4px;padding:6px 16px;}'
-            'QPushButton:hover{background:#321;}'
-        )
-        self._btn_back.clicked.connect(self.go_back.emit)
-        nav.addWidget(self._btn_back)
+        # (no "Back to Step 1": the step bar is the way back -- user ruling
+        # 2026-11-03)
         nav.addStretch()
         # REMOVE: redundant navigation button (use top-right Next only)
 
-        self._btn_run = QPushButton('▶  Run Segmentation & Merge')
-        self._btn_run.setStyleSheet(
-            'QPushButton{background:#2a5;color:white;border-radius:4px;'
-            'padding:7px 22px;font-size:13px;font-weight:bold;}'
-            'QPushButton:hover{background:#3b6;}'
-            'QPushButton:disabled{background:#333;color:#555;}'
-        )
+        self._btn_run = QPushButton('▶  Run Segmentation && Merge')
+        theme_widgets.button(self._btn_run, "run",
+                             "padding:7px 22px;font-size:13px;font-weight:bold;")
         self._btn_run.clicked.connect(self._run)
         nav.addWidget(self._btn_run)
 
         self._btn_stop = QPushButton('⏹ Stop')
         self._btn_stop.setEnabled(False)
-        self._btn_stop.setStyleSheet(
-            'QPushButton{background:#722;color:white;border-radius:4px;padding:7px 14px;}'
-            'QPushButton:hover{background:#944;}'
-            'QPushButton:disabled{background:#333;color:#555;}'
-        )
+        theme_widgets.button(self._btn_stop, "danger", "padding:7px 14px;")
         self._btn_stop.clicked.connect(self._stop)
         nav.addWidget(self._btn_stop)
 
@@ -1171,7 +1157,7 @@ class Step2Page(QWidget):
             left tab     `Parameters`: the parameter panel
             right tab    `Tile Status`: tool row = `Tile Status Overview`;
                          the overview and the progress below it
-            bottom slot  ← Back to Step 1 | stretch | Run | Stop
+            bottom slot  stretch | Run | Stop
 
         Every widget is the one built above, moved into its slot.
         """
@@ -1229,12 +1215,7 @@ class Step2Page(QWidget):
     def _box_style(color):
         # margin-top + positioned ::title so the title sits in the border gap and
         # is never occluded by the first body widget (styled-QGroupBox title bug).
-        return (
-            f'QGroupBox{{border:1px solid {color};border-radius:5px;'
-            f'margin-top:16px;font-weight:bold;color:{color};font-size:11px;}}'
-            f'QGroupBox::title{{subcontrol-origin:margin;subcontrol-position:'
-            f'top left;left:8px;padding:0 4px;}}'
-        )
+        return theme_widgets.panel_box_qss(color)
 
     # ── zarr loading ──────────────────────────────────────────────────
 
@@ -1500,7 +1481,7 @@ class Step2Page(QWidget):
         lay.addLayout(gr)
 
         self._remap_status_lbl = QLabel('Remap: off')
-        self._remap_status_lbl.setStyleSheet('color:#888;font-size:10px;')
+        self._remap_status_lbl.setStyleSheet(f'color:{_TK["text3"]};font-size:10px;')
         self._remap_status_lbl.setWordWrap(True)
         lay.addWidget(self._remap_status_lbl)
         self._update_remap_status()
@@ -1516,7 +1497,7 @@ class Step2Page(QWidget):
         path = self._remap_config_edit.text().strip()
         if not path:
             self._remap_status_lbl.setText('Remap: off')
-            self._remap_status_lbl.setStyleSheet('color:#888;font-size:10px;')
+            self._remap_status_lbl.setStyleSheet(f'color:{_TK["text3"]};font-size:10px;')
             return
         allow = self._allow_preview_remap.isChecked()
         gate = self._remap_gate_mode.currentData() or 'remap'
@@ -3528,7 +3509,6 @@ class Step2Page(QWidget):
             lambda m, t=token, wk=worker: self._on_run_error(t, wk, m))
 
         self._btn_run.setEnabled(False)
-        self._btn_back.setEnabled(False)
         self._btn_stop.setEnabled(True)
         self._prog_bar.setValue(0)
         # Block A9 §36: a hidden image viewer gives its GPU textures back
@@ -3665,7 +3645,6 @@ class Step2Page(QWidget):
         self._run_active = False
         self._skip_empty_cb.setEnabled(True)
         self._btn_run.setEnabled(True)
-        self._btn_back.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._apply_pending_context()
 
@@ -3716,7 +3695,6 @@ class Step2Page(QWidget):
             + f'  →  {output_dir}'
         )
         self._btn_run.setEnabled(True)
-        self._btn_back.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._last_output_dir = output_dir
         self.segmentation_done.emit(output_dir)
@@ -3770,7 +3748,6 @@ class Step2Page(QWidget):
         self._skip_empty_cb.setEnabled(True)
         self._prog_lbl.setText('✗ Error — see terminal')
         self._btn_run.setEnabled(True)
-        self._btn_back.setEnabled(True)
         self._btn_stop.setEnabled(False)
         QMessageBox.critical(self, 'Error', msg)
         print(f'[Step2 Error]\n{msg}')

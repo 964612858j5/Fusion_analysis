@@ -68,7 +68,8 @@ def test_the_page_is_step1_s_channels_frame_and_a_viewer_slot(app, tmp_path):
         assert len(boxes) == 1 and boxes[0].styleSheet() == channel_template.frame_qss()
         texts = {b.text() for b in page.findChildren(QtWidgets.QPushButton)}
         assert {"Intensity…", "Reset weights", "Load weights", "Overlay", "Fusion",
-                "Tissue Navigator", "← Back to Step 2"} <= texts
+                "Tissue Navigator"} <= texts
+        assert "← Back to Step 2" not in texts        # removed, user ruling 2026-11-03
         assert w._step3_cb_all.text() == "Show all"
         # Step1's style sources
         assert w._step3_cb_all.styleSheet() == w._step0._cb_all.styleSheet()

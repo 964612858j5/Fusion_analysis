@@ -344,7 +344,7 @@ class Step15BackgroundCorrectionPage(QWidget):
         nav.addWidget(self._btn_back)
         nav.addStretch()
 
-        self._btn_continue = QPushButton('Save & Continue →')
+        self._btn_continue = QPushButton('Save && Continue →')
         self._btn_continue.setStyleSheet(
             'QPushButton{background:#2a5;color:white;border-radius:4px;'
             'padding:7px 22px;font-size:13px;font-weight:bold;}'

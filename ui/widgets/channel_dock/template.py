@@ -59,18 +59,23 @@ SWATCH_SIZE = 13
 NAME_WIDTH_PADDING = 6          # added to the longest name in the list
 ACCESSORY_SPACING = 5
 
-# ── colour tokens ────────────────────────────────────────────────────────
-COLOR_BACKGROUND = "#101620"
-COLOR_BORDER = "#253246"
-COLOR_ROW_SEPARATOR = "#202c3b"
-COLOR_HOVER = "#1a3e33"
-COLOR_SELECTED = "#1a2b3e"
-COLOR_FIELD_BG = "#182230"
-COLOR_FIELD_BORDER = "#354a63"
-COLOR_TEXT = "#dce5ef"
-COLOR_ACCENT = "#9bd0ff"
-COLOR_MUTED = "#6d8196"
-COLOR_FRAME = "#61afef"
+# ── colour tokens: the application theme's (docs/v17_desktop_ui_plan.md) ──
+from ...theme import current_name as _theme_name, tokens as _tokens  # noqa: E402
+_T = _tokens.THEMES[_theme_name()]
+COLOR_BACKGROUND = _T["layer1"]
+COLOR_BORDER = _T["border"]
+COLOR_ROW_SEPARATOR = _T["border"]
+COLOR_HOVER = _T["hover"]
+COLOR_SELECTED = _T["active"]
+COLOR_FIELD_BG = _T["layer2"]
+COLOR_FIELD_BORDER = _T["border_strong"]
+COLOR_TEXT = _T["text"]
+COLOR_ACCENT = _T["accent"]
+COLOR_MUTED = _T["text3"]
+COLOR_FRAME = _T["accent"]
+COLOR_DISABLED_BORDER = _T["border"]
+COLOR_DISABLED_BG = _T["layer3"]
+COLOR_DISABLED_TEXT = _T["disabled_text"]
 NAME_FONT_PX = 11
 
 # THE palette. One deal for the process, in Step0's order, because Step0's is
@@ -101,8 +106,8 @@ CHECKBOX_INDICATOR_QSS = (
     f"background:{COLOR_FIELD_BG};}}"
     f"QCheckBox::indicator:checked{{background:{COLOR_FIELD_BG};"
     f"border:1px solid {COLOR_ACCENT};image:url({_CHECK_ICON});}}"
-    f"QCheckBox::indicator:disabled{{border:1px solid #3a4a5c;"
-    f"background:#141b26;}}"
+    f"QCheckBox::indicator:disabled{{border:1px solid {COLOR_DISABLED_BORDER};"
+    f"background:{COLOR_DISABLED_BG};}}"
 )
 
 NAME_QSS = f"color:{COLOR_TEXT};font-size:{NAME_FONT_PX}px;"
@@ -139,7 +144,7 @@ DOCK_QSS = (
     f"QPushButton#dockTool {{ color:{COLOR_ACCENT}; background:{COLOR_FIELD_BG};"
     f" border:1px solid {COLOR_FIELD_BORDER}; border-radius:4px;"
     f" padding:2px 8px; font-size:10px; }}"
-    f"QPushButton#dockTool:hover {{ background:#23354a; }}"
+    f"QPushButton#dockTool:hover {{ background:{COLOR_HOVER}; }}"
 ) + LIST_QSS
 
 # The accessory styling family: a host's own controls look like they belong to
@@ -151,7 +156,7 @@ ACCESSORY_FIELD_QSS = (
 ACCESSORY_COMBO_QSS = (
     f"QComboBox{{{ACCESSORY_FIELD_QSS}padding:1px 2px;}}"
     "QComboBox::drop-down{border:none;}"
-    "QComboBox:disabled{color:#555;}"
+    f"QComboBox:disabled{{color:{COLOR_DISABLED_TEXT};}}"
 )
 ACCESSORY_SPINBOX_QSS = f"QDoubleSpinBox{{{ACCESSORY_FIELD_QSS}}}"
 

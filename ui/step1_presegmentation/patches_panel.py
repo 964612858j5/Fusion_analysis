@@ -21,6 +21,7 @@ import time
 from PyQt5 import QtWidgets
 from PyQt5.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
 
+from ..theme import dialogs as theme_dialogs, widgets as theme_widgets
 from ..step0.roi_context_model import patch_color, patch_id, patch_name
 
 TILE_H = 24
@@ -261,7 +262,7 @@ class PatchesPanel(QtWidgets.QWidget):
         # Deletes the TICKED patches (user ruling, 2026-09-24): with
         # `Select all` that is every patch, or just the few ticked.
         self._btn_delete = QtWidgets.QPushButton("Delete", self)
-        self._btn_delete.setStyleSheet("font-size:11px;")
+        theme_widgets.button(self._btn_delete, "danger", "font-size:11px;padding:3px 10px;")
         self._btn_delete.clicked.connect(self._ask_delete_selected)
         row2.addWidget(self._btn_delete)
         row2.addStretch(1)
@@ -345,10 +346,8 @@ class PatchesPanel(QtWidgets.QWidget):
             return
         names = [t.name() for t in self._tiles if t.pid in ids]
         what = names[0] if len(names) == 1 else f"{len(names)} selected patches"
-        answer = QtWidgets.QMessageBox.question(
-            self, "Delete patches", f"Delete {what}?",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
-        if answer == QtWidgets.QMessageBox.Yes:
+        # destructive: a red Delete that is never the default (ruling 5)
+        if theme_dialogs.confirm_danger(self, "Delete patches", f"Delete {what}?"):
             self.delete_selected_requested.emit(list(ids))
 
     def _ask_random(self):

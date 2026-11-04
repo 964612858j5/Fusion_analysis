@@ -25,6 +25,7 @@ import dataclasses
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtCore import Qt, pyqtSignal
 
+from .theme import widgets as theme_widgets
 from .step1_button_styles import MODE_BUTTON_QSS
 from .step1_presegmentation.mask_layers import PALETTE
 from .step1_presegmentation.method_blocks import block_frame_qss
@@ -35,6 +36,9 @@ TICK_LABELS = {CELL: "Cells", NUCLEUS: "Nuclei"}
 NO_RESULTS_TEXT = "No segmentation results for this slide — run Step2"
 _GREY = "color:#999;font-size:10px;"
 _WARN = "color:#ffd166;font-size:10px;"
+
+
+_TK = theme_widgets.t()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -86,12 +90,13 @@ class ResultRow(QtWidgets.QFrame):
             self.btn_delete = QtWidgets.QToolButton(self)
             self.btn_delete.setText("×")
             self.btn_delete.setToolTip("Delete this run and everything made from it")
-            self.btn_delete.setStyleSheet("QToolButton{color:#e06c75;border:none;font-weight:bold;}")
+            self.btn_delete.setStyleSheet(
+                theme_widgets.button_qss("danger", "border:none;font-weight:bold;", "QToolButton"))
             top.addWidget(self.btn_delete)
         self.title = QtWidgets.QLabel(info.title, self)
         self.title.setWordWrap(True)
         self.title.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
-        self.title.setStyleSheet("font-weight:bold;font-size:11px;color:#ddd;")
+        self.title.setStyleSheet(f"font-weight:bold;font-size:11px;color:{_TK['text2']};")
         top.addWidget(self.title, 1)
         self.btn_use = QtWidgets.QPushButton("Use", self)
         self.btn_use.setMinimumWidth(52)
@@ -112,7 +117,7 @@ class ResultRow(QtWidgets.QFrame):
         self.ticks, self.swatches = {}, {}
         for kind in KINDS:
             tick = QtWidgets.QCheckBox(TICK_LABELS[kind], self)
-            tick.setStyleSheet("font-size:10px;color:#ddd;")
+            tick.setStyleSheet(f"font-size:10px;color:{_TK['text2']};")
             tick.setEnabled(kind in info.has)
             why = dict(info.reasons).get(kind)
             if kind not in info.has and why:
@@ -162,7 +167,10 @@ class Step3ResultsWindow(QtWidgets.QWidget):
         super().__init__(parent, Qt.Window | Qt.WindowMinimizeButtonHint
                          | Qt.WindowCloseButtonHint | Qt.WindowStaysOnTopHint)
         self.setWindowTitle("Segmentation results")
-        self.setStyleSheet("QWidget{background:#1c1c1c;color:#ddd;}")
+        # the window's own background only: a bare QWidget rule here reached
+        # every button inside and took away the theme's hover (plan §10)
+        self.setObjectName("step3ResultsWindow")
+        self.setStyleSheet(f"QWidget#step3ResultsWindow{{background:{_TK['layer1']};}}")
         self.resize(420, 520)
         #: per entry key, for the session: {"ticks": {kind: bool}, "styles": {kind: MaskStyle}}
         self._state = {}

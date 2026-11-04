@@ -718,7 +718,7 @@ def test_the_montages_buttons_look_like_the_viewers(app, tmp_path, monkeypatch):
         for b, layer in ((view.btn_show_fusion, "membrane"), (view.btn_show_nucleus, "nucleus")):
             qss = b.styleSheet()
             assert qss == layer_button_qss(layer) and qss != MODE_BUTTON_QSS
-            for part in ("border-radius:4px", "font-size:10px", "padding:2px 10px"):
+            for part in ("border-radius:6px", "font-size:10px", "padding:2px 10px"):
                 assert part in qss
         assert view.btn_show_fusion.styleSheet() != view.btn_show_nucleus.styleSheet()
     finally:

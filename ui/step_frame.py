@@ -33,11 +33,11 @@ from PyQt5.QtWidgets import QHBoxLayout, QSizePolicy, QSplitter, QVBoxLayout, QW
 # One tab look for every framed page's two tab widgets, so each page reads as
 # one surface rather than two (moved here from `main_window` in S2: Step0
 # builds its own frame and must not import the window).
-FRAME_TAB_QSS = (
-    "QTabWidget::pane{border:1px solid #444;border-radius:5px;}"
-    "QTabBar::tab{background:#222;color:#bbb;padding:5px 12px;border:1px solid #444;}"
-    "QTabBar::tab:selected{color:#fff;border-bottom-color:#111;}"
-)
+# "Attached" tabs in the theme's colours (docs/v17_desktop_ui_plan.md §10,
+# ruling 2): the metrics -- padding 5px 12px, a 1 px border -- are the ones
+# the frame's geometry was measured on and stay; the selected tab is not bold.
+from .theme.widgets import frame_tab_qss as _frame_tab_qss  # noqa: E402
+FRAME_TAB_QSS = _frame_tab_qss()
 
 
 def free_tab_bar(tabs):

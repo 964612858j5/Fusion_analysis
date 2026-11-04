@@ -135,10 +135,8 @@ class Step3Page(QWidget):
             right_tabs.setCornerWidget(corner_widget, Qt.TopRightCorner)
         self._right_tabs = right_tabs
 
-        back = QPushButton("← Back to Step 2")
-        back.setStyleSheet("padding:6px 16px;background:#333;color:#ddd;border-radius:4px;")
-        back.clicked.connect(self.go_back.emit)
-        frame.bottom_layout.addWidget(back)
+        # (no "Back to Step 2": the step bar is the way back -- user ruling
+        # 2026-11-03)
         frame.bottom_layout.addStretch()
 
     # ── what the window reads ─────────────────────────────────────────

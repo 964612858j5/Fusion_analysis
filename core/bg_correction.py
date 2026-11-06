@@ -17,6 +17,7 @@ from ..config import (
     CUCIM_SIGMA_DEFAULT,
     BG_CORR_MAX_TILE,
 )
+from . import gpu_kernels
 
 # Bump on ANY numeric change of the correction methods (cache keys and
 # provenance depend on it). "2": gaussian/cucim tiled halo widened from
@@ -71,6 +72,16 @@ _GPU_FAILURE_CACHE = set()
 GPU_MORPH_AVAILABLE = False
 GPU_MORPH_SMOKE_TEST = {"cupy": "not_run", "cupyx_ndimage": "not_run", "cucim": "not_run"}
 
+#: THE FILTER BACKEND IN USE (block RT, docs/v17_step0_runtime_kernels.md).
+#: True  -> core/gpu_kernels.py: two finite kernels, the support width and the
+#:          Gaussian weights are runtime arguments, so a new radius/sigma
+#:          never compiles anything.
+#: False -> the cupyx implementation, which generates a new kernel per size.
+#: The fallback is never silent: `RUNTIME_KERNEL_ERROR` says why, and the
+#: import-time smoke test prints it once.
+RUNTIME_KERNELS_ACTIVE = False
+RUNTIME_KERNEL_ERROR = ""
+
 
 def _gpu_failure_key(exc):
     text = str(exc)
@@ -99,15 +110,48 @@ def _disable_gpu_morph(exc, context):
 
 
 def _run_gpu_morph_smoke_test():
+    """Prove the GPU can correct tiles, and compile the finite kernel set.
+
+    The smoke test is the ONE phase where a CUDA kernel may be compiled:
+    it runs at import, before the window is shown (and before any event
+    loop exists), exactly where the old per-size kernels used to be
+    compiled.  Two runtime-parameterised kernels replace them, so no later
+    radius/sigma compiles anything (core/gpu_kernels.py).
+    """
+    global RUNTIME_KERNELS_ACTIVE, RUNTIME_KERNEL_ERROR
     arr = cp.asarray(np.arange(64, dtype=np.float32).reshape(8, 8))
     arr = arr + cp.float32(1.0)
     _ = cp.asnumpy(arr)
     GPU_MORPH_SMOKE_TEST["cupy"] = "pass"
-    eroded = _cupyx_ndi.grey_erosion(arr, size=(3, 3), mode="reflect")
-    dilated = _cupyx_ndi.grey_dilation(eroded, size=(3, 3), mode="reflect")
-    gauss = _cupyx_ndi.gaussian_filter(arr, sigma=1, mode="reflect")
-    _ = cp.asnumpy(dilated + gauss)
-    GPU_MORPH_SMOKE_TEST["cupyx_ndimage"] = "pass"
+
+    if gpu_kernels.legacy_forced():
+        # The operator asked for the reference path: do not spend the compile.
+        RUNTIME_KERNEL_ERROR = f"disabled by {gpu_kernels.LEGACY_ENV}"
+        GPU_MORPH_SMOKE_TEST["runtime_kernels"] = "skipped (legacy switch)"
+        eroded = _cupyx_ndi.grey_erosion(arr, size=(3, 3), mode="reflect")
+        dilated = _cupyx_ndi.grey_dilation(eroded, size=(3, 3), mode="reflect")
+        gauss = _cupyx_ndi.gaussian_filter(arr, sigma=1, mode="reflect")
+        _ = cp.asnumpy(dilated + gauss)
+        GPU_MORPH_SMOKE_TEST["cupyx_ndimage"] = "pass"
+    elif gpu_kernels.available() and gpu_kernels.warm():
+        RUNTIME_KERNELS_ACTIVE = True
+        GPU_MORPH_SMOKE_TEST["runtime_kernels"] = "pass"
+    else:
+        RUNTIME_KERNEL_ERROR = gpu_kernels.compile_error() or "CuPy not available"
+        GPU_MORPH_SMOKE_TEST["runtime_kernels"] = f"fail: {RUNTIME_KERNEL_ERROR}"
+        _warn_gpu_once(
+            "runtime_kernels:" + RUNTIME_KERNEL_ERROR,
+            f"[GPU] runtime kernels unavailable ({RUNTIME_KERNEL_ERROR}); using "
+            "the cupyx implementation, which compiles a new kernel for every "
+            "radius/sigma (interactive tuning will stall on new values).",
+        )
+        # The fallback must still work, and this is where that is proved.
+        eroded = _cupyx_ndi.grey_erosion(arr, size=(3, 3), mode="reflect")
+        dilated = _cupyx_ndi.grey_dilation(eroded, size=(3, 3), mode="reflect")
+        gauss = _cupyx_ndi.gaussian_filter(arr, sigma=1, mode="reflect")
+        _ = cp.asnumpy(dilated + gauss)
+        GPU_MORPH_SMOKE_TEST["cupyx_ndimage"] = "pass"
+
     try:
         import cucim  # noqa: F401
         GPU_MORPH_SMOKE_TEST["cucim"] = "import_pass"
@@ -123,7 +167,12 @@ try:
         _run_gpu_morph_smoke_test()
         GPU_MORPH_AVAILABLE = True
         CUCIM_AVAILABLE = True
-        print(f"[GPU] cupy {cp.__version__} ready, GPU morphology smoke test passed")
+        print(f"[GPU] cupy {cp.__version__} ready, GPU morphology smoke test passed "
+              f"(filters: {'runtime-kernels' if RUNTIME_KERNELS_ACTIVE else 'cupyx-legacy'}"
+              + (f", cache {gpu_kernels.cache_dir()}, kernels ready in "
+                 f"{gpu_kernels.stats().get('compile_ms')} ms"
+                 if RUNTIME_KERNELS_ACTIVE else "")
+              + ")")
     except Exception as _smoke_exc:
         CUCIM_IMPORT_ERROR = str(_smoke_exc)
         CUCIM_AVAILABLE = False
@@ -296,8 +345,66 @@ def _tile_slices(height, width, tile_size, overlap):
             )
 
 
+def _runtime_kernels_usable():
+    """May this call use the finite runtime-parameterised kernels?"""
+    return bool(RUNTIME_KERNELS_ACTIVE) and not gpu_kernels.legacy_forced()
+
+
+def _disable_runtime_kernels(exc, context):
+    """A failure inside the custom kernels: fall back, once, in the log."""
+    global RUNTIME_KERNELS_ACTIVE, RUNTIME_KERNEL_ERROR
+    RUNTIME_KERNELS_ACTIVE = False
+    RUNTIME_KERNEL_ERROR = f"{type(exc).__name__}: {exc}"
+    _warn_gpu_once(
+        "runtime_kernels_runtime:" + RUNTIME_KERNEL_ERROR,
+        f"[GPU] {context}: runtime kernels failed ({RUNTIME_KERNEL_ERROR}); "
+        "using the cupyx implementation for this session -- new radius/sigma "
+        "values will compile again.",
+    )
+
+
+def gpu_filter_backend():
+    """Which GPU filter implementation this process runs, for logs and tests.
+
+    "runtime-kernels" -- finite kernels, no per-parameter compilation;
+    "cupyx-legacy"    -- the reference path (compiles per radius/sigma);
+    "cpu"             -- no GPU morphology at all.
+    """
+    if not GPU_MORPH_AVAILABLE:
+        return "cpu"
+    if RUNTIME_KERNELS_ACTIVE and not gpu_kernels.legacy_forced():
+        return "runtime-kernels"
+    return "cupyx-legacy"
+
+
 def _tophat_gpu(arr32, radius):
-    """GPU kernel: cupyx grey_erosion/dilation, SQUARE (2r+1)^2 (no NVRTC JIT)."""
+    """White TopHat on the GPU: square (2r+1) element, reflect border.
+
+    Runtime-parameterised kernels (core/gpu_kernels.py): one compiled kernel
+    pair serves every radius, so a new radius never compiles anything.  The
+    cupyx implementation below is the numerical reference the tests compare
+    against, and the fallback when this process cannot use the custom
+    kernels.
+    """
+    radius = max(1, int(radius))
+    arr32 = arr32.astype(np.float32, copy=False)
+    if _runtime_kernels_usable():
+        try:
+            return gpu_kernels.tophat(arr32, radius)
+        except Exception as _e:                          # noqa: BLE001
+            _disable_runtime_kernels(_e, "tophat")
+    return _tophat_gpu_legacy(arr32, radius)
+
+
+def _tophat_gpu_legacy(arr32, radius):
+    """Reference: cupyx grey_erosion/dilation, SQUARE (2r+1)^2.
+
+
+    The support width is a literal in cupyx's generated CUDA source, so this
+    path compiles a NEW kernel for every distinct radius.  Kept as the
+    numerical reference and as the fallback -- not the interactive path.
+    """
+    gpu_kernels.STATS["legacy_calls"] += 1
     size = 2 * radius + 1
     gpu_arr = cp.asarray(arr32)
     eroded  = _cupyx_ndi.grey_erosion(gpu_arr,  size=(size, size), mode='reflect')
@@ -368,6 +475,25 @@ def _apply_cucim_or_cpu(arr, sigma, prefer_gpu=True):
 
 
 def _cucim_gpu(arr32, sigma):
+    """Gaussian background subtraction on the GPU (truncate=4, reflect).
+
+    Runtime-parameterised: the weights are computed per sigma on the host and
+    handed to one compiled kernel as data, so a new sigma never compiles
+    anything.  `_cucim_gpu_legacy` is the reference the tests compare with.
+    """
+    sigma = max(1, int(sigma))
+    arr32 = arr32.astype(np.float32, copy=False)
+    if _runtime_kernels_usable():
+        try:
+            return gpu_kernels.gaussian_bg_subtract(arr32, sigma)
+        except Exception as _e:                          # noqa: BLE001
+            _disable_runtime_kernels(_e, "cucim")
+    return _cucim_gpu_legacy(arr32, sigma)
+
+
+def _cucim_gpu_legacy(arr32, sigma):
+    """Reference: cupyx gaussian_filter (compiles a new kernel per sigma)."""
+    gpu_kernels.STATS["legacy_calls"] += 1
     gpu_arr = cp.asarray(arr32)
     bg_gpu  = _cupyx_ndi.gaussian_filter(gpu_arr, sigma=sigma, mode='reflect')
     out_gpu = cp.clip(gpu_arr - bg_gpu, 0, None)

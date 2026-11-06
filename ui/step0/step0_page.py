@@ -9285,8 +9285,30 @@ class Step0Page(QWidget):
         # row's glyph turns `stale`. Nothing is recomputed and nothing is
         # thrown away: the old result stays visible until a Process replaces
         # it, and the glyph is what says it was made with other parameters.
+        # ALWAYS, even for the duplicate commit below: this is bookkeeping,
+        # not a refresh, and a row whose state changed for another reason
+        # (a new dataset's same-named channel, a Save landing) must not be
+        # left showing a stale glyph because the numbers happened to match.
         self._refresh_channel_state(ch)
         self._show_decision_status(ch)          # now Unsaved (or Saved again)
+        # ONE STATE, ONE VIEW REFRESH (block RT). Enter reaches this handler
+        # twice: the spin box commits its typed text on Return (valueChanged
+        # fires before `_on_dec_param_entered` runs) and the handler then
+        # commits again. Both calls carry the SAME numbers, so the second one
+        # has nothing to re-issue -- and doing it anyway was a whole second
+        # viewport request plus a second tissue-preview dispatch, measured on
+        # the real page (docs/v17_step0_runtime_kernels.md §5). The signature
+        # is the DATASET plus the channel's *effective* pair, so
+        #   * a global Method Parameters change (effective value moves without
+        #     touching this channel's overrides), and
+        #   * the same channel name and numbers in another dataset
+        # are both new states and still refresh.
+        radius, sigma = self._resolve_channel_params(ch)
+        applied = (str(getattr(self, "ome_path", "") or ""), ch,
+                   int(radius), int(sigma))
+        if applied == getattr(self, "_dec_param_applied", None):
+            return
+        self._dec_param_applied = applied
         # Recompute only the tiled view the user can currently see. Compare
         # owns three visible method controllers; Full Image owns the one
         # source chosen in its toolbar. Patches are navigation bookmarks, not
@@ -9324,13 +9346,39 @@ class Step0Page(QWidget):
         boxes = {"tophat": self._dec_radius, "cucim": self._dec_sigma}
         if method not in boxes:
             # Backward-compatible programmatic call: commit both and run both.
+            changed = False
             for sb in boxes.values():
-                sb.interpretText()
+                changed = self._commit_spin(sb) or changed
             method = "both"
         else:
-            boxes[method].interpretText()
-        self._on_dec_param_changed(method)
+            changed = self._commit_spin(boxes[method])
+        # ONE COMMIT, ONE REFRESH (block RT). `interpretText()` emits
+        # `valueChanged` synchronously when the typed text differs from the
+        # committed value, and that signal is already connected to
+        # `_on_dec_param_changed` -- so the value is persisted and the visible
+        # view refreshed exactly once. Calling `_on_dec_param_changed` again
+        # here ran the whole refresh a second time: measured, one Enter
+        # produced two tissue-preview dispatches and two compose passes
+        # (docs/v17_step0_runtime_kernels.md §5). The explicit call is kept
+        # for the other case -- Enter with an UNCHANGED value -- because that
+        # is the one where no `valueChanged` fires and the old behaviour
+        # (re-apply the value, then the channel's compute path) still stands.
+        if not changed:
+            self._on_dec_param_changed(method)
         self._process_current_channel(method)
+
+    @staticmethod
+    def _commit_spin(box):
+        """Commit a spin box's typed text; True when the value actually moved.
+
+        `QAbstractSpinBox.interpretText()` writes the text into the value,
+        which emits `valueChanged` for every connected slot. The before/after
+        comparison is what tells the caller whether that already happened, so
+        the refresh is neither duplicated nor silently skipped.
+        """
+        before = box.value()
+        box.interpretText()
+        return box.value() != before
 
     # ── saved or not (user ruling 2026-10-31) ──────────────────────────────
     # "Saved:" says the channel's setting IS the workspace's saved one; an

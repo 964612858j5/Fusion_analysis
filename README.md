@@ -108,7 +108,7 @@ Default input/output paths can be preset in [`config.py`](config.py) (`OME_TIFF_
 block01/
 ├── main.py            # entry point (python -m block01.main)
 ├── config.py          # default paths & constants
-├── ui/                # Step 0–4 pages (PyQt5)
+├── ui/                # Step 0–4 pages (PySide6)
 ├── core/              # OME-TIFF lazy loader, channel fusion, background correction
 ├── workers/           # segmentation / tile-merge / quantification workers
 ├── utils/             # tiling, segmentation config, helpers
@@ -127,8 +127,8 @@ government organisations. It is source-available, not OSI open source.
 company by company: mingyuanluan1@gmail.com.
 
 Some parts keep their own terms: the DeepCell-derived `seg_runner/mesmer_torch/`
-and the Mesmer weights are for non-commercial **academic** use only; PyQt5 is
-GPL v3 or commercial, and its GPL terms do not fit a noncommercial licence
-(a move to PySide6 is planned) — see [NOTICE](NOTICE).
+and the Mesmer weights are for non-commercial **academic** use only; the GUI runs
+on PySide6 (LGPL), which replaced PyQt5 (GPL v3 or commercial) so the app can be
+handed on without a per-seat Qt-binding licence — see [NOTICE](NOTICE).
 
 Required Notice: Copyright (c) 2026 Mingyuan Luan (mingyuanluan1@gmail.com)

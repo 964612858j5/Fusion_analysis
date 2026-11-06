@@ -1,6 +1,6 @@
 """Headless smoke tests for the v13.1 ChannelWorkbench data bridge.
 
-Runs under an offscreen Qt platform. Skips cleanly if PyQt5 or a Qt platform
+Runs under an offscreen Qt platform. Skips cleanly if Qt or a platform
 plugin is unavailable (e.g. minimal CI), so it never breaks the suite.
 """
 

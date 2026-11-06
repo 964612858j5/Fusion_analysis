@@ -107,7 +107,7 @@ def test_save_product_uses_the_runtime_kernels_and_matches_the_reference(app, tm
     before = gk.stats()["legacy_calls"]
     w = WsiCorrectionWorker(loader, str(tmp_path), cfg, rois=[roi])
     out = {}
-    w.finished.connect(lambda p, dec: out.update(path=p))
+    w.job_finished.connect(lambda p, dec: out.update(path=p))
     w.error.connect(lambda m: out.update(err=m))
     w.run()
     _settle(w)

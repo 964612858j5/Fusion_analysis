@@ -1563,7 +1563,7 @@ class RawDataPrefetchWorker(QThread):
     """后台IO worker：批量读取指定通道的所有patch原始数据，写入raw_cache。
     不做任何计算，只负责磁盘→内存的IO，尽快完成。
     """
-    finished = Signal(str, int, object)   # (channel, patch_idx, raw_array)
+    job_finished = Signal(str, int, object)   # (channel, patch_idx, raw_array)
     error    = Signal(str, int, str)      # (channel, patch_idx, msg)
 
     def __init__(self, loader, channel_name, patch_idx, roi,
@@ -1588,7 +1588,7 @@ class RawDataPrefetchWorker(QThread):
             )
             if self._stop:
                 return
-            self.finished.emit(self.channel_name, self.patch_idx, raw)
+            self.job_finished.emit(self.channel_name, self.patch_idx, raw)
         except Exception:
             if not self._stop:
                 self.error.emit(self.channel_name, self.patch_idx, traceback.format_exc())
@@ -1598,7 +1598,7 @@ class BgComputeWorker(QThread):
     """纯GPU计算worker：接受已读好的raw数组，不做任何IO。
     tophat + cucim + norm + metrics，全部在GPU上完成。
     """
-    finished = Signal(int, dict)
+    job_finished = Signal(int, dict)
     error    = Signal(int, str)
 
     def __init__(self, request_id, channel_name, raw, nuc_raw,
@@ -1658,7 +1658,7 @@ class BgComputeWorker(QThread):
                 "tophat_metrics":   _compute_bg_metrics(tophat),
                 "cucim_metrics":    _compute_bg_metrics(cucim),
             }
-            self.finished.emit(self.request_id, payload)
+            self.job_finished.emit(self.request_id, payload)
         except Exception:
             if not self._stop:
                 self.error.emit(self.request_id, traceback.format_exc())
@@ -1837,7 +1837,7 @@ class BatchProcessWorker(QThread):
             self.error_signal.emit("__global__", -1, _tb.format_exc())
 
 class BackgroundPreviewWorker(QThread):
-    finished = Signal(int, dict)
+    job_finished = Signal(int, dict)
     error = Signal(int, str)
 
     def __init__(self, request_id, loader, channel_name, roi,
@@ -1932,7 +1932,7 @@ class BackgroundPreviewWorker(QThread):
                 "tophat_metrics":   _compute_bg_metrics(tophat),
                 "cucim_metrics":    _compute_bg_metrics(cucim),
             }
-            self.finished.emit(self.request_id, payload)
+            self.job_finished.emit(self.request_id, payload)
         except Exception:
             if not self._stop:
                 self.error.emit(self.request_id, traceback.format_exc())
@@ -2148,7 +2148,7 @@ def correction_tile_size(method, impl=None):
 
 class WsiCorrectionWorker(QThread):
     progress = Signal(int, int, int, int, str, str, int)
-    finished = Signal(str, dict)
+    job_finished = Signal(str, dict)
     canceled = Signal(str)
     error = Signal(str)
 
@@ -2401,7 +2401,7 @@ class WsiCorrectionWorker(QThread):
                 # mode there is genuinely nothing.
                 if incremental and withdrawn:
                     self.swap_plan = ("in", [], withdrawn)
-                self.finished.emit(live_path if incremental else "",
+                self.job_finished.emit(live_path if incremental else "",
                                    dict(desired) if incremental else {})
                 return
 
@@ -2618,7 +2618,7 @@ class WsiCorrectionWorker(QThread):
                 ("in", [(info["group_name"], ch) for info in roi_infos
                         for ch, _m, _p in channels], withdrawn)
                 if incremental else ("whole",))
-            self.finished.emit(live_path, corrected_decisions)
+            self.job_finished.emit(live_path, corrected_decisions)
         except Exception:
             # a display builder still running ends with the save (R7b B2)
             builder = locals().get("display")

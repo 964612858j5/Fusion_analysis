@@ -1,4 +1,10 @@
-# v17 — PyQt5 → PySide6 move (plan v0.3, 2026-11-04)
+# v17 — PyQt5 → PySide6 move (plan v0.4, 2026-11-07)
+
+v0.4: **M0–M3 done** (PySide6 6.11.3-Essentials). What the move cost, per
+area, is in §8 — the two findings that changed code shape are that a Qt 6
+binding CANNOT reach past a subclass signal that shadows `QThread.finished`
+(the business payload moved to `job_finished`) and that `libxcb-cursor0` is a
+runtime dependency of Qt ≥ 6.5 on X11.
 
 v0.3: user rulings (TG 2026-11-04) — **no switch back to PyQt5** (the old
 version is on GitHub: 5501cf9 is the last PyQt5 commit); **the user runs the
@@ -132,3 +138,51 @@ user's Windows run, M4 0.5 day.
 * Per-call overhead (§3): measured on real paths in M3.
 * High-DPI is always on in Qt 6: rounding of fixed pixel sizes (25/26 px rows)
   at 150 % on Windows — screenshots in M3.
+
+
+## 8. What M2 actually cost (2026-11-07, PySide6-Essentials 6.11.3)
+
+Measured and changed on the A9 server (Ubuntu 22.04, Python 3.10.20,
+pyqtgraph 0.14.0). Probes ran against an isolated install
+(`pip install --target /tmp/pyside6_site`), the product env was not touched.
+
+1. **`QThread.finished` cannot be reached past a shadowing subclass signal.**
+   `QtCore.QThread.finished.__get__(worker, type(worker))` returns the
+   SUBCLASS's signal under PySide6 (probed: `sig is worker.finished` → True),
+   and the class-level `Signal` object has no `.connect`. The six workers that
+   declared a business `finished` (`PlainReadWorker`, `BgComputeWorker`,
+   `BatchProcessWorker`, `WsiCorrectionWorker`, `FullFusionWorker`,
+   `SegmentMergeWorker`) now declare **`job_finished`**; `worker.finished` is
+   the thread's own signal again and `qt.thread_finished(worker)` returns it.
+2. **`stateChanged(int)` vs `Qt.Checked`.** `Qt.Checked == 2` is **False**
+   under PySide6 while `stateChanged` still delivers the int `2`; every
+   comparison goes through `qt.is_checked(state)` now.
+3. **`int(<enum/flag>)` raises** (`TypeError`), confirming the M1 helper: the
+   remaining 12 sites in tests/scripts use `flag_value()`.
+4. **`QWIDGETSIZE_MAX` is not exported** by PySide6 (neither QtWidgets nor
+   QtCore); `qt/QtWidgets.py` defines it as QWidget's maximum (16 777 215).
+5. **Module moves** resolved in `qt/__init__.py`: `QOpenGLWidget`
+   (QtOpenGLWidgets), `QOpenGLFramebufferObject(+Format)`
+   (QtOpenGL), `QShortcut`/`QActionGroup`/`QAction` (QtGui).
+6. **`libxcb-cursor0`** (Qt ≥ 6.5 xcb plugin). Without it the app dies at
+   "could not load the Qt platform plugin xcb". It is a system package on
+   Ubuntu (`apt install libxcb-cursor0`); the isolated verification env used
+   a conda-forge `xcb-util-cursor` build through `LD_LIBRARY_PATH`.
+7. **sip → shiboken6**: `is_deleted` = `not shiboken6.isValid`, `delete_cpp` =
+   `shiboken6.delete`; `sip.setdestroyonexit(False)` has no equivalent and
+   `keep_wrappers_at_exit()` is a documented no-op.
+8. **Exit crashes in two test modules** (process aborts AFTER the tests pass,
+   `viewer/scheduler.py` workers alive at interpreter shutdown). Not seen in
+   the product window's open/close path. Open item, see §9.
+
+## 9. Open items from M2
+
+* The test-session exit crash above (2 modules). The product's own open/close
+  was clean; the remaining work is to shut the scheduler workers down in those
+  fixtures before the interpreter does it.
+* Windows has not been run (the user runs it): see
+  docs/v17_windows_acceptance.md.
+* The paint cost of the Regions overlay is ~30–40 % higher on PySide6 than on
+  PyQt5 for the same data (measured with scripts/benchmark_regions_overlay.py);
+  the optimisation still wins over the original implementation in every
+  scenario.

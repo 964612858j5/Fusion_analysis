@@ -228,7 +228,7 @@ def _write_real_corrected_zarr(step0_dir, loader, config, rois,
     worker = WsiCorrectionWorker(
         loader, str(step0_dir), config, rois=rois,
         process_channels=set(process_channels), incremental=False)
-    worker.finished.connect(
+    worker.job_finished.connect(
         lambda path, decisions: result.update(path=path, decisions=decisions))
     worker.error.connect(lambda message: result.update(error=message))
     worker.run()
@@ -323,7 +323,7 @@ def test_a_global_change_dirties_only_channels_that_still_inherit_it(
 
     class _Worker(QtCore.QThread):
         progress = QtCore.Signal(int, int, int, int, str, str, int)
-        finished = QtCore.Signal(str, dict)
+        job_finished = QtCore.Signal(str, dict)
         canceled = QtCore.Signal(str)
         error = QtCore.Signal(str)
 
@@ -451,7 +451,7 @@ def test_no_patch_background_change_processes_the_full_wsi_region(
 
     class _Worker(QtCore.QThread):
         progress = QtCore.Signal(int, int, int, int, str, str, int)
-        finished = QtCore.Signal(str, dict)
+        job_finished = QtCore.Signal(str, dict)
         canceled = QtCore.Signal(str)
         error = QtCore.Signal(str)
 

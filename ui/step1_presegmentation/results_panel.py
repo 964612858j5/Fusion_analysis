@@ -8,7 +8,7 @@ until the user presses `Use` (plan 4.4 / 7.7); a row that may not be chosen
 says why in the row itself.
 """
 
-from ...qt import QtCore, QtGui, QtWidgets
+from ...qt import QtCore, QtGui, QtWidgets, is_checked
 
 from ...utils import segmentation_param_schema as ps
 from . import mask_layers
@@ -152,7 +152,7 @@ class _AllCheck(QtWidgets.QCheckBox):
         self.setTristate(True)
 
     def nextCheckState(self):  # noqa: N802
-        self.setCheckState(QtCore.Qt.Unchecked if self.checkState() == QtCore.Qt.Checked
+        self.setCheckState(QtCore.Qt.Unchecked if is_checked(self.checkState())
                            else QtCore.Qt.Checked)
 
 
@@ -246,7 +246,7 @@ class ResultsPanel(QtWidgets.QWidget):
         self._show_all_state()
 
     def _on_all_clicked(self, kind):
-        self.set_all(kind, self.chk_all[kind].checkState() == QtCore.Qt.Checked)
+        self.set_all(kind, is_checked(self.chk_all[kind].checkState()))
 
     def _show_all_state(self):
         """Each tick says what the boxes say: all on, none on, or some."""

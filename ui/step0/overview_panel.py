@@ -265,7 +265,7 @@ class FullFusionWorker(QThread):
     """
 
     progress   = Signal(int, int, str)   # done, total, msg
-    finished   = Signal(str)             # zarr_path on success
+    job_finished = Signal(str)           # zarr_path on success
     error      = Signal(str)             # traceback string
 
     # Block PA-3 (G1): the work is cut into UNITS on the output store's own
@@ -993,7 +993,7 @@ class FullFusionWorker(QThread):
 
             # Return first zarr path for "Next" button
             first_zarr = list(zarr_paths.values())[0] if zarr_paths else ""
-            self.finished.emit(first_zarr)
+            self.job_finished.emit(first_zarr)
 
         except Exception:
             self.error.emit(traceback.format_exc())

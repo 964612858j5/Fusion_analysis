@@ -9,7 +9,7 @@ index and pop a success box.
 `stop()` is cooperative, so a job that has been asked to stop is not a job that
 has ended: the token is dropped immediately (nothing may write again) and the
 QThread is held by a strong reference until it PHYSICALLY finishes. The worker's
-own `finished(str)` shadows `QThread.finished()`, so the base signal is fetched
+business payload is `job_finished`; `finished` is the thread's own signal
 explicitly rather than mistaken for thread termination.
 
 Own module: page-heavy PyQt suites crash pyqtgraph offscreen when combined.
@@ -37,7 +37,7 @@ class _FakeFusion(QtCore.QThread):
     """Same signal contract as FullFusionWorker, including the shadowing."""
 
     progress = QtCore.Signal(int, int, str)
-    finished = QtCore.Signal(str)      # shadows QThread.finished()
+    job_finished = QtCore.Signal(str)      # shadows QThread.finished()
     error = QtCore.Signal(str)
 
     def __init__(self, obeys_stop=True):
@@ -147,7 +147,7 @@ def test_a_job_that_was_never_interrupted_still_delivers_its_result(app, tmp_pat
         w._step0_lbl.mousePressEvent(None)          # same dataset, just Step0
 
         worker.progress.emit(1, 2, "half")
-        worker.finished.emit("/tmp/a/fused.zarr")
+        worker.job_finished.emit("/tmp/a/fused.zarr")
         for _ in range(20):
             QtWidgets.QApplication.processEvents()
 
@@ -192,7 +192,7 @@ def test_a_late_answer_from_a_retired_job_changes_nothing(app, tmp_path, monkeyp
         w._step0.dataset_committed.emit({"gen": 6})
 
         worker.progress.emit(1, 2, "late")
-        worker.finished.emit("/tmp/a/fused.zarr")
+        worker.job_finished.emit("/tmp/a/fused.zarr")
         worker.error.emit("late failure")
         for _ in range(20):
             QtWidgets.QApplication.processEvents()
@@ -222,7 +222,7 @@ def test_an_invalidated_handoff_also_retires_the_job(app, tmp_path):
         assert worker.stop_called is True
         assert w._step1_context_ready is False
 
-        worker.finished.emit("/tmp/a/fused.zarr")
+        worker.job_finished.emit("/tmp/a/fused.zarr")
         for _ in range(20):
             QtWidgets.QApplication.processEvents()
         assert seen["done"] == []
@@ -260,12 +260,12 @@ def test_business_finished_and_physical_finished_are_different_signals(app, tmp_
     _record_callbacks(w)
     order = []
     try:
-        worker.finished.connect(lambda s: order.append(("business", s)))
-        physical = QtCore.QThread.finished.__get__(worker, QtCore.QThread)
+        worker.job_finished.connect(lambda s: order.append(("business", s)))
+        physical = worker.finished            # the thread's own signal
         physical.connect(lambda: order.append(("physical", None)))
 
         w._start_fusion_worker(worker, job_name="fusion", n_rows=1, n_cols=1)
-        worker.finished.emit("/tmp/a/fused.zarr")
+        worker.job_finished.emit("/tmp/a/fused.zarr")
         for _ in range(10):
             QtWidgets.QApplication.processEvents()
         assert order == [("business", "/tmp/a/fused.zarr")]
@@ -323,7 +323,7 @@ def test_a_job_started_for_another_raw_file_may_not_write(app, tmp_path):
             "stage": "raw", "corrected_artifact": None}
         assert w._fusion_callback_allowed(w._fusion_token) is False
 
-        worker.finished.emit("/tmp/a/fused.zarr")
+        worker.job_finished.emit("/tmp/a/fused.zarr")
         for _ in range(20):
             QtWidgets.QApplication.processEvents()
         assert seen["done"] == []

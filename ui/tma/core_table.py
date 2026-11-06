@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from ...qt import is_checked
 from ...qt.QtCore import Qt, Signal
 from ...qt.QtGui import QColor
 from ...qt.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
@@ -178,4 +179,4 @@ class CoreTable(QWidget):
         r = self._rows[item.row()]
         if r["run"] is None:
             return
-        self.run_toggled.emit(r["id"], item.checkState() == Qt.Checked)
+        self.run_toggled.emit(r["id"], is_checked(item.checkState()))

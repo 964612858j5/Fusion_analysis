@@ -11,7 +11,7 @@ import numpy as np
 import tifffile
 import zarr
 
-from ..qt import QtWidgets, QtCore, QtGui
+from ..qt import QtWidgets, QtCore, QtGui, is_checked
 from ..qt.QtCore import Qt, QTimer, Signal
 from ..qt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -767,7 +767,7 @@ class Step15BackgroundCorrectionPage(QWidget):
         self._set_state('selection_ready')
 
     def _on_select_all_changed(self, state):
-        checked = (state == Qt.Checked)
+        checked = is_checked(state)
         for ch in self._channel_order:
             if ch == self.nucleus_channel:
                 continue
@@ -807,8 +807,8 @@ class Step15BackgroundCorrectionPage(QWidget):
             return
         if self._bg_state == 'review_ready':
             self._invalidate_channel_cache(ch)
-        self._channel_state[ch]['checked'] = (state == Qt.Checked)
-        if state != Qt.Checked and self._bg_state in {'pre_choice', 'selection_ready', 'skipped'}:
+        self._channel_state[ch]['checked'] = is_checked(state)
+        if not is_checked(state) and self._bg_state in {'pre_choice', 'selection_ready', 'skipped'}:
             self._channel_decisions[ch] = 'original'
         self._refresh_channel_row(ch)
         self._update_select_all_state()

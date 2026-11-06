@@ -588,7 +588,7 @@ def test_the_viewbox_no_longer_takes_the_gesture():
 #
 # So the panel takes the grab itself, and these tests ask Qt who holds it
 # rather than asking whether the range happened to change. `mouseGrabber()`
-# is a static of `QWidget` in PyQt5 and it is Qt's own bookkeeping, so it is
+# is a static of `QWidget` in Qt and it is Qt's own bookkeeping, so it is
 # truthful offscreen even though the offscreen platform warns that it cannot
 # take a platform-level grab.
 #

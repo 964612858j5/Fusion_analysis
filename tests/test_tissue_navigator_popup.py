@@ -15,7 +15,7 @@ pytest.importorskip("block01.qt")
 
 @pytest.fixture(scope="module")
 def app():
-    from block01.qt import QtWidgets
+    from block01.qt import QtWidgets, flag_value
     a = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     return a
 
@@ -224,9 +224,9 @@ def test_window_has_native_min_max_close(app):
     p = _mk(app)
     assert p.windowType() == Qt.Window               # NOT Qt.Tool (no min/max on X11)
     f = int(p.windowFlags())
-    assert f & int(Qt.WindowMinimizeButtonHint)
-    assert f & int(Qt.WindowMaximizeButtonHint)
-    assert f & int(Qt.WindowCloseButtonHint)
+    assert f & flag_value(Qt.WindowMinimizeButtonHint)
+    assert f & flag_value(Qt.WindowMaximizeButtonHint)
+    assert f & flag_value(Qt.WindowCloseButtonHint)
 
 
 # C: redundant toolbar minimize button removed; header content (label) kept.

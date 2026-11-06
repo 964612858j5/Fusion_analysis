@@ -3503,7 +3503,7 @@ class Step2Page(QWidget):
             lambda *a, t=token, wk=worker: self._run_signal(t, wk, self._on_tile_done, a))
         self._worker.tile_skipped.connect(
             lambda *a, t=token, wk=worker: self._run_signal(t, wk, self._on_tile_skipped, a))
-        self._worker.finished.connect(
+        self._worker.job_finished.connect(
             lambda out, n, t=token, wk=worker: self._on_run_finished(t, wk, out, n))
         self._worker.error.connect(
             lambda m, t=token, wk=worker: self._on_run_error(t, wk, m))

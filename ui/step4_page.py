@@ -5,7 +5,7 @@ block01/ui/step4_page.py — Step4Page (Cell Feature Extraction).
 import os
 
 from ..qt import QtWidgets
-from ..qt import is_deleted
+from ..qt import is_deleted, is_checked
 from ..qt.QtCore import QProcess, QTimer, Qt, Signal
 from ..qt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -244,7 +244,7 @@ class Step4Page(QWidget):
         """(distribution statistics, markers in slide order) as checked."""
         dist = [k for k, cb in self._dist_checks.items() if cb.isChecked()]
         markers = [self._marker_list.item(i).text() for i in range(self._marker_list.count())
-                   if self._marker_list.item(i).checkState() == Qt.Checked]
+                   if is_checked(self._marker_list.item(i).checkState())]
         return dist, markers
 
     def _update_scope(self):

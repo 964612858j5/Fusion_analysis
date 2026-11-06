@@ -22,7 +22,7 @@ import numpy as np
 import pyqtgraph as pg
 import zarr
 
-from ..qt import QtWidgets, QtCore, QtGui
+from ..qt import QtWidgets, QtCore, QtGui, thread_finished
 from ..qt.QtCore import Qt, QTimer, Signal
 from ..qt.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -12089,13 +12089,13 @@ class MainWindow(QMainWindow):
         self._fusion_token = token
         worker.progress.connect(
             self._guarded_fusion_callback(token, self._on_fusion_progress, "progress"))
-        worker.finished.connect(
+        worker.job_finished.connect(
             self._guarded_fusion_callback(token, self._on_fusion_done, "finished"))
         worker.error.connect(
             self._guarded_fusion_callback(token, self._on_fusion_error, "error"))
         # Physical exit: the base `QThread.finished()`, which the worker's own
         # `finished(str)` shadows.
-        QtCore.QThread.finished.__get__(worker, QtCore.QThread).connect(
+        thread_finished(worker).connect(
             lambda w=worker: self._on_fusion_thread_exited(w))
 
         self._lock_ui()
@@ -12187,8 +12187,7 @@ class MainWindow(QMainWindow):
         if worker.isRunning():
             self._retired_fusion_workers.append(worker)
             try:
-                physically_finished = QtCore.QThread.finished.__get__(
-                    worker, QtCore.QThread)
+                physically_finished = thread_finished(worker)
                 physically_finished.connect(
                     lambda w=worker: self._drop_retired_fusion_worker(w))
             except Exception as exc:

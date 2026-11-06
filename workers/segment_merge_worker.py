@@ -148,7 +148,7 @@ class SegmentMergeWorker(QThread):
     tile_done  = Signal(int, int, int)   # tile_idx, n_tiles, n_cells_this_tile
     tile_skipped = Signal(int, int)      # tile_idx, n_tiles (block S2T: no tissue / user)
     progress   = Signal(int, int, str)   # done, total, message
-    finished   = Signal(str, int)        # output_dir, total_cells
+    job_finished = Signal(str, int)      # output_dir, total_cells
     error      = Signal(str)
 
     def __init__(self, zarr_path, seg_config=None, n_rows=1, n_cols=1,
@@ -3773,7 +3773,7 @@ class SegmentMergeWorker(QThread):
                 if getattr(self, "_channel_store", None) is not None:
                     self._channel_store.close()
                 self._close_active_tile_scheduler()
-                self.finished.emit(self.output_dir, total_cells_all)
+                self.job_finished.emit(self.output_dir, total_cells_all)
                 return
 
             # ── Full WSI mode ─────────────────────────────────────────
@@ -4476,7 +4476,7 @@ class SegmentMergeWorker(QThread):
             if getattr(self, "_channel_store", None) is not None:
                 self._channel_store.close()
             self._close_active_tile_scheduler()
-            self.finished.emit(self.output_dir, total_cells)
+            self.job_finished.emit(self.output_dir, total_cells)
 
         except Exception as exc:
             self._close_active_tile_scheduler()     # its reads settle before the answer

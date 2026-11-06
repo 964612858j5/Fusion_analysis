@@ -58,9 +58,10 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           "$CI_PY" - <<'PY'
-          from PyQt5.QtCore import QT_VERSION_STR
-          from PyQt5.QtGui import QFontDatabase
-          from PyQt5.QtWidgets import QApplication
+          from PySide6.QtCore import qVersion
+          from PySide6.QtGui import QFontDatabase
+          from PySide6.QtWidgets import QApplication
+          QT_VERSION_STR = qVersion()
           app = QApplication([])
           print("Qt", QT_VERSION_STR, "fonts:", QFontDatabase().families()[:12])
           import block01, fusion_viewer_core

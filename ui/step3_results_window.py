@@ -22,7 +22,7 @@ turns `ticks_changed` / `style_changed` / `use_requested` /
 
 import dataclasses
 
-from ..qt import QtCore, QtGui, QtWidgets
+from ..qt import QtCore, QtGui, QtWidgets, is_checked
 from ..qt.QtCore import Qt, Signal
 
 from .theme import widgets as theme_widgets
@@ -68,7 +68,7 @@ class _AllCheck(QtWidgets.QCheckBox):
         self.setTristate(True)
 
     def nextCheckState(self):  # noqa: N802
-        self.setCheckState(Qt.Unchecked if self.checkState() == Qt.Checked else Qt.Checked)
+        self.setCheckState(Qt.Unchecked if is_checked(self.checkState()) else Qt.Checked)
 
 
 class ResultRow(QtWidgets.QFrame):
@@ -337,7 +337,7 @@ class Step3ResultsWindow(QtWidgets.QWidget):
         self.style_changed.emit(key, kind, dict(change))
 
     def _all_clicked(self, kind):
-        on = self.all_ticks[kind].checkState() == Qt.Checked
+        on = is_checked(self.all_ticks[kind].checkState())
         changed = False
         for key in self._order:
             row = self._rows[key]

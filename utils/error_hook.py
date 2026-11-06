@@ -1,8 +1,9 @@
 """One global exception hook (docs/v17_error_guard_plan.md §1).
 
-Under PyQt5 5.15 an exception that escapes a slot, a timer or a paint while
-Python's default `sys.excepthook` is in place ends the whole process. With
-this hook it is logged and the process keeps running:
+An exception that escapes a slot, a timer or a paint used to end the whole
+process (PyQt5 5.15 with Python's default `sys.excepthook`); Qt 6 bindings
+print it and carry on, but the same hook is what records it. With this hook
+it is logged whether or not the binding would have survived:
 
   * `sys.excepthook` and `threading.excepthook`: the traceback to stderr as
     before, and appended to `~/.block01/logs/errors.log` (rotated past 5 MB

@@ -155,7 +155,7 @@ def test_explicit_worker_writes_nonempty_corrected_zarr(app, tmp_path):
     rois = [{"name": "ROI_1", "bbox_fullres": [10, 90, 20, 120]}]
     w = WsiCorrectionWorker(_FakeLoader(), str(tmp_path), cfg, rois=rois)
     out = {}
-    w.finished.connect(lambda p, dec: out.update(path=p, dec=dec))
+    w.job_finished.connect(lambda p, dec: out.update(path=p, dec=dec))
     w.error.connect(lambda m: out.update(err=m))
     w.run()                              # run synchronously (no QThread)
     _settle(w)                     # what the Save page does next
@@ -180,7 +180,7 @@ def test_worker_no_channels_makes_no_zarr(app, tmp_path):
     rois = [{"name": "ROI_1", "bbox_fullres": [0, 50, 0, 50]}]
     w = WsiCorrectionWorker(_FakeLoader(), str(tmp_path), cfg, rois=rois)
     out = {}
-    w.finished.connect(lambda p, dec: out.update(path=p, dec=dec))
+    w.job_finished.connect(lambda p, dec: out.update(path=p, dec=dec))
     w.run()
     _settle(w)                     # what the Save page does next
     assert out.get("path") == ""         # no corrected output claimed
@@ -249,7 +249,7 @@ def _run_worker(tmp_dir, decisions, rois, process_channels=None, incremental=Fal
                             process_channels=process_channels,
                             incremental=incremental)
     out = {}
-    w.finished.connect(lambda p, dec: out.update(path=p, dec=dec))
+    w.job_finished.connect(lambda p, dec: out.update(path=p, dec=dec))
     w.error.connect(lambda m: out.update(err=m))
     w.run()
     _settle(w)                     # what the Save page does next
@@ -542,7 +542,7 @@ def _step0_dispatch_capture(tmp_path, monkeypatch, existing_sigs):
     # stand-in that is not a QThread cannot be watched at all.
     class _FakeWorker(QtCore.QThread):
         progress = QtCore.Signal(int, int, int, int, str, str, int)
-        finished = QtCore.Signal(str, dict)
+        job_finished = QtCore.Signal(str, dict)
         canceled = QtCore.Signal(str)
         error = QtCore.Signal(str)
         def __init__(self, loader, out, cfg, rois=None, parent=None,
@@ -668,7 +668,7 @@ def test_dispatch_roi_bbox_mismatch_reprocesses_all(app, tmp_path, monkeypatch):
     # business `finished` this class shadows it with.
     class _FW(QtCore.QThread):
         progress = QtCore.Signal(int, int, int, int, str, str, int)
-        finished = QtCore.Signal(str, dict)
+        job_finished = QtCore.Signal(str, dict)
         canceled = QtCore.Signal(str)
         error = QtCore.Signal(str)
         def __init__(self, *a, process_channels=None, incremental=False, **k):
@@ -731,7 +731,7 @@ def _run_one(tmp_dir, ch, method, param, process_channels=None, incremental=Fals
     w = WsiCorrectionWorker(_OneChLoader(ch), tmp_dir, cfg, rois=rois,
                             process_channels=process_channels, incremental=incremental)
     out = {}
-    w.finished.connect(lambda p, dec: out.update(path=p, dec=dec))
+    w.job_finished.connect(lambda p, dec: out.update(path=p, dec=dec))
     w.error.connect(lambda m: out.update(err=m))
     w.run()
     _settle(w)                     # what the Save page does next

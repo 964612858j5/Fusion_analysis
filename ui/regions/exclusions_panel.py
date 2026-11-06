@@ -15,6 +15,7 @@ change, stored as drawn (never clipped), one polygon each.
 
 from __future__ import annotations
 
+from ...qt import is_checked
 from ...qt.QtCore import Qt, Signal
 from ...qt.QtGui import QColor
 from ...qt.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout,
@@ -158,7 +159,7 @@ class ExclusionsPanel(QWidget):
         lay.addWidget(box)
         if dlg.exec() != QDialog.Accepted:
             return
-        chosen = [lst.item(i).text() for i in range(lst.count()) if lst.item(i).checkState() == Qt.Checked]
+        chosen = [lst.item(i).text() for i in range(lst.count()) if is_checked(lst.item(i).checkState())]
         self.set_channel_choice(chosen)
 
     def set_channel_choice(self, chosen):

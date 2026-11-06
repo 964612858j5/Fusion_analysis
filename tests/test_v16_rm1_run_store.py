@@ -163,7 +163,7 @@ class _FakeWsi(QtCore.QThread):
     shadows the base one); records what it was asked to do, runs nothing.
     (Moved here from the DV tests, removed with DV in block RM-3.)"""
     progress = QtCore.Signal(int, int, int, int, str, str, int)
-    finished = QtCore.Signal(str, dict)
+    job_finished = QtCore.Signal(str, dict)
     canceled = QtCore.Signal(str)
     error = QtCore.Signal(str)
     made = []

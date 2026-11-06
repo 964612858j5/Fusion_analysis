@@ -21,7 +21,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from block01.qt import QtWidgets  # noqa: E402
+from block01.qt import QtWidgets, flag_value  # noqa: E402
 from block01.qt.QtCore import Qt  # noqa: E402
 
 from block01.utils import error_hook as eh  # noqa: E402
@@ -88,7 +88,7 @@ def test_a_real_event_loop_survives_logs_and_notifies(tmp_path):
     assert len(texts) == 4, texts                              # same error once
     assert "ValueError: same place" in texts[0] and "KeyError" in texts[1]
     assert "ZeroDivisionError" in texts[2] and "RuntimeError: in a QThread" in texts[3]
-    assert all(s["gui"] and s["modal"] == int(Qt.NonModal) for s in shown)
+    assert all(s["gui"] and s["modal"] == flag_value(Qt.NonModal) for s in shown)
     log = (tmp_path / ".block01" / "logs" / "errors.log").read_text()
     assert log.count("ValueError: same place") == 2            # every one is logged
     assert "in thread py-worker" in log and "RuntimeError: in a QThread" in log

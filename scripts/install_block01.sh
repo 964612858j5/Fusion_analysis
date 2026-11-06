@@ -634,7 +634,7 @@ selftest() {
                    *) warn "GPU background correction unavailable, the CPU is used ($gpu)" ;; esac
     local core
     core=$(cd "$STATE_DIR/run" && QT_QPA_PLATFORM=offscreen PYTHONPATH="$STATE_DIR/pkg" "$PY" -c '
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 app = QApplication([])
 import block01.main  # noqa: F401 -- the app imports
 from block01.ui.step1_core_adapter import core_unavailable_reason

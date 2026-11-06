@@ -15,6 +15,7 @@ from test_tma_f3_page import _centre, _drag, _line, _merge, _page, _set_target, 
 
 from block01.core.regions import geometry as G  # noqa: E402
 from block01.core.regions import lock as K  # noqa: E402
+from block01.qt import flag_value  # noqa: E402
 
 
 def _open_exclusions(page):
@@ -601,13 +602,13 @@ def test_circle_keeps_the_press_on_its_outline_however_far_the_drag_goes(app, en
     p = page.holder.d["exclusions"][page.selected]["polygon"]
     assert near(p, 100, 100) and near(p, 180, 260)                    # both points on the outline
     assert page.ctl.press(300, 300)
-    page.ctl.drag(340, 360, finish=True, mods=int(Qt.ShiftModifier))
+    page.ctl.drag(340, 360, finish=True, mods=flag_value(Qt.ShiftModifier))
     page.ctl.released()
     p = np.array(page.holder.d["exclusions"][page.selected]["polygon"])
     assert abs(np.ptp(p[:, 0]) - np.ptp(p[:, 1])) <= 2                # a circle
     assert near(p.tolist(), 300, 300) and near(p.tolist(), 340, 360)  # on that diameter
     assert page.ctl.press(600, 400)
-    page.ctl.drag(620, 430, finish=True, mods=int(Qt.AltModifier))
+    page.ctl.drag(620, 430, finish=True, mods=flag_value(Qt.AltModifier))
     page.ctl.released()
     p = np.array(page.holder.d["exclusions"][page.selected]["polygon"])
     assert abs(p[:, 0].mean() - 400) <= 2 and abs(p[:, 1].mean() - 600) <= 2   # centred on the press
@@ -871,7 +872,7 @@ def test_the_circle_rule_holds_for_every_modifier_and_direction(app, env, monkey
         return abs(((y - cy) / ry) ** 2 + ((x - cx) / rx) ** 2 - 1.0) < 1e-9
     for (dy, dx), shift, alt in itertools.product(((40, 70), (-40, 70), (40, -70), (-40, -70)),
                                                   (False, True), (False, True)):
-        mods = (int(Qt.ShiftModifier) if shift else 0) | (int(Qt.AltModifier) if alt else 0)
+        mods = (flag_value(Qt.ShiftModifier) if shift else 0) | (flag_value(Qt.AltModifier) if alt else 0)
         assert page.ctl.press(450, 350)
         page.ctl.drag(450 + dy, 350 + dx, mods=mods)
         c = page.ctl.preview_circle()
@@ -890,7 +891,7 @@ def test_the_circle_rule_holds_for_every_modifier_and_direction(app, env, monkey
     page.ctl.released()
     assert len(page.holder.d["exclusions"]) == n
     assert page.ctl.press(450, 350)
-    page.ctl.drag(450, 450, finish=True, mods=int(Qt.ShiftModifier))  # Shift: a circle
+    page.ctl.drag(450, 450, finish=True, mods=flag_value(Qt.ShiftModifier))  # Shift: a circle
     page.ctl.released()
     assert len(page.holder.d["exclusions"]) == n + 1
     page.shutdown()

@@ -34,9 +34,8 @@ pydantic-extra-types==2.11.1
 pydantic_core==2.50.2
 Pygments==2.21.0
 PyOpenGL==3.1.10
-PyQt5==5.15.11
-PyQt5-Qt5==5.15.19
-PyQt5_sip==12.20.0
+PySide6-Essentials==6.11.3
+shiboken6==6.11.3
 pyqtgraph==0.14.0
 pytest==9.2.0
 python-dateutil==3.0.0

@@ -22,7 +22,7 @@ tifffile = pytest.importorskip("tifffile")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pyqtgraph as pg  # noqa: E402
-from block01.qt import QtCore  # noqa: E402
+from block01.qt import QtCore, flag_value  # noqa: E402
 from block01.qt.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from block01.core.regions import document as D  # noqa: E402
@@ -486,7 +486,7 @@ def test_the_transform_box_works_as_photoshops_and_autosave_waits_for_enter(app,
     # Shift keeps the ratio, Alt scales about the centre
     from block01.qt.QtCore import Qt
     assert page.ctl.press(y1, x1)
-    page.ctl.drag(y1 + 40, x1 + 40, finish=True, mods=int(Qt.ShiftModifier | Qt.AltModifier))
+    page.ctl.drag(y1 + 40, x1 + 40, finish=True, mods=flag_value(Qt.ShiftModifier | Qt.AltModifier))
     page.ctl.released()
     p3 = np.array(page.ctl.transform.preview())
     w0, h0 = x1 - x0, y1 - y0
@@ -498,7 +498,7 @@ def test_the_transform_box_works_as_photoshops_and_autosave_waits_for_enter(app,
     tol = 8 * page.view.screen_px()
     assert page.ctl.box_hit(y0 - 2 * tol, x0 - 2 * tol) == ("rotate", 0)
     assert page.ctl.press(y0 - 2 * tol, x0 - 2 * tol)
-    page.ctl.drag(y0 - 2 * tol, x1 + 4 * tol, finish=True, mods=int(Qt.ShiftModifier))
+    page.ctl.drag(y0 - 2 * tol, x1 + 4 * tol, finish=True, mods=flag_value(Qt.ShiftModifier))
     page.ctl.released()
     th = page.ctl.transform.theta
     assert abs(th) > 0.1 and abs(th / np.radians(15) - round(th / np.radians(15))) < 1e-9

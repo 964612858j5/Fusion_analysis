@@ -19,7 +19,7 @@ from queue import Empty
 import numpy as np
 import zarr
 
-from ...qt import QtWidgets, QtCore, QtGui
+from ...qt import QtWidgets, QtCore, QtGui, thread_finished, is_checked
 from ...qt.QtCore import Qt, QTimer, QThread, Signal
 from ...qt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -3264,8 +3264,7 @@ class Step0Page(QWidget):
         nothing -- they do not shadow it, and the bound base signal is the
         same object they would have given anyway.
         """
-        physical_finished = QtCore.QThread.finished.__get__(
-            worker, type(worker))
+        physical_finished = thread_finished(worker)
         physical_finished.connect(
             self._gen_slot(self._on_production_worker_finished))
 
@@ -9648,7 +9647,7 @@ class Step0Page(QWidget):
         channels whose capabilities allow a sweep, which is why the nucleus
         is not in it: the DAPI layer is shown and hidden deliberately.
         """
-        visible = (state == Qt.Checked)
+        visible = is_checked(state)
         state_owner = self.display.state
         for ch in self._channel_order:
             if not state_owner.capabilities(ch).bulk_toggleable:
@@ -10873,7 +10872,7 @@ class Step0Page(QWidget):
             _pv_s,
             nucleus_channel=self.nucleus_channel,
         )
-        self._preview_worker.finished.connect(self._gen_slot(self._on_preview_ready))
+        self._preview_worker.job_finished.connect(self._gen_slot(self._on_preview_ready))
         self._preview_worker.error.connect(self._gen_slot(self._on_preview_error))
         self._preview_worker.start()
 
@@ -12568,7 +12567,7 @@ class Step0Page(QWidget):
             process_channels=set(to_process), incremental=rois_match,
         )
         self._wsi_worker.progress.connect(self._gen_slot(self._on_wsi_progress))
-        self._wsi_worker.finished.connect(self._gen_slot(
+        self._wsi_worker.job_finished.connect(self._gen_slot(
             lambda path, decisions: self._on_wsi_finished(config, path, decisions)))
         self._wsi_worker.canceled.connect(self._gen_slot(self._on_wsi_canceled))
         self._wsi_worker.error.connect(self._gen_slot(self._on_wsi_error))

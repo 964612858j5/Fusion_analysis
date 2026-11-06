@@ -33,7 +33,7 @@ import subprocess
 import sys
 import time
 
-from block01.qt import QtCore, QtGui, QtWidgets
+from block01.qt import QtCore, QtGui, QtWidgets, flag_value
 
 from block01.utils import perf_trace
 from block01.viewer import coverage_probe, read_ledger
@@ -744,10 +744,10 @@ class Driver(QtCore.QObject):
         for ch in str(int(a["value"])):
             for kind in (QtCore.QEvent.KeyPress, QtCore.QEvent.KeyRelease):
                 QtWidgets.QApplication.sendEvent(box, QtGui.QKeyEvent(
-                    kind, int(QtCore.Qt.Key_0) + int(ch), QtCore.Qt.NoModifier, ch))
+                    kind, flag_value(QtCore.Qt.Key_0) + int(ch), QtCore.Qt.NoModifier, ch))
         for kind in (QtCore.QEvent.KeyPress, QtCore.QEvent.KeyRelease):
             QtWidgets.QApplication.sendEvent(box, QtGui.QKeyEvent(
-                kind, int(QtCore.Qt.Key_Return), QtCore.Qt.NoModifier, "\r"))
+                kind, flag_value(QtCore.Qt.Key_Return), QtCore.Qt.NoModifier, "\r"))
         if box.value() != int(a["value"]):
             perf_trace.mark("a9.s0param_typed_wrong", want=int(a["value"]), got=int(box.value()))
         if a.get("_nosettle"):

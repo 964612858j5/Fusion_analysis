@@ -441,7 +441,7 @@ def _drive_real_save(app, monkeypatch, tmp_path, tab):
     class _FakeWsiWorker(QtCore.QThread):
         # Mirrors the real worker's signal surface, including the business
         # `finished(str, dict)` that SHADOWS `QThread.finished`.
-        finished = QtCore.Signal(str, dict)
+        job_finished = QtCore.Signal(str, dict)
         progress = QtCore.Signal(int, int, int, int, str, str, int)
         canceled = QtCore.Signal(str)
         error = QtCore.Signal(str)
@@ -454,7 +454,7 @@ def _drive_real_save(app, monkeypatch, tmp_path, tab):
         def run(self):
             # Emitted from INSIDE run(), exactly like the real worker:
             # isRunning() is still true here.
-            self.finished.emit("/tmp/corrected.zarr", {"CD3": "tophat"})
+            self.job_finished.emit("/tmp/corrected.zarr", {"CD3": "tophat"})
             self.emitted.set()
             self.may_exit.wait(10)
 
@@ -643,7 +643,7 @@ def test_a_cancelled_or_failed_run_still_resumes_exactly_once(app):
 
     class _Cancelled(QtCore.QThread):
         canceled = QtCore.Signal(str)
-        finished = QtCore.Signal(str, dict)      # SHADOWS QThread's
+        job_finished = QtCore.Signal(str, dict)      # SHADOWS QThread's
 
         def run(self):
             self.canceled.emit("/tmp/partial.zarr")

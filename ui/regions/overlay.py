@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence
 
+import numpy as np
+
 from ...qt import QtCore, QtGui, QtWidgets
 from ...qt import flag_value
 from ...qt.QtCore import Qt
@@ -31,6 +33,30 @@ from ...core.regions import transform as T
 
 LABEL_MIN_PX = 14            # a shape smaller than this on screen gets no label
 CLICK_SLOP_PX = 4
+
+
+class _Shape:
+    """One static shape, prepared once per `set_items`.
+
+    The paint path must not re-read the raw Python polygon lists on every
+    frame: panning and zooming invalidate the static picture on every step,
+    and that is exactly when a per-point Python→Qt conversion shows up. The
+    point array and the level-0 bounding box are all `_paint_static` needs.
+    """
+
+    __slots__ = ("item", "pts", "bbox")
+
+    def __init__(self, item):
+        self.item = item
+        poly = item.get("polygon") or ()
+        pts = np.asarray(poly, dtype=np.float64).reshape(-1, 2)
+        self.pts = pts
+        if pts.size:
+            x0, y0 = pts.min(axis=0)
+            x1, y1 = pts.max(axis=0)
+            self.bbox = (float(x0), float(y0), float(x1), float(y1))
+        else:
+            self.bbox = (0.0, 0.0, 0.0, 0.0)
 
 
 class RegionsOverlay(QtWidgets.QWidget):
@@ -54,6 +80,7 @@ class RegionsOverlay(QtWidgets.QWidget):
         self.circle = None
         self._press = None            # (pos, claimed, space-pan)
         self._static = None           # (key, QPixmap): the outlines and labels as last painted
+        self._shapes: List[_Shape] = []   # prepared in `set_items`
         self._items_ver = 0
         self._cursors = {}
         self._space = False
@@ -98,6 +125,9 @@ class RegionsOverlay(QtWidgets.QWidget):
         self.handles_for = handles_for
         self.vertices_for = vertices_for
         self.order_labels = dict(order_labels or {})
+        # Everything the static picture needs, computed once here rather than
+        # once per frame while the user pans or zooms.
+        self._shapes = [_Shape(it) for it in self.items]
         self._items_ver += 1
         self.update()
 
@@ -256,8 +286,13 @@ class RegionsOverlay(QtWidgets.QWidget):
                 or self.handles_for is not None or self.live is not None):
             return
         tr = self.canvas_transform()
-        key = (self._items_ver, tr.m11(), tr.m22(), tr.dx(), tr.dy(), self.width(), self.height(),
-               self.devicePixelRatioF())
+        # Everything the cached picture depends on: the data version, the whole
+        # transform (not only its scale -- a transform is free to rotate), the
+        # widget's size, the device pixel ratio, and the font the labels are
+        # measured with.
+        key = (self._items_ver, tr.m11(), tr.m12(), tr.m21(), tr.m22(),
+               tr.dx(), tr.dy(), self.width(), self.height(),
+               self.devicePixelRatioF(), QtWidgets.QApplication.font().key())
         if self._static is None or self._static[0] != key:
             dpr = self.devicePixelRatioF()
             pm = QtGui.QPixmap(int(self.width() * dpr), int(self.height() * dpr))
@@ -277,11 +312,38 @@ class RegionsOverlay(QtWidgets.QWidget):
     def _paint_static(self, p, tr):
         area = QtCore.QRectF(self.rect())
         fm = QtGui.QFontMetricsF(p.font())
-        for it in self.items:
-            poly = QtGui.QPolygonF([tr.map(QtCore.QPointF(x, y)) for x, y in it["polygon"]])
-            br = poly.boundingRect()
-            if not br.intersects(area):
+        m11, m12 = tr.m11(), tr.m12()
+        m21, m22 = tr.m21(), tr.m22()
+        dx, dy = tr.dx(), tr.dy()
+        # A shape whose outline only touches the edge is still visible (half a
+        # pen width plus antialiasing); culling must not eat that.
+        view = area.adjusted(-2.0, -2.0, 2.0, 2.0)
+        for shape in self._shapes:
+            it = shape.item
+            if not shape.pts.size:
                 continue
+            x0, y0, x1, y1 = shape.bbox
+            # Cull on the transformed box -- four corners per SHAPE -- before
+            # the per-point work below. The box of the transformed corners is
+            # the transformed box for any affine transform.
+            xs = (m11 * x0 + m21 * y0 + dx, m11 * x1 + m21 * y0 + dx,
+                  m11 * x1 + m21 * y1 + dx, m11 * x0 + m21 * y1 + dx)
+            ys = (m12 * x0 + m22 * y0 + dy, m12 * x1 + m22 * y0 + dy,
+                  m12 * x1 + m22 * y1 + dy, m12 * x0 + m22 * y1 + dy)
+            box = QtCore.QRectF(min(xs), min(ys),
+                                max(xs) - min(xs), max(ys) - min(ys))
+            if not box.intersects(view):
+                continue
+            # Same affine map the transform applies, in float64, for the whole
+            # polygon at once (QTransform::map does exactly these products and
+            # additions per point).
+            pts = shape.pts
+            sx = pts[:, 0] * m11 + pts[:, 1] * m21 + dx
+            sy = pts[:, 0] * m12 + pts[:, 1] * m22 + dy
+            poly = QtGui.QPolygonF([QtCore.QPointF(px, py)
+                                    for px, py in zip(sx.tolist(), sy.tolist())])
+            br = QtCore.QRectF(float(sx.min()), float(sy.min()),
+                               float(sx.max() - sx.min()), float(sy.max() - sy.min()))
             pen = QtGui.QPen(QtGui.QColor(it["color"]))
             pen.setWidthF(3.0 if it["id"] in self.selected else 1.5)
             if it.get("dash"):

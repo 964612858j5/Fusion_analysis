@@ -527,6 +527,17 @@ class Driver(QtCore.QObject):
             QtCore.QTimer.singleShot(500, QtWidgets.QApplication.quit)
         return True
 
+    def _fail(self, reason):
+        """Stop the scenario for a named reason (a wait that timed out, a page
+        that is not the one the script believes). The outer validator reads
+        `a9.invalid`; the app still closes normally."""
+        perf_trace.mark("a9.invalid", n=self.i, reason=reason)
+        print(f"[A9] SCENARIO INVALID at action {self.i}: {reason} -- stopping")
+        self.i = len(self.actions)
+        self._invalid = reason
+        if os.environ.get("BLOCK01_A9_QUIT"):
+            QtCore.QTimer.singleShot(500, QtWidgets.QApplication.quit)
+
     def _step(self):
         if self.i >= len(self.actions):
             if os.environ.get("BLOCK01_A9_QUIT"):
@@ -651,7 +662,7 @@ class Driver(QtCore.QObject):
                 return
             if time.monotonic() >= deadline:
                 perf_trace.mark("a9.wait", n=self.i, cond=cond, ok=False)
-                self._invalid(f"{cond} not reached in {timeout_s:.0f}s")
+                self._fail(f"{cond} not reached in {timeout_s:.0f}s")
                 return
             QtCore.QTimer.singleShot(100, poll)
 
@@ -663,7 +674,7 @@ class Driver(QtCore.QObject):
         have = int(getattr(self.w, "_current_step", -1) or 0)
         perf_trace.mark("a9.assert_step", n=self.i, want=want, have=have)
         if have != want:
-            self._invalid(f"expected step {want}, the window is on {have}")
+            self._fail(f"expected step {want}, the window is on {have}")
             return
         self._next(0)
 

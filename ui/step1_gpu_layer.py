@@ -44,6 +44,7 @@ from .step1_display_types import (  # noqa: F401 -- re-exported
     ViewportSnapshot,
     _as_name,
     _check_gl,
+    _clear_gl_errors,
     _LabelTextureLru,
     _TextureRecord,
     label_radius,
@@ -716,6 +717,9 @@ class _TileArrayStore:
         if perf_trace.enabled():
             perf_trace.mark("gpu.array_prepare", items=len(items), missing=len(missing),
                             scan_ms=round((started - self._prepare_started) * 1000.0, 2))
+        # A foreign error in the queue (Qt's own widget bookkeeping) would be
+        # read by `_check_gl` below and blamed on this batch's uploads.
+        self.foreign_gl_errors = _clear_gl_errors(gl)
         gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         for channel, plane in missing:
             if (budget_ms is not None and plane.identity not in mandatory

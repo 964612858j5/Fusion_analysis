@@ -281,6 +281,25 @@ def _as_name(value) -> int:
     return int(value)
 
 
+def _clear_gl_errors(gl) -> int:
+    """Drop GL errors that were pending BEFORE this layer's own batch.
+
+    Qt's own `QOpenGLWidget` bookkeeping can leave an error in the queue
+    (probed on PySide6 6.11.3: GL_INVALID_ENUM pending when the array upload
+    batch started, with every one of this layer's calls clean). `_check_gl`
+    reads the queue right after OUR call, so a foreign error gets blamed on
+    the upload and the whole submission is rejected -- the picture silently
+    keeps its last frame. Draining once at the batch start attributes only
+    errors this layer's own calls produce; it does not hide them.
+    """
+    dropped = 0
+    while True:
+        error = gl.glGetError()
+        if error == gl.GL_NO_ERROR:
+            return dropped
+        dropped += 1
+
+
 def _check_gl(gl, operation: str) -> None:
     error = gl.glGetError()
     if error != gl.GL_NO_ERROR:

@@ -572,6 +572,55 @@ class Driver(QtCore.QObject):
         getattr(self.w, go)()
         self._next(0)
 
+    def _do_s0save(self, a, _t):
+        """The product's own "Save and continue": the Step0 handoff."""
+        perf_trace.mark("a9.delivered", n=self.i, kind="programmatic")
+        self._view_epoch += 1
+        self.w._step0._btn_continue.click()
+        self._next(0)
+
+    def _do_wait(self, a, _t):
+        """Wait for a NAMED condition, not a fixed pause. On timeout the run
+        is marked invalid and stops -- no scenario continues on a guess."""
+        cond = a.get("cond")
+        timeout_s = float(a.get("timeout_s", 180))
+        deadline = time.monotonic() + timeout_s
+
+        def ready():
+            if cond == "step1_ready":
+                return bool(getattr(self.w, "_step1_context_ready", False))
+            if cond == "step1_viewer":
+                mount = getattr(self.w, "_step1_mount", None)
+                return mount is not None and getattr(mount, "host", None) is not None \
+                    and getattr(mount.host, "stack", None) is not None
+            if cond == "step1_idle":
+                mount = getattr(self.w, "_step1_mount", None)
+                return mount is not None and not getattr(mount, "paused", True)
+            raise ValueError(f"unknown wait condition {cond!r}")
+
+        def poll():
+            if ready():
+                perf_trace.mark("a9.wait", n=self.i, cond=cond, ok=True)
+                self._next(0)
+                return
+            if time.monotonic() >= deadline:
+                perf_trace.mark("a9.wait", n=self.i, cond=cond, ok=False)
+                self._invalid(f"{cond} not reached in {timeout_s:.0f}s")
+                return
+            QtCore.QTimer.singleShot(100, poll)
+
+        poll()
+
+    def _do_assert_step(self, a, _t):
+        """The page the scenario believes it is on, checked, not assumed."""
+        want = int(a["step"])
+        have = int(getattr(self.w, "_current_step", -1) or 0)
+        perf_trace.mark("a9.assert_step", n=self.i, want=want, have=have)
+        if have != want:
+            self._invalid(f"expected step {want}, the window is on {have}")
+            return
+        self._next(0)
+
     def _do_mode(self, a, _t):
         """Overlay / Fusion, by the button the user clicks."""
         name = "_btn_mode_fusion" if a.get("value") == "fusion" else "_btn_mode_overlay"

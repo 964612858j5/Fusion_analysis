@@ -890,6 +890,14 @@ class Step1WholeSlideMount(QtCore.QObject):
         except Exception:                                   # noqa: BLE001
             pass
         try:
+            # Hide before the deferred delete: a top-level QOpenGLWidget that
+            # is still visible can be painted between now and the DeferredDelete,
+            # and on a torn-down layer that paint runs Python in a state it no
+            # longer supports (block RT2: the crash was a paint delivered while
+            # the wrapper was being collected).
+            hide = getattr(layer, "hide", None)
+            if hide is not None and isinstance(layer, QtWidgets.QWidget):
+                hide()
             layer.setParent(None)
             layer.deleteLater()
         except RuntimeError:                                # C++ side gone

@@ -314,6 +314,11 @@ def _close(rig):
     host.deleteLater()
     for _ in range(20):
         QtWidgets.QApplication.processEvents()
+    # `deleteLater()` is a request: without the DeferredDelete round the
+    # wrapper is finally destroyed by the Python GC -- inside a collection,
+    # where its paint override runs in a state shiboken cannot survive.
+    QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    QtWidgets.QApplication.processEvents()
     gc.collect()
 
 

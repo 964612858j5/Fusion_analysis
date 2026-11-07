@@ -104,7 +104,7 @@ class _Handled(QtCore.QObject):
             # `seq` pairs this with the k-th `a9.post` of the action (M0):
             # post -> handled is the event's own queue time
             self.seq += 1
-            perf_trace.mark("a9.handled", n=self.n, qt=int(event.type()), seq=self.seq)
+            perf_trace.mark("a9.handled", n=self.n, qt=flag_value(event.type()), seq=self.seq)
         return False
 
     def done(self):

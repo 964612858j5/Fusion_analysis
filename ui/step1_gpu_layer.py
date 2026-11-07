@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Hashable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
-from ..qt import QtCore, QtGui, QtWidgets
+from ..qt import QtCore, QtGui, QtWidgets, flag_value
 
 #: moved to `step1_display_types` (block A6); imported back, the same objects
 from .step1_display_types import (  # noqa: F401 -- re-exported
@@ -1560,7 +1560,7 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
                 "gl_version": _decode(GL.glGetString(GL.GL_VERSION)),
                 "glsl_version": _decode(GL.glGetString(GL.GL_SHADING_LANGUAGE_VERSION)),
                 "actual_format": {"major": actual.majorVersion(), "minor": actual.minorVersion(),
-                                  "profile": int(actual.profile())},
+                                  "profile": flag_value(actual.profile())},
                 "max_texture_image_units": int(GL.glGetIntegerv(GL.GL_MAX_TEXTURE_IMAGE_UNITS)),
                 "max_texture_size": int(GL.glGetIntegerv(GL.GL_MAX_TEXTURE_SIZE)),
                 "software_renderer": any(item in renderer_lower for item in ("llvmpipe", "softpipe", "swiftshader", "software")),

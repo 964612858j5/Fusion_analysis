@@ -3471,7 +3471,7 @@ class OverviewPanel(QWidget):
         ev_type = ev_btn = ev_buttons = "n/a"
         if event is not None:
             try:
-                ev_type = int(event.type())
+                ev_type = flag_value(event.type())
             except (AttributeError, RuntimeError):
                 pass
             try:

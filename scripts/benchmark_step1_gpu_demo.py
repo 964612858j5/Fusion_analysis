@@ -55,7 +55,7 @@ def _this_checkout_as_block01():
 
 
 _this_checkout_as_block01()
-from block01.qt import QtCore, QtGui, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtGui, QtWidgets, flag_value  # noqa: E402
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -333,7 +333,7 @@ class GpuProbeWidget(QtWidgets.QOpenGLWidget):
             self.capabilities = {
                 "requested_format": {"major": 3, "minor": 3, "profile": "core"},
                 "actual_format": {"major": actual.majorVersion(), "minor": actual.minorVersion(),
-                                  "profile": int(actual.profile())},
+                                  "profile": flag_value(actual.profile())},
                 "gl_vendor": vendor,
                 "gl_renderer": renderer,
                 "gl_version": version,

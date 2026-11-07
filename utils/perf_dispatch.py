@@ -86,10 +86,11 @@ class TimedApplication(QApplication):
     def notify(self, receiver, event):  # noqa: N802
         if not self._dispatch_on:
             return super().notify(receiver, event)
+        from ..qt import flag_value
         local = self._dispatch_local
         depth = getattr(local, "depth", 0)
         local.depth = depth + 1
-        etype = int(event.type())
+        etype = flag_value(event.type())
         t0 = time.monotonic()
         try:
             return super().notify(receiver, event)

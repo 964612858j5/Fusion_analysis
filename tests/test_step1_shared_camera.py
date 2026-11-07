@@ -28,7 +28,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("block01.qt")
 pytest.importorskip("pyqtgraph")
 
-from block01.qt import QtTest, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtTest, QtWidgets  # noqa: E402
 
 from block01.ui import step1_viewer_mount as mount_module  # noqa: E402
 from block01.ui.shared_camera import CameraSnapshot  # noqa: E402
@@ -213,6 +213,11 @@ def _close(rig):
     w.deleteLater()
     for _ in range(20):
         QtWidgets.QApplication.processEvents()
+    # `deleteLater()` is a request: without the DeferredDelete round the
+    # wrapper is finally destroyed by the Python GC -- inside a collection,
+    # where its paint override runs in a state shiboken cannot survive.
+    QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    QtWidgets.QApplication.processEvents()
     gc.collect()
 
 

@@ -576,8 +576,54 @@ class Driver(QtCore.QObject):
         """The product's own "Save and continue": the Step0 handoff."""
         perf_trace.mark("a9.delivered", n=self.i, kind="programmatic")
         self._view_epoch += 1
-        self.w._step0._btn_continue.click()
+        # The click runs the save, which opens a MODAL dialog and blocks until
+        # it is dismissed. Post the click and return: the driver's own timer
+        # then runs inside that dialog's nested loop, so `accept_modal` can
+        # dismiss it -- exactly what a user does.
+        QtCore.QTimer.singleShot(0, self.w._step0._btn_continue.click)
         self._next(0)
+
+    def _do_accept_modal(self, a, _t):
+        """Dismiss the modal dialog the product opens (e.g. the "saved as raw"
+        confirmation), as a user does. Waits for it by NAME, not by a pause;
+        a missing dialog is not an error -- the action records what it saw."""
+        timeout_s = float(a.get("timeout_s", 60))
+        deadline = time.monotonic() + timeout_s
+
+        def poll():
+            modal = QtWidgets.QApplication.activeModalWidget()
+            if modal is not None:
+                title = getattr(modal, "windowTitle", lambda: "")()
+                btn = None
+                default = getattr(modal, "defaultButton", lambda: None)()
+                if default is not None and callable(getattr(default, "click", None)):
+                    btn = default
+                elif isinstance(modal, QtWidgets.QMessageBox):
+                    box = modal
+                    for role in (QtWidgets.QMessageBox.Ok, QtWidgets.QMessageBox.Yes):
+                        maybe = box.button(role)
+                        if maybe is not None:
+                            btn = maybe
+                            break
+                if btn is not None:
+                    # `accept()` is QDialog.Accepted (1); QMessageBox.Ok is a
+                    # button ROLE (1024) -- a question answered with accept()
+                    # reads as "not Ok" and aborts the save. Click the button.
+                    perf_trace.mark("a9.modal", n=self.i, title=str(title)[:80],
+                                    button=str(btn.text())[:40])
+                    btn.click()
+                else:
+                    perf_trace.mark("a9.modal", n=self.i, title=str(title)[:80])
+                    modal.close()
+                self._next(0)
+                return
+            if time.monotonic() >= deadline:
+                perf_trace.mark("a9.modal", n=self.i, title=None, timeout=True)
+                self._next(0)
+                return
+            QtCore.QTimer.singleShot(100, poll)
+
+        poll()
 
     def _do_wait(self, a, _t):
         """Wait for a NAMED condition, not a fixed pause. On timeout the run

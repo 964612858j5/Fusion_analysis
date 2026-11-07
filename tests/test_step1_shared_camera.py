@@ -192,10 +192,28 @@ def _window(app, monkeypatch, tmp_path):
 
 
 def _close(rig):
-    rig.w._display.shutdown("test")
-    rig.w.hide()
-    rig.w.deleteLater()
-    QtWidgets.QApplication.processEvents()
+    """Close through the PRODUCT's path, then let the rig's widgets go.
+
+    `MainWindow.closeEvent` is what stops the viewers' scheduler threads
+    (probed on PySide6: 16 worker threads before, 0 after, process exit 0).
+    The old teardown called `_display.shutdown` and left the threads running
+    into interpreter exit, where the Qt 6 binding turns a late paint on a
+    half-deleted GL widget into a segfault -- so this must be the real close
+    and not a shortcut around it.
+    """
+    import gc
+
+    w = rig.w
+    w.close()
+    for _ in range(100):                      # a refused close retries itself
+        QtWidgets.QApplication.processEvents()
+        if not w.isVisible():
+            break
+        QtTest.QTest.qWait(10)
+    w.deleteLater()
+    for _ in range(20):
+        QtWidgets.QApplication.processEvents()
+    gc.collect()
 
 
 def _in(rig, step):

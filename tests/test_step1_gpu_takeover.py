@@ -297,10 +297,24 @@ def _require_gpu(rig):
 
 
 def _close(rig):
+    """The mount's own close, then the host the test built goes for good.
+
+    `Step1WholeSlideMount.close()` is the product's teardown (scheduler,
+    coordinator, viewer); the host widget is this rig's own, and a live
+    QOpenGLWidget that outlives the interpreter is what PySide6 crashes on
+    (a paint override runs while Python is finalizing).
+    """
+    import gc
+
+    host = rig.mount.host
     for raw in rig.raws:
         raw.release_all()
     rig.mount.close()
-    QtWidgets.QApplication.processEvents()
+    host.close()
+    host.deleteLater()
+    for _ in range(20):
+        QtWidgets.QApplication.processEvents()
+    gc.collect()
 
 
 # ── the production widget's own framebuffer ───────────────────────────

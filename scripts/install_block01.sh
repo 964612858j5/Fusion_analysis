@@ -104,7 +104,7 @@ resolve_cuda() {
     echo ""
 }
 
-# the system libraries pip's Qt 5 needs for its window (xcb) and offscreen
+# the system libraries the Qt binding needs for its window (xcb) and offscreen
 # platforms, with the Debian/Ubuntu package that has each (found by the
 # clean ubuntu:22.04 test: a bare system has none of them)
 QT_SYSTEM_LIBS="libGL.so.1:libgl1 libEGL.so.1:libegl1 libX11-xcb.so.1:libx11-xcb1 libXext.so.6:libxext6
@@ -112,6 +112,7 @@ libdbus-1.so.3:libdbus-1-3 libglib-2.0.so.0:libglib2.0-0 libgthread-2.0.so.0:lib
 libfontconfig.so.1:libfontconfig1 libxkbcommon.so.0:libxkbcommon0 libxkbcommon-x11.so.0:libxkbcommon-x11-0
 libxcb-icccm.so.4:libxcb-icccm4 libxcb-image.so.0:libxcb-image0 libxcb-keysyms.so.1:libxcb-keysyms1
 libxcb-randr.so.0:libxcb-randr0 libxcb-render-util.so.0:libxcb-render-util0 libxcb-render.so.0:libxcb-render0
+libxcb-cursor.so.0:libxcb-cursor0
 libxcb-shape.so.0:libxcb-shape0 libxcb-shm.so.0:libxcb-shm0 libxcb-sync.so.1:libxcb-sync1
 libxcb-xfixes.so.0:libxcb-xfixes0 libxcb-xinerama.so.0:libxcb-xinerama0 libxcb-xkb.so.1:libxcb-xkb1"
 

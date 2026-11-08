@@ -1382,7 +1382,12 @@ class Step0Page(QWidget):
             sb.setStyleSheet(
                 "QSpinBox{background:#1a1a1a;color:#ddd;border:1px solid #444;"
                 "border-radius:3px;padding:1px 4px;font-size:11px;}"
-                "QSpinBox:disabled{color:#555;border-color:#2a2a2a;}"
+                # Readable while disabled: the nucleus channel has no
+                # correction, so its radius/sigma are not editable -- but
+                # #555 on #1a1a1a made the numbers look EMPTY, and the
+                # Per-Channel Decision row then reads as if it had lost the
+                # defaults. Greyed, not blank.
+                "QSpinBox:disabled{color:#9a9a9a;border-color:#2a2a2a;}"
             )
             sb.setKeyboardTracking(False)   # valueChanged once per committed edit
             sb.valueChanged.connect(

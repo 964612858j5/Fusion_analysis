@@ -885,6 +885,15 @@ class Driver(QtCore.QObject):
             resolved = page._resolve_channel_params(ch)
         except Exception as exc:                          # noqa: BLE001
             resolved = f"err:{exc}"
+        def _ui(sb):
+            le = sb.lineEdit()
+            return ("enabled=%s value=%s text=%r le_text=%r le_color=%s bg=%s"
+                    % (sb.isEnabled(), sb.value(), sb.text(),
+                       le.text() if le is not None else None,
+                       (le.palette().color(QtGui.QPalette.Text).name() if le is not None else None),
+                       sb.palette().color(QtGui.QPalette.Base).name()))
+        perf_trace.mark("a9.decui", label=str(a.get("label", "")), channel=str(ch),
+                        radius=_ui(page._dec_radius), sigma=_ui(page._dec_sigma))
         perf_trace.mark("a9.decision", label=str(a.get("label", "")), channel=str(ch),
                         dec_radius=page._dec_radius.value(),
                         dec_sigma=page._dec_sigma.value(),

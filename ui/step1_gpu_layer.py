@@ -550,9 +550,11 @@ class _TileArrayStore:
                 # turned into a silent fallback.
                 self.storage_fallback = True
         if not stored:
+            # NO drain here: the queue may hold an error this frame's own
+            # earlier calls produced (or one the failed entry call produced).
+            # The boundary that decides what is foreign is `submit()`, once
+            # per frame; `_check_gl` below must see whatever is there.
             self.storage_fallback = True
-            while gl.glGetError() != gl.GL_NO_ERROR:       # only the unusable-entry case
-                pass
             _i, fmt_gl, typ = self._gl_format(gl, fmt)
             gl.glTexImage3D(gl.GL_TEXTURE_2D_ARRAY, 0, internal, ARRAY_TILE, ARRAY_TILE,
                             layers, 0, fmt_gl, typ, None)
@@ -1097,10 +1099,10 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             self._require_ready()
             # THE batch boundary for GL errors is this submission, not one
             # helper inside it: whatever was already pending when the frame
-            # started is foreign (Qt's own widget bookkeeping leaves one in
-            # PySide6 -- probed), while every call this submission makes is
-            # still checked by the `_check_gl` calls inside `_compose` and by
-            # the one at its end.
+            # started is foreign (an error is already in the queue when a
+            # frame begins; WHERE it comes from is not identified), while
+            # every call this submission makes is still checked by the
+            # `_check_gl` calls inside `_compose` and by the one at its end.
             if self._arrays is not None:
                 self._arrays.foreign_gl_errors = _clear_gl_errors(self._gl)
             else:

@@ -12,6 +12,7 @@ it makes afterwards is checked. These tests pin that with a fake GL:
   clean, and nothing is silently skipped.
 """
 
+import time
 import types
 
 import numpy as np
@@ -41,10 +42,15 @@ class FakeGL:
     GL_FLOAT = 0x1406
     GL_TEXTURE_2D = 0x0DE1
 
-    def __init__(self):
+    def __init__(self, no_storage=False):
         self.errors = []
         self.calls = []
         self.fail_on = None          # name that must set an error
+        self.no_storage = no_storage
+        if no_storage:
+            # an Instance attribute beats the class method: `getattr(gl,
+            # "glTexStorage3D", None)` then answers None, as on GL < 4.2.
+            self.glTexStorage3D = None
 
     def _queue(self, error):
         self.errors.append(error)
@@ -101,6 +107,8 @@ class FakeGL:
         return self.GL_FRAMEBUFFER_COMPLETE
 
     def __getattr__(self, name):
+        if name == "glTexStorage3D" and self.no_storage:
+            raise AttributeError(name)       # a GL < 4.2 entry point
         if name.startswith("GL_"):
             return 0
         if not name.startswith("gl"):
@@ -164,3 +172,122 @@ def test_a_batch_that_raised_consumed_its_error():
     gl.fail_on = None
     store.prepare(gl, [("CD3", _plane(("t", 1, 0, 0)))])
     assert store.deferred == 0
+
+
+def test_a_frame_error_survives_a_fallback_allocation():
+    """`storage_fallback` set, and an error this frame produced is pending:
+    the fallback must NOT drain it -- the allocation's own check raises."""
+    gl = FakeGL()
+    _clear_gl_errors(gl)                          # the submission boundary
+    gl._queue(gl.GL_INVALID_ENUM)                 # an earlier call this frame
+    store = _TileArrayStore(max_bytes=64 << 20, max_layers=8)
+    store.storage_fallback = True
+    with pytest.raises(Step1GpuLayerError) as exc:
+        store.prepare(gl, [("CD3", _plane())])
+    assert "array block allocation" in str(exc.value)
+
+
+def test_a_frame_error_survives_a_missing_entry_point():
+    gl = FakeGL(no_storage=True)
+    _clear_gl_errors(gl)
+    gl._queue(gl.GL_INVALID_ENUM)
+    store = _TileArrayStore(max_bytes=64 << 20, max_layers=8)
+    with pytest.raises(Step1GpuLayerError):
+        store.prepare(gl, [("CD3", _plane())])
+
+
+def test_a_clean_fallback_still_allocates():
+    gl = FakeGL(no_storage=True)
+    _clear_gl_errors(gl)
+    store = _TileArrayStore(max_bytes=64 << 20, max_layers=8)
+    store.prepare(gl, [("CD3", _plane())])
+    assert store.blocks, "the fallback allocation produced no block"
+    assert store.storage_fallback is True
+
+
+def test_a_failed_submission_keeps_the_layer_and_binding_state(app):
+    """GL-level injection through the REAL submit path: a frame whose upload
+    fails must not replace the layer's scene and must not be appended to the
+    binding's submission history."""
+    import os
+    from block01.qt import QtWidgets
+    import test_step1_gpu_takeover as T
+
+    if os.environ.get("QT_QPA_PLATFORM") not in (None, "xcb"):
+        pytest.skip("needs the xcb platform for a real context")
+    rig = T._mount(app, visible=("CD3",), windows=("CD3", "DAPI"))
+    try:
+        mount = rig.mount
+        layer = mount.gpu_layer
+        binding = mount.gpu_binding
+        descriptor, display, viewport = layer._scene
+        scene_before = layer._scene
+        raw = layer._gl
+        armed = {"on": False}
+
+        class RawWithInject:
+            """The real GL, with one GL error queued on the next tile upload."""
+            def __init__(self, inner):
+                self._inner = inner
+                self.pending = False
+            def __getattr__(self, name):
+                inner = self._inner
+                obj = self
+                if name == "glGetError":
+                    def get():
+                        if obj.pending:
+                            obj.pending = False
+                            return inner.GL_INVALID_ENUM
+                        return inner.glGetError()
+                    return get
+                target = getattr(inner, name)
+                if not callable(target):
+                    return target
+                if name == "glTexSubImage3D":
+                    def call(*a, **k):
+                        r = target(*a, **k)
+                        if armed["on"]:
+                            armed["on"] = False
+                            obj.pending = True
+                        return r
+                    return call
+                return target
+
+        injected = RawWithInject(raw)
+        layer._gl = injected
+        try:
+            # no background headroom allocation may consume the injection
+            binding._headroom_timer.stop()
+            # force a real upload: forget what the store already holds
+            layer._arrays.slots.clear()
+            layer._arrays.used.clear()
+            layer._known_resident.clear()
+            armed["on"] = True
+            with pytest.raises(Step1GpuLayerError):
+                layer.submit(descriptor, display, viewport)
+            assert layer._scene is scene_before, "a failed frame replaced the scene"
+
+            # the binding: a failing publication is recorded, not appended
+            layer._arrays.slots.clear()
+            layer._arrays.used.clear()
+            layer._known_resident.clear()
+            history_before = len(binding.descriptor_history)
+            binding._last_error = ""
+            armed["on"] = True
+            binding._publish_body()
+            assert len(binding.descriptor_history) == history_before, \
+                "a failed frame was appended to the submission history"
+            assert binding._last_error, "the failure was not recorded on the binding"
+        finally:
+            layer._gl = raw
+    finally:
+        try:
+            rig.mount.close()
+        except Exception:
+            pass
+
+
+@pytest.fixture(scope="module")
+def app():
+    from block01.qt import QtWidgets
+    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])

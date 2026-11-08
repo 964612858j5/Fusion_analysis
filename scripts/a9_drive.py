@@ -597,55 +597,56 @@ class Driver(QtCore.QObject):
     def _do_accept_modal(self, a, _t):
         """Answer ONE named dialog with ONE named button.
 
-        `title` is the identity the scenario expects; `button` the label it
-        clicks (case-insensitive substring); `required` says whether the
-        dialog MUST appear. An unexpected dialog is never auto-confirmed: the
-        scenario fails. Nothing here changes the product's interaction."""
-        title = a.get("title")
-        allowed = a.get("titles")
-        if allowed is None:
-            allowed = [title] if title is not None else []
-        button = a.get("button", "OK")
+        The scenario MUST name both: `titles` (non-empty list of the exact
+        window titles it expects) and `button` (the exact label it clicks,
+        compared after stripping a mnemonic `&` and surrounding spaces). An
+        unexpected dialog, a missing button, or a required dialog that never
+        appears all fail the scenario -- nothing is ever auto-confirmed and
+        there is no "click the default button" fallback."""
+        titles = [str(t) for t in (a.get("titles") or ())]
+        button = str(a.get("button") or "").strip()
         required = bool(a.get("required", True))
         timeout_s = float(a.get("timeout_s", 60))
+        if not titles or not button:
+            self._fail("accept_modal needs a non-empty 'titles' and a 'button'")
+            return
         deadline = time.monotonic() + timeout_s
+
+        def norm(text):
+            return str(text).replace("&", "").strip()
 
         def poll():
             modal = QtWidgets.QApplication.activeModalWidget()
             if modal is None:
                 if time.monotonic() >= deadline:
-                    perf_trace.mark("a9.modal", n=self.i, title=title,
-                                    ok=not required, timeout=True, required=required)
+                    perf_trace.mark("a9.modal", n=self.i, titles=titles, ok=not required,
+                                    timeout=True, required=required)
                     if required:
-                        self._fail(f"dialog {title!r} never appeared")
+                        self._fail(f"dialog {titles!r} never appeared")
                     else:
                         self._next(0)
                     return
                 QtCore.QTimer.singleShot(100, poll)
                 return
             seen = str(getattr(modal, "windowTitle", lambda: "")())
-            if allowed and seen not in allowed:
-                perf_trace.mark("a9.modal", n=self.i, title=title, seen=seen,
+            if seen not in titles:
+                perf_trace.mark("a9.modal", n=self.i, titles=titles, seen=seen,
                                 ok=False, unexpected=True)
-                self._fail(f"unexpected dialog {seen!r} (expected one of {allowed!r})")
+                self._fail(f"unexpected dialog {seen!r} (expected one of {titles!r})")
                 return
             target = None
             if isinstance(modal, QtWidgets.QMessageBox):
                 for b in modal.buttons():
-                    if button.lower() in str(b.text()).replace("&", "").lower():
+                    if norm(b.text()) == button:
                         target = b
                         break
             if target is None:
-                default = getattr(modal, "defaultButton", lambda: None)()
-                if default is not None and callable(getattr(default, "click", None)):
-                    target = default
-            if target is None:
-                perf_trace.mark("a9.modal", n=self.i, title=title, seen=seen,
-                                ok=False, no_button=True)
+                perf_trace.mark("a9.modal", n=self.i, titles=titles, seen=seen,
+                                ok=False, no_button=True, button=button)
                 self._fail(f"dialog {seen!r} has no button {button!r}")
                 return
-            perf_trace.mark("a9.modal", n=self.i, title=title, seen=seen, ok=True,
-                            button=str(target.text())[:40])
+            perf_trace.mark("a9.modal", n=self.i, titles=titles, seen=seen, ok=True,
+                            button=norm(target.text()))
             target.click()
             self._next(0)
 

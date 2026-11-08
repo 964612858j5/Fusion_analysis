@@ -1375,7 +1375,11 @@ class Step0Page(QWidget):
                  "TopHat disk radius (px) for this channel"),
                 (self._dec_sigma, "cucim",
                  "cucim Gaussian sigma (px) for this channel")):
-            sb.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+            # NOT `NoButtons`: with a stylesheet that draws a frame, Qt 6
+            # then gives the internal line edit a width of ONE pixel (probed:
+            # PyQt5 gave 46 px for the same widget), and the number is drawn
+            # outside the box. Hiding the buttons in the stylesheet keeps the
+            # look and leaves the field the full width.
             sb.setAlignment(Qt.AlignRight)
             sb.setFixedWidth(56)
             sb.setToolTip(tip)
@@ -1388,6 +1392,8 @@ class Step0Page(QWidget):
                 # Per-Channel Decision row then reads as if it had lost the
                 # defaults. Greyed, not blank.
                 "QSpinBox:disabled{color:#9a9a9a;border-color:#2a2a2a;}"
+                "QSpinBox::up-button,QSpinBox::down-button{width:0;height:0;"
+                "border:none;}"
             )
             sb.setKeyboardTracking(False)   # valueChanged once per committed edit
             sb.valueChanged.connect(
@@ -9740,13 +9746,16 @@ class Step0Page(QWidget):
             sb = QtWidgets.QSpinBox()
             sb.setRange(int(rng[0]), int(rng[1]))
             sb.setValue(int(default))
-            sb.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+            # see the decision row: `NoButtons` + a stylesheet gives Qt 6 a
+            # one-pixel line edit, so the buttons are hidden in the style
             sb.setAlignment(Qt.AlignRight)
             sb.setFixedWidth(64)
             sb.setToolTip(tip)
             sb.setStyleSheet(
                 "QSpinBox{background:#1a1a1a;color:#ddd;border:1px solid #444;"
-                "border-radius:3px;padding:1px 5px;font-size:11px;}")
+                "border-radius:3px;padding:1px 5px;font-size:11px;}"
+                "QSpinBox::up-button,QSpinBox::down-button{width:0;height:0;"
+                "border:none;}")
             return sb
 
         self._tophat_slider = _param_input(

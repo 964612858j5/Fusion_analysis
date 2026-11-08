@@ -488,6 +488,9 @@ class _TileArrayStore:
         self.used: Dict[Hashable, int] = {}
         self.tick = 0
         self._evict_order = None
+        #: GL errors that were pending BEFORE the current submission (count,
+        #: not cumulative); set by the layer at the submission boundary.
+        self.foreign_gl_errors = 0
         #: id(plane) -> plane, for planes already validated (immutable)
         self._validated = ObjectCache()
         self.meta: Dict[Hashable, Tuple] = {}     # identity -> (rect, valid, (w, h), fmt)
@@ -535,19 +538,27 @@ class _TileArrayStore:
         gl.glTexParameteri(gl.GL_TEXTURE_2D_ARRAY, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
         gl.glTexParameteri(gl.GL_TEXTURE_2D_ARRAY, gl.GL_TEXTURE_MAX_LEVEL, 0)
         storage = getattr(gl, "glTexStorage3D", None)
-        try:
-            if storage is None or self.storage_fallback:
-                raise AttributeError
-            storage(gl.GL_TEXTURE_2D_ARRAY, 1, internal, ARRAY_TILE, ARRAY_TILE, layers)
-            _check_gl(gl, "array block storage")
-        except Exception:                                  # noqa: BLE001 -- GL < 4.2
+        stored = False
+        if storage is not None and not self.storage_fallback:
+            try:
+                storage(gl.GL_TEXTURE_2D_ARRAY, 1, internal, ARRAY_TILE, ARRAY_TILE, layers)
+                stored = True
+            except (AttributeError, TypeError):
+                # the entry point itself is unusable here (GL < 4.2): fall
+                # back below. A GL ERROR from the call is NOT caught here --
+                # it must reach `_check_gl` and fail the submission, not be
+                # turned into a silent fallback.
+                self.storage_fallback = True
+        if not stored:
             self.storage_fallback = True
-            while gl.glGetError() != gl.GL_NO_ERROR:
+            while gl.glGetError() != gl.GL_NO_ERROR:       # only the unusable-entry case
                 pass
             _i, fmt_gl, typ = self._gl_format(gl, fmt)
             gl.glTexImage3D(gl.GL_TEXTURE_2D_ARRAY, 0, internal, ARRAY_TILE, ARRAY_TILE,
                             layers, 0, fmt_gl, typ, None)
             _check_gl(gl, "array block allocation")
+        else:
+            _check_gl(gl, "array block storage")
         self._warm(gl, texture, fmt, layers)
         family = fmt == "f32"
         taken = {b.vt_index for b in self.blocks if (b.fmt == "f32") == family}
@@ -717,9 +728,10 @@ class _TileArrayStore:
         if perf_trace.enabled():
             perf_trace.mark("gpu.array_prepare", items=len(items), missing=len(missing),
                             scan_ms=round((started - self._prepare_started) * 1000.0, 2))
-        # A foreign error in the queue (Qt's own widget bookkeeping) would be
-        # read by `_check_gl` below and blamed on this batch's uploads.
-        self.foreign_gl_errors = _clear_gl_errors(gl)
+        # No drain here: this runs INSIDE a submission, after `submit()` has
+        # already cleared what was pending before the frame. Draining again
+        # would also drop an error this frame's own earlier calls produced
+        # (e.g. a failed target allocation) and hide it from the checks below.
         gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         for channel, plane in missing:
             if (budget_ms is not None and plane.identity not in mandatory
@@ -1083,6 +1095,16 @@ class Step1GpuLayer(QtWidgets.QOpenGLWidget):
             self.makeCurrent()
         try:
             self._require_ready()
+            # THE batch boundary for GL errors is this submission, not one
+            # helper inside it: whatever was already pending when the frame
+            # started is foreign (Qt's own widget bookkeeping leaves one in
+            # PySide6 -- probed), while every call this submission makes is
+            # still checked by the `_check_gl` calls inside `_compose` and by
+            # the one at its end.
+            if self._arrays is not None:
+                self._arrays.foreign_gl_errors = _clear_gl_errors(self._gl)
+            else:
+                _clear_gl_errors(self._gl)
             result = self._compose(source_descriptor, display_snapshot, viewport_snapshot,
                                    upload=True, upload_budget_ms=self.upload_budget_ms)
             self._scene = (source_descriptor, display_snapshot, viewport_snapshot)

@@ -2666,17 +2666,19 @@ class Step0Page(QWidget):
         # so at the full image's magnification each shows a third of the
         # geography -- which is the point of comparing, and the opposite of
         # shrinking the content threefold to fit the same ground in.
-        self._apply_compare_camera(px, py, scale)
-        # READ BACK, after the panels have really been placed -- see the
-        # field's own comment. Recorded here and not before
-        # `_apply_compare_camera`, because before it the panels are still
-        # wherever the previous entry left them.
-        self._compare_entry_panel_camera = self._compare_camera()
         self._compare_opened = True
+        # PLACE, THEN RECORD: on a cold entry the panels are not laid out on
+        # this turn (`QWidget.width()` is 0 until the page has been through
+        # a layout), and `CompareStrip.set_camera` skips every panel it
+        # cannot solve a rectangle for -- the entry camera was silently
+        # dropped and the panels stayed at their fit (the thumbnail-sized
+        # picture the user saw). The placement is retried on the next turns
+        # until a panel has a size; the read-back and the publish happen
+        # where it actually landed.
+        self._place_compare_entry(px, py, scale, 0)
         # Block A7 (ruling 17): the right-click into compare is the user's
         # command -- one jump; leaving and the mirrored panels write nothing.
         self._connect_compare_user_ranges(strip)
-        self.publish_camera("step0-compare-enter", jump=True)
         self._preview_status.setText(
             "Original | TopHat | cucim, one camera. Wheel to zoom, drag to "
             "pan; right-click, Esc or \u201cBack to full image\u201d returns "
@@ -2684,6 +2686,38 @@ class Step0Page(QWidget):
         self._refresh_preview_display(keep_zoom=True)
         self._update_compare_view_rect()
         return strip
+
+    def _place_compare_entry(self, px, py, scale, attempt):
+        """Put the entry camera on the panels, once they can hold it.
+
+        The strip solves each panel's rectangle from that panel's own widget
+        size, and a page that has only just been switched to has none yet.
+        Retrying on the next event-loop turns (bounded) is what keeps a cold
+        entry at the user's camera instead of the panels' fit; the read-back
+        and the one camera publication belong to the turn it lands."""
+        if not self._compare_mode():
+            return
+        strip = self._compare_strip_widget
+        boxes = strip.view_boxes if strip is not None else []
+        width = 0.0
+        if boxes:
+            try:
+                width = float(boxes[0].width()) if boxes[0] is not None else 0.0
+            except RuntimeError:                            # the C++ side is gone
+                width = 0.0
+        # ONLY A PANEL THAT CANNOT HOLD A CAMERA IS RETRIED. A panel with a
+        # size takes the entry camera once -- retrying after that would fight
+        # a gesture the user made in the meantime.
+        if width > 0 and self._apply_compare_camera(px, py, scale):
+            self._compare_entry_panel_camera = self._compare_camera()
+            self.publish_camera("step0-compare-enter", jump=True)
+            return
+        if attempt < self._COMPARE_ENTRY_ATTEMPTS:
+            QTimer.singleShot(0, lambda: self._place_compare_entry(px, py, scale, attempt + 1))
+
+    #: Cold-entry placement turns: the page switch, the layout and the
+    #: panels' first size all happen inside these.
+    _COMPARE_ENTRY_ATTEMPTS = 8
 
     # -- "Preparing Compare..." -------------------------------------------
     #

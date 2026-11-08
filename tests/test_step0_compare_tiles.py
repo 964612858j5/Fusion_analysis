@@ -638,6 +638,35 @@ def _full_rect(page):
     return (x0, y0, x1 - x0, y1 - y0)
 
 
+def test_the_entry_camera_lands_when_the_panels_have_no_size_yet(app, monkeypatch):
+    """A cold entry switches the page on and solves each panel's rectangle
+    from that panel's own widget size -- which is 0 until the page has been
+    laid out. `CompareStrip.set_camera` skips a panel it cannot solve, so the
+    entry camera used to be dropped and the panels stayed at their fit (the
+    thumbnail the user saw). The placement retries on the next turns."""
+    page = _page(app)
+    cam = page._full_image_camera()
+    calls = {"n": 0}
+    cls = type(page._compare_strip_widget)
+
+    def view_boxes(self):
+        calls["n"] += 1
+        if calls["n"] == 1:                 # the first turn: not laid out
+            return [None, None, None]
+        return cls.__dict__["_real_view_boxes"].__get__(self)
+
+    real = cls.view_boxes
+    monkeypatch.setattr(cls, "_real_view_boxes", real, raising=False)
+    monkeypatch.setattr(cls, "view_boxes", property(view_boxes))
+    P = (cam[0] + 500.0, cam[1] - 300.0)
+    strip = _enter(page, *P)
+    opened = strip.camera(0)
+    assert opened is not None, "the panels never got a camera"
+    assert opened[0] == pytest.approx(P[0], abs=1.0)
+    assert opened[1] == pytest.approx(P[1], abs=1.0)
+    assert calls["n"] >= 2, "the placement was never retried"
+
+
 def test_leaving_without_moving_comes_back_where_the_full_image_was(app):
     """USER RULING 2026-09-21, replacing this test's previous assertion.
 
@@ -3339,7 +3368,14 @@ def test_a_pan_during_a_pending_switch_replans_for_the_new_viewport(staged):
     generation = strip._pending["generation"]
 
     cx, cy, scale = strip.camera(0)
-    strip.set_camera(cx + 900.0, cy + 700.0, scale)
+    # A pan only re-plans when it changes WHICH tiles are on screen: at the
+    # whole-slide camera the entry now lands on, every tile is visible from
+    # everywhere. Zoom in to a few tiles first, then pan two tiles across --
+    # two real gestures, in the units the user's hand works in.
+    zoomed = scale * 8.0
+    strip.set_camera(cx, cy, zoomed)
+    QtTest.QTest.qWait(20)
+    strip.set_camera(cx + 2.0 * 512.0, cy + 2.0 * 512.0, zoomed)
     QtTest.QTest.qWait(20)
 
     if strip.pending:

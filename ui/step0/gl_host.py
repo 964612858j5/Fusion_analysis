@@ -1198,7 +1198,9 @@ class Step0GlHost(QtWidgets.QOpenGLWidget):
         try:
             for region, colour in self._gaps:
                 gl.clear_color(colour.redF(), colour.greenF(), colour.blueF(), 1.0)
-                for r in region.rects():
+                # PySide6's QRegion has no `rects()` (Qt 6 removed it); the
+                # region iterates its rectangles -- same order, same rects.
+                for r in region:
                     x, y = int(round(r.x() * ratio)), int(round(r.y() * ratio))
                     w, h = int(round(r.width() * ratio)), int(round(r.height() * ratio))
                     gl.scissor(x, height - y - h, w, h)

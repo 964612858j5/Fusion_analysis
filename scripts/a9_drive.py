@@ -877,6 +877,42 @@ class Driver(QtCore.QObject):
             return
         self._after_settle(lambda: None, timeout_s=float(a.get("timeout_s", 60)))
 
+    def _do_decision(self, a, _t):
+        """The Per-Channel Decision row's inputs vs the effective values."""
+        page = self.w._step0
+        ch = page.current_channel
+        try:
+            resolved = page._resolve_channel_params(ch)
+        except Exception as exc:                          # noqa: BLE001
+            resolved = f"err:{exc}"
+        perf_trace.mark("a9.decision", label=str(a.get("label", "")), channel=str(ch),
+                        dec_radius=page._dec_radius.value(),
+                        dec_sigma=page._dec_sigma.value(),
+                        global_radius=page._tophat_slider.value(),
+                        global_sigma=page._cucim_slider.value(),
+                        resolved=("%d|%d" % resolved if isinstance(resolved, tuple) else resolved),
+                        override=bool(page._channel_params.get(ch)))
+        self._next(0)
+
+    def _do_cameras(self, a, _t):
+        """Record both cameras (full image and compare panels) as they are."""
+        page = self.w._step0
+        full = None
+        cmp_cam = None
+        try:
+            full = page._full_image_camera()
+        except Exception as exc:                          # noqa: BLE001
+            full = f"err:{exc}"
+        try:
+            cmp_cam = page._compare_camera()
+        except Exception as exc:                          # noqa: BLE001
+            cmp_cam = f"err:{exc}"
+        perf_trace.mark("a9.cameras", label=str(a.get("label", "")),
+                        compare=bool(page._compare_mode()),
+                        full=("|".join("%.6f" % v for v in full) if isinstance(full, tuple) else full),
+                        panels=("|".join("%.6f" % v for v in cmp_cam) if isinstance(cmp_cam, tuple) else cmp_cam))
+        self._next(0)
+
     def _do_s0compare(self, a, _t):
         """Into compare mode at the middle of the full image, as a
         right-click there does (the page's own entry)."""

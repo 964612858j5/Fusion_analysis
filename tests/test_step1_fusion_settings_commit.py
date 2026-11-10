@@ -474,11 +474,14 @@ def test_the_fused_zarr_uses_the_mapping_that_was_saved_with_it(app, tmp_path,
         w.close()
 
 
-def test_params_searched_on_other_settings_are_refused(app, tmp_path,
-                                                       monkeypatch,
-                                                       _no_modal_dialogs):
+def test_params_searched_on_other_settings_are_not_saved(app, tmp_path,
+                                                         monkeypatch,
+                                                         _no_modal_dialogs):
     """Search on settings A, save settings B, then generate: the params
-    describe a picture the new fusion does not produce."""
+    describe a picture the new fusion does not produce. Since the decouple
+    plan (2026-11-10) Generate does not need them and does not save them --
+    only a pre-segmentation result chosen with Use is saved -- so the image
+    is generated and no parameters go with it."""
     w = _window(app, tmp_path)
     try:
         seen = _launched(w, monkeypatch)
@@ -502,10 +505,10 @@ def test_params_searched_on_other_settings_are_refused(app, tmp_path,
 
         assert w._params_match_committed_settings() is False
         w._save()
-        assert started == []
-        # Block E: a Phase 2 pick no longer reaches Save at all.
-        assert any("choose a pre-segmentation result first" in str(a).lower()
-                   for a in _no_modal_dialogs)
+        # nothing refused for the pick, and the pick is not saved
+        assert not any("other settings" in str(a).lower() for a in _no_modal_dialogs)
+        assert w.__dict__.get("_pending_segmentation_param_path", "") == ""
+        assert not os.path.exists(os.path.join(str(tmp_path), "segmentation_params"))
     finally:
         w.close()
 

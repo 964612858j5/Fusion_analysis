@@ -124,9 +124,15 @@ row, and the duplicate Tissue Preview button in the step bar.
 * **Step1's `Pre-segmentation` tab** is three titled frames, `Patches`,
   `Methods` and `Results` (user ruling 2026-09-25), in the look of the
   old controls' boxes. The old Phase1 / Phase2 controls that followed them
-  are kept but not shown since block E (user ruling 2026-09-25), and Save
-  takes a pre-segmentation result chosen with `Use`, nothing else: old
-  Phase 2 parameters, an old session's included, leave it locked.
+  are kept but not shown since block E (user ruling 2026-09-25). Step1's
+  bottom button is `Generate DAPI input zarr` for every method (user ruling
+  2026-11-10, docs/v17_step1_generate_decouple_plan.md): enabled by saved
+  fusion settings alone, no pre-segmentation needed; it saves parameters
+  only for a result chosen with `Use` (old Phase 2 parameters, an old
+  session's included, are never saved). Step2 then takes those parameters,
+  or, after a Generate without a chosen result, `None / Manual default`.
+  Step2 asks before a run (`Run anyway` / `Cancel`) when the index
+  parameters were found on other fusion settings than the input image's.
 * **Step1's `Pre-segmentation` tab** opens with the PATCHES strip (user
   ruling, 2026-09-24; `docs/step1_presegmentation_redesign_plan.md` block
   A1): one tile per patch, showing the patch's name and nothing else, all

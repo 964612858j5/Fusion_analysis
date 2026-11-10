@@ -1481,7 +1481,9 @@ class MainWindow(QMainWindow):
         self._step1_save_slot = save_slot
         bot.addWidget(save_slot)
         bot.addStretch()
-        self.btn_save = QPushButton("Save Config  &&  Generate fused.zarr")
+        # One button for every method (user ruling 2026-11-10, docs/
+        # v17_step1_generate_decouple_plan.md): no pre-segmentation needed.
+        self.btn_save = QPushButton("Generate DAPI input zarr")
         self.btn_save.setEnabled(False)
         # Step2's Run colours (user ruling 2026-11-03), no floppy-disk glyph
         theme_widgets.button(self.btn_save, "run",
@@ -3938,7 +3940,7 @@ class MainWindow(QMainWindow):
         self._rebuild_patch_buttons([])
         self.prev_img.clear()
         self.result_grid.setup_grid(0, [], "")
-        self.btn_save.setEnabled(False)
+        self._check_save_unlock()
         self._fusion_bar_widget.setVisible(False)
         self.patch_cache_status.setText(" ")
         self.roi_status.setText("No ROI loaded")
@@ -5674,6 +5676,34 @@ class MainWindow(QMainWindow):
             print(f"[Step2] failed to load the workspace's segmentation params:\n{traceback.format_exc()}")
         return False
 
+    def _apply_step2_handover(self):
+        """Step2 takes what the last Generate chose (docs/
+        v17_step1_generate_decouple_plan.md §2, user rulings §5): the
+        parameters it saved -- also over a Step2 draft edited by hand -- or,
+        when no result was chosen, its manual default (an older parameter
+        file stays on disk and can be chosen on purpose). Waits while a
+        Step2 run is going; True when applied."""
+        handover = self.__dict__.get("_step2_handover")
+        step2 = self.__dict__.get("_step2")
+        if handover is None or step2 is None or getattr(step2, "_run_active", False):
+            return False
+        self._step2_handover = None
+        kind, out_dir = handover
+        try:
+            if kind == "params" and hasattr(step2, "load_step1_active_params"):
+                if not step2.load_step1_active_params(out_dir):
+                    print("[Step2] the new Step1 parameters could not be loaded")
+                    return False
+            elif kind == "manual" and hasattr(step2, "use_manual_default"):
+                # the index is loaded (not applied), so entering Step2 does
+                # not auto-load the older parameters over this choice
+                step2.use_manual_default(out_dir)
+        except Exception:                                   # noqa: BLE001
+            print(f"[Step2] the Generate's hand-over failed:\n{traceback.format_exc()}")
+            return False
+        print(f"[Step2] took the last Generate's choice: {kind}")
+        return True
+
     @_perf("switch.go_step2")
     def _go_to_step2(self):
         if self._current_step == 1:
@@ -5731,6 +5761,7 @@ class MainWindow(QMainWindow):
                 )
         self._step2_workspace_params(s0, s1)
         self._rm_bind_step2()
+        self._apply_step2_handover()        # a Generate's choice, if still waiting
         self._rm_restore_page_draft("step2", self.__dict__.get("_step2"))
         self._stack.setCurrentIndex(2)
         self._set_step_active(2)
@@ -7515,7 +7546,7 @@ class MainWindow(QMainWindow):
         if self._params_source == PRESEG_SOURCE:
             self._p2_params = None
             self._params_source = None
-            self.btn_save.setEnabled(False)
+            self._check_save_unlock()
             self._fusion_bar_widget.setVisible(False)
 
     def _on_preseg_use(self, combo_id):
@@ -10103,7 +10134,6 @@ class MainWindow(QMainWindow):
 
     def _on_step1_segmentation_mode_changed(self, method):
         method = method or CELLPOSE_WHOLECELL_FUSION
-        is_whole = method == CELLPOSE_WHOLECELL_FUSION
         phase_required = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
         workflow = {
@@ -10128,16 +10158,11 @@ class MainWindow(QMainWindow):
         self.config.setVisible(True)
         self.config.setEnabled(True)
         self.result_grid.setVisible(True)
-        if is_whole:
-            self.btn_save.setText("Save Config  &&  Generate fused.zarr")
-        else:
-            self.btn_save.setText("Save segmentation config  &&  Generate DAPI input zarr")
-
         if phase_required:
             if self._p2_params is not None and self._p2_params.get("method") != method:
                 self._p2_params = None
                 self._params_source = None
-                self.btn_save.setEnabled(False)
+                self._check_save_unlock()
                 self._fusion_bar_widget.setVisible(False)
         elif is_stardist and not (self._params_source == PRESEG_SOURCE
                                   and (self._p2_params or {}).get("method") == method):
@@ -10666,6 +10691,7 @@ class MainWindow(QMainWindow):
         button = getattr(self, "_btn_save_fusion_settings", None)
         if button is not None:
             button.setEnabled(dirty)
+        self._check_save_unlock()          # Generate needs saved settings
         return dirty
 
     def _require_committed_fusion_settings(self, what):
@@ -10685,43 +10711,48 @@ class MainWindow(QMainWindow):
         return False
 
     def _save_allowed(self):
-        """Save takes a pre-segmentation result chosen with Use, and nothing
-        else (block E, plan 4.7; user ruling 2026-09-25): the old Phase1 /
-        Phase2 panel is off the screen, and parameters an old session carries
-        do not unlock it."""
-        return (self._p2_params is not None
-                and self._params_source == PRESEG_SOURCE
-                and getattr(self, "_preseg_selected", None) is not None)
+        """Generate needs saved fusion settings, nothing else: no
+        pre-segmentation result (user ruling 2026-11-10, docs/
+        v17_step1_generate_decouple_plan.md §2). The other checks (an ROI for
+        ROI-only output, a window for every weighted channel, a saved Step0
+        result) are made, with their reasons, when it is clicked."""
+        if self.__dict__.get("loader") is None:
+            return False
+        worker = self.__dict__.get("_fusion_worker")
+        if worker is not None and worker.isRunning():
+            return False
+        if self.__dict__.get("_display") is None or self._committed_fusion_settings() is None:
+            return False
+        return not self._fusion_settings_dirty()
+
+    def _generate_params_selection(self):
+        """The pre-segmentation result whose parameters a Generate saves:
+        one chosen with Use, else None (Step2 then starts from its manual
+        default)."""
+        if (self.__dict__.get("_p2_params") is not None
+                and self.__dict__.get("_params_source") == PRESEG_SOURCE
+                and self.__dict__.get("_preseg_selected") is not None):
+            return self._preseg_selected
+        return None
 
     def _check_save_unlock(self):
-        """Unlock the Save button when a chosen result is there to save."""
-        if not self._save_allowed():
-            self.btn_save.setEnabled(False)
+        """Generate's button follows `_save_allowed`; the bar says whether a
+        chosen result's parameters go with it."""
+        button = self.__dict__.get("btn_save")
+        if button is None:
             return
-        if self._p2_params is not None:
-            self.btn_save.setEnabled(True)
-            src = self._params_source or "phase2"
-            src_lbl = {
-                "phase2":  "Phase 2 grid search",
-                "loaded":  "loaded from JSON",
-                "manual":  "manual entry",
-            }.get(src, src)
-            d  = self._p2_params.get("diameter", "auto")
-            fl = self._p2_params.get("flow_threshold", 0.4)
-            cp = self._p2_params.get("cellprob_threshold", 0.0)
-            method = self._p2_params.get("method", CELLPOSE_WHOLECELL_FUSION)
-            if method == CELLPOSE_WHOLECELL_FUSION:
-                msg = (
-                    f"Params ready ({src_lbl})  "
-                    f"diam={d}  flow={fl}  prob={cp}  "
-                    f"→ click Save to generate fused.zarr"
-                )
-            else:
-                msg = (
-                    f"Params ready ({src_lbl})  method={method}  "
-                    f"→ click Save to generate DAPI input zarr"
-                )
-            self._fusion_lbl.setText(msg)
+        allowed = self._save_allowed()
+        button.setEnabled(allowed)
+        label = self.__dict__.get("_fusion_lbl")
+        if not allowed or label is None:
+            return
+        if self._generate_params_selection() is not None:
+            method = (self._p2_params or {}).get("method", "")
+            label.setText(f"Result chosen ({method}): Generate also saves its "
+                          f"parameters for Step2")
+        else:
+            label.setText("No pre-segmentation result chosen: Generate writes the "
+                          "image only; set the parameters in Step2")
 
     # ── Lock / unlock UI during fusion ──────────────────────────────
 
@@ -10796,11 +10827,7 @@ class MainWindow(QMainWindow):
                                       f"could not be published: {exc}")
                 return
         self._fusion_pbar.setValue(100)
-        method = CELLPOSE_WHOLECELL_FUSION
-        if self._p2_params:
-            method = self._p2_params.get("method", CELLPOSE_WHOLECELL_FUSION)
-        is_wholecell = method == CELLPOSE_WHOLECELL_FUSION
-        result_name = "Fusion" if is_wholecell else "DAPI input zarr"
+        result_name = "DAPI input zarr"
         self._fusion_lbl.setText(f"✓  {result_name} complete → {zarr_path}")
         self._fused_zarr_path = zarr_path
         self.step1_output = {
@@ -10821,6 +10848,12 @@ class MainWindow(QMainWindow):
                 error_hook.report(exc, "Step1: the ROI's step status not updated")
         self.step1_done = True
         self._update_next_button()
+        # §2: this Generate is the newest choice of Step2's parameters.
+        handover = self.__dict__.pop("_pending_step2_handover", None)
+        if handover is not None:
+            self._step2_handover = handover
+            self._rm_step2_draft_pending = False    # an older draft does not come back
+            self._apply_step2_handover()
         # Block RM: a fuse run carries its identity in its own params.json.
         if self.__dict__.get("_rm_fuse_mode"):
             self._rm_note_viewing(os.path.dirname(os.path.abspath(zarr_path)))
@@ -10901,7 +10934,9 @@ class MainWindow(QMainWindow):
                 button.setEnabled(False)
             d.show()
 
-    def _expected_dapi_input_meta(self, worker_fcfg, selected_method):
+    def _expected_dapi_input_meta(self, worker_fcfg, _method=None):
+        # `_method` is ignored: one image for every method (user ruling
+        # 2026-11-10); kept so older callers still work.
         active_roi = self._active_roi or (self._rois[0] if self._rois else None)
         regions = []
         if self._rois:
@@ -10930,7 +10965,7 @@ class MainWindow(QMainWindow):
         meta = {
             "version": 1,
             "purpose": "step1_dapi_input_zarr",
-            "method": selected_method,
+            # no `method`: one image for every method (user ruling 2026-11-10)
             "source_path": os.path.abspath(source_path) if source_path else "",
             "raw_ome_path": os.path.abspath(getattr(self.loader, "filepath", OME_TIFF_FILE)),
             "roi_id": (self.step0_output or {}).get("roi_id", ""),
@@ -11171,7 +11206,7 @@ class MainWindow(QMainWindow):
             return None
         return regions[0]
 
-    def _expected_meta_for_current_config(self, method=""):
+    def _expected_meta_for_current_config(self):
         """The identity a fusion of what is loaded right now would have.
 
         Built the way `_save` builds it, so a stored result can be compared
@@ -11181,9 +11216,6 @@ class MainWindow(QMainWindow):
         """
         if self.loader is None:
             return None
-        method = str(method or self._active_segmentation_method
-                     or (self._p2_params or {}).get("method")
-                     or CELLPOSE_WHOLECELL_FUSION)
         try:
             fcfg = self._effective_fusion_config()
             fcfg.update({
@@ -11193,12 +11225,11 @@ class MainWindow(QMainWindow):
                 "norm_high": NORM_HIGH,
                 "channel_remap_params": self._fusion_display_mapping(),
             })
-            if method == CELLPOSE_WHOLECELL_FUSION:
-                return self._expected_fused_zarr_meta(fcfg, method)
+            # one image for every method (user ruling 2026-11-10)
             nuc_ch = (fcfg.get("nucleus") or {}).get("channel") \
                 or self.config.nucleus_channel()
             fcfg["nucleus"] = {"channel": nuc_ch, "weight": 1.0}
-            return self._expected_dapi_input_meta(fcfg, method)
+            return self._expected_dapi_input_meta(fcfg)
         except Exception as exc:
             print(f"[Step1] could not describe the current fusion identity: {exc}")
             return None
@@ -11456,29 +11487,13 @@ class MainWindow(QMainWindow):
         return {}, ""
 
     def _save(self):
-        if not self._save_allowed():
-            QMessageBox.warning(
-                self, "Nothing chosen",
-                "Choose a pre-segmentation result first: Pre-segmentation tab → "
-                "Results → Use.")
-            return
-        current_method = self.search._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
-        if self._p2_params is None and current_method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION):
-            self._p2_params = self.search.get_current_params()
-            self._params_source = "direct_method"
-        if self._p2_params is None:
-            # Give user a hint about all three ways to get params
-            QMessageBox.warning(
-                self, "No parameters available",
-                "Please do one of the following before saving:\n\n"
-                "1. Run Phase 1 → Phase 2 and select params from the result grid\n"
-                "2. Click 📂 Browse to load an existing segmentation params JSON\n"
-                "3. Fill in the manual spinboxes and click ✓ Use These Params"
-            )
-            return
-
+        """Generate DAPI input zarr (user ruling 2026-11-10, docs/
+        v17_step1_generate_decouple_plan.md): one image for every method, no
+        pre-segmentation needed. With a result chosen (Use) its parameters
+        are saved too, as Step2's; without one only the image is written and
+        Step2 starts from its manual default."""
         preseg_cfg = None
-        if self._params_source == PRESEG_SOURCE:
+        if self._params_source == PRESEG_SOURCE:     # a result chosen with Use
             ok, why = self._preseg_selection_valid()
             if not ok:
                 self._drop_preseg_selection()
@@ -11502,17 +11517,11 @@ class MainWindow(QMainWindow):
             return
 
         if not self._require_committed_fusion_settings(
-                "Generating fused.zarr"):
+                "Generating the DAPI input zarr"):
             return
-        if not self._params_match_committed_settings():
-            QMessageBox.warning(
-                self, "Segmentation params are from other settings",
-                "These segmentation parameters were found by a search that ran "
-                "on different fusion settings, so pairing them with this "
-                "fusion would describe a picture neither of them saw.\n\n"
-                "Run the search again on the saved settings.")
-            print("[Step1] save refused: the params were searched on "
-                  "other fusion settings")
+        if self._committed_fusion_settings() is None:
+            QMessageBox.warning(self, "Generate",
+                                "Save the fusion settings first (Save Fusion Settings).")
             return
 
         # ── Every weighted channel has a window ──────────────────────
@@ -11565,30 +11574,11 @@ class MainWindow(QMainWindow):
         self._last_save = json.loads(json.dumps(fcfg, default=str))
         self._schedule_step1_session_save()
 
-        # ── Write timestamped segmentation params ─────────────────────
-        method_cfg = self.search.get_selected_method_config()
-        selected_method = (
-            self._p2_params.get("method")
-            or method_cfg.get("method")
-            or CELLPOSE_WHOLECELL_FUSION
-        )
-        if preseg_cfg is not None:
-            cpcfg = preseg_cfg
-        else:
-            params_block = dict(method_cfg.get("params") or {})
-            params_block.update(dict(self._p2_params.get("params") or {}))
-            cpcfg = normalize_segmentation_config({
-                "method":             selected_method,
-                "params":             params_block,
-                "model_type":         "cpsam",
-                "diameter":           self._p2_params.get("diameter"),
-                "flow_threshold":     self._p2_params.get("flow_threshold", 0.4),
-                "cellprob_threshold": self._p2_params.get("cellprob_threshold", 0.0),
-                "min_size":           15,
-                "phase1_diameter":    self._p1_diam,
-                "params_source":      self._params_source or "unknown",
-                "saved_at":           time.strftime("%Y-%m-%d %H:%M:%S"),
-            })
+        # ── The chosen result's parameters (only with a Use) ──────────
+        # Parameters set by hand are Step2's (its manual source): Step1 saves
+        # only a chosen pre-segmentation result's.
+        cpcfg = preseg_cfg
+        selected_method = (cpcfg or {}).get("method") or ""
         if selected_method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
             step1_weights = {}
             for gdata in (fcfg.get("groups") or {}).values():
@@ -11646,33 +11636,32 @@ class MainWindow(QMainWindow):
             print(f"[Step1] HQ roi_id={roi_id} roi_name={roi_name}")
             print(f"[Step1] HQ selected channels={hq_meta['hq_channels']}")
             print(f"[Step1] HQ available at save={available_at_save}")
-        # Block RM (§16.3-6): the file names the corrected product by a
-        # project-relative path (Step2 resolves it when it loads the file).
-        fp_method, _ = save_segmentation_params(
-            OUTPUT_DIR, run_store.to_records(cpcfg, run_store.project_dir_of(OUTPUT_DIR)))
-        print(f"[Save] fusion settings of this Save -> {self._step1_session_path(OUTPUT_DIR)} (last_save)")
-        print(f"[Save] {fp_method}")
-        print(f"[Step1] saved active segmentation params={fp_method}")
-        self._pending_segmentation_param_path = fp_method
-
-        # ── Tile selection dialog ─────────────────────────────────────
-        # Count active channels for RAM estimate
-        is_wholecell = selected_method == CELLPOSE_WHOLECELL_FUSION
-        worker_fcfg = dict(fcfg)
-        if not is_wholecell:
-            self._pending_fused_zarr_meta = None
-            nuc_ch = fcfg.get("nucleus", {}).get("channel") or self.config.nucleus_channel()
-            worker_fcfg = dict(fcfg)
-            # DAPI-only methods use channel 1 as segmentation input, but the
-            # saved zarr remains a full fusion preview/QC source: ch0 marker
-            # fusion, ch1 DAPI/nucleus.
-            worker_fcfg["nucleus"] = {"channel": nuc_ch, "weight": 1.0}
-            expected_dapi_meta = self._expected_dapi_input_meta(worker_fcfg, selected_method)
-            self._pending_dapi_input_meta = expected_dapi_meta
+        fp_method = ""
+        if cpcfg is not None:
+            # Block RM (§16.3-6): the file names the corrected product by a
+            # project-relative path (Step2 resolves it when it loads the file).
+            fp_method, _ = save_segmentation_params(
+                OUTPUT_DIR, run_store.to_records(cpcfg, run_store.project_dir_of(OUTPUT_DIR)))
+            print(f"[Save] {fp_method}")
+            print(f"[Step1] saved active segmentation params={fp_method}")
         else:
-            self._pending_dapi_input_meta = None
-            expected_fused_meta = self._expected_fused_zarr_meta(worker_fcfg, selected_method)
-            self._pending_fused_zarr_meta = expected_fused_meta
+            print("[Step1] no pre-segmentation result chosen: no segmentation params saved")
+        print(f"[Save] fusion settings of this Save -> {self._step1_session_path(OUTPUT_DIR)} (last_save)")
+        self._pending_segmentation_param_path = fp_method
+        # What Step2 takes once this Generate has finished (§2): the params
+        # just saved, else its manual default.
+        self._pending_step2_handover = ("params" if cpcfg is not None else "manual",
+                                        OUTPUT_DIR)
+
+        # ── One image for every method (user ruling 2026-11-10) ───────
+        # ch0 the marker fusion of the committed settings, ch1 the nucleus at
+        # weight 1 (full DAPI brightness).
+        is_wholecell = False
+        self._pending_fused_zarr_meta = None
+        nuc_ch = fcfg.get("nucleus", {}).get("channel") or self.config.nucleus_channel()
+        worker_fcfg = dict(fcfg)
+        worker_fcfg["nucleus"] = {"channel": nuc_ch, "weight": 1.0}
+        self._pending_dapi_input_meta = self._expected_dapi_input_meta(worker_fcfg)
         # Block DV (§3.3, §3.12): inside a workspace, a Generate either
         # returns to an existing version with the same content (its fused
         # products are reused) or makes a new one in its own folder.
@@ -11690,8 +11679,7 @@ class MainWindow(QMainWindow):
                 "Save in Step0 first.")
             return
         if rm_roi:
-            rm_key = self._rm_fuse_reuse_key(
-                self._pending_fused_zarr_meta if is_wholecell else self._pending_dapi_input_meta)
+            rm_key = self._rm_fuse_reuse_key(self._pending_dapi_input_meta)
             same = run_store.find_same(rm_roi, "fuse", rm_upstream, rm_key)
             if same and self._rm_reuse_fuse_run(same):
                 return
@@ -11739,7 +11727,7 @@ class MainWindow(QMainWindow):
                     cpcfg, fp_method)}
         started = self._start_fusion_worker(
             worker,
-            job_name="fusion" if is_wholecell else "DAPI input zarr",
+            job_name="DAPI input zarr",
             n_rows=n_rows, n_cols=n_cols)
         if started is None and rm_run:
             self._rm_discard_fuse("the fusion job was not started")

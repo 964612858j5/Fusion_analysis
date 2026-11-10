@@ -7,7 +7,7 @@ the way. A Phase 2 / manual choice keeps its old file -- the fixed min size
 15 and the Cellpose keys included -- and no contract (old files keep the old
 path, user ruling 2026-09-25); the expected file is the one the code before
 the change wrote (captured from HEAD 54e825d); since block E such a choice
-no longer reaches Save at all. Own module: one real window,
+is never saved (and since the decouple plan Generate runs without one). Own module: one real window,
 as in test_step1_preseg_run_ui.
 """
 import json
@@ -79,10 +79,12 @@ def test_a_chosen_result_saves_exactly_its_own_config(app, tmp_path, monkeypatch
         w.close()
 
 
-def test_the_old_panel_save_is_refused(app, tmp_path, monkeypatch):  # noqa: F811
+def test_the_old_panel_params_are_not_saved(app, tmp_path, monkeypatch):  # noqa: F811
     """Block E (plan 4.7, user ruling 2026-09-25): Phase 2 parameters -- the
-    old panel's, or an old session's -- no longer reach Save; no file is
-    written. (Until block E this test pinned the file they wrote: BEFORE.)"""
+    old panel's, or an old session's -- are never saved; no file is written.
+    (Until block E this test pinned the file they wrote: BEFORE.) Since the
+    decouple plan (2026-11-10) Generate itself needs no chosen result: it is
+    not refused, it just saves no parameters."""
     w, got, said = _saving_window(app, tmp_path, monkeypatch)
     try:
         w._p1_diam = 22.0
@@ -92,6 +94,6 @@ def test_the_old_panel_save_is_refused(app, tmp_path, monkeypatch):  # noqa: F81
         w._params_source = "phase2_grid"
         w._save()
         assert "cfg" not in got
-        assert "Choose a pre-segmentation result first" in said[-1]
+        assert not any("Choose a pre-segmentation result first" in str(m) for m in said)
     finally:
         w.close()

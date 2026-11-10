@@ -2848,6 +2848,70 @@ class Step2Page(QWidget):
         print(f"[Step2] active_param_file={self._seg_param_file}")
         return True
 
+    def use_manual_default(self, index_dir=""):
+        """A Generate without a chosen pre-segmentation result (docs/
+        v17_step1_generate_decouple_plan.md §2, user ruling §5 Q1): source
+        "None / Manual default", the method's defaults on screen. The
+        parameter index (`index_dir`'s, when none is loaded yet) is loaded
+        but not applied, so an older file can still be chosen on purpose."""
+        if index_dir and not self._seg_params_edit.text().strip():
+            self._load_seg_params_index(index_dir, silent=True, apply_active=False)
+        self._set_param_source("manual")
+        self._seg_config = {}
+        method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
+        old = self._loading_index_selection
+        self._loading_index_selection = True
+        try:
+            self._apply_method_defaults_to_ui(method)
+        finally:
+            self._loading_index_selection = old
+        print(f"[Step2] manual default (method={method}): no Step1 parameters chosen")
+
+    def _input_fusion_settings_hash(self):
+        """The fusion settings hash of the fuse run Step2's input comes from
+        (its params.json), or "" outside a workspace / for an older image."""
+        from ..utils import run_store
+        if not self._zarr_path:
+            return ""
+        run_dir = os.path.dirname(os.path.abspath(self._zarr_path))
+        if run_store.kind_of(run_dir) != "fuse":
+            return ""
+        try:
+            params = run_store.read_params(run_dir) or {}
+        except Exception:                                   # noqa: BLE001
+            return ""
+        return str(((params.get("fusion_settings") or {}).get("hash")) or "")
+
+    def _confirm_fusion_settings_match(self, seg_config):
+        """Parameters found on other fusion settings than the input's (user
+        ruling 2026-11-10, plan §2): asked before the run. Returns
+        `(run, record)`; `record` goes into the run's seg_config only (the
+        worker does not check it). Nothing is asked without both hashes."""
+        try:
+            block = preseg_contract.validate(seg_config)
+        except preseg_contract.ContractError:
+            return True, None                   # the contract check has said why
+        params_hash = str((block or {}).get("fusion_settings_hash") or "")
+        input_hash = self._input_fusion_settings_hash()
+        if not params_hash or not input_hash or params_hash == input_hash:
+            return True, None
+        print(f"[Step2] parameters from other fusion settings: "
+              f"{params_hash[:12]} (params) vs {input_hash[:12]} (input)")
+        box = QMessageBox(self)
+        box.setWindowTitle('Segmentation params')
+        box.setIcon(QMessageBox.Warning)
+        box.setText(
+            "These parameters were found on other fusion settings than the ones the "
+            "input image was generated with, so the result may differ from the Step1 "
+            "preview.\n\nRun anyway? This is recorded with the result.")
+        run_btn = box.addButton('Run anyway', QMessageBox.AcceptRole)
+        box.addButton('Cancel', QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is not run_btn:
+            return False, None
+        return True, {"params_hash": params_hash, "input_hash": input_hash,
+                      "confirmed_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+
     def _on_csd_engine_changed(self):
         """cds2 ignores constraint_mode -> force it to 'none' and grey it out."""
         is_cds2 = (self._csd_engine.currentData() == 'cds2')
@@ -3691,6 +3755,11 @@ class Step2Page(QWidget):
             run_it, identity_confirmation = self._confirm_engine_identity(seg_config)
             if not run_it:
                 return
+            run_it, settings_record = self._confirm_fusion_settings_match(seg_config)
+            if not run_it:
+                return
+            if settings_record is not None:
+                seg_config["settings_mismatch_confirmed"] = settings_record
         else:
             # Manual parameters are the user's own, not a Step1 hand-over.
             seg_config.pop(preseg_contract.CONTRACT_KEY, None)

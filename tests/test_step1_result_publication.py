@@ -229,7 +229,9 @@ def test_a_session_store_that_proves_itself_is_restored(app, tmp_path):
 
 @pytest.mark.parametrize("change,why", [
     ({"complete": False}, "never finished"),
-    ({"artifact_kind": "step1_dapi_input_zarr"}, "the other kind of artifact"),
+    # one kind for every method now (decouple plan 2026-11-10): the old
+    # whole-cell kind is the other one
+    ({"artifact_kind": "step1_fused_zarr"}, "the other kind of artifact"),
     ({"fusion_formula_version": 1}, "an older formula"),
     ({"config_hash": ""}, "no configuration recorded"),
     ({"config_hash": "unrelated-config"}, "another configuration entirely"),

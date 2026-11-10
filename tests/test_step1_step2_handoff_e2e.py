@@ -7,8 +7,8 @@ the subject and is stopped before it starts), Step2 entered with the real
 (`get_seg_config()`) carries the chosen combination unchanged, its contract
 checks out, and the engine would receive exactly that combination.
 
-Save takes a chosen result only (plan 4.7, user ruling 2026-09-25): old
-Phase 2 parameters, as an old session brings them back, leave it locked.
+Only a chosen result's parameters are saved (plan 4.7, user ruling
+2026-09-25); since the decouple plan (2026-11-10) Generate itself needs none.
 Own module: one real window per test, as in test_step1_preseg_run_ui.
 """
 import json
@@ -93,18 +93,25 @@ def test_step2_runs_the_chosen_combination_unchanged(app, tmp_path, monkeypatch,
         w.close()
 
 
-def test_old_phase2_parameters_do_not_unlock_save(app, tmp_path, monkeypatch):
-    """As an old session brings them back: Save stays locked and refuses."""
+def test_old_phase2_parameters_are_neither_needed_nor_saved(app, tmp_path, monkeypatch):
+    """As an old session brings them back. Since the decouple plan
+    (2026-11-10) Generate does not need a chosen result, and parameters that
+    are not a chosen pre-segmentation result are never saved."""
+    from block01.ui import main_window as mw
     w = _window(app, tmp_path, monkeypatch)
     said = _quiet(monkeypatch)
+    saved = []
+    monkeypatch.setattr(mw, "save_segmentation_params",
+                        lambda *a, **k: saved.append(a) or ("", ""))
+    monkeypatch.setattr(type(w), "_start_fusion_worker", lambda self, *a, **k: None)
     try:
         w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 31.0,
                         "flow_threshold": 0.7, "cellprob_threshold": -0.5}
         w._params_source = "phase2_grid"
-        w._check_save_unlock()
-        assert not w.btn_save.isEnabled()
         w._save()
-        assert "Choose a pre-segmentation result first" in said[-1]
+        assert not any("Choose a pre-segmentation result first" in str(m) for m in said)
+        assert saved == []
+        assert w.__dict__.get("_pending_segmentation_param_path", "") == ""
     finally:
         w.close()
 

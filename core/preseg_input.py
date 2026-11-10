@@ -22,6 +22,8 @@ from .fusion_engine import FusionEngine
 #: Which array each method is given; methods with the same kind share one.
 INPUT_KIND = {
     "cellpose_wholecell_fusion": "fusion_fusion_nucleus",
+    # cells on [f0, f0, f1], nuclei on channel 2 = f1 (the engine slices it)
+    "cellpose_wholecell_nuclei": "fusion_fusion_nucleus",
     "cellpose_nuclei_dapi": "nucleus",
     "cellpose_nuclei_expansion": "nucleus",
     "stardist_nuclei_dapi": "nucleus",

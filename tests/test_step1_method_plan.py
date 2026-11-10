@@ -32,8 +32,9 @@ def _spec(method, key):
 
 
 # ── the parameter table ─────────────────────────────────────────────────────
-def test_the_ui_lists_the_eight_methods_and_hides_hq():
-    assert len(ps.UI_METHODS) == 8
+def test_the_ui_lists_the_nine_methods_and_hides_hq():
+    # nine since v17's Cellpose whole-cell + nuclei
+    assert len(ps.UI_METHODS) == 9
     assert not set(ps.HIDDEN_METHODS) & set(ps.UI_METHODS)
     for m in ps.UI_METHODS:                       # every default is a valid value
         for s in ps.specs(m):

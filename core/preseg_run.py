@@ -160,7 +160,7 @@ def mask_path(rdir, task_id, kind):
 
 
 def publish_result(rdir, run, task, status, masks=None, error="", device="", runtime_s=None,
-                   paired=None):
+                   paired=None, drops=None):
     """Masks first, then the record; returns the record. `masks` =
     {"cell": array|None, "nucleus": array|None} for an ok task."""
     import numpy as np
@@ -190,6 +190,8 @@ def publish_result(rdir, run, task, status, masks=None, error="", device="", run
     }
     if paired is not None:
         record["paired"] = bool(paired)
+    if drops is not None:          # Cellpose whole-cell + nuclei: what the pairing left out
+        record["drops"] = {str(k): int(v) for k, v in drops.items()}
     protocol.publish_json(record_path(rdir, task["task_id"]), record)
     return record
 

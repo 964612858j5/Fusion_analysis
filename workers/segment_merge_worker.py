@@ -64,7 +64,8 @@ from ..utils.tile_scheduler import TileScheduler
 from ..utils.tile_strategy import suggest_tile_strategy
 from ..seg_runner import protocol as runner_protocol
 from ..seg_runner.client import EngineProcess, EngineStartError
-from ..seg_runner.engines import EXPANSION_METHODS, METHOD_ENGINE, METHOD_OUTPUTS
+from ..seg_runner.engines import (CELL_AND_NUCLEUS_METHODS, EXPANSION_METHODS, METHOD_ENGINE,
+                                  METHOD_OUTPUTS)
 from ..seg_runner import engines as seg_engines
 from ..utils.mesmer_utils import mesmer_metadata
 from ..utils import segmentation_param_schema as param_schema
@@ -682,7 +683,12 @@ class SegmentMergeWorker(QThread):
     #: two expansions and nuclear-guided. Their nuclei are paired to their
     #: cells (`core.nuclei_pairing`), numbered on their own and mapped to a
     #: cell by the nucleus -> cell table. HQ / HQ2 / CDS keep their own path.
-    SECONDARY_NUCLEI_METHODS = frozenset(EXPANSION_METHODS) | {MESMER_NUCLEAR_GUIDED}
+    SECONDARY_NUCLEI_METHODS = (frozenset(EXPANSION_METHODS) | {MESMER_NUCLEAR_GUIDED}
+                                | frozenset(CELL_AND_NUCLEUS_METHODS))
+    #: docs/v17_cellpose_cell_nucleus_plan.md: a cell without a nucleus is
+    #: dropped -- per tile, and again at the merge when none of its nuclei
+    #: can be written.
+    CELLS_NEED_NUCLEUS = frozenset(CELL_AND_NUCLEUS_METHODS)
     UINT32_LIMIT = 2 ** 32 - 1
     TABLE_CHUNK = 1 << 20
 
@@ -725,7 +731,8 @@ class SegmentMergeWorker(QThread):
         size = self._size_filter(zarr_path or self.zarr_path)
         merger = seam_merge.SeamMerger((full_h, full_w), stiles, spill, with_nuclei=keeps_nuclei,
                                        table_sink=sink, table_chunk=self.TABLE_CHUNK,
-                                       max_area=size["max_area_px"], judge=judge)
+                                       max_area=size["max_area_px"], judge=judge,
+                                       require_nucleus=self.method in self.CELLS_NEED_NUCLEUS)
         merger.size_filter = size
         print(f"[Step2] size filter {out_prefix or 'whole image'}: objects above "
               f"{size['max_area_px']:,} px are dropped ({size['rule']}; {size['source']})")
@@ -969,15 +976,24 @@ class SegmentMergeWorker(QThread):
                           dtype="<u4", fill_value=0)
         table[0] = 0
         return {"offset": 0, "table": table, "table_path": table_path, "table_partial": partial,
-                "dropped": {"multiple_cells": 0, "partial_background": 0, "outside_cells": 0}}
+                "dropped": {"multiple_cells": 0, "partial_background": 0, "outside_cells": 0},
+                "pairing": {}}
 
     def _nuclei_count_drops(self, state, local_raw, dropped_ids, own_local):
         """Count the tile's dropped nuclei that this tile owns (by their own
         centroid) -- before any `continue`, so a tile without kept cells
-        still counts the nuclei it dropped."""
-        for reason, n in nuclei_pairing.owned_drop_counts(local_raw, dropped_ids,
-                                                          own_local).items():
-            state["dropped"][reason] += n
+        still counts the nuclei it dropped. Cellpose whole-cell + nuclei
+        (plan §13) hands its combine events instead, as {reason: (label
+        image, ids)}: counted the same way, into `state["pairing"]`."""
+        plain, events = {}, {}
+        for reason, value in (dropped_ids or {}).items():
+            (events if isinstance(value, tuple) else plain)[reason] = value
+        if plain:
+            for reason, n in nuclei_pairing.owned_drop_counts(local_raw, plain,
+                                                              own_local).items():
+                state["dropped"][reason] = state["dropped"].get(reason, 0) + n
+        for reason, n in nuclei_pairing.owned_object_counts(events, own_local).items():
+            state["pairing"][reason] = state["pairing"].get(reason, 0) + int(n)
 
     def _nuclei_add_tile(self, state, lut, local_nuclei, local_cell):
         """The tile's nuclei, renumbered: a nucleus stays when its cell does
@@ -1077,6 +1093,15 @@ class SegmentMergeWorker(QThread):
             store["nuclei"] = {"predicted": predicted, "kept": m,
                                "retained_fraction": (m / predicted) if predicted else None,
                                "dropped": dropped}
+            if self.method in self.CELLS_NEED_NUCLEUS:
+                # plan §13: what making cells and nuclei one did (owned by
+                # centroid, per tile) and the cells the merge left out for
+                # having no writable nucleus; `kept` counts nucleus PIECES
+                pairing = dict(nuclei_state.get("pairing") or {})
+                pairing["cells_no_writable_nucleus"] = int(
+                    ((seam or {}).get("seam_reconciliation") or {})
+                    .get("cells_dropped_no_writable_nucleus", 0))
+                store["nuclei"]["pairing"] = pairing
         elif self.method in self.SECONDARY_NUCLEI_METHODS:
             store["nuclei"] = {"unavailable": "this run recovered tiles from .npy; "
                                               "the nuclei cannot be recovered"}
@@ -2686,7 +2711,16 @@ class SegmentMergeWorker(QThread):
             if raw is None:
                 raise RuntimeError(f"the engine returned no nucleus mask for {tid}")
             raw = raw.astype(np.uint32, copy=False)
-            kept, nucleus_cell, counts, dropped = nuclei_pairing.pair_nuclei(mask, raw)
+            if method in self.CELLS_NEED_NUCLEUS:
+                # plan §13: cells and nuclei made one (union / shared out /
+                # nucleus-born cells; cells without a nucleus dropped); its
+                # events are counted by centroid like the dropped nuclei
+                combined = nuclei_pairing.combine_cells_and_nuclei(mask, raw)
+                return {"mask": combined["cells"], "nuclei": combined["nuclei"],
+                        "nuclei_cell": combined["nucleus_cell"], "nuclei_raw": raw,
+                        "nuclei_dropped": dict(combined["objects"]), "qc_rows": []}
+            else:
+                kept, nucleus_cell, counts, dropped = nuclei_pairing.pair_nuclei(mask, raw)
             return {"mask": mask, "nuclei": kept, "nuclei_cell": nucleus_cell,
                     "nuclei_raw": raw, "nuclei_dropped": dropped, "qc_rows": []}
         return mask
@@ -3576,6 +3610,13 @@ class SegmentMergeWorker(QThread):
             # contract raises ContractError here.
             self._contract = preseg_contract.validate(self.seg_config)
             self._engine_meta = None
+            if self.recovery_npy_dir is not None and self.method in self.CELLS_NEED_NUCLEUS:
+                # docs/v17_cellpose_cell_nucleus_plan.md §2: recovered tiles
+                # carry no nuclei, so the cells could not be paired
+                raise RuntimeError(
+                    "Recovery Mode cannot run this method: the saved tiles have no "
+                    "nuclei, so cells without a nucleus could not be dropped. Run it "
+                    "again without Recovery Mode.")
             if self._contract is not None:
                 if int(self._contract["halo_px"]) != int(self.overlap_px):
                     raise RuntimeError(

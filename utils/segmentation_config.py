@@ -9,6 +9,7 @@ from copy import deepcopy
 
 
 CELLPOSE_WHOLECELL_FUSION = "cellpose_wholecell_fusion"
+CELLPOSE_WHOLECELL_NUCLEI = "cellpose_wholecell_nuclei"
 CELLPOSE_NUCLEI_DAPI = "cellpose_nuclei_dapi"
 CELLPOSE_NUCLEI_EXPANSION = "cellpose_nuclei_expansion"
 CELLPOSE_NUCLEI_HQ = "cellpose_nuclei_hq"
@@ -36,6 +37,32 @@ SEGMENTATION_METHODS = {
             "batch_size": 8,
         },
         "output_type": "cell_mask",
+    },
+    # docs/v17_cellpose_cell_nucleus_plan.md (user rulings 2026-11-10): cells
+    # as CELLPOSE_WHOLECELL_FUSION, nuclei as CELLPOSE_NUCLEI_DAPI, from the
+    # same Step1 image; a nucleus must lie in one cell, a cell without a
+    # nucleus is dropped. The nucleus pass has its own (not grid-searched)
+    # parameters.
+    CELLPOSE_WHOLECELL_NUCLEI: {
+        "method": CELLPOSE_WHOLECELL_NUCLEI,
+        "display_name": "Cellpose whole-cell + nuclei (Fusion + DAPI)",
+        "input_type": "fused_channel_plus_dapi",
+        "process": "cellpose_cells_and_nuclei_paired_cells_without_nucleus_dropped",
+        "params": {
+            "model_type": "cpsam",
+            "diameter": None,
+            "flow_threshold": 0.4,
+            "cellprob_threshold": 0.0,
+            "min_size": 15,
+            "nucleus_diameter": None,
+            "nucleus_flow_threshold": 0.4,
+            "nucleus_cellprob_threshold": 0.0,
+            "nucleus_min_size": 15,
+            "use_gpu": True,
+            "tile_size": 1024,
+            "batch_size": 8,
+        },
+        "output_type": "cell_mask_with_nuclei",
     },
     CELLPOSE_NUCLEI_DAPI: {
         "method": CELLPOSE_NUCLEI_DAPI,
@@ -402,6 +429,10 @@ def normalize_segmentation_config(config=None, default_method=CELLPOSE_WHOLECELL
         "tile_size",
         "batch_size",
         "expand_distance",
+        "nucleus_diameter",
+        "nucleus_flow_threshold",
+        "nucleus_cellprob_threshold",
+        "nucleus_min_size",
         "phase1_diameter",
         "params_source",
         "hq_channels",

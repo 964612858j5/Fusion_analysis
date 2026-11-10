@@ -11,6 +11,7 @@ import math
 
 _CELLPOSE_METHODS = {
     "cellpose_wholecell_fusion",
+    "cellpose_wholecell_nuclei",
     "legacy_cellpose_wholecell_fusion",
     "cellpose_nuclei_dapi",
     "cellpose_nuclei_expansion",

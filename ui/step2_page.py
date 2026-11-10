@@ -30,6 +30,8 @@ from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_HQ,
     CELLPOSE_NUCLEI_HQ2,
     CELLPOSE_WHOLECELL_FUSION,
+    CELLPOSE_WHOLECELL_NUCLEI,
+    SEGMENTATION_METHODS,
     MESMER_WHOLE_CELL,
     MESMER_NUCLEI,
     MESMER_NUCLEAR_GUIDED,
@@ -60,6 +62,10 @@ from ..workers.segment_merge_worker import SegmentMergeWorker
 from ..core import preseg_contract
 from ..seg_runner import engines as seg_engines
 from ..utils import segmentation_param_schema as param_schema
+
+
+NUCLEUS_PASS_KEYS = ("nucleus_diameter", "nucleus_flow_threshold",
+                     "nucleus_cellprob_threshold", "nucleus_min_size")
 
 
 def _gpu_on(value):
@@ -690,6 +696,32 @@ class Step2Page(QWidget):
         self._cp_minsize.setRange(1, 10000)
         self._cp_minsize.setValue(15)
         r, self._cp_minsize_label, _ = _param_row('min_size (px²):', self._cp_minsize)
+        cpl.addLayout(r)
+
+        # Cellpose whole-cell + nuclei (docs/v17_cellpose_cell_nucleus_plan.md):
+        # the nucleus pass's own values, shown for that method only.
+        self._nuc_diam = QDoubleSpinBox()
+        self._nuc_diam.setRange(0, 300)
+        self._nuc_diam.setValue(0)
+        self._nuc_diam.setSpecialValueText('auto')
+        r, self._nuc_diam_label, _ = _param_row('nucleus diameter (0=auto):', self._nuc_diam)
+        cpl.addLayout(r)
+        self._nuc_flow = QDoubleSpinBox()
+        self._nuc_flow.setRange(0.0, 3.0)
+        self._nuc_flow.setSingleStep(0.05)
+        self._nuc_flow.setValue(0.4)
+        r, self._nuc_flow_label, _ = _param_row('nucleus flow_threshold:', self._nuc_flow)
+        cpl.addLayout(r)
+        self._nuc_prob = QDoubleSpinBox()
+        self._nuc_prob.setRange(-6.0, 6.0)
+        self._nuc_prob.setSingleStep(0.1)
+        self._nuc_prob.setValue(0.0)
+        r, self._nuc_prob_label, _ = _param_row('nucleus cellprob_threshold:', self._nuc_prob)
+        cpl.addLayout(r)
+        self._nuc_minsize = QtWidgets.QSpinBox()
+        self._nuc_minsize.setRange(1, 10000)
+        self._nuc_minsize.setValue(15)
+        r, self._nuc_minsize_label, _ = _param_row('nucleus min_size (px²):', self._nuc_minsize)
         cpl.addLayout(r)
 
         # Every method, manual or from the index (block M): unchecked, the
@@ -2941,6 +2973,7 @@ class Step2Page(QWidget):
             self._cp_flow.setValue(p.get('flow_threshold', 0.4))
             self._cp_prob.setValue(p.get('cellprob_threshold', 0.0))
             self._cp_minsize.setValue(p.get('min_size', 15))
+            self._set_nucleus_pass(p)
         self._cp_gpu.setChecked(_gpu_on(p.get('use_gpu', True)))
         self._sd_model.setText(preseg_contract.STARDIST_MODEL)
         self._sd_prob.setValue(-1.0 if p.get('prob_thresh') is None else float(p.get('prob_thresh')))
@@ -3031,12 +3064,24 @@ class Step2Page(QWidget):
             self._mesmer_min_size.setValue(int(p.get("postprocess_min_size", 0) or 0))
         self._on_method_changed()
 
+    def _set_nucleus_pass(self, p):
+        """The nucleus pass's four values (Cellpose whole-cell + nuclei);
+        a missing key is the registry's default, None = auto diameter."""
+        d = SEGMENTATION_METHODS[CELLPOSE_WHOLECELL_NUCLEI]["params"]
+        diam = p.get('nucleus_diameter', d['nucleus_diameter'])
+        self._nuc_diam.setValue(float(diam or 0))
+        self._nuc_flow.setValue(float(p.get('nucleus_flow_threshold', d['nucleus_flow_threshold'])))
+        self._nuc_prob.setValue(float(p.get('nucleus_cellprob_threshold',
+                                            d['nucleus_cellprob_threshold'])))
+        self._nuc_minsize.setValue(int(p.get('nucleus_min_size', d['nucleus_min_size'])))
+
     def _apply_method_defaults_to_ui(self, method):
         cfg = normalize_segmentation_config({"method": method})
         self._cp_diam.setValue(cfg.get('diameter') or 0)
         self._cp_flow.setValue(cfg.get('flow_threshold', 0.4))
         self._cp_prob.setValue(cfg.get('cellprob_threshold', 0.0))
         self._cp_minsize.setValue(cfg.get('min_size', 15))
+        self._set_nucleus_pass(cfg)
         self._cp_gpu.setChecked(_gpu_on(cfg.get('use_gpu', True)))
         self._sd_model.setText(preseg_contract.STARDIST_MODEL)
         self._sd_prob.setValue(-1.0 if cfg.get('prob_thresh') is None else float(cfg.get('prob_thresh')))
@@ -3303,6 +3348,20 @@ class Step2Page(QWidget):
             data['skip_tiles'] = skip
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             data.update(params)
+        if method != CELLPOSE_WHOLECELL_NUCLEI:
+            # a file / draft of that method loaded before: its nucleus values
+            # do not belong to this one (codex review 2026-11-10)
+            for key in NUCLEUS_PASS_KEYS:
+                data.pop(key, None)
+                params.pop(key, None)
+        else:
+            nd = self._nuc_diam.value()
+            data.update({
+                'nucleus_diameter':           None if nd == 0 else nd,
+                'nucleus_flow_threshold':     self._nuc_flow.value(),
+                'nucleus_cellprob_threshold': self._nuc_prob.value(),
+                'nucleus_min_size':           self._nuc_minsize.value(),
+            })
         # The Step0 manual channel remap reaches Step2 via source-alignment
         # PROMOTION at launch (_promote_step0_remap in _run), NEVER by attaching the
         # raw Step0 preview config here. That preview config is Step2-incompatible by
@@ -3428,7 +3487,7 @@ class Step2Page(QWidget):
             and (self._param_source_combo.currentData() or "manual") == "manual"
         ):
             self._apply_method_defaults_to_ui(method)
-        is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)
+        is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_WHOLECELL_NUCLEI, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
         is_expansion = method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION)
         is_hq = method == CELLPOSE_NUCLEI_HQ
@@ -3449,6 +3508,10 @@ class Step2Page(QWidget):
             self._sd_nms_label, self._sd_nms,
         ):
             w.setVisible(is_stardist)
+        for w in (self._nuc_diam_label, self._nuc_diam, self._nuc_flow_label, self._nuc_flow,
+                  self._nuc_prob_label, self._nuc_prob, self._nuc_minsize_label,
+                  self._nuc_minsize):
+            w.setVisible(method == CELLPOSE_WHOLECELL_NUCLEI)
         self._sd_expand_label.setVisible(is_expansion)
         self._sd_expand.setVisible(is_expansion)
         for w in self._hq_widgets:
@@ -3782,6 +3845,14 @@ class Step2Page(QWidget):
         recovery_dir = None
         if self._rec_box.isChecked():
             recovery_dir = self._rec_edit.text().strip() or None
+        if recovery_dir and seg_config.get("method") in seg_engines.CELL_AND_NUCLEUS_METHODS:
+            # docs/v17_cellpose_cell_nucleus_plan.md §2: recovered tiles have
+            # no nuclei, so the cells could not be paired
+            QMessageBox.warning(self, 'Recovery Mode',
+                                'Recovery Mode cannot run this method: the saved tiles have '
+                                'no nuclei, so cells without a nucleus could not be dropped.\n\n'
+                                'Untick Recovery Mode to run it.')
+            return
 
         if self._auto_tile_strategy.isChecked() and not self._is_stardist():
             # (StarDist: the grid checked by `_stardist_grid_ok_for_run` -- over

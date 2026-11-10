@@ -38,6 +38,11 @@ IDENT = {
 COMBOS = {
     "cellpose_wholecell_fusion": {"diameter": 25.0, "flow_threshold": 0.6,
                                   "cellprob_threshold": -1.0, "min_size": 30},
+    # v17: non-default nucleus values, an auto nucleus diameter (plan §4)
+    "cellpose_wholecell_nuclei": {"diameter": 25.0, "flow_threshold": 0.6,
+                                  "cellprob_threshold": -1.0, "min_size": 30,
+                                  "nucleus_diameter": None, "nucleus_flow_threshold": 0.7,
+                                  "nucleus_cellprob_threshold": -0.5, "nucleus_min_size": 9},
     "cellpose_nuclei_dapi": {"diameter": None, "flow_threshold": 0.4,
                              "cellprob_threshold": 0.5, "min_size": 40},
     "cellpose_nuclei_expansion": {"diameter": 18.5, "flow_threshold": 0.8,

@@ -336,17 +336,24 @@ class SeamMerger:
     def __init__(self, region_shape, tiles, spill_dir, with_nuclei=False,
                  tau=SEAM_MERGE["duplicate_overlap_threshold"],
                  min_free=SEAM_MERGE["minimum_writable_fraction"],
-                 table_sink=None, table_chunk=1 << 20, max_area=None, judge=None):
+                 table_sink=None, table_chunk=1 << 20, max_area=None, judge=None,
+                 require_nucleus=False):
         """`judge(tile, local) -> {label: verdict row}` (F4-3): the Regions
         verdict of every object of a tile's read window, computed once per
         tile; with it, `_write` drops the rejected winners before they take
-        an id and records each written cell's row (`facts`, id order)."""
+        an id and records each written cell's row (`facts`, id order).
+
+        `require_nucleus` (docs/v17_cellpose_cell_nucleus_plan.md): a cell
+        none of whose nuclei can be written (all would cross pixels another
+        cell already took) is not written either -- before it takes an id,
+        so every written cell holds a nucleus and ids stay 1..N."""
         import os
         self.shape = tuple(region_shape)
         self.tiles = list(tiles)
         self.spill_dir = spill_dir
         os.makedirs(spill_dir, exist_ok=True)
         self.with_nuclei = with_nuclei
+        self.require_nucleus = bool(require_nucleus) and bool(with_nuclei)
         self.tau, self.min_free = float(tau), float(min_free)
         self.n_cells = 0
         self.n_nuclei = 0
@@ -366,6 +373,8 @@ class SeamMerger:
                       "dropped_insufficient_free_pixels": 0,
                       "nuclei_dropped_seam_conflict": 0,
                       "oversized_objects_dropped": 0, "nuclei_dropped_oversized": 0}
+        if self.require_nucleus:                 # only then: the legacy record is unchanged
+            self.stats["cells_dropped_no_writable_nucleus"] = 0
         if judge is not None:                    # only with Regions: the legacy record is unchanged
             self.stats.update({f"regions_dropped_{r}": 0 for r in VERDICT_REASONS if r},
                               nuclei_dropped_regions=0)
@@ -387,6 +396,13 @@ class SeamMerger:
         if n_free == 0 or n_free < self.min_free * cand.area:
             self.stats["dropped_insufficient_free_pixels"] += 1
             return 0
+        if self.require_nucleus:
+            ids = (np.unique(nuc_crop[nuc_crop > 0]) if nuc_crop is not None
+                   else np.zeros(0, np.uint32))
+            if not any(free[nuc_crop == n].all() for n in ids):
+                self.stats["cells_dropped_no_writable_nucleus"] += 1
+                self.stats["nuclei_dropped_seam_conflict"] += int(ids.size)
+                return 0
         if n_free < cand.area:
             self.stats["cells_with_clipped_pixels"] += 1
             self.stats["clipped_pixels"] += int(cand.area - n_free)

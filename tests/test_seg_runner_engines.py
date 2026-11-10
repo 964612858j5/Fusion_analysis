@@ -39,7 +39,8 @@ def test_every_ui_method_has_the_outputs_of_the_plan_table():
     assert set(engines.METHOD_OUTPUTS) == set(ps.UI_METHODS)
     both = {m for m, o in engines.METHOD_OUTPUTS.items() if set(o) == {"cell", "nucleus"}}
     assert both == {"cellpose_nuclei_expansion", "stardist_nuclei_expansion",
-                    "mesmer_nuclear_guided"}
+                    "mesmer_nuclear_guided",
+                    "cellpose_wholecell_nuclei"}   # v17 Cellpose whole-cell + nuclei
     assert engines.METHOD_OUTPUTS["mesmer_whole_cell"] == ("cell",)
 
 

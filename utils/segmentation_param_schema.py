@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from .segmentation_config import (
     CELLPOSE_NUCLEI_CSD, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION,
     CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_WHOLECELL_FUSION,
+    CELLPOSE_WHOLECELL_NUCLEI,
     MESMER_NUCLEAR_GUIDED, MESMER_NUCLEI, MESMER_WHOLE_CELL, SEGMENTATION_METHODS,
     STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION, RETIRED_METHODS,
 )
@@ -27,7 +28,7 @@ from .segmentation_config import (
 #: The methods the new UI lists, in this order (HQ / HQ2 / CSD are retired:
 #: `segmentation_config.RETIRED_METHODS`).
 UI_METHODS = [
-    CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION,
+    CELLPOSE_WHOLECELL_FUSION, CELLPOSE_WHOLECELL_NUCLEI, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION,
     STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION,
     MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED,
 ]
@@ -81,6 +82,19 @@ def _cellpose(expansion):
     return specs
 
 
+def _cellpose_with_nuclei():
+    """docs/v17_cellpose_cell_nucleus_plan.md: the cell pass as whole-cell
+    (its first three listable), then the nucleus pass's own single values
+    (user ruling 2026-11-10: not grid-searched)."""
+    return _cellpose(False) + [
+        ParamSpec("nucleus_diameter", "nucleus diameter", "float", 0, 300, 1, None, False,
+                  True, "0 or auto: Cellpose estimates it"),
+        ParamSpec("nucleus_flow_threshold", "nucleus flow", "float", 0, 3, 2, 0.4),
+        ParamSpec("nucleus_cellprob_threshold", "nucleus cellprob", "float", -6, 6, 2, 0.0),
+        ParamSpec("nucleus_min_size", "nucleus min size", "int", 1, 10000, 0, 15),
+    ]
+
+
 def _stardist(expansion):
     specs = [
         ParamSpec("prob_thresh", "prob", "float", 0, 1, 2, None, True, True,
@@ -112,6 +126,7 @@ def _mesmer(method):
 
 METHOD_PARAMS = {
     CELLPOSE_WHOLECELL_FUSION: _cellpose(False),
+    CELLPOSE_WHOLECELL_NUCLEI: _cellpose_with_nuclei(),
     CELLPOSE_NUCLEI_DAPI: _cellpose(False),
     CELLPOSE_NUCLEI_EXPANSION: _cellpose(True),
     STARDIST_NUCLEI_DAPI: _stardist(False),
@@ -198,7 +213,7 @@ def _parse_one(spec, tok):
         raise ParamError(f"{tok} has more than {spec.decimals} decimal"
                          f"{'s' if spec.decimals != 1 else ''}")
     v = round(v, spec.decimals)
-    if spec.auto and spec.key == "diameter" and v == 0:
+    if spec.auto and spec.key in ("diameter", "nucleus_diameter") and v == 0:
         return None                                  # 0 means auto, as in Step2
     return v
 

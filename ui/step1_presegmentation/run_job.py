@@ -261,18 +261,29 @@ class PresegRunJob:
                 rrec = json.load(f)
             raw = {k: (np.load(rrec[k]["path"]) if (rrec.get(k) or {}).get("status") == "ok" else None)
                    for k in ("cell", "nucleus")}
+            combined = None
+            if t["method"] in seg_engines.CELL_AND_NUCLEUS_METHODS:
+                # plan §13: cells and nuclei made one first, so Regions judges
+                # the cells as they will be (nuclei follow their cell)
+                combined = combine_window(raw)
+                raw = {"cell": combined["cells"], "nucleus": combined["nuclei"]}
             raster = self._regions_raster(t["method"])
             if raster is not None:                        # F4-2: the Regions rules, before the crop
                 raw, dropped = preseg_input.regions_filter(t["method"], raw, rt["_window"], raster)
                 print(f"[Preseg] {t['task_id']}: Regions dropped {dropped}")
             own = preseg_input.own_local(t["patch_bbox"], rt["_window"])
-            masks, paired = own_masks(t["method"], raw, own)
+            drops = None
+            if combined is not None:
+                masks, drops = own_cell_nucleus_masks(raw, combined, own)
+                paired = True
+            else:
+                masks, paired = own_masks(t["method"], raw, own)
             for k in ("cell", "nucleus"):
                 p = (rrec.get(k) or {}).get("path")
                 if p and os.path.exists(p):
                     os.remove(p)
             self._settle(t, preseg_run.OK, "", masks=masks, device=rrec.get("device_used", ""),
-                         runtime_s=rrec.get("runtime_s"), paired=paired)
+                         runtime_s=rrec.get("runtime_s"), paired=paired, drops=drops)
         except Exception:  # noqa: BLE001
             self._settle(t, preseg_run.FAILED, "result: " + traceback.format_exc()[-2000:])
 
@@ -330,6 +341,51 @@ def own_masks(method, raw, own):
             paired = False
     return ({k: (None if v is None else label_ownership.crop(v, own)) for k, v in out.items()},
             paired)
+
+
+def combine_window(raw):
+    """Cellpose whole-cell + nuclei: the window's cells and nuclei made one
+    (`core.nuclei_pairing.combine_cells_and_nuclei`, plan §13)."""
+    from ...core import nuclei_pairing
+    cell, nuc = raw.get("cell"), raw.get("nucleus")
+    if cell is None or nuc is None:
+        raise RuntimeError("the engine returned no cell or no nucleus mask")
+    return nuclei_pairing.combine_cells_and_nuclei(cell, nuc)
+
+
+def own_cell_nucleus_masks(raw, combined, own):
+    """What the patch owns of a combined window (plan §13): the cells by
+    their centroid, each kept nucleus piece with its PARENT cell (separate
+    ids; `nucleus_cell` maps them -- after the Regions filter `raw` may have
+    fewer of either). Cropped to the patch afterwards: at the patch edge a
+    kept cell may show without its nucleus (visibility, not the rule).
+    Returns ({cell, nucleus}, drops): the window's events owned by centroid
+    (`combined["objects"]`)."""
+    from ...core import nuclei_pairing
+    cells = np.asarray(raw["cell"], np.uint32)
+    nuc = np.asarray(raw["nucleus"], np.uint32)
+    parent_of = np.asarray(combined["nucleus_cell"], np.int64)
+    drops = nuclei_pairing.owned_object_counts(combined["objects"], own)
+    keep = (label_ownership.kept_labels(cells, own)
+            if cells.size and cells.max() > 0 else [])
+    if not keep:
+        zero = np.zeros(cells.shape, np.uint32)
+        out = {"cell": zero, "nucleus": zero.copy()}
+    else:
+        lut = label_ownership.ownership_lut(cells, keep)
+        big = np.zeros(max(lut.size, int(parent_of.max()) + 1), np.uint32)
+        big[:lut.size] = lut                      # a parent the filter removed -> 0
+        present = np.zeros(parent_of.size, bool)
+        present[np.unique(nuc[nuc > 0])] = True
+        parent = np.zeros(parent_of.size, np.uint32)
+        parent[present] = big[parent_of[present]]
+        parent[0] = 0
+        nuc_ids = np.nonzero(parent > 0)[0]
+        nuc_lut = np.zeros(parent_of.size, np.uint32)
+        nuc_lut[nuc_ids] = np.arange(1, nuc_ids.size + 1, dtype=np.uint32)
+        out = {"cell": lut[cells], "nucleus": nuc_lut[nuc]}
+    return ({k: label_ownership.crop(v, own) for k, v in out.items()},
+            {k: int(v) for k, v in drops.items()})
 
 
 def summary_line(records, total):

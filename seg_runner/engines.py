@@ -26,6 +26,7 @@ import pathlib
 # Which output each method produces (plan 7.2): "cell", "nucleus" or both.
 METHOD_OUTPUTS = {
     "cellpose_wholecell_fusion": ("cell",),
+    "cellpose_wholecell_nuclei": ("cell", "nucleus"),
     "cellpose_nuclei_dapi": ("nucleus",),
     "cellpose_nuclei_expansion": ("cell", "nucleus"),
     "stardist_nuclei_dapi": ("nucleus",),
@@ -36,6 +37,20 @@ METHOD_OUTPUTS = {
 }
 METHOD_ENGINE = {m: m.split("_", 1)[0] for m in METHOD_OUTPUTS}
 EXPANSION_METHODS = ("cellpose_nuclei_expansion", "stardist_nuclei_expansion")
+#: Cells and nuclei from two passes of ONE model on one input
+#: (docs/v17_cellpose_cell_nucleus_plan.md): the nucleus pass reads the
+#: input's last channel -- the nucleus channel -- with its own parameters.
+#: Returned RAW; the pairing is the application's (core/nuclei_pairing.py).
+CELL_AND_NUCLEUS_METHODS = ("cellpose_wholecell_nuclei",)
+#: the registry's nucleus defaults (utils/segmentation_config.py), here so
+#: the engine process imports nothing of the application
+NUCLEUS_PASS_DEFAULTS = {"diameter": None, "flow_threshold": 0.4,
+                         "cellprob_threshold": 0.0, "min_size": 15}
+
+
+def nucleus_pass_params(params):
+    """The nucleus pass's parameters: `nucleus_<key>` as `<key>`."""
+    return {k: params.get(f"nucleus_{k}", d) for k, d in NUCLEUS_PASS_DEFAULTS.items()}
 # The listed Mesmer thresholds and the output they act on (plan P2).
 MESMER_THRESHOLDS = ("maxima_threshold", "interior_threshold")
 MESMER_THRESHOLD_TARGET = {"mesmer_whole_cell": "whole_cell",
@@ -438,6 +453,11 @@ def run(engine_obj, method, image, params):
             nuc = masks["nuclear"]
             # nuclear-guided: the second output, library defaults, not post-processed
             result["nucleus"] = postprocess_mask(nuc, min_size) if "cell" not in outputs else nuc
+    elif method in CELL_AND_NUCLEUS_METHODS:
+        image = np.asarray(image)
+        result["cell"] = engine_obj.predict(image, params)
+        result["nucleus"] = engine_obj.predict(np.ascontiguousarray(image[..., -1]),
+                                               nucleus_pass_params(params))
     elif method in EXPANSION_METHODS:
         nuclei = np.asarray(engine_obj.predict(image, params))
         result["nucleus"] = nuclei

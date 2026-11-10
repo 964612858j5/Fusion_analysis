@@ -7484,6 +7484,17 @@ class MainWindow(QMainWindow):
             bits = [f"{st['total'] - st['pending']}/{st['total']} patches"]
             if st[preseg_run.OK]:
                 bits.append(f"{st['cells']} cells")
+                # Cellpose whole-cell + nuclei: what the pairing left out
+                # (docs/v17_cellpose_cell_nucleus_plan.md §2), from the records
+                drops = [r.get("drops") for r in self._preseg_records.values()
+                         if r.get("combo_id") == cid and r.get("drops")]
+                if drops:
+                    def total(key):
+                        return sum(int(d.get(key, 0)) for d in drops)
+                    bits.append(f"{total('cells_from_nucleus')} cells from a nucleus · "
+                                f"{total('nuclei_shared')} nuclei shared · "
+                                f"{total('cells_without_nucleus')} cells without a nucleus "
+                                f"dropped")
             if st[preseg_run.FAILED]:
                 bits.append(f"{st[preseg_run.FAILED]} failed")
             if st[preseg_run.CANCELLED]:

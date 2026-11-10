@@ -1,4 +1,10 @@
-# v17 — PyQt5 → PySide6 move (plan v0.4, 2026-11-07)
+# v17 — PyQt5 → PySide6 move (plan v0.5, 2026-11-08)
+
+v0.5: **M4 done in the repo** (docs/v17_pyside6_wrapup_plan.md): the
+installer's pip list carried PyQt5 and no PySide6 (fixed), the installer's
+glibc floor is 2.34, NOTICE, the GPU benchmark's version record. Still open:
+the Linux test-exit crash (§9), the server rebuild check, PyQt5 out of
+fusion_test2, Windows, and older-Linux support through conda-forge.
 
 v0.4: **M0–M3 done** (PySide6 6.11.3-Essentials). What the move cost, per
 area, is in §8 — the two findings that changed code shape are that a Qt 6
@@ -177,6 +183,7 @@ pyqtgraph 0.14.0). Probes ran against an isolated install
 
 ## 9. Open items from M2
 
+* (v0.5) M4 repo part done — see docs/v17_pyside6_wrapup_plan.md §10.
 * The test-session exit crash above (2 modules). The product's own open/close
   was clean; the remaining work is to shut the scheduler workers down in those
   fixtures before the interpreter does it.

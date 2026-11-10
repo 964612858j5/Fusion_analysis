@@ -144,8 +144,9 @@ preflight() {
     # (no `cmd | head` here: under pipefail the writer's SIGPIPE fails the pipe)
     local glibc; glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || glibc="glibc 0"
     glibc=${glibc##* }
-    if [ "$(printf '%s\n2.28\n' "$glibc" | sort -V | sed -n 1p)" != 2.28 ]; then
-        say "  glibc:    $glibc -- too old (2.28 or newer needed)"; hard=1
+    # 2.34: PySide6 6.10+ ships Linux wheels only as manylinux_2_34
+    if [ "$(printf '%s\n2.34\n' "$glibc" | sort -V | sed -n 1p)" != 2.34 ]; then
+        say "  glibc:    $glibc -- too old (2.34 or newer needed: the interface's Qt for Python packages are built for it)"; hard=1
     else
         say "  glibc:    $glibc"
     fi

@@ -55,6 +55,7 @@ def _this_checkout_as_block01():
 
 
 _this_checkout_as_block01()
+from block01 import qt  # noqa: E402
 from block01.qt import QtCore, QtGui, QtWidgets, flag_value  # noqa: E402
 
 
@@ -917,8 +918,8 @@ def _environment(args) -> Dict[str, object]:
         "executable": sys.executable,
         "python": sys.version.split()[0],
         "sys_path": sys.path,
-        "pyqt": QtCore.PYQT_VERSION_STR,
-        "qt": QtCore.QT_VERSION_STR,
+        "qt_binding": f"{qt.BINDING} {qt.BINDING_VERSION}",
+        "qt": QtCore.qVersion(),
         "pyopengl_version": opengl_version,
         "pyopengl_file": opengl_file,
         "pyopengl_distribution_version": distribution_version,

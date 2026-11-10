@@ -24,6 +24,10 @@ is fixed.
 * On a CPU with AVX512, NumPy's float32 power differs by 1 ulp, so the Python
   fusion fallback can differ from the Rust fusion by 1 grey level in some
   pixels (suspected from CI, not yet confirmed).
+* The installer needs glibc 2.34 or newer (PySide6 6.10+ wheels), so
+  RHEL/Rocky/Alma 8, Ubuntu 20.04 and Debian 11 are refused. A conda-forge
+  PySide6 (built for glibc 2.17) would bring them back; a separate block,
+  agreed by the user 2026-11-08.
 * GPU background correction needs a CUDA toolkit (CuPy compiles against it);
   without one the CPU is used.
 * Waits still blocking the window (`docs/v17_small_review_items_plan.md`
@@ -38,6 +42,16 @@ is fixed.
   (`docs/v17_patch_reader_versions_plan.md` §6.3); not authorized yet.
 
 ## Tests
+
+* `test_step1_shared_camera.py` and `test_step1_gpu_takeover.py` crashed at
+  interpreter exit, after all tests passed, on the Linux A9 server with the
+  viewer core and GL (docs/v17_pyside6_plan.md §8; root cause not
+  re-confirmed). On macOS (no viewer core, offscreen) both exit 0: 15 passed,
+  and 2 passed / 45 skipped.
+* macOS, PySide6 6.11.3: the root conftest's between-test `gc` sometimes
+  segfaults inside shiboken6 (seen on unchanged HEAD); run one test per
+  process there. `test_install_scripts.py` needs Linux tools (uname, flock,
+  `date -Is`, bash >= 4): 10 cases fail on macOS, also on HEAD.
 
 * Known failing modules (also left out of CI, `tests/ci_cpu_modules.txt`):
   shared intensity lifecycle, real load first frame, preview source provider,

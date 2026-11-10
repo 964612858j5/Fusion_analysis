@@ -97,3 +97,53 @@ def test_pyqtgraph_is_told_the_binding_before_it_is_imported():
     assert out.returncode == 0, out.stderr
     lib, binding = out.stdout.split()
     assert lib == binding, f"pyqtgraph bound to {lib}, entry point says {binding}"
+
+
+def _pins(path):
+    pins = {}
+    for line in (ROOT / path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith(("#", "-")):
+            name, _, version = line.lstrip("- ").partition("==")
+            pins[name.strip().lower().replace("_", "-")] = version.strip()
+    return pins
+
+
+def test_the_installers_pip_list_installs_the_binding_the_import_point_names():
+    """The installer builds the env from the conda lock + this pip list
+    (scripts/install_block01.sh), not from environment.yml: it must carry
+    the binding `qt/__init__.py` imports, at the version the other env files
+    pin, and no other binding."""
+    from block01 import qt
+    assert qt.BINDING == "PySide6"
+    pip = _pins("envs/fusion_mesmer/requirements-pip.txt")
+    ci = _pins("envs/ci/requirements-cpu.txt")
+    yml = {}
+    for line in (ROOT / "envs/fusion_mesmer/environment.yml").read_text(encoding="utf-8").splitlines():
+        if "==" in line:
+            name, _, version = line.strip().lstrip("- ").partition("==")
+            yml[name.strip().lower().replace("_", "-")] = version.strip()
+    assert [n for n in pip if n.startswith(("pyqt5", "pyqt6", "pyside2"))] == []
+    for name in ("pyside6-essentials", "shiboken6"):
+        assert pip.get(name) == ci.get(name) == yml.get(name) == qt.BINDING_VERSION, name
+
+
+def test_the_gpu_benchmark_records_the_binding_it_runs_on():
+    """scripts/benchmark_step1_gpu_demo.py writes its environment before the
+    result; it read PyQt5-only attributes and died there on PySide6."""
+    import importlib.util
+    import sys
+    import types
+    spec = importlib.util.spec_from_file_location(
+        "_bench_step1_gpu_demo", ROOT / "scripts" / "benchmark_step1_gpu_demo.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod                    # its dataclasses look it up
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.modules.pop(spec.name, None)
+    from block01 import qt
+    env = mod._environment(types.SimpleNamespace(platform="offscreen"))
+    assert env["qt_binding"] == f"PySide6 {qt.BINDING_VERSION}"
+    assert env["qt"] == qt.QtCore.qVersion()
+    assert "pyqt" not in env

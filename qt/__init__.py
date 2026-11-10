@@ -30,6 +30,7 @@ import os as _os
 
 _os.environ.setdefault("PYQTGRAPH_QT_LIB", BINDING)
 
+import PySide6 as _binding  # noqa: E402
 import shiboken6 as _shiboken  # noqa: E402
 from PySide6 import QtCore as _QtCore  # noqa: E402
 from PySide6.QtCore import Qt as _Qt  # noqa: E402
@@ -46,6 +47,9 @@ from PySide6.QtOpenGL import (  # noqa: E402
     QOpenGLFramebufferObjectFormat,
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget  # noqa: E402
+
+#: The binding's own version, for reports (`QtCore.qVersion()` is Qt's).
+BINDING_VERSION = _binding.__version__
 
 
 def is_deleted(obj) -> bool:

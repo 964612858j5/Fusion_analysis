@@ -29,13 +29,7 @@ commercial licence for Block01 does not cover them.
   and StarDist and their models have their own licences, which a user
   must check for their use.
 * Python and system packages installed by scripts/install_block01.sh keep
-  their own licences. PyQt5 is licensed under the GPL v3 or a commercial
-  licence from Riverbank Computing, and the GPL's conditions turn on
-  licence compatibility, not on whether money is made: PolyForm
-  Noncommercial is not GPL-compatible. This repository distributes Block01's
-  own source only and does not include PyQt5 (the installer fetches it from
-  PyPI onto the user's machine); whether that arrangement is sufficient has
-  not been settled. A planned move of the interface to PySide6 (LGPL) would
-  remove the question. Until then, anyone distributing Block01 together with
-  PyQt5 -- in particular a commercial licensee -- needs appropriate PyQt
-  rights of their own.
+  their own licences. The interface uses PySide6 and shiboken6 (Qt for
+  Python), licensed under the LGPL v3 (and other licences offered by The Qt
+  Company). The installer fetches them from PyPI onto the user's machine as
+  separate, replaceable packages; this repository does not include them.

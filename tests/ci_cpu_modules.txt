@@ -114,6 +114,7 @@ test_prefetch_policy.py
 test_preseg_contract.py
 test_preseg_run.py
 test_preview_compose.py
+test_qt_import_point.py
 test_quant_engine.py
 test_quant_sources.py
 test_random_patches.py

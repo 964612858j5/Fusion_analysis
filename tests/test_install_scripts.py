@@ -556,3 +556,19 @@ def test_the_space_check_counts_the_spatialdata_environment_left(tmp_path):
     (sd / ".block01_env_ok").write_text("t")
     r = _preflight(tmp_path, 5, stub)
     assert r.returncode == 0 and "about 1 GB" in r.stdout                  # built: 0
+
+
+def test_the_glibc_floor_is_what_the_qt_wheels_need(tmp_path):
+    """PySide6 6.10+ has Linux wheels only for glibc >= 2.34 (manylinux_2_34):
+    an older system is refused at the pre-check, not half-way through pip."""
+    stubs = '''uname() { case "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac; }
+flock() { :; }
+getconf() { echo "glibc %s"; }'''
+    for version, refused in (("2.31", True), ("2.34", False), ("2.35", False)):
+        r = _preflight(tmp_path, 100, stubs % version)
+        line = next(l for l in r.stdout.splitlines() if " glibc: " in l)   # "[install]   glibc:    2.31 ..."
+        assert line.split("glibc:", 1)[1].split()[0] == version, r.stdout
+        if refused:
+            assert "too old (2.34 or newer needed" in line and r.returncode == 1, r.stdout
+        else:
+            assert "too old" not in line and r.returncode == 0, r.stdout

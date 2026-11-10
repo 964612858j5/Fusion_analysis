@@ -378,3 +378,7 @@ controllers do not read the new field (`press(y, x, ctrl)` unchanged).
 User real-machine acceptance on the Mac: PASSED (TG 2026-11-09), except
 §8 item 5 (a run: green / yellow over purple), which waits for the Cellpose
 Mac GPU block's segmentation run.
+
+§8 item 5 accepted (TG 2026-11-10): during a Cellpose run on the Mac, the
+running yellow / done green borders show over the purple and the hatching
+stays. The block's real-machine acceptance is complete.

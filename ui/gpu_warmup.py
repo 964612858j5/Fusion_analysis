@@ -19,6 +19,7 @@ BLOCK01_GPU_WARMUP=0 turns it off.
 """
 
 import os
+import sys
 import threading
 
 from ..qt import QtCore, QtGui
@@ -37,10 +38,24 @@ def configure_surface_format():
     compare panels' swaps off the screen -- frames drawn, nothing shown, drag
     dead -- and interval 1 fixed it (user acceptance 2026-10-29, S0-C).
     `BLOCK01_VSYNC=0` asks for 0 again, for diagnosis. A REQUEST, not a
-    guarantee: a driver may ignore it. Returns the interval asked for."""
+    guarantee: a driver may ignore it. Returns the interval asked for.
+
+    macOS only: the default format is also OpenGL 3.3 core, the version
+    and profile every GL widget here asks for (Step0 host, Step1 layers).
+    macOS cannot share a core-profile context with the window's default
+    (legacy 2.1) one -- Qt logs "Could not create NSOpenGLContext with
+    shared context, falling back to unshared context" -- and the window
+    then composites the widget's texture from the wrong context: after
+    Load, Step0's viewer showed a stale, upside-down copy of the window
+    and never the slide, until a resize (reproduced 2026-11-09, Mac mini).
+    The fix is for macOS only; other systems keep their earlier setting."""
     interval = 0 if os.environ.get("BLOCK01_VSYNC") == "0" else 1
     fmt = QtGui.QSurfaceFormat.defaultFormat()
     fmt.setSwapInterval(interval)
+    if sys.platform == "darwin":
+        fmt.setRenderableType(QtGui.QSurfaceFormat.OpenGL)
+        fmt.setVersion(3, 3)
+        fmt.setProfile(QtGui.QSurfaceFormat.CoreProfile)
     QtGui.QSurfaceFormat.setDefaultFormat(fmt)
     return interval
 

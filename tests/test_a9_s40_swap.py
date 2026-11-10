@@ -22,8 +22,10 @@ def default_format():
     QtGui.QSurfaceFormat.setDefaultFormat(saved)
 
 
-def test_swaps_wait_for_the_refresh_by_default(monkeypatch, default_format):
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_swaps_wait_for_the_refresh_by_default(monkeypatch, default_format, platform):
     monkeypatch.delenv("BLOCK01_VSYNC", raising=False)
+    monkeypatch.setattr(gpu_warmup.sys, "platform", platform)
     before = QtGui.QSurfaceFormat.defaultFormat()
     fmt = QtGui.QSurfaceFormat.defaultFormat()
     fmt.setSwapInterval(0)
@@ -32,14 +34,30 @@ def test_swaps_wait_for_the_refresh_by_default(monkeypatch, default_format):
     after = QtGui.QSurfaceFormat.defaultFormat()
     assert after.swapInterval() == 1
     # nothing else of the default format is touched
-    assert (after.majorVersion(), after.minorVersion(), after.profile(), after.depthBufferSize()) == \
-        (before.majorVersion(), before.minorVersion(), before.profile(), before.depthBufferSize())
+    assert (after.majorVersion(), after.minorVersion(), after.profile(), after.depthBufferSize(),
+            after.renderableType()) == \
+        (before.majorVersion(), before.minorVersion(), before.profile(), before.depthBufferSize(),
+         before.renderableType())
 
 
 def test_vsync_0_asks_for_no_wait(monkeypatch, default_format):
     monkeypatch.setenv("BLOCK01_VSYNC", "0")
     assert gpu_warmup.configure_surface_format() == 0
     assert QtGui.QSurfaceFormat.defaultFormat().swapInterval() == 0
+
+
+def test_on_macos_the_default_format_is_the_widgets_gl_3_3_core(monkeypatch, default_format):
+    """macOS shares GL contexts only within one profile; the GL widgets ask
+    for 3.3 core, so the application's default (the window's composition
+    context) must be the same, or Step0's viewer shows a stale picture."""
+    monkeypatch.delenv("BLOCK01_VSYNC", raising=False)
+    monkeypatch.setattr(gpu_warmup.sys, "platform", "darwin")
+    assert gpu_warmup.configure_surface_format() == 1
+    after = QtGui.QSurfaceFormat.defaultFormat()
+    assert (after.majorVersion(), after.minorVersion()) == (3, 3)
+    assert after.profile() == QtGui.QSurfaceFormat.CoreProfile
+    assert after.renderableType() == QtGui.QSurfaceFormat.OpenGL
+    assert after.swapInterval() == 1
 
 
 @pytest.mark.parametrize("interval", [0, 1])

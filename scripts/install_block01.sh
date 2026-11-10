@@ -43,6 +43,7 @@ MESMER_SHA256="25b1babc2ff769a9f9484184073db8bc264d5ab2de8a6f9ce07c289e8b935129"
 declare -A MODEL_VAR=(
     [cellpose_cpsam]=CELLPOSE_LOCAL_MODELS_PATH
     [stardist_2D_versatile_fluo]=BLOCK01_STARDIST_MODEL_PATH
+    [stardist_2D_versatile_fluo_torch]=BLOCK01_STARDIST_TORCH_PATH
     [mesmer_multiplex_segmentation]=DEEPCELL_MESMER_MODEL_PATH
     [mesmer_multiplex_segmentation_torch]=BLOCK01_MESMER_TORCH_PATH
 )
@@ -589,6 +590,18 @@ app_env() {
     mkdir -p "$KERAS_HOME"
 }
 
+# convert_stardist_weights: the StarDist engine loads a torch conversion of
+# weights_best.h5 (docs/stardist_torch_plan.md §4.5) and converts nothing
+# itself. Make it here: after the original models are verified (step 5) and
+# BEFORE the self-test (step 6) starts any engine -- the manifest check inside
+# the self-test would otherwise fail for a missing file on a first install.
+convert_stardist_weights() {
+    STEP="5b. the StarDist torch weights"
+    app_env                                   # both directories come from MODEL_VAR
+    say "== 5b. StarDist: converting weights_best.h5 for the PyTorch engine =="
+    (cd "$REPO" && run env PYTHONPATH="$REPO" "$PY" "$REPO/scripts/convert_stardist_to_torch.py")
+}
+
 # check_selftest: seg_runner.selftest's lines on stdin; every engine must be
 # ok, exit 0 and name its device
 check_selftest() {
@@ -701,6 +714,7 @@ main() {
     ensure_core
     ensure_models
     ensure_alias
+    convert_stardist_weights
     selftest
     write_record
     say "== Done in $(( $(date +%s) - t0 )) s. Start Block01 with: =="

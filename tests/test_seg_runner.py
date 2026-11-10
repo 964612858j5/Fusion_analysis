@@ -87,9 +87,22 @@ def _mask(record_path, kind):
     return np.load(rec[kind]["path"]), rec
 
 
+def _stardist_weights():
+    """The converted weights the engine will load, or a skip."""
+    from block01.seg_runner import engines
+    from block01.seg_runner.stardist_torch import weights
+    try:
+        root = engines.model_path(engines.STARDIST_TORCH_ENTRY)
+    except engines.ModelMissingError as exc:
+        pytest.skip(str(exc))
+    entry = engines.manifest_entry(engines.STARDIST_TORCH_ENTRY)
+    return weights, os.path.join(root, weights.WEIGHTS_FILE), entry.get("content_sha256")
+
+
 @pytest.fixture
 def stardist_ok(tmp_path, monkeypatch):
     pytest.importorskip("stardist")
+    _stardist_weights()
     _temporary_keras_home(tmp_path, monkeypatch)
 
 
@@ -116,41 +129,52 @@ def _temporary_keras_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
 
-def test_stardist_in_subprocess_equals_direct_call(tmp_path, monkeypatch, stardist_ok):
-    from csbdeep.utils import normalize
-    from stardist.models import StarDist2D
+def test_stardist_in_subprocess_equals_the_torch_port(tmp_path, stardist_direct):
+    """The engine's masks equal the same model run in this process.
+
+    This is the WIRING check (docs/stardist_torch_plan.md §8): both sides use
+    the torch network on the CPU (`cpu_only=True`), so a difference means the
+    engine's path differs -- not a rounding difference, and not porting
+    correctness (that is the TF comparison in scripts/stardist_consistency.py).
+    """
     img = synthetic.nuclei()
-    direct, _ = StarDist2D.from_pretrained("2D_versatile_fluo").predict_instances(
-        normalize(img, 1, 99.8, axis=(0, 1)))
-    ep = EngineProcess("stardist", log_path=str(tmp_path / "e.log"))
+    direct = stardist_direct(img)
+    ep = EngineProcess("stardist", log_path=str(tmp_path / "e.log"), cpu_only=True)
     ep.start()
     states = ep.run([_task(tmp_path, "s1", img, "stardist_nuclei_dapi")])
     ep.close()
     assert states == {"s1": "ok"}
     mask, rec = _mask(ep.states["s1"]["detail"], "nucleus")
     assert np.array_equal(mask, direct.astype(np.uint32))
+    assert rec["device_used"] == "cpu"
     assert rec["cell"] == {"status": "not_produced"}
 
 
 def test_stardist_from_an_installed_folder_equals_from_pretrained(tmp_path, monkeypatch, stardist_ok):
     """docs/v17_install_plan.md §2.5: with BLOCK01_STARDIST_MODEL_PATH the
     engine loads the installer's folder (no download, no unzip) and gives the
-    labels `from_pretrained` gives. Both read copies of the deployed files;
-    HOME is temporary, so neither touches ~/.keras."""
+    labels `from_pretrained` gives with the same torch network. Both read
+    copies of the deployed files; HOME is temporary, so neither touches
+    ~/.keras."""
     import shutil
     from csbdeep.utils import normalize
     from stardist.models import StarDist2D
     from block01.seg_runner.engines import STARDIST_DIR_ENV
+    from block01.seg_runner.stardist_torch import network
     src = DEPLOYED_STARDIST
     folder = tmp_path / "models" / "stardist_2D_versatile_fluo"
     folder.mkdir(parents=True)
     for name in ("config.json", "thresholds.json", "weights_best.h5"):
         shutil.copy2(os.path.join(src, name), folder)
     img = synthetic.nuclei()
-    direct, _ = StarDist2D.from_pretrained("2D_versatile_fluo").predict_instances(
-        normalize(img, 1, 99.8, axis=(0, 1)))
+    from block01.seg_runner import engines as seg_engines
+    weights_mod, weights_path, digest = _stardist_weights()
+    seg_engines._hide_tensorflow_gpu()      # the reference must not take a GPU (§6.5)
+    reference = StarDist2D.from_pretrained("2D_versatile_fluo")
+    reference.keras_model = network.TorchNetwork(weights_mod.load(weights_path, "cpu", digest), "cpu")
+    direct, _ = reference.predict_instances(normalize(img, 1, 99.8, axis=(0, 1)))
     monkeypatch.setenv(STARDIST_DIR_ENV, str(folder))
-    ep = EngineProcess("stardist", log_path=str(tmp_path / "e.log"))
+    ep = EngineProcess("stardist", log_path=str(tmp_path / "e.log"), cpu_only=True)
     ep.start()
     states = ep.run([_task(tmp_path, "s1", img, "stardist_nuclei_dapi")])
     ep.close()

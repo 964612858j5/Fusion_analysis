@@ -65,6 +65,14 @@ def test_another_engine_makes_it_run_again(tmp_path):
     assert not _ok(rec)
 
 
+def test_a_version_1_result_runs_again(tmp_path):
+    """The engine is behaviour 2 now (torch, user ruling 2026-11-10): a StarDist
+    result recorded as 1 is another behaviour, so Step1 runs it again."""
+    _, rec = _old_run(tmp_path, engine=dict(seg_engines.behavior_identity("stardist"),
+                                            behavior_version=1))
+    assert not _ok(rec)
+
+
 def test_a_failed_or_cancelled_task_or_a_missing_file_runs_again(tmp_path):
     for status in ("failed", "cancelled"):
         _, rec = _old_run(tmp_path / status, status=status)

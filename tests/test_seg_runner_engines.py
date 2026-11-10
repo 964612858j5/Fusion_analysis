@@ -44,16 +44,11 @@ def test_every_ui_method_has_the_outputs_of_the_plan_table():
 
 
 # ── expansion ───────────────────────────────────────────────────────────────
-def test_stardist_expansion_returns_the_nuclei_from_before_expanding(tmp_path):
-    pytest.importorskip("stardist")
-    from csbdeep.utils import normalize
+def test_stardist_expansion_returns_the_nuclei_from_before_expanding(tmp_path, stardist_direct):
     from skimage.segmentation import expand_labels
-    from stardist.models import StarDist2D
     img = synthetic.nuclei()
-    direct, _ = StarDist2D.from_pretrained("2D_versatile_fluo").predict_instances(
-        normalize(img, 1, 99.8, axis=(0, 1)))
-    direct = direct.astype(np.uint32)
-    ep = EngineProcess("stardist", log_path=str(tmp_path / "e.log"))
+    direct = stardist_direct(img).astype(np.uint32)
+    ep = EngineProcess("stardist", log_path=str(tmp_path / "e.log"), cpu_only=True)
     ep.start()
     states = ep.run([_task(tmp_path, "x8", img, "stardist_nuclei_expansion", expand_distance=8.0),
                      _task(tmp_path, "x0", img, "stardist_nuclei_expansion", expand_distance=0.0)])

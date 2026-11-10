@@ -93,7 +93,9 @@ def engine_provenance(engine, engine_obj):
         artifact = None
     out = {
         "git_commit": _git_commit(),
-        "runner_version": _sha256_files(sorted(_PKG.glob("*.py")) + sorted(_PKG.glob("mesmer_torch/*.py"))),
+        "runner_version": _sha256_files(sorted(_PKG.glob("*.py"))
+                                        + sorted(_PKG.glob("mesmer_torch/*.py"))
+                                        + sorted(_PKG.glob("stardist_torch/*.py"))),
         "lib_versions": engine_obj.lib_versions(),
         "env_lock_hash": _sha256_files([env / "conda-linux-64.lock", env / "requirements-pip.txt"]),
         "device": engine_obj.device,

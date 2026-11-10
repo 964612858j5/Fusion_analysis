@@ -47,6 +47,15 @@ MODELS = {
                                       "root": "/sda1/Fusion/benchmark/spacec/models/Mesmer_model/MultiplexSegmentation",
                                       "env_override": "DEEPCELL_MESMER_MODEL_PATH",
                                       "files": None},
+    # The torch conversion the StarDist engine loads (docs/stardist_torch_plan.md
+    # §4): made from `stardist_2D_versatile_fluo`'s own weights_best.h5 on each
+    # machine by `scripts/convert_stardist_to_torch.py`, never committed.
+    "stardist_2D_versatile_fluo_torch": {"engine": "stardist",
+                                         "root": "~/.keras/models/StarDist2D/2D_versatile_fluo_torch",
+                                         "env_override": "BLOCK01_STARDIST_TORCH_PATH",
+                                         "derived_from": "stardist_2D_versatile_fluo",
+                                         "generated": True,
+                                         "files": ["stardist_2D_versatile_fluo.pt"]},
     # The torch conversion the Mesmer engine loads (docs/mesmer_torch_plan.md
     # §10): made from the entry above at its first use on each machine,
     # never committed (non-commercial weights licence).
@@ -74,8 +83,14 @@ def _files(root, names):
     return base, sorted(str(p.relative_to(base)) for p in base.rglob("*") if p.is_file())
 
 
-def _content_digest(path):
-    from seg_runner.mesmer_torch import weights
+def _content_digest(path, engine):
+    """The content digest of a `generated` entry, with the module that owns
+    that engine's format (each format string is part of its own digest, so a
+    file of one engine can never pass as the other's)."""
+    if engine == "stardist":
+        from seg_runner.stardist_torch import weights
+    else:
+        from seg_runner.mesmer_torch import weights
     return weights.content_digest(weights.read(path))
 
 
@@ -139,7 +154,7 @@ def verify():
                 bad += 1
             elif entry.get("generated"):
                 try:
-                    same = _content_digest(p) == entry.get("content_sha256")
+                    same = _content_digest(p, entry.get("engine")) == entry.get("content_sha256")
                 except Exception as exc:  # noqa: BLE001 -- an unreadable file is a mismatch
                     print(f"UNREADABLE {key}: {p} ({exc})")
                     same = False

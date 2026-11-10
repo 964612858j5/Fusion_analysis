@@ -40,6 +40,19 @@
         }
       ]
     },
+    "stardist_2D_versatile_fluo_torch": {
+      "engine": "stardist",
+      "root": "~/.keras/models/StarDist2D/2D_versatile_fluo_torch",
+      "env_override": "BLOCK01_STARDIST_TORCH_PATH",
+      "derived_from": "stardist_2D_versatile_fluo",
+      "generated": true,
+      "content_sha256": "ea60584ea226728dec7613dc93f9ff3cf5ab7ee0a0dfd9119ee0e3c70da95a80",
+      "files": [
+        {
+          "path": "stardist_2D_versatile_fluo.pt"
+        }
+      ]
+    },
     "mesmer_multiplex_segmentation": {
       "engine": "mesmer",
       "root": "/sda1/Fusion/benchmark/spacec/models/Mesmer_model/MultiplexSegmentation",

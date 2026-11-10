@@ -377,10 +377,12 @@ def test_no_question_when_nothing_changed_or_the_identity_is_legacy(app, tmp_pat
 
 
 def test_another_behaviour_version_is_asked_and_cancel_stops(app, tmp_path, monkeypatch):
-    page = _hand_over(tmp_path, app, _v2(behavior_version=0))
+    # the current StarDist behaviour is 2 (torch, user ruling 2026-11-10): a
+    # Step1 result recorded as 1 must be asked about as "1 -> 2"
+    page = _hand_over(tmp_path, app, _v2(behavior_version=1))
     shown = _answer(monkeypatch, "Cancel")
     assert page._confirm_engine_identity(page.get_seg_config()) == (False, None)
-    assert len(shown) == 1 and "behaviour has changed" in shown[0] and "0 -> 1" in shown[0]
+    assert len(shown) == 1 and "behaviour has changed" in shown[0] and "1 -> 2" in shown[0]
 
 
 def test_run_anyway_hands_the_confirmed_differences_to_the_run(app, tmp_path, monkeypatch):

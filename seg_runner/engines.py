@@ -59,13 +59,19 @@ IDENTITY_VERSION = 2
 #: mesmer 2 (user ruling 2026-10-25): the network runs on PyTorch (GPU first,
 #: CPU otherwise) instead of TensorFlow; results differ from version 1 at the
 #: level of floating-point rounding, so they are another behaviour.
-BEHAVIOR_VERSION = {"cellpose": 1, "stardist": 1, "mesmer": 2}
+#: stardist 2 (user ruling 2026-11-10): the same -- the network runs on PyTorch
+#: (docs/stardist_torch_plan.md); only the inference implementation changed.
+BEHAVIOR_VERSION = {"cellpose": 1, "stardist": 2, "mesmer": 2}
 #: The LOGICAL model of each engine (its `models.json` key). Mesmer's is the
 #: Keras model; the file it loads is that model's torch conversion, stored as
 #: `MESMER_TORCH_ENTRY` -- the same weights, so the same model identity.
 MODEL_ID = {"cellpose": "cellpose_cpsam", "stardist": "stardist_2D_versatile_fluo",
             "mesmer": "mesmer_multiplex_segmentation"}
 MESMER_TORCH_ENTRY = "mesmer_multiplex_segmentation_torch"
+#: StarDist's torch conversion of `stardist_2D_versatile_fluo`'s own
+#: `weights_best.h5` (docs/stardist_torch_plan.md §4): the same weights, so
+#: `MODEL_ID["stardist"]` stays the logical model.
+STARDIST_TORCH_ENTRY = "stardist_2D_versatile_fluo_torch"
 #: Compared between a Step1 result and the engine Step2 runs.
 COMPARED_FIELDS = ("behavior_version", "model_id")
 
@@ -195,15 +201,25 @@ def cellpose_model_args():
     return {"gpu": False}
 
 
-def _tf_gpu_count():
+def _hide_tensorflow_gpu():
+    """Import TensorFlow and take its GPUs away BEFORE the Keras model is
+    built: csbdeep computes at construction (`csbdeep/models/base_model.py:162-167`),
+    so hiding afterwards would be too late. Returns what TF saw, for the
+    provenance; raises when the isolation cannot be VERIFIED -- a log line is
+    not proof (docs/stardist_torch_plan.md §6.5)."""
     import tensorflow as tf
-    gpus = tf.config.list_physical_devices("GPU")
-    for g in gpus:
+    before = [d.name for d in tf.config.list_physical_devices("GPU")]
+    if before:
         try:
-            tf.config.experimental.set_memory_growth(g, True)
-        except Exception:  # noqa: BLE001 -- already initialised
-            pass
-    return len(gpus)
+            tf.config.set_visible_devices([], "GPU")
+        except RuntimeError as exc:     # its GPUs are already initialised
+            raise RuntimeError(
+                "TensorFlow initialised its GPU before it could be hidden; the StarDist "
+                f"engine refuses to share it with PyTorch (devices {before})") from exc
+    after = [d.name for d in tf.config.list_logical_devices("GPU")]
+    if after:
+        raise RuntimeError(f"TensorFlow still sees GPU devices {after} after hiding them")
+    return {"physical_before": before, "logical_after": after}
 
 
 class CellposeEngine:
@@ -248,32 +264,71 @@ STARDIST_DIR_ENV = "BLOCK01_STARDIST_MODEL_PATH"
 
 
 class StardistEngine:
+    """StarDist on PyTorch (docs/stardist_torch_plan.md).
+
+    The stardist package still runs the model: `StarDist2D` holds the config,
+    the thresholds and the prediction loop; only its Keras network is replaced
+    by `stardist_torch.network.TorchNetwork`, which runs the converted
+    `weights_best.h5`. Normalization, padding, the sparse NMS and the polygon
+    reconstruction are the package's own code.
+
+    Device from `torch_device()` (CUDA, else the Mac's GPU, else CPU -- and CPU
+    whenever `BLOCK01_ENGINE_CPU_ONLY=1`); numerics as in
+    `stardist_torch/numerics.py`. TensorFlow's GPUs are hidden before the Keras
+    model is built, because that construction computes (§6.5)."""
+
     name = "stardist"
 
     def __init__(self, model_name="2D_versatile_fluo"):
+        from .stardist_torch import network, numerics, weights
         os.environ.setdefault("KERAS_BACKEND", "tensorflow")
-        n = _tf_gpu_count()
+        # BEFORE the Keras model exists: it computes at construction (§6.5)
+        self._tf_gpu = _hide_tensorflow_gpu()
+        dev = torch_device()
+        entry = manifest_entry(STARDIST_TORCH_ENTRY)
+        path = os.path.join(model_path(STARDIST_TORCH_ENTRY), weights.WEIGHTS_FILE)
+        params = weights.load(path, dev, entry.get("content_sha256"))
         from stardist.models import StarDist2D
         folder = os.environ.get(STARDIST_DIR_ENV)
         if folder:
             # an installed model folder (docs/v17_install_plan.md §2.5): the
             # instance `from_pretrained` builds, without its download / unzip
             folder = os.path.abspath(os.path.expanduser(folder))
-            self._model = StarDist2D(None, name=os.path.basename(folder),
-                                     basedir=os.path.dirname(folder))
+            model = StarDist2D(None, name=os.path.basename(folder),
+                               basedir=os.path.dirname(folder))
         else:
-            self._model = StarDist2D.from_pretrained(model_name)
-        self.device = "gpu" if n else "cpu"
+            model = StarDist2D.from_pretrained(model_name)
+        model.keras_model = network.TorchNetwork(params, dev)     # the one swap
+        self._model = model
+        self.model_path = path
+        self._numerics = dict(numerics.NUMERICS)
+        self._artifact = {"entry": STARDIST_TORCH_ENTRY, "sha256": _file_sha256(path),
+                          "content_sha256": params["content_sha256"],
+                          "source": params.get("source") or {}}
+        self.device = {"cuda": "gpu"}.get(dev, dev)
 
     def lib_versions(self):
         import stardist
         import tensorflow as tf
+        import torch
         return {"stardist": stardist.__version__, "tensorflow": tf.__version__,
-                "csbdeep": _dist_version("csbdeep"), **_common_lib_versions()}
+                "torch": torch.__version__, "cuda": torch.version.cuda or "",
+                "cudnn": str(torch.backends.cudnn.version() or ""),
+                "csbdeep": _dist_version("csbdeep"),
+                "stardist_backend": "torch", "stardist_numerics": dict(self._numerics),
+                "tf_gpu_physical": len(self._tf_gpu["physical_before"]),
+                "tf_gpu_hidden": not self._tf_gpu["logical_after"],
+                **_common_lib_versions()}
 
     def model_resolved_path(self):
-        path = getattr(self._model, "logdir", None)
-        return str(path) if path else None
+        return str(self.model_path) if self.model_path else None
+
+    def model_artifact(self):
+        """The weights file this process runs and where it came from: its
+        content digest (checked against the manifest at load), its file sha256
+        (may differ between machines: recorded, never compared) and the
+        conversion source."""
+        return dict(self._artifact)
 
     def predict(self, image, params):
         from csbdeep.utils import normalize

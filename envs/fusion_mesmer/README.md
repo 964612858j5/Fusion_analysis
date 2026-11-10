@@ -30,10 +30,25 @@ Regenerate all four from the live environment with
   headers must be re-verified (step 4 below).
 - `KERAS_BACKEND=tensorflow` (the application and `seg_runner` set it).
 
-On the build machine, TensorFlow 2.8.4 sees no GPU: StarDist runs on the CPU.
-Cellpose and Mesmer use the GPU through PyTorch. Mesmer runs a PyTorch copy of
-the Keras model's weights (`seg_runner/mesmer_torch`, docs/mesmer_torch_plan.md
-§10). Nothing has to be done for it: at its first use on a machine (the
+On the build machine, TensorFlow 2.8.4 sees no GPU. StarDist now runs its
+network on PyTorch too (`seg_runner/stardist_torch`, docs/stardist_torch_plan.md):
+the engine still builds the installed `StarDist2D` model for its configuration,
+thresholds and prediction loop, but replaces its Keras network with the same
+`weights_best.h5` converted to torch -- so it uses the GPU (CUDA, or the Mac's
+MPS) like Cellpose and Mesmer, and TensorFlow's GPUs are hidden before the
+Keras model is built. The conversion needs no TensorFlow:
+`scripts/install_block01.sh` runs `scripts/convert_stardist_to_torch.py` once,
+after the original models are verified and before the self-test, into the
+directory of the manifest entry `stardist_2D_versatile_fluo_torch` (or
+`BLOCK01_STARDIST_TORCH_PATH`); the engine checks it against the content digest
+in `models.json`. `python scripts/convert_stardist_to_torch.py` does the same by
+hand. An existing installation that upgrades to this version must run
+`bash scripts/install_block01.sh` once more, with the same install root and
+options: it converts the StarDist weights, and without them the StarDist
+engine cannot start (the `.pt` is missing). Cellpose and Mesmer use the GPU
+through PyTorch as before. Mesmer runs a PyTorch copy of the Keras model's
+weights (`seg_runner/mesmer_torch`, docs/mesmer_torch_plan.md §10). Nothing
+has to be done for it: at its first use on a machine (the
 selftest below, or the first Mesmer run) the engine converts the Keras model
 once, on the CPU (about 20 s), into the directory of the manifest entry
 `mesmer_multiplex_segmentation_torch` (or BLOCK01_MESMER_TORCH_PATH), and

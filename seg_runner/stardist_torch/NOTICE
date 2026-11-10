@@ -1,0 +1,39 @@
+StarDist on PyTorch -- third-party notices
+==========================================
+
+What this directory is
+----------------------
+The 2D StarDist network (`2D_versatile_fluo`) written as a PyTorch forward
+pass. The StarDist model still runs as `stardist.models.StarDist2D`; only its
+Keras network object is replaced. Normalisation, padding, the sparse
+non-maximum suppression, the polygon reconstruction and the label image stay
+the stardist package's own code.
+
+Upstream
+--------
+StarDist 0.9.2            BSD 3-Clause, Copyright (c) 2018-2025, Uwe Schmidt, Martin Weigert
+CSBDeep 0.8.2             BSD 3-Clause, Copyright (c) 2018-2024, Uwe Schmidt, Martin Weigert
+
+The two licence texts are copied verbatim next to this file as
+`LICENSE-stardist` and `LICENSE-csbdeep`.
+
+What was taken from them
+------------------------
+The network STRUCTURE: two 3x3 convolutions and the grid pool, a U-Net with
+three down levels, a middle, three up levels with a nearest-neighbour
+upsample and a skip concatenation, `features`, and the 1x1 `prob` (sigmoid)
+and `dist` (linear) heads. `graph.py` implements that structure in our own
+code, from `config.json` and the published architecture
+(`csbdeep/internals/blocks.py:unet_block`, `stardist/models/model2d.py:_build`);
+no source file of StarDist or CSBDeep was copied.
+
+Not taken: their weight conversion, their normalisation, their tiling, their
+NMS or their polygon code -- all of it is called as an installed package at
+run time.
+
+Weights
+-------
+`2D_versatile_fluo` (BSD 3-Clause per its model card) is converted once from
+the installed `weights_best.h5` into a `.pt` file. The `.pt` is not part of
+this repository and is not redistributed with it; see `envs/fusion_mesmer/models.json`
+and `docs/v17_install_plan.md` for how each installation obtains the models.

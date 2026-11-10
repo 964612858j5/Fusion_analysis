@@ -261,12 +261,22 @@ PATCHES = [{"id": 1, "name": "P1", "bbox": [20, 120, 30, 150]},
            {"id": 2, "name": "P2", "bbox": [180, 290, 200, 318]}]
 
 
-def test_the_job_equals_the_steps_done_by_hand(tmp_path):
-    pytest.importorskip("stardist")
-    from csbdeep.utils import normalize
+def test_the_job_equals_the_steps_done_by_hand(tmp_path, stardist_direct, monkeypatch):
+    # SAME device on both sides: the reference runs on the CPU, so the engine
+    # must too. PresegRunJob builds its own EngineProcess and passes no
+    # cpu_only, and client.start() REMOVES BLOCK01_ENGINE_CPU_ONLY from the
+    # child when cpu_only is false -- setting the variable alone does nothing.
+    # Wrap the class instead (test only; the product caller stays as it is).
     from skimage.segmentation import expand_labels
-    from stardist.models import StarDist2D
+    import block01.ui.step1_presegmentation.run_job as run_job
     from block01.ui.step1_presegmentation.run_job import PresegRunJob
+    real_engine = run_job.EngineProcess
+
+    def cpu_engine(*args, **kwargs):
+        kwargs.setdefault("cpu_only", True)
+        return real_engine(*args, **kwargs)
+
+    monkeypatch.setattr(run_job, "EngineProcess", cpu_engine)
     methods = [{"method": "stardist_nuclei_expansion",
                 "values": _vals("stardist_nuclei_expansion", expand_distance=[6.0])}]
     run = _job_run(tmp_path, methods, PATCHES)
@@ -277,13 +287,11 @@ def test_the_job_equals_the_steps_done_by_hand(tmp_path):
     assert job.wait(600)
     assert [r["status"] for r in got] == ["ok", "ok"] and progress[-1] == (2, 2)
 
-    model = StarDist2D.from_pretrained("2D_versatile_fluo")
     ld = _Loader()
     for rec, p in zip(got, PATCHES):
         win = preseg_input.read_window(p["bbox"], 24, (0, 300, 0, 320))
         F1 = preseg_input.model_input("nucleus", preseg_input.fused_window(ld, win, SNAP))
-        nuc, _ = model.predict_instances(normalize(F1, 1, 99.8, axis=(0, 1)))
-        nuc = nuc.astype(np.uint32)
+        nuc = stardist_direct(F1).astype(np.uint32)
         own = preseg_input.own_local(p["bbox"], win)
         c, n, k = label_ownership.apply_ownership(expand_labels(nuc, distance=6.0), own,
                                                   shared=nuc)
@@ -294,6 +302,7 @@ def test_the_job_equals_the_steps_done_by_hand(tmp_path):
         np.testing.assert_array_equal(nucleus, label_ownership.crop(n, own))
         assert rec["paired"] is True and rec["patch_label"] == p["name"]
         assert rec["engine_identity"]["engine"] == "stardist" and rec["device"]
+    assert [r["device"] for r in got] == ["cpu", "cpu"]      # what was compared
     rdir = preseg_run.run_dir(str(tmp_path), run["run_id"])
     saved = preseg_run.read_run(rdir)              # block RM: params.json, then .done
     assert saved["tasks"] == run["tasks"] and saved["fusion"]["hash"] == "fh1"
@@ -329,6 +338,54 @@ def test_stop_cancels_what_is_left_and_no_engine_remains(tmp_path):
     assert pids and _group_gone(pids[0])
     rdir = preseg_run.run_dir(str(tmp_path), run["run_id"])
     assert not os.path.exists(os.path.join(rdir, "engine_stardist.log"))   # never started
+
+
+def test_the_run_records_the_torch_engine_and_its_artifact(tmp_path, monkeypatch):
+    """Layer 3 (docs/stardist_torch_plan.md §8): a real Step1 run through the
+    engine process records the torch behaviour identity, the device it ran on
+    and the converted weights it used."""
+    pytest.importorskip("stardist")
+    from block01.seg_runner import engines as seg_engines
+    try:
+        seg_engines.model_path(seg_engines.STARDIST_TORCH_ENTRY)
+    except seg_engines.ModelMissingError as exc:
+        pytest.skip(str(exc))
+    import block01.ui.step1_presegmentation.run_job as run_job
+    from block01.ui.step1_presegmentation.run_job import PresegRunJob
+    real_engine = run_job.EngineProcess
+
+    def cpu_engine(*args, **kwargs):
+        kwargs.setdefault("cpu_only", True)
+        return real_engine(*args, **kwargs)
+
+    monkeypatch.setattr(run_job, "EngineProcess", cpu_engine)
+    methods = [{"method": "stardist_nuclei_dapi",
+                "values": _vals("stardist_nuclei_dapi", prob_thresh=[0.3])}]
+    run = _job_run(tmp_path, methods, PATCHES[:1])
+    got = []
+    job = PresegRunJob(str(tmp_path), run, _Loader, on_record=got.append)
+    job.start()
+    assert job.wait(600)
+    assert [r["status"] for r in got] == ["ok"]
+
+    identity = job.run["engines"]["stardist"]
+    assert identity["behavior_version"] == 2
+    assert identity["model_id"] == "stardist_2D_versatile_fluo"
+    assert job.run["devices"]["stardist"] == "cpu"
+    assert got[0]["device"] == "cpu"
+    provenance = job.run["engine_provenance"]["stardist"]
+    assert provenance["lib_versions"]["stardist_backend"] == "torch"
+    assert provenance["lib_versions"]["tf_gpu_hidden"] is True
+    versions = provenance["lib_versions"]              # the versions of what ran
+    assert versions["torch"]
+    assert "cudnn" in versions                        # "" on a CPU-only machine is right
+    import torch
+    if torch.cuda.is_available():
+        assert versions["cudnn"]
+    artifact = provenance["model_artifact"]
+    assert artifact["entry"] == seg_engines.STARDIST_TORCH_ENTRY
+    assert len(artifact["content_sha256"]) == 64
+    assert artifact["source"]["model_key"] == "stardist_2D_versatile_fluo"
 
 
 def test_an_engine_that_cannot_start_fails_its_tasks_and_the_others_still_run(tmp_path):

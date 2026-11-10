@@ -148,3 +148,49 @@ def test_a_shape_smaller_than_the_label_threshold_gets_no_label_but_draws(app):
         assert _paint(ov) > 0
     finally:
         view.close()
+
+
+def _image(ov, size=(600, 400)):
+    pm = QtGui.QPixmap(*size)
+    pm.fill(QtCore.Qt.transparent)
+    p = QtGui.QPainter(pm)
+    p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+    ov._paint_static(p, ov.canvas_transform())
+    p.end()
+    return pm.toImage()
+
+
+def _ink(img, x0, x1, y):
+    return sum(1 for x in range(int(x0), int(x1)) if img.pixelColor(x, int(y)).alpha())
+
+
+def test_regions_items_paint_as_before_and_the_optional_keys_only_when_set(app):
+    """docs/v17_step2_skip_tiles_ux_plan.md §2: `fill` and `width` are
+    optional; a Regions item sets neither and is painted as before (no fill,
+    a 1.5 px border, 3 px when selected)."""
+    view, vb, ov = _rig(app)
+    try:
+        plain = {"id": "a", "polygon": _square(100, 100, 100), "color": "#6bcb77"}
+        centre = ov.to_widget(150, 150)
+        edge = ov.to_widget(100, 150)                                  # the left side, mid-height
+        cx, cy = int(centre.x()), int(centre.y())
+        ex, ey = edge.x(), edge.y()
+        ov.set_items([plain])
+        img = _image(ov)
+        assert img.pixelColor(cx, cy).alpha() == 0                    # no fill inside
+        thin = _ink(img, ex - 10, ex + 10, ey)
+        assert thin > 0
+        ov.set_items([plain], selected={"a"})
+        assert _ink(_image(ov), ex - 10, ex + 10, ey) > thin          # selected: 3 px, as before
+        ov.set_items([dict(plain, fill="#4dc678dd", width=4.0)])
+        img = _image(ov)
+        inside = img.pixelColor(cx, cy)
+        assert inside.alpha() > 0 and inside.blue() > inside.green()
+        assert _ink(img, ex - 10, ex - 1, ey) > _ink(_image_of(ov, plain), ex - 10, ex - 1, ey)   # the 4 px border
+    finally:
+        view.close()
+
+
+def _image_of(ov, item):
+    ov.set_items([item])
+    return _image(ov)

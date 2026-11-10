@@ -353,13 +353,31 @@ row, and the duplicate Tissue Preview button in the step bar.
   on this grid only`. Under Overlap, the checkbox `Skip tiles without
   tissue` (off by default; locked while a run computes): ticked, the tiles
   whose read window (with its overlap) holds no tissue on the slide's ~16x
-  level are drawn with a dashed blue-grey border and are not segmented; a
-  click on a tile toggles it -- back to segmenting without a question,
-  skipping a tile WITH tissue only after the `Skip a tile with tissue` Yes /
-  No question (then a dashed purple border); a line under the checkbox
-  counts the tiles left out; changing Rows / Cols / Overlap recomputes the
-  proposal and resets the clicks (the line says so). A skipped tile is drawn
-  solid blue-grey during the run. The Tile Status overview's long side is at
+  level are PROPOSED, but ticking skips nothing (user, 2026-11-09): every
+  tile starts segmented and `Skip all empty` applies the proposal. A skipped tile (user request 2026-11-08,
+  `docs/v17_step2_skip_tiles_ux_plan.md`) is filled with translucent purple
+  and bordered with a 4 px solid purple line, before and during the run; a
+  tile WITH tissue the user chose to skip is also hatched (it stays hatched
+  during the run); the running yellow and done green borders are drawn over
+  the purple. The same in Tile Status and the zoomable DAPI picture. A
+  click on a tile toggles it at once -- back to segmenting without a
+  question, skipping a tile WITH tissue only after the `Skip a tile with
+  tissue` Yes / No question. While Shift is held (in both pictures) tiles
+  are only COLLECTED, never asked about (user, 2026-11-09): Shift + click
+  collects one tile toggled (a second Shift + click takes it back out),
+  Shift + drag boxes several -- all skipped when the start tile was
+  segmented, all restored when it was skipped; collected and boxed tiles
+  are framed white and show the result. Letting go of Shift commits
+  everything at once, with ONE question (`Skip tiles with tissue` / `Skip a
+  tile with tissue`) naming the collected tiles that hold tissue (No: those
+  stay segmented, the rest is applied); a plain click first commits what
+  was collected. A box being dragged and the collected tiles are dropped by
+  a grid change, unticking, a run or a button. Under the checkbox, while it is ticked, two buttons:
+  `Skip all empty` (apply the proposal, the user's changes cleared) and
+  `Skip none` (every tile segmented), both locked while a run computes; a
+  line under them counts the tiles left out; changing Rows / Cols / Overlap
+  recomputes the proposal and resets to nothing skipped (the line says so
+  when something had been skipped). The Tile Status overview's long side is at
   most 4096 px (was a fixed 1/32). The
   public `Channels` panel is NOT shown in Step2: its frame and the dock
   mounted in it are kept, hidden, not deleted; Step2's own ticks are kept.

@@ -16,6 +16,8 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from ..qt import flag_value
+from ..qt.QtCore import Qt
 from .regions.core_outlines import CoreOutlines
 from .regions.overlay import RegionsOverlay
 
@@ -24,16 +26,42 @@ STEP2_RAW_TEXTURE_BYTES = 256 * 1024 * 1024
 
 
 class _GridClicks:
-    """The tile grid's read-only controller (plan 3.1): a click on a tile is
-    `on_tile(r, c)`; everything else goes on to the view."""
+    """The tile grid's controller (plan 3.1): a click on a tile is
+    `on_tile(r, c)`; everything else goes on to the view.
 
-    def __init__(self, tile_at, on_tile):
-        self._tile_at, self._on_tile = tile_at, on_tile
+    With `box` (the Step2 page) a Shift + press on a tile may start the
+    page's Shift+drag box (docs/v17_step2_skip_tiles_ux_plan.md §3.2). The
+    overlay then calls drag(finish=True), click() when the release did not
+    move, and released(): the finishing drag only moves the box, click() is
+    a Shift + click (the start tile alone), released() commits what is left
+    -- whichever runs first clears the box, so one gesture commits once. A
+    press it took stays its own until released: a box dropped meanwhile
+    (grid, option, run, button) makes the release do nothing."""
+
+    def __init__(self, tile_at, on_tile, box=None):
+        self._tile_at, self._on_tile, self._page = tile_at, on_tile, box
+        self._claimed = False
+        self.overlay = None        # set by the viewer: the press's own modifiers
+
+    def _boxing(self):
+        return self._page is not None and self._page._box is not None
 
     def press(self, y, x, ctrl=False):
-        return False
+        if self._page is None:
+            return False
+        hit = self._tile_at(y, x)
+        shift = None
+        if self.overlay is not None:               # Shift as sent with the press
+            shift = bool(self.overlay.press_modifiers & flag_value(Qt.ShiftModifier))
+        self._claimed = hit is not None and bool(self._page._box_begin(*hit, shift=shift))
+        return self._claimed
 
     def click(self, y, x, ctrl=False):
+        if self._boxing():
+            self._page._box_click()
+            return
+        if self._claimed:                                  # the box was dropped: nothing
+            return
         hit = self._tile_at(y, x)
         if hit is not None:
             self._on_tile(*hit)
@@ -47,11 +75,16 @@ class _GridClicks:
     def hover(self, *_a):
         pass
 
-    def drag(self, *_a, **_k):
-        pass
+    def drag(self, y, x, finish=False, mods=0):
+        if self._boxing():
+            hit = self._page.tile_at_clamped(y, x)
+            if hit is not None:
+                self._page._box_move(*hit)
 
     def released(self):
-        pass
+        if self._boxing():
+            self._page._box_finish()
+        self._claimed = False
 
     def cursor_at(self, *_a):
         return None
@@ -241,8 +274,9 @@ class Step2DapiViewer:
         view = self.view()
         if self.grid is None or self.grid.graphics is not view.graphics or self.grid.vb is not view.view_box:
             self._detach_grid()
-            self.grid = RegionsOverlay(view.graphics, view.view_box,
-                                       _GridClicks(self.page.tile_at, self.page._on_tile_clicked))
+            clicks = _GridClicks(self.page.tile_at, self.page._on_tile_clicked, box=self.page)
+            self.grid = RegionsOverlay(view.graphics, view.view_box, clicks)
+            clicks.overlay = self.grid
         self.grid.set_items(self.page.tile_items())
         try:
             n = self.cores.refresh()

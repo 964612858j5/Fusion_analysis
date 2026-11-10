@@ -9,7 +9,7 @@ import time
 import numpy as np
 import zarr
 
-from ..qt import QtWidgets, QtCore
+from ..qt import QtWidgets, QtCore, QtGui
 from ..qt.QtCore import Qt, QRectF, QThread, Signal
 from ..qt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -153,6 +153,42 @@ class _ElidedLabel(QLabel):
         m = self.contentsMargins()
         width = max(0, self.width() - m.left() - m.right() - 10)
         QLabel.setText(self, self.fontMetrics().elidedText(self._full, Qt.ElideRight, width))
+
+
+class _TileRect(pg.RectROI):
+    """A Tile Status tile: the RectROI outline, with the skip look under it
+    (docs/v17_step2_skip_tiles_ux_plan.md §2) -- a translucent fill and, for
+    a tile with tissue the user chose to skip, diagonal hatching drawn in
+    screen pixels so its density does not change with zoom."""
+
+    fill = None                        # QColor, or None
+    hatch = None                       # QColor of the hatching, or None
+    frame = None                       # QPen of the Shift+drag box frame over it, or None
+
+    def paint(self, p, opt, widget):
+        if self.fill is not None or self.hatch is not None:
+            r = QRectF(0, 0, self.state['size'][0], self.state['size'][1]).normalized()
+            p.save()
+            p.setPen(Qt.NoPen)
+            if self.fill is not None:
+                p.setBrush(self.fill)
+                p.drawRect(r)
+            if self.hatch is not None:
+                screen = p.transform().mapRect(r)
+                p.resetTransform()
+                p.setBrush(QtGui.QBrush(self.hatch, Qt.BDiagPattern))
+                p.drawRect(screen)
+            p.restore()
+        p.save()                                   # RectROI.paint scales the painter to a unit square
+        super().paint(p, opt, widget)
+        p.restore()
+        if self.frame is not None:                 # the box's frame, over the result look
+            r = QRectF(0, 0, self.state['size'][0], self.state['size'][1]).normalized()
+            p.save()
+            p.setPen(self.frame)
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(r)
+            p.restore()
 
 
 class Step2Page(QWidget):
@@ -304,10 +340,20 @@ class Step2Page(QWidget):
         ll.addWidget(self._ov_gv, stretch=1)
         self._ov_layout = ll
         self._tile_colour_state = {}
-        # Tiles picked with Shift+click (user 2026-10-25): changed together,
-        # with one question, when Shift is released.
-        self._tile_pick = []
-        self._pick_filter_on = False
+        # A Shift+drag box over the tiles (docs/v17_step2_skip_tiles_ux_plan.md
+        # §3): {"start": (r, c), "end": (r, c), "skip": bool} while dragged,
+        # the boxed tiles' preview {(r, c): state}, and the overview press.
+        self._box = None
+        self._box_preview = {}
+        self._ov_press = None
+        self._ov_gv.viewport().installEventFilter(self)
+        # Tiles collected while Shift is held (plan §13): {index: skip?},
+        # committed with one question when Shift is let go -- seen by a
+        # 100 ms check that runs only while something is collected.
+        self._pending = {}
+        self._shift_timer = QtCore.QTimer(self)
+        self._shift_timer.setInterval(100)
+        self._shift_timer.timeout.connect(self._shift_poll)
         self.dapi_viewer = None               # the zoomable DAPI picture (set by the main window)
         self.input_shown = None               # () -> None: another input is on screen
         # The TMA cores over the overview (docs/f5_tma_display_plan.md part 2):
@@ -507,10 +553,27 @@ class Step2Page(QWidget):
         self._skip_empty_cb.setChecked(False)
         self._skip_empty_cb.setToolTip(
             'Tiles whose read window (with its overlap) holds no tissue on the slide '
-            'are not segmented. Click a tile in Tile Status to change it; skipping a '
-            'tile with tissue asks first. A skipped tile has no cells.')
+            'are not segmented. Click a tile in Tile Status to change it, or hold Shift '
+            'and drag over several; skipping a tile with tissue asks first. A skipped '
+            'tile has no cells.')
         self._skip_empty_cb.stateChanged.connect(self._on_skip_toggled)
         til.addWidget(self._skip_empty_cb)
+        # Two shortcuts under the checkbox (user request, plan §3.4).
+        self._skip_btn_row = QWidget()
+        sbr = QHBoxLayout(self._skip_btn_row)
+        sbr.setContentsMargins(0, 0, 0, 0)
+        self._skip_all_empty_btn = QPushButton('Skip all empty')
+        self._skip_all_empty_btn.setToolTip('Back to the automatic proposal: every tile '
+                                            'without tissue is skipped; your own changes are cleared.')
+        self._skip_all_empty_btn.clicked.connect(self._skip_all_empty)
+        self._skip_none_btn = QPushButton('Skip none')
+        self._skip_none_btn.setToolTip('Segment every tile.')
+        self._skip_none_btn.clicked.connect(self._skip_none)
+        sbr.addWidget(self._skip_all_empty_btn)
+        sbr.addWidget(self._skip_none_btn)
+        sbr.addStretch()
+        self._skip_btn_row.setVisible(False)
+        til.addWidget(self._skip_btn_row)
         self._skip_hint_lbl = QLabel('')
         self._skip_hint_lbl.setStyleSheet(f'color:{_TK["text3"]};font-size:10px;')
         self._skip_hint_lbl.setWordWrap(True)
@@ -2128,7 +2191,13 @@ class Step2Page(QWidget):
         nr = self._rows_spin.value()
         nc = self._cols_spin.value()
 
-        # Remove old rects
+        # Remove old rects; a box being dragged and the tiles collected end
+        # (they named these tiles)
+        self._box = None
+        self._box_preview = {}
+        self._pending = {}
+        if self.__dict__.get('_shift_timer') is not None:
+            self._shift_timer.stop()
         for item in list(self._tile_rects.values()):
             self._ov_vb.removeItem(item)
         self._tile_rects.clear()
@@ -2146,7 +2215,7 @@ class Step2Page(QWidget):
                 ox0 = c * tw
                 ox1 = min(ox0 + tw, self._full_w)
                 # convert to overview coords
-                rect = pg.RectROI(
+                rect = _TileRect(
                     [ox0 / ds, oy0 / ds],
                     [(ox1 - ox0) / ds, (oy1 - oy0) / ds],
                     pen=pg.mkPen('#808080', width=1),
@@ -2156,6 +2225,7 @@ class Step2Page(QWidget):
                 rect.sigClicked.connect(lambda _roi, _ev=None, r=r, c=c:
                                         self._on_tile_clicked(r, c))
                 self._ov_vb.addItem(rect)
+                rect.base_z = rect.zValue()                # the layers stack on it (plan §2)
                 self._tile_rects[(r, c)] = rect
                 self._tile_status[(r, c)] = 'idle'
         if self._run_active or self._skip_plan is None:
@@ -2260,9 +2330,6 @@ class Step2Page(QWidget):
             if (r, c) in self._tile_rects:
                 self._set_tile_colour(r, c, state)
                 self._tile_status[(r, c)] = state
-        for idx in self._tile_pick:
-            if divmod(int(idx), nc) in self._tile_rects:
-                self._set_tile_colour(*divmod(int(idx), nc), 'picked')
 
     def _skip_hint(self):
         plan = self._skip_plan
@@ -2271,13 +2338,43 @@ class Step2Page(QWidget):
         n = len(plan["fractions"])
         forced = len(plan["user_forced"])
         text = (f'{len(self._plan_skips())} of {n} tiles skipped '
-                f'({len(set(plan["auto"]) - plan["user_kept"])} without tissue'
-                + (f', {forced} with tissue, chosen by you' if forced else '')
-                + ') — click a tile to change it, or hold Shift and click several')
+                f'({len(plan["auto"])} have no tissue'
+                + (f'; {forced} with tissue skipped by you' if forced else '')
+                + ') — click a tile to change it; hold Shift to select several')
         if plan.get("reset_note"):
             text = plan["reset_note"] + ' ' + text
         self._skip_hint_lbl.setText(text)
         self._skip_hint_lbl.setVisible(True)
+        self._sync_skip_buttons()
+
+    def _sync_skip_buttons(self):
+        """The two buttons: shown with the count line, locked while a run computes."""
+        self._skip_btn_row.setVisible(self._skip_plan is not None
+                                      and self._skip_empty_cb.isChecked())
+        self._skip_all_empty_btn.setEnabled(not self._run_active)
+        self._skip_none_btn.setEnabled(not self._run_active)
+
+    def _edit_plan(self, user_kept):
+        """A button: the user's own changes replaced in one go, no question."""
+        plan = self._skip_plan
+        if plan is None or self._run_active or not self._plan_matches_drawn_grid():
+            return
+        self._box_cancel()
+        plan["user_kept"] = set(user_kept)
+        plan["user_forced"] = {}
+        plan.pop("reset_note", None)
+        self._draw_tile_grid()
+        self._skip_hint()
+
+    def _skip_all_empty(self):
+        """Back to the automatic proposal (every tile without tissue skipped)."""
+        if self._skip_plan is not None:
+            self._edit_plan(())
+
+    def _skip_none(self):
+        """Every tile is segmented."""
+        if self._skip_plan is not None:
+            self._edit_plan(self._skip_plan["auto"])
 
     def _on_skip_toggled(self, *_):
         self._refresh_skip_plan(reset_note=False)
@@ -2286,13 +2383,14 @@ class Step2Page(QWidget):
     def _refresh_skip_plan(self, reset_note=True):
         """(Re)compute the proposal for the drawn grid. A new grid or overlap
         drops the user's own choices -- they named tiles of another grid."""
+        self._box_cancel()
         if not self._skip_empty_cb.isChecked() or not self._zarr_path:
             self._skip_plan = None
             self._skip_hint_lbl.setVisible(False)
+            self._sync_skip_buttons()
             return
         from ..core import tile_tissue
-        had_choices = bool(self._tile_pick or (self._skip_plan and (
-            self._skip_plan["user_kept"] or self._skip_plan["user_forced"])))
+        had_choices = bool(self._skip_plan and self._plan_skips())
         try:
             bbox, slide, channel = tile_tissue.fused_region(self._zarr_path)
             key = (slide, channel)
@@ -2305,39 +2403,28 @@ class Step2Page(QWidget):
             self._skip_plan = None
             self._skip_hint_lbl.setText(f'Skip unavailable: {exc}')
             self._skip_hint_lbl.setVisible(True)
+            self._sync_skip_buttons()
             return
-        plan["user_kept"] = set()
+        # plan §13: ticking skips nothing -- every proposed tile starts kept;
+        # "Skip all empty" applies the proposal
+        plan["user_kept"] = set(plan["auto"])
         plan["user_forced"] = {}
-        self._tile_pick = []
-        self._watch_shift(False)
         if reset_note and had_choices:
             plan["reset_note"] = 'The grid changed: your tile choices were reset.'
         self._skip_plan = plan
         self._skip_hint()
 
     def _on_tile_clicked(self, r, c):
-        """Toggle one tile of the plan. Skipping a tile that holds tissue is
-        asked first (the user's own decision, recorded as such). With Shift
-        held the tile is only picked; the picked tiles change together when
-        Shift is released."""
+        """Toggle one tile of the plan at once. Skipping a tile that holds
+        tissue is asked first (the user's own decision, recorded as such)."""
         plan = self._skip_plan
         if plan is None or self._run_active or not self._plan_matches_drawn_grid():
             return
         idx = int(r) * plan["grid"][1] + int(c)
         if idx >= len(plan["fractions"]):
             return
-        if self._shift_held():
-            if idx in self._tile_pick:
-                self._tile_pick.remove(idx)
-            else:
-                self._tile_pick.append(idx)
-            self._watch_shift(bool(self._tile_pick))
-            if idx in self._tile_pick:
-                self._set_tile_colour(int(r), int(c), 'picked')
-            else:
-                self._draw_tile_grid()                   # back to its plan colour
-            return
-        self._apply_tile_pick()                          # Shift's release was missed
+        if self._pending:
+            self._commit_pending()
         self._toggle_tiles([idx])
 
     def _toggle_tiles(self, tiles):
@@ -2365,42 +2452,193 @@ class Step2Page(QWidget):
         self._draw_tile_grid()
         self._skip_hint()
 
-    def _shift_held(self):
-        """A seam: offscreen tests press Shift by replacing it."""
-        return bool(QtWidgets.QApplication.keyboardModifiers() & Qt.ShiftModifier)
+    def _set_tiles(self, tiles, skip):
+        """Set these tiles skipped (`skip`) or segmented; the tiles already
+        so are left alone. One question for the tissue tiles to skip."""
+        skips = self._plan_skips()
+        todo = [i for i in tiles if (i in skips) != bool(skip)]
+        if todo:
+            self._toggle_tiles(todo)
 
-    def _watch_shift(self, on):
-        """Listen (application-wide) for Shift's release while tiles are picked."""
-        app = QtWidgets.QApplication.instance()
-        if app is None or on == self._pick_filter_on:
+    def _shift_held(self):
+        """Shift is down NOW: the system's live state, not the last event's
+        (Shift let go in another window must still be seen). A seam:
+        offscreen tests press Shift by replacing it."""
+        return bool(QtWidgets.QApplication.queryKeyboardModifiers() & Qt.ShiftModifier)
+
+    # ── the Shift+drag box (plan §3.2): one commit per gesture ──────────
+
+    def _box_begin(self, r, c, shift=None):
+        """A press on tile (r, c): a box starts when Shift is held and the
+        plan can be edited. Its direction is the start tile's (user
+        decision A): segmented -> skip the boxed tiles, skipped -> restore.
+        `shift`: whether the press itself carried Shift (what the system sent
+        with it, the reliable answer); None asks the keyboard now."""
+        plan = self._skip_plan
+        held = self._shift_held() if shift is None else bool(shift)
+        if (plan is None or self._run_active or not self._skip_empty_cb.isChecked()
+                or not self._plan_matches_drawn_grid() or not held):
+            return False
+        idx = int(r) * plan["grid"][1] + int(c)
+        if idx >= len(plan["fractions"]):
+            return False
+        self._box = {"start": (int(r), int(c)), "end": (int(r), int(c)),
+                     "skip": not self._skipped_after(idx)}
+        self._show_box()
+        return True
+
+    def _box_tiles(self, box):
+        """The plan's tile indices in the rows x columns the box spans."""
+        plan = self._skip_plan
+        nc = plan["grid"][1]
+        (r0, c0), (r1, c1) = box["start"], box["end"]
+        return [r * nc + c for r in range(min(r0, r1), max(r0, r1) + 1)
+                for c in range(min(c0, c1), max(c0, c1) + 1)
+                if r * nc + c < len(plan["fractions"])]
+
+    def _box_move(self, r, c):
+        """The pointer is over tile (r, c) (clamped): redrawn only when the
+        boxed range changes."""
+        box = self._box
+        if box is None or (int(r), int(c)) == box["end"]:
             return
-        if on:
-            app.installEventFilter(self)
+        box["end"] = (int(r), int(c))
+        self._show_box()
+
+    def _skipped_after(self, idx):
+        """Whether tile `idx` would be skipped: its collected state, else the plan's."""
+        if idx in self._pending:
+            return self._pending[idx]
+        return idx in self._plan_skips()
+
+    def _collect(self, idx, skip):
+        """Tile `idx` to end up skipped (`skip`) -- collected, or dropped from
+        the collection when that is what the plan already says."""
+        if (idx in self._plan_skips()) == bool(skip):
+            self._pending.pop(idx, None)
         else:
-            app.removeEventFilter(self)
-        self._pick_filter_on = on
+            self._pending[idx] = bool(skip)
+
+    def _box_click(self):
+        """Shift + click without moving: the start tile alone is collected
+        toggled (a second click takes it back out). Nothing is asked yet."""
+        box, self._box = self._box, None
+        if box is None:
+            return
+        r, c = box["start"]
+        idx = r * self._skip_plan["grid"][1] + c
+        self._collect(idx, not self._skipped_after(idx))
+        self._after_collect()
+
+    def _box_finish(self):
+        """The release: the boxed tiles are collected in the box's direction."""
+        box, self._box = self._box, None
+        if box is None:
+            return
+        for idx in self._box_tiles(box):
+            self._collect(idx, box["skip"])
+        self._after_collect()
+
+    def _after_collect(self):
+        self._show_box()
+        if self._pending:
+            self._shift_timer.start()
+        else:
+            self._shift_timer.stop()             # the last tile taken back out
+        if not self._shift_held():
+            self._commit_pending()
+
+    def _shift_poll(self):
+        """Shift let go (and no box held): what was collected is committed."""
+        if self._box is None and not self._shift_held():
+            self._commit_pending()
+
+    def _commit_pending(self):
+        """Everything collected at once, ONE question for the tissue tiles."""
+        self._shift_timer.stop()
+        pending, self._pending = self._pending, {}
+        self._show_box()
+        if not pending or self._skip_plan is None:
+            return
+        self._set_tiles([i for i, skip in pending.items() if not skip], False)
+        self._set_tiles([i for i, skip in pending.items() if skip], True)
+
+    def _box_cancel(self):
+        """A box being dragged, and the tiles collected, end with no change
+        (grid, option, run, button)."""
+        self._shift_timer.stop()
+        if self._box is None and not self._box_preview and not self._pending:
+            return
+        self._box = None
+        self._pending = {}
+        self._show_box()
+
+    def _show_box(self):
+        """Draw the collected tiles and the boxed ones as they would end up,
+        framed in white."""
+        old, new = self._box_preview, {}
+        box, plan = self._box, self._skip_plan
+        if plan is not None:
+            nc = plan["grid"][1]
+            skips = self._plan_skips()
+            wanted = dict(self._pending)
+            if box is not None:
+                wanted.update({idx: box["skip"] for idx in self._box_tiles(box)})
+            for idx, skip in wanted.items():
+                rc = divmod(idx, nc)
+                if not skip:
+                    new[rc] = 'idle'
+                elif idx in skips:
+                    new[rc] = self._tile_colour_state.get(rc, 'plan_skip')
+                else:
+                    new[rc] = 'plan_forced' if float(plan["fractions"][idx]) > 0.0 else 'plan_skip'
+        self._box_preview = new
+        for rc in set(old) | set(new):
+            self._style_tile(*rc)
+        if self.dapi_viewer is not None:
+            self.dapi_viewer.refresh()
+
+    def _overview_tile(self, pos, clamp=False):
+        """(row, col) of the drawn tile under a point of the overview's viewport."""
+        if not self._tile_rects or not self._full_h:
+            return None
+        q = self._ov_vb.mapSceneToView(self._ov_gv.mapToScene(pos))
+        ds = self._ov_ds
+        return self._tile_index_at(q.y() * ds, q.x() * ds, clamp)
 
     def eventFilter(self, obj, event):
-        if (self._pick_filter_on and event.type() == QtCore.QEvent.KeyRelease
-                and event.key() == Qt.Key_Shift and not event.isAutoRepeat()):
-            QtCore.QTimer.singleShot(0, self._apply_tile_pick)
-        elif (self._pick_filter_on and event.type() == QtCore.QEvent.ApplicationActivate
-              and not self._shift_held()):
-            # Shift was released in another application: apply on return
-            QtCore.QTimer.singleShot(0, self._apply_tile_pick)
+        """The overview's Shift+drag box (plan §3.2): a Shift + left press on
+        a tile that starts a box is consumed with its moves and release (the
+        tile's RectROI never sees them); any other press goes on as before."""
+        gv = self.__dict__.get('_ov_gv')
+        if gv is not None and obj is gv.viewport():
+            t = event.type()
+            if (t in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonDblClick)
+                    and event.button() == Qt.LeftButton and self._ov_press is None):
+                hit = self._overview_tile(event.pos())
+                shift = bool(event.modifiers() & Qt.ShiftModifier)     # as sent with the press
+                if hit is not None and self._box_begin(*hit, shift=shift):
+                    self._ov_press = QtCore.QPoint(event.pos())
+                    return True
+            elif t == QtCore.QEvent.MouseMove and self._ov_press is not None:
+                hit = self._overview_tile(event.pos(), clamp=True)
+                if hit is not None:
+                    self._box_move(*hit)
+                return True
+            elif (t == QtCore.QEvent.MouseButtonRelease and event.button() == Qt.LeftButton
+                  and self._ov_press is not None):
+                from .regions.overlay import CLICK_SLOP_PX
+                start, self._ov_press = self._ov_press, None
+                if self._box is not None:
+                    hit = self._overview_tile(event.pos(), clamp=True)
+                    if hit is not None:
+                        self._box_move(*hit)
+                    if (event.pos() - start).manhattanLength() > CLICK_SLOP_PX:
+                        self._box_finish()
+                    else:
+                        self._box_click()
+                return True
         return super().eventFilter(obj, event)
-
-    def _apply_tile_pick(self):
-        """Shift was released (or a run starts): change the picked tiles."""
-        picked, self._tile_pick = self._tile_pick, []
-        self._watch_shift(False)
-        plan = self._skip_plan
-        if not picked:
-            return
-        if plan is None or self._run_active or not self._plan_matches_drawn_grid():
-            self._draw_tile_grid()
-            return
-        self._toggle_tiles([i for i in picked if i < len(plan["fractions"])])
 
     def _confirm_forced_skips(self, tissue):
         """One question for several tiles with tissue (a seam like
@@ -2440,13 +2678,20 @@ class Step2Page(QWidget):
                 "fractions": [float(f) for f in plan["fractions"]], "mask": plan["mask"]}
 
     def _on_tile_skipped(self, tile_idx, n_tiles):
-        self._record_tile(tile_idx, 'skipped')
+        forced = (self._run_progress or {}).get("forced", ())
+        self._record_tile(tile_idx, 'skipped_forced' if int(tile_idx) in forced else 'skipped')
 
     def _begin_run_progress(self, nr, nc):
-        """A new run: a new progress record; every drawn tile back to idle."""
+        """A new run: a new progress record; every drawn tile back to idle.
+        The tissue tiles the user chose to skip are kept with it, so they
+        stay hatched while the run computes."""
         self._run_active = True
         self._skip_empty_cb.setEnabled(False)
-        self._run_progress = {"grid": (int(nr), int(nc)), "state": {}}
+        self._sync_skip_buttons()
+        plan = self._skip_plan
+        forced = ({int(i) for i in plan["user_forced"]}
+                  if plan is not None and self._skip_empty_cb.isChecked() else set())
+        self._run_progress = {"grid": (int(nr), int(nc)), "state": {}, "forced": forced}
         for key in self._tile_status:
             self._tile_status[key] = 'idle'
             self._set_tile_colour(key[0], key[1], 'idle')
@@ -2465,25 +2710,63 @@ class Step2Page(QWidget):
             self._set_tile_colour(r, c, state)
             self._tile_status[(r, c)] = state
 
+    SKIP_PURPLE = '#c678dd'
     TILE_COLOURS = {
         'idle':    '#808080',
         'running': '#ffc832',
         'done':    '#3cc850',
         'error':   '#dc3c3c',
-        'skipped': '#5a7896',          # block S2T: left out by the plan
-        'plan_skip': '#5a7896',        # the next run will leave it out
-        'plan_forced': '#c678dd',      # ... although it holds tissue (the user's choice)
-        'picked': '#56b6c2',           # picked with Shift+click, changed on Shift's release
+        'skipped': SKIP_PURPLE,        # block S2T: left out by the plan
+        'skipped_forced': SKIP_PURPLE,  # ... a tile with tissue the user chose
+        'plan_skip': SKIP_PURPLE,      # the next run will leave it out
+        'plan_forced': SKIP_PURPLE,    # ... although it holds tissue (the user's choice)
     }
-    TILE_DASHED = ('plan_skip', 'plan_forced')
+    #: The skip look (plan §2): translucent purple fill, 4 px border; the
+    #: tissue tiles the user chose are hatched too.
+    SKIP_STATES = ('plan_skip', 'plan_forced', 'skipped', 'skipped_forced')
+    HATCHED_STATES = ('plan_forced', 'skipped_forced')
+    SKIP_FILL = '#4dc678dd'            # SKIP_PURPLE at alpha 0.30 (#AARRGGBB)
+    SKIP_WIDTH = 4.0
+    PREVIEW_COLOUR = '#ffffff'         # the frame of a tile under a Shift+drag box
+    PREVIEW_WIDTH = 2.0
+
+    def _tile_look(self, row, col):
+        """(colour, width or None, fill or None, hatched, layer, framed) of a
+        drawn tile. Layers (plan §2): 0 idle, 1 skipped, 2 running / done /
+        error, 3 under the box. A tile under the box looks like its result
+        (purple, hatched or not) with a white frame over it. Width None =
+        the view's own default."""
+        preview = self._box_preview.get((row, col))
+        state = preview if preview is not None else self._tile_colour_state.get((row, col), 'idle')
+        if state in self.SKIP_STATES:
+            look = [self.SKIP_PURPLE, self.SKIP_WIDTH, self.SKIP_FILL,
+                    state in self.HATCHED_STATES, 1]
+        else:
+            look = [self.TILE_COLOURS.get(state, '#808080'), None, None, False,
+                    0 if state == 'idle' else 2]
+        if preview is not None:
+            look[4] = 3
+        return tuple(look) + (preview is not None,)
+
+    def _style_tile(self, row, col):
+        """Apply a tile's look to its overview RectROI."""
+        rect = self._tile_rects.get((row, col))
+        if rect is None:
+            return
+        colour, width, fill, hatched, layer, framed = self._tile_look(row, col)
+        rect.fill = QtGui.QColor(fill) if fill else None
+        rect.hatch = QtGui.QColor(colour) if hatched else None
+        rect.frame = pg.mkPen(self.PREVIEW_COLOUR, width=self.PREVIEW_WIDTH) if framed else None
+        rect.setPen(pg.mkPen(colour, width=width or 2))
+        rect.setZValue(getattr(rect, 'base_z', 0.0) + layer)
+        rect.update()
 
     def _set_tile_colour(self, row, col, state):
         rect = self._tile_rects.get((row, col))
         if rect is None:
             return
         self._tile_colour_state[(row, col)] = state
-        style = Qt.DashLine if state in self.TILE_DASHED else Qt.SolidLine
-        rect.setPen(pg.mkPen(self.TILE_COLOURS.get(state, '#808080'), width=2, style=style))
+        self._style_tile(row, col)
         if self.dapi_viewer is not None:
             self.dapi_viewer.refresh()                     # the grid over the zoomable picture
 
@@ -2509,21 +2792,46 @@ class Step2Page(QWidget):
         for (r, c) in sorted(self._tile_rects):
             y0, x0 = oy + r * th, ox + c * tw
             y1, x1 = oy + min((r + 1) * th, self._full_h), ox + min((c + 1) * tw, self._full_w)
-            state = self._tile_colour_state.get((r, c), 'idle')
-            items.append({"id": f"tile_{r}_{c}", "polygon": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
-                          "color": self.TILE_COLOURS.get(state, '#808080'),
-                          "dash": state in self.TILE_DASHED})
-        return items
+            colour, width, fill, hatched, layer, framed = self._tile_look(r, c)
+            poly = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+            item = {"id": f"tile_{r}_{c}", "polygon": poly, "color": colour}
+            if width is not None:
+                item["width"] = width
+            if fill:
+                item["fill"] = fill
+            if hatched:
+                item["hatch"] = True
+            items.append((layer, item))
+            if framed:                                     # the box's white frame, over it
+                items.append((layer + 0.5, {"id": f"tile_{r}_{c}_box", "polygon": poly,
+                                            "color": self.PREVIEW_COLOUR, "width": self.PREVIEW_WIDTH}))
+        # drawn in layer order: purple under running / done, the box on top
+        return [it for _layer, it in sorted(items, key=lambda li: li[0])]
 
     def tile_at(self, y, x):
         """(row, col) of the drawn tile under slide pixel (y, x), or None."""
         if not self._tile_rects or not self._full_h:
             return None
         nr, nc, th, tw, oy, ox = self._tile_geometry()
-        ly, lx = y - oy, x - ox
-        if not (0 <= ly < self._full_h and 0 <= lx < self._full_w):
+        return self._tile_index_at(y - oy, x - ox)
+
+    def tile_at_clamped(self, y, x):
+        """(row, col) of the drawn tile nearest slide pixel (y, x): a point
+        outside the grid is clamped to its edge tiles (a Shift+drag box)."""
+        if not self._tile_rects or not self._full_h:
             return None
-        rc = (int(ly // th), int(lx // tw))
+        nr, nc, th, tw, oy, ox = self._tile_geometry()
+        return self._tile_index_at(y - oy, x - ox, clamp=True)
+
+    def _tile_index_at(self, ly, lx, clamp=False):
+        """(row, col) under a point in the region's own pixels."""
+        nr, nc, th, tw, _oy, _ox = self._tile_geometry()
+        if clamp:
+            rc = (min(max(int(ly // th), 0), nr - 1), min(max(int(lx // tw), 0), nc - 1))
+        elif not (0 <= ly < self._full_h and 0 <= lx < self._full_w):
+            return None
+        else:
+            rc = (int(ly // th), int(lx // tw))
         return rc if rc in self._tile_rects else None
 
     # ── Segmentation params loading ───────────────────────────────────
@@ -3327,7 +3635,7 @@ class Step2Page(QWidget):
                                     (region_fused_paths or {}).items() if v}
 
     def _run(self):
-        self._apply_tile_pick()                 # tiles still picked with Shift count
+        self._box_cancel()                      # a box still being dragged changes nothing
         if not self._zarr_path or not os.path.exists(self._zarr_path):
             QMessageBox.warning(self, 'No data',
                                 'Please load a fused.zarr first.')
@@ -3644,6 +3952,7 @@ class Step2Page(QWidget):
         self._run_grid_lbl.setVisible(False)
         self._run_active = False
         self._skip_empty_cb.setEnabled(True)
+        self._sync_skip_buttons()
         self._btn_run.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._apply_pending_context()
@@ -3674,6 +3983,7 @@ class Step2Page(QWidget):
         self._run_grid_lbl.setVisible(False)
         self._run_active = False
         self._skip_empty_cb.setEnabled(True)
+        self._sync_skip_buttons()
         self._mark_source_aware_applied()
         runtime = {}
         try:
@@ -3746,6 +4056,7 @@ class Step2Page(QWidget):
         self._run_grid_lbl.setVisible(False)
         self._run_active = False
         self._skip_empty_cb.setEnabled(True)
+        self._sync_skip_buttons()
         self._prog_lbl.setText('✗ Error — see terminal')
         self._btn_run.setEnabled(True)
         self._btn_stop.setEnabled(False)

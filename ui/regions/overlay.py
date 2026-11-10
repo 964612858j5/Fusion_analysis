@@ -79,6 +79,9 @@ class RegionsOverlay(QtWidgets.QWidget):
         self.sequence: List = []
         self.circle = None
         self._press = None            # (pos, claimed, space-pan)
+        # the keyboard modifiers of the last press, as the system sent them
+        # with it (a controller that needs more than Ctrl reads them)
+        self.press_modifiers = 0
         self._static = None           # (key, QPixmap): the outlines and labels as last painted
         self._shapes: List[_Shape] = []   # prepared in `set_items`
         self._items_ver = 0
@@ -220,6 +223,7 @@ class RegionsOverlay(QtWidgets.QWidget):
                 return False                                 # a space drag pans, whatever the tool
             y, x = self.to_level0(event.pos())
             ctrl = bool(event.modifiers() & Qt.ControlModifier)
+            self.press_modifiers = flag_value(event.modifiers())
             claimed = bool(c.press(y, x, ctrl))
             self._press = (QtCore.QPoint(event.pos()), claimed, False)
             return claimed
@@ -345,9 +349,15 @@ class RegionsOverlay(QtWidgets.QWidget):
             br = QtCore.QRectF(float(sx.min()), float(sy.min()),
                                float(sx.max() - sx.min()), float(sy.max() - sy.min()))
             pen = QtGui.QPen(QtGui.QColor(it["color"]))
-            pen.setWidthF(3.0 if it["id"] in self.selected else 1.5)
+            width = it.get("width")                       # optional (Step2's tiles); Regions sets none
+            pen.setWidthF(float(width) if width is not None
+                          else (3.0 if it["id"] in self.selected else 1.5))
             if it.get("dash"):
                 pen.setStyle(Qt.DashLine)
+            if it.get("fill"):                            # optional solid fill under hatch and border
+                p.setPen(Qt.NoPen)
+                p.setBrush(QtGui.QColor(it["fill"]))
+                p.drawPolygon(poly)
             p.setPen(pen)
             if it.get("hatch"):                           # an exclusion: hatched, as a mark
                 p.setBrush(QtGui.QBrush(QtGui.QColor(it["color"]), Qt.BDiagPattern))

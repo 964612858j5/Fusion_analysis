@@ -235,6 +235,56 @@ def test_the_grid_is_drawn_and_clicked_in_slide_pixels(app):
     assert next(i for i in page.tile_items() if i["id"] == "tile_0_0")["color"] == page.TILE_COLOURS["done"]
 
 
+def test_the_grid_controller_hands_a_shift_press_to_the_page_box(app):
+    """docs/v17_step2_skip_tiles_ux_plan.md §3.2: with the page as `box`, a
+    press the page takes is claimed; the finishing drag only moves; click()
+    is a Shift + click and released() commits what is left -- once."""
+    calls = []
+    page = SimpleNamespace(_box=None)
+
+    def begin(r, c, shift=None):
+        page._box = {"start": (r, c)}
+        calls.append(("begin", r, c))
+        return True
+
+    def end(name):
+        def f():
+            page._box = None
+            calls.append((name,))
+        return f
+    page._box_begin = begin
+    page._box_move = lambda r, c: calls.append(("move", r, c))
+    page._box_click, page._box_finish = end("click"), end("finish")
+    page.tile_at_clamped = lambda y, x: (int(y), int(x))
+    clicks = _GridClicks(lambda y, x: (int(y), int(x)), lambda r, c: calls.append(("tile", r, c)), box=page)
+    assert clicks.press(0, 0) is True
+    clicks.drag(1, 2)
+    clicks.drag(1, 2, finish=True)
+    clicks.released()
+    assert calls == [("begin", 0, 0), ("move", 1, 2), ("move", 1, 2), ("finish",)]
+    calls.clear()
+    clicks.press(0, 0)
+    clicks.drag(0, 0, finish=True)
+    clicks.click(0, 0)                                        # a Shift + click
+    clicks.released()                                         # nothing left to commit
+    assert calls == [("begin", 0, 0), ("move", 0, 0), ("click",)]
+    calls.clear()
+    clicks.click(3, 4)                                        # an unclaimed plain click
+    clicks.released()
+    assert calls == [("tile", 3, 4)]
+    page._box_begin = lambda r, c, shift=None: False          # no Shift: the view keeps the press
+    assert clicks.press(0, 0) is False
+    # with its overlay, the controller hands on the press's own Shift
+    seen = []
+    page._box_begin = lambda r, c, shift=None: seen.append(shift) or False
+    clicks.overlay = SimpleNamespace(press_modifiers=0)
+    clicks.press(0, 0)
+    from block01.qt import QtCore, flag_value
+    clicks.overlay.press_modifiers = flag_value(QtCore.Qt.ShiftModifier)
+    clicks.press(0, 0)
+    assert seen == [False, True]
+
+
 def test_clearing_the_input_tells_the_zoomable_picture(app):
     from block01.ui.step2_page import Step2Page
     page = Step2Page()

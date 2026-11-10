@@ -44,7 +44,8 @@ deployment, optionally AI-assisted with the user's own API key.
   downloads it from Hugging Face on first use), StarDist under `~/.keras`
   (csbdeep downloads it from GitHub on first use), Mesmer Keras at an
   absolute server path (`DEEPCELL_MESMER_MODEL_PATH`; obtained from DeepCell
-  with an account token; non-commercial academic licence), Mesmer torch
+  with an account token -- since 2026-11-10 from DeepCell's public storage,
+  no token, docs/v17_mesmer_public_download_plan.md; non-commercial academic licence), Mesmer torch
   generated from it at first use (`BLOCK01_MESMER_TORCH_PATH`, checked by a
   content digest).
 * CI builds the wheel on Linux and Windows on `native/**` changes and keeps
@@ -186,7 +187,11 @@ on failure the step, the exact failing command and what to do.
    * StarDist: `https://github.com/stardist/stardist-models/releases/download/v0.1/python_2D_versatile_fluo.zip`
      (BSD-3); the zip is verified, its `config.json`, `thresholds.json`,
      `weights_best.h5` extracted and verified;
-   * Mesmer: DeepCell 0.12.10's own protocol — POST
+   * Mesmer (REPLACED 2026-11-10 by docs/v17_mesmer_public_download_plan.md:
+     a plain download of the same archive from
+     `deepcell-data.s3-us-west-1.amazonaws.com`, checked by its SHA-256, no
+     token; the token flow below and its acceptance item are history):
+     DeepCell 0.12.10's own protocol — POST
      `s3_key=models/MultiplexSegmentation-9.tar.gz` to
      `https://users.deepcell.org/api/getData/` with header
      `X-Api-Key: $DEEPCELL_ACCESS_TOKEN`, download the returned URL, extract
@@ -307,7 +312,8 @@ No change to the environment lock, scientific behaviour or project data.
   Cases: fresh run completes (time measured); second run "already
   installed"; `--check-only` writes nothing; interrupted run (killed
   during the env step) → next run recovers; a foreign prefix refused; a
-  model mismatch refused; Mesmer without token stops before the self-test;
+  model mismatch refused; Mesmer without token stops before the self-test
+  (replaced 2026-11-10: no token, the public download);
   `unshare -n` → readable network error. Temporary root deleted after.
 * Clean Linux baseline: the installer run in a clean container
   (`ubuntu:22.04` with the host's NVIDIA runtime if available, else the

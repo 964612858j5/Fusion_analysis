@@ -21,8 +21,8 @@ user's consent. (docs/v17_install_plan.md §4.)
    this machine, stop and report — do not work around it.
 4. Never touch user data: image files, Block01 project folders, anything
    outside the checkout and the install root.
-5. Never store API keys or tokens in files. `DEEPCELL_ACCESS_TOKEN` is passed
-   on the command line of one installer run, typed by the user.
+5. Never store API keys or tokens in files. (The installer needs none: the
+   Mesmer model comes from DeepCell's public model storage.)
 6. Do not modify an existing environment, model folder or link the installer
    refused to touch; ask the user what to do with it, or use a new `--root`.
 
@@ -40,9 +40,11 @@ user's consent. (docs/v17_install_plan.md §4.)
    * no CUDA toolkit: GPU background correction falls back to the CPU; the
      verified toolkit is CUDA 12.2 (point `CUDA_PATH` at it for the run);
    * not enough space: ask the user where to install (`--root DIR`).
-3. Mesmer needs a free DeepCell account: the user signs up at
-   https://users.deepcell.org and gives the token for the run, or points
-   `--models FOLDER` at an existing copy (`FOLDER/<models.json entry>/…`).
+3. Mesmer is downloaded from DeepCell's public model storage
+   (`deepcell-data.s3-us-west-1.amazonaws.com`), no account needed; its
+   licence (non-commercial academic use) is shown and must be accepted like
+   the others. An existing copy can be used instead with `--models FOLDER`
+   (`FOLDER/<models.json entry>/…`).
 4. Run `bash scripts/install_block01.sh` (with `--root`, `--models` as
    agreed), in a terminal so the licences can be answered. It also builds a
    second small environment for Step 4's SpatialData export (about 1.2 GB);

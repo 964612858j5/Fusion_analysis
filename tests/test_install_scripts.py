@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 
@@ -184,15 +185,48 @@ ensure_models'''
     assert (d / "cpsam").read_bytes() == b"wrong"
 
 
-def test_mesmer_without_a_token_stops_before_anything_is_downloaded(tmp_path):
-    body = f'''PY={PY}; ROOT="{tmp_path}"; unset DEEPCELL_ACCESS_TOKEN
+def test_mesmer_comes_from_the_public_address_with_its_checksum_and_no_token(tmp_path):
+    """docs/v17_mesmer_public_download_plan.md: no token is asked for; the
+    archive is downloaded from DeepCell's public storage and checked against
+    its fixed SHA-256 before anything is unpacked; the licence is still shown
+    and accepted first."""
+    body = f'''PY={PY}; ROOT="{tmp_path}"; unset DEEPCELL_ACCESS_TOKEN; ACCEPT_LICENCES=1
+ORIGINAL_MODELS=(mesmer_multiplex_segmentation)
+model_state() {{ echo missing; }}
+download() {{ echo "DOWNLOAD $1 $3"; mkdir -p "$(dirname "$2")"; : > "$2"; }}
+run() {{ "$@"; }}
+verify_into_place() {{ echo "VERIFY $1"; }}
+tar() {{ mkdir -p "$4/MultiplexSegmentation"; }}
+ensure_models'''
+    r = _bash(INSTALL, body)
+    assert r.returncode == 0, r.stderr
+    assert "non-commercial" in r.stdout and "accepted with --accept-model-licences" in r.stdout
+    assert ("DOWNLOAD https://deepcell-data.s3-us-west-1.amazonaws.com/saved-models/"
+            "MultiplexSegmentation-9.tar.gz "
+            "25b1babc2ff769a9f9484184073db8bc264d5ab2de8a6f9ce07c289e8b935129") in r.stdout
+    assert "VERIFY mesmer_multiplex_segmentation" in r.stdout
+    assert "DEEPCELL_ACCESS_TOKEN" not in r.stdout + r.stderr
+    src = INSTALL.read_text(encoding="utf-8")
+    assert "users.deepcell.org" not in src and "DEEPCELL_ACCESS_TOKEN" not in src
+
+
+def test_mesmer_licence_answered_no_downloads_nothing(tmp_path):
+    body = f'''PY={PY}; ROOT="{tmp_path}"; ACCEPT_LICENCES=0
 ORIGINAL_MODELS=(mesmer_multiplex_segmentation)
 model_state() {{ echo missing; }}
 fetch_model() {{ echo FETCHED; }}
 ensure_models'''
-    r = _bash(INSTALL, body)
-    assert r.returncode == 1 and "DEEPCELL_ACCESS_TOKEN" in r.stderr
-    assert "non-commercial" in r.stdout and "FETCHED" not in r.stdout
+    if shutil.which("script") is None:
+        pytest.skip("needs script(1) for a terminal")
+    cmd = f'. "{INSTALL}"\n{body}'
+    import sys
+    argv = (["script", "-q", "/dev/null", "bash", "-c", cmd] if sys.platform == "darwin"
+            else ["script", "-qec", f"bash -c {shlex.quote(cmd)}", "/dev/null"])
+    r = subprocess.run(argv, capture_output=True, text=True, input="no\n",
+                       env=dict(os.environ, BLOCK01_INSTALL_SOURCED="1"), timeout=60)
+    out = r.stdout + r.stderr
+    assert "non-commercial" in out and "FETCHED" not in out
+    assert "the licence was not accepted" in out
 
 
 def test_a_licence_needs_an_answer(tmp_path):

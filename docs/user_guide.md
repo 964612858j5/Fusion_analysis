@@ -66,7 +66,7 @@ bash scripts/install_block01.sh
 It checks the computer, installs the Python environment and the prebuilt
 viewer core, a second small environment for Step 4's SpatialData export
 (`--no-spatialdata` skips it), shows each segmentation model's licence and downloads it after
-you type `yes` (Mesmer needs a free DeepCell token in `DEEPCELL_ACCESS_TOKEN`),
+you type `yes` (Mesmer comes from DeepCell's public model storage; no account or token is needed),
 tests the three engines and prints the start command. Everything goes under
 `~/.local/share/block01` (`--root DIR` to choose another place); nothing
 already on the computer is changed. If it stops, it says which step failed

@@ -34,8 +34,10 @@ MATURIN_PIN="maturin==1.15.0"
 
 CPSAM_URL="https://huggingface.co/mouseland/cellpose-sam/resolve/main/cpsam"
 STARDIST_URL="https://github.com/stardist/stardist-models/releases/download/v0.1/python_2D_versatile_fluo.zip"
-DEEPCELL_API="https://users.deepcell.org/api/getData/"
-DEEPCELL_KEY="models/MultiplexSegmentation-9.tar.gz"
+# DeepCell's public model storage -- the same archive DeepCell's own client
+# and SPACEc fetch, no account token (docs/v17_mesmer_public_download_plan.md)
+MESMER_URL="https://deepcell-data.s3-us-west-1.amazonaws.com/saved-models/MultiplexSegmentation-9.tar.gz"
+MESMER_SHA256="25b1babc2ff769a9f9484184073db8bc264d5ab2de8a6f9ce07c289e8b935129"
 
 # environment variable each original model entry is found through (§2.5)
 declare -A MODEL_VAR=(
@@ -210,7 +212,7 @@ preflight() {
     local url
     command -v curl >/dev/null || { say "  network:  not checked (needs curl)"; [ "$hard" = 0 ] || fail "this computer does not meet the requirements listed above." "fix the items marked above and run the installer again"; }
     for url in https://conda.anaconda.org https://pypi.org https://download.pytorch.org/whl/cu121/ \
-               https://github.com https://huggingface.co https://users.deepcell.org; do
+               https://github.com https://huggingface.co https://deepcell-data.s3-us-west-1.amazonaws.com; do
         if curl -sS -o /dev/null --connect-timeout 10 --max-time 20 -I "$url" 2>/dev/null; then
             say "  network:  $url ok"
         else
@@ -452,7 +454,8 @@ EOF
 EOF
         ;;
         mesmer_multiplex_segmentation) cat <<'EOF'
-  Mesmer model "MultiplexSegmentation" (100 MB) from DeepCell (users.deepcell.org)
+  Mesmer model "MultiplexSegmentation" (100 MB) from DeepCell's public model storage
+    (deepcell-data.s3-us-west-1.amazonaws.com)
   Licence: non-commercial academic use only (DeepCell ASSET_LICENSE)
     https://github.com/vanvalenlab/deepcell-auth/blob/main/ASSET_LICENSE
   The PyTorch copy Block01 makes from it keeps the same licence; never share it.
@@ -511,14 +514,9 @@ fetch_model() {
             download "$STARDIST_URL" "$stage/2D_versatile_fluo.zip" "$zsha"
             run "$PY" -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$stage/2D_versatile_fluo.zip" "$stage" ;;
         mesmer_multiplex_segmentation)
-            local reply url
-            reply=$(curl -fsS --retry 3 -X POST -H "X-Api-Key: $DEEPCELL_ACCESS_TOKEN" \
-                    --data-urlencode "s3_key=$DEEPCELL_KEY" "$DEEPCELL_API") \
-                || { rm -rf -- "$stage"; fail "DeepCell refused the download (a wrong or expired token, or no network)." \
-                     "check DEEPCELL_ACCESS_TOKEN at https://users.deepcell.org and run the installer again"; }
-            url=$(printf '%s' "$reply" | "$PY" -c "import json,sys; print(json.load(sys.stdin)['url'])") \
-                || fail "DeepCell's answer had no download link." "try again later"
-            download "$url" "$stage/mesmer.tar.gz" ""
+            # the archive is checked before it is unpacked; every file again
+            # against models.json by verify_into_place
+            download "$MESMER_URL" "$stage/mesmer.tar.gz" "$MESMER_SHA256"
             mkdir -p "$stage/x"
             run tar -xzf "$stage/mesmer.tar.gz" -C "$stage/x"
             [ -d "$stage/x/MultiplexSegmentation" ] || fail "the DeepCell archive has no MultiplexSegmentation folder." "report it"
@@ -553,11 +551,6 @@ ensure_models() {
             done < <(manifest_files "$key")
             verify_into_place "$key" "$stage" "$dir"
             continue
-        fi
-        if [ "$key" = mesmer_multiplex_segmentation ] && [ -z "${DEEPCELL_ACCESS_TOKEN:-}" ]; then
-            licence_text "$key"
-            fail "the Mesmer model needs a free DeepCell account token, and DEEPCELL_ACCESS_TOKEN is not set." \
-                 "get a token at https://users.deepcell.org, then: DEEPCELL_ACCESS_TOKEN=... bash scripts/install_block01.sh ; or put an existing copy in FOLDER/$key and pass --models FOLDER"
         fi
         accept_licence "$key"
         say "model $key: downloading"

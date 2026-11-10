@@ -167,7 +167,9 @@ def test_cellpose_in_subprocess_equals_direct_call(tmp_path):
     img = synthetic.wholecell_rgb()
     # A copy: Cellpose rewrites a multi-channel input in place, and `img` is
     # also what the subprocess is given.
-    direct, _, _ = models.CellposeModel(gpu=torch.cuda.is_available()).eval(
+    from block01.seg_runner.engines import cellpose_model_args
+    # the engine's device choice, so both sides run on the same device
+    direct, _, _ = models.CellposeModel(**cellpose_model_args()).eval(
         img.copy(), diameter=None, flow_threshold=0.4, cellprob_threshold=0.0, min_size=15,
         channel_axis=-1)
     ep = EngineProcess("cellpose", log_path=str(tmp_path / "e.log"))

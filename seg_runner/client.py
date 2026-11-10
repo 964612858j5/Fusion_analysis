@@ -52,8 +52,14 @@ class EngineProcess:
         env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
         env.setdefault("KERAS_BACKEND", "tensorflow")
         env.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+        # an operation the Mac's GPU lacks runs on the CPU instead of failing
+        # (read by torch at import, in the child: set before it starts)
+        env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
         if self.cpu_only:
             env["CUDA_VISIBLE_DEVICES"] = ""
+            env["BLOCK01_ENGINE_CPU_ONLY"] = "1"      # engines.CPU_ONLY_ENV: hides MPS too
+        else:
+            env.pop("BLOCK01_ENGINE_CPU_ONLY", None)
         self._log = open(self.log_path, "ab") if self.log_path else subprocess.DEVNULL
         self.proc = subprocess.Popen(
             [self.python, "-m", "seg_runner.runner", "--engine", self.engine],

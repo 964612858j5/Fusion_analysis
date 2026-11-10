@@ -162,6 +162,39 @@ def expand(nuclei, distance):
     return expand_labels(nuclei, distance=dist)
 
 
+#: set by `client.EngineProcess` when Step2's "Use GPU" is off: hiding CUDA
+#: (CUDA_VISIBLE_DEVICES) does not hide the Mac's GPU (MPS)
+CPU_ONLY_ENV = "BLOCK01_ENGINE_CPU_ONLY"
+
+
+def torch_device():
+    """The torch engines' device (docs/v17_cellpose_mac_gpu_plan.md):
+    "cuda" when CUDA works, else "mps" (Apple silicon) when available, else
+    "cpu"; "cpu" whenever the GPU is not wanted."""
+    import torch
+    if os.environ.get(CPU_ONLY_ENV) == "1":
+        return "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def cellpose_model_args():
+    """`models.CellposeModel` keyword arguments for `torch_device()`. On CUDA
+    exactly the call made before (`gpu=True`, Cellpose's own device check);
+    on the Mac's GPU the device named explicitly (it overrides `gpu`)."""
+    import torch
+    dev = torch_device()
+    if dev == "cuda":
+        return {"gpu": True}
+    if dev == "mps":
+        return {"gpu": True, "device": torch.device("mps")}
+    return {"gpu": False}
+
+
 def _tf_gpu_count():
     import tensorflow as tf
     gpus = tf.config.list_physical_devices("GPU")
@@ -177,9 +210,8 @@ class CellposeEngine:
     name = "cellpose"
 
     def __init__(self):
-        import torch
         from cellpose import models
-        self._model = models.CellposeModel(gpu=torch.cuda.is_available())
+        self._model = models.CellposeModel(**cellpose_model_args())
         self.device = str(self._model.device)
 
     def lib_versions(self):
@@ -252,16 +284,16 @@ class StardistEngine:
 
 class MesmerEngine:
     """Mesmer on PyTorch: the converted MultiplexSegmentation weights through
-    `mesmer_torch.app` -- GPU when CUDA is there, else CPU; batch 1, float32,
+    `mesmer_torch.app` -- on `torch_device()` (CUDA, else the Mac's GPU,
+    else CPU); batch 1, float32,
     deterministic cuDNN and no TF32 during the network pass
     (`app.NUMERICS`), so a rerun on the same device gives the same masks."""
     name = "mesmer"
 
     def __init__(self):
         import sys
-        import torch
         from .mesmer_torch import app, prepare, weights
-        cuda = torch.cuda.is_available()
+        dev = torch_device()
         entry = manifest_entry(MESMER_TORCH_ENTRY)
         root = model_root(entry)
         # first use on this machine: made from the Keras model (plan §10)
@@ -269,13 +301,13 @@ class MesmerEngine:
                        entry.get("content_sha256"), lambda m: print(m, file=sys.stderr, flush=True))
         path = os.path.join(model_path(MESMER_TORCH_ENTRY), weights.WEIGHTS_FILE)
         self.model_path = path
-        params = weights.load(path, "cuda" if cuda else "cpu", entry.get("content_sha256"))
+        params = weights.load(path, dev, entry.get("content_sha256"))
         self._artifact = {"entry": MESMER_TORCH_ENTRY, "sha256": _file_sha256(path),
                           "content_sha256": params["content_sha256"],
                           "source": params.get("source") or {}}
-        self._app = app.MesmerTorch(params, "cuda" if cuda else "cpu")
+        self._app = app.MesmerTorch(params, dev)
         self._numerics = app.NUMERICS
-        self.device = "gpu" if cuda else "cpu"
+        self.device = {"cuda": "gpu"}.get(dev, dev)       # "gpu" on CUDA, as before
 
     def lib_versions(self):
         import torch

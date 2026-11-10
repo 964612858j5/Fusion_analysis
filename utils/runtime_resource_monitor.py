@@ -118,7 +118,9 @@ class RuntimeResourceMonitor:
         cellpose_actual_device = self._cellpose_model_device() if "cellpose" in self.backend.lower() else "unknown"
         if reported is not None or self._is_recovery() or self._is_engine_pending():
             # the report names the device; execution means a task really ran
-            actual_cuda_execution = bool(likely_gpu_inference and inference)
+            # -- and CUDA means CUDA: the Mac's GPU ("mps") is a GPU, not CUDA
+            actual_cuda_execution = bool(likely_gpu_inference and inference
+                                         and "mps" not in self._engine_device_text().lower())
         else:
             actual_cuda_execution = bool(likely_gpu_inference or ("cuda" in str(cellpose_actual_device).lower() and gpu_peak_util > 0.0))
         gpu_morph_available = None
@@ -196,9 +198,10 @@ class RuntimeResourceMonitor:
     def _engine_reported_device(self):
         """"gpu" / "cpu" as reported by the engine process at its start, or
         None when there is no such report (before the start, or an
-        in-process method)."""
+        in-process method). "mps" -- the Mac's GPU
+        (docs/v17_cellpose_mac_gpu_plan.md) -- is a GPU too."""
         device = self._engine_device_text().lower()
-        if "gpu" in device or "cuda" in device:
+        if "gpu" in device or "cuda" in device or "mps" in device:
             return "gpu"
         if "cpu" in device:
             return "cpu"

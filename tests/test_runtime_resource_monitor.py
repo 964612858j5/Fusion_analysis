@@ -67,7 +67,8 @@ def _engine_monitor(device, use_gpu=True, backend="mesmer_nuclear_guided"):
 def test_an_engine_reporting_the_gpu_is_never_called_a_cpu_fallback():
     # samples that look like a fall back (memory grew, GPU idle, CPU busy):
     # the guess must not override what the engine process reported
-    for backend, device in (("mesmer_nuclear_guided", "gpu"), ("cellpose_nuclei", "cuda:0")):
+    for backend, device in (("mesmer_nuclear_guided", "gpu"), ("cellpose_nuclei", "cuda:0"),
+                            ("mesmer_nuclear_guided", "mps"), ("cellpose_nuclei", "mps")):   # the Mac's GPU
         mon = _engine_monitor(device, backend=backend)
         mon.samples = _samples()
         got = mon.diagnose()
@@ -139,3 +140,19 @@ def test_the_first_sample_already_knows_recovery_and_engine_runs(tmp_path, monke
         assert seen[-1] == want, (method, recovery, seen)
         diag = w._runtime_monitor.diagnose()
         assert not (diag["likely_gpu_inference"] or diag["likely_cpu_fallback"] or diag["actual_cuda_execution"])
+
+
+def test_the_macs_gpu_is_a_gpu_but_not_cuda():
+    """docs/v17_cellpose_mac_gpu_plan.md §9: an engine on "mps" runs on a GPU
+    (no CPU fallback), but the report must not say it executed on CUDA."""
+    for backend in ("mesmer_nuclear_guided", "cellpose_nuclei"):
+        mon = _engine_monitor("mps", backend=backend)
+        mon.samples = [{"stage": "model_inference", "gpu_utilization_percent": 0.0,
+                        "cpu_percent": 20.0, "gpu_memory_used_mb": 0.0}]
+        got = mon.diagnose()
+        assert got["backend_runtime_device"] == "gpu" and got["likely_gpu_inference"] is True
+        assert got["actual_cuda_execution"] is False, backend
+    mon = _engine_monitor("cuda:0", backend="cellpose_nuclei")      # CUDA still counts as CUDA
+    mon.samples = [{"stage": "model_inference", "gpu_utilization_percent": 50.0,
+                    "cpu_percent": 20.0, "gpu_memory_used_mb": 900.0}]
+    assert mon.diagnose()["actual_cuda_execution"] is True

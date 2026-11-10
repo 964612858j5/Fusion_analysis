@@ -186,7 +186,7 @@ Take the parameters tuned in Step 1 and **actually circle every single cell in t
 
 1. Confirm the inputs in **Input Data** (fusion image / parameter file, usually carried over automatically). You can click **Load zarr info & overview** to take a look.
 2. **Tile Grid**: set the tile size (how big each cell of the grid is). Smaller tiles use less GPU memory, but the seams need more care.
-3. **Segmentation Parameters**: confirm the parameters; you can also **Apply Selected Params** to reuse a previously chosen set.
+3. **Segmentation Parameters**: confirm the parameters; you can also **Apply Selected Params** to reuse a previously chosen set. **GPU: Use GPU if available** runs Cellpose and Mesmer on an NVIDIA GPU, or on a Mac with Apple silicon (macOS 14 or newer) on the Mac's GPU; when neither is there, or the box is unticked, they run on the CPU (much slower). Results on GPU and CPU agree closely but not pixel for pixel.
 4. Choose the **Output** location, then click **▶ Run Segmentation & Merge** to start. The progress bar shows which tile is being processed; in **Tile Status** the running tile is yellow and finished tiles are green. Changing **Rows / Cols** during a run does not change the run: the new grid is shown with no state (it would point at other parts of the image), and switching back to the run's grid (named under the tile line, `Running grid: …`) shows all its states again.
 5. To stop midway, click **⏹ Stop**; if it gets interrupted, **Recovery Mode** can resume merging from the saved intermediate files instead of starting over.
 

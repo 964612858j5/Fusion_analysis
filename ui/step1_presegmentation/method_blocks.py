@@ -17,7 +17,7 @@ method another block has asks the same question.
 """
 
 from ...qt import QtWidgets
-from ...qt.QtCore import Qt, Signal
+from ...qt.QtCore import QCoreApplication, QEvent, QSize, Qt, QTimer, Signal
 
 from ..theme import widgets as theme_widgets
 from ...utils import segmentation_param_schema as ps
@@ -117,6 +117,20 @@ class ConflictDialog(QtWidgets.QDialog):
         return {k: c.currentData() for k, c in self._choices.items()}
 
 
+#: the Methods list never shrinks below this (or its blocks, if fewer)
+LIST_MIN_HEIGHT = 120
+
+
+class _MethodList(QtWidgets.QScrollArea):
+    """The blocks' scroll area (backlog 9, docs/v17_step1_methods_scroll_plan.md):
+    it asks for its blocks' height, which `MethodsPanel._fit_list` sets."""
+
+    need = 0
+
+    def sizeHint(self):  # noqa: N802
+        return QSize(super().sizeHint().width(), self.need)
+
+
 class MethodsPanel(QtWidgets.QWidget):
     plan_changed = Signal()
     save_plan_requested = Signal()
@@ -139,9 +153,23 @@ class MethodsPanel(QtWidgets.QWidget):
         outer.setSpacing(4)
 
         # the title is the section frame's ("Methods"), not a label in here
-        self._list = QtWidgets.QVBoxLayout()
+        # The blocks scroll when there are more than the column can hold, as
+        # the Results boxes do: a block squeezed below its height loses its
+        # text (backlog 9). The list is as tall as its blocks, never taller.
+        self.list_scroll = _MethodList(self)
+        self.list_scroll.setWidgetResizable(True)
+        self.list_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.list_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list_scroll.setMinimumWidth(0)
+        self._list_host = QtWidgets.QWidget(self.list_scroll)
+        self._list = QtWidgets.QVBoxLayout(self._list_host)
+        self._list.setContentsMargins(0, 0, 0, 0)
         self._list.setSpacing(4)
-        outer.addLayout(self._list)
+        self._list.addStretch(1)
+        self.list_scroll.setWidget(self._list_host)
+        # its width changes with the column AND with its own scroll bar
+        self.list_scroll.viewport().installEventFilter(self)
+        outer.addWidget(self.list_scroll)
         self._empty = QtWidgets.QLabel("No method yet — add one with +", self)
         self._empty.setStyleSheet("color:#888;font-size:11px;")
         self._empty.setWordWrap(True)
@@ -265,10 +293,12 @@ class MethodsPanel(QtWidgets.QWidget):
                 if target is not None:
                     self._refresh()
                     self.plan_changed.emit()
+                    self._show_block(target)
                 return target
         blk = self._add_block(method, values)
         self._refresh()
         self.plan_changed.emit()
+        self._show_block(blk)
         return blk
 
     def _merge_into(self, existing, method, values):
@@ -310,12 +340,14 @@ class MethodsPanel(QtWidgets.QWidget):
                     self._drop_block(blk)
                     self._refresh()
                     self.plan_changed.emit()
+                    self._show_block(target)
                     return
             blk.set_method(method, values)
         else:
             blk.set_values(values)
         self._refresh()
         self.plan_changed.emit()
+        self._show_block(blk)
 
     def _remove(self, uid):
         blk = self.block_by_uid(uid)
@@ -326,10 +358,10 @@ class MethodsPanel(QtWidgets.QWidget):
 
     # ── internals ────────────────────────────────────────────────────
     def _add_block(self, method, values):
-        blk = MethodBlock(method, values, self)
+        blk = MethodBlock(method, values, self._list_host)
         blk.edit_clicked.connect(self._edit)
         blk.remove_clicked.connect(self._remove)
-        self._list.addWidget(blk)
+        self._list.insertWidget(self._list.count() - 1, blk)       # above the stretch
         self._blocks.append(blk)
         return blk
 
@@ -339,7 +371,43 @@ class MethodsPanel(QtWidgets.QWidget):
         blk.setParent(None)
         blk.deleteLater()
 
+    def eventFilter(self, obj, event):  # noqa: N802
+        if obj is self.list_scroll.viewport() and event.type() == QEvent.Resize:
+            self._fit_list()
+        return super().eventFilter(obj, event)
+
+    def _fit_list(self):
+        """The list asks for its blocks' height at its own width; limits are
+        set only when that height changes."""
+        width = self.list_scroll.viewport().width()
+        need = (sum(b.heightForWidth(width) for b in self._blocks)
+                + self._list.spacing() * max(0, len(self._blocks) - 1))
+        self.list_scroll.setVisible(bool(self._blocks))
+        if need != self.list_scroll.need:
+            self.list_scroll.need = need
+            self.list_scroll.setMaximumHeight(need)
+            self.list_scroll.setMinimumHeight(min(need, LIST_MIN_HEIGHT))
+            self.list_scroll.updateGeometry()
+
+    def _show_block(self, blk):
+        """Scroll `blk` into view once the new layout is in place: all of it,
+        or its top line (title, Edit, ×) when it is taller than the list."""
+        def show():
+            if blk not in self._blocks:
+                return
+            # the list's own layout passes (block placed, list resized, its
+            # range set) may still be queued behind this call
+            for _ in range(3):
+                QCoreApplication.sendPostedEvents(None, QEvent.LayoutRequest)
+            view = self.list_scroll.viewport().height()
+            if blk.height() <= view:
+                self.list_scroll.ensureWidgetVisible(blk, 0, 0)
+            else:
+                self.list_scroll.verticalScrollBar().setValue(blk.y())
+        QTimer.singleShot(0, self, show)          # dropped with the panel
+
     def _refresh(self):
+        self._fit_list()
         self._empty.setVisible(not self._blocks)
         self.btn_save.setEnabled(bool(self._blocks))
         self.btn_run.setEnabled(not self._running and self.task_count() > 0)

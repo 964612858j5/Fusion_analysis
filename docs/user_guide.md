@@ -117,7 +117,8 @@ Read in the raw big image, **circle the region you actually care about (ROI)**, 
    - In **Nucleus Channel**, pick the nucleus channel (usually `DAPI`).
 4. **Background correction (denoising)**: in **Method Parameters**, choose a background-removal method:
    - **TopHat**: classic morphological background removal, adjustable radius;
-   - **cucim**: GPU Gaussian background subtraction, faster (requires GPU support).
+   - **cucim**: Gaussian background subtraction.
+   - Both methods run on an NVIDIA GPU when there is one, or on a Mac with Apple silicon on the Mac's GPU, and on the CPU otherwise. On a Mac, TopHat gives exactly the CPU's result. The Gaussian differs from the CPU only by float rounding (about 0.0001 on 0–255 data), and a saved channel records which one made it. Setting `BLOCK01_BG_MPS=0` before starting keeps a Mac on the CPU.
    - In the **Patch Preview — Original | TopHat | cucim** panel you can **compare side by side** the original and both denoising results, and pick whichever is cleaner.
 5. **Choose preview patches**: tick a few representative small regions. Step 1 parameter tuning later uses these patches for quick trials, instead of running the whole image each time.
 6. Click "Process", and the software generates the corrected image and config files.

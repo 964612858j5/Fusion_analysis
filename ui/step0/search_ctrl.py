@@ -1953,7 +1953,7 @@ def read_corrected_zarr_state(zarr_path):
                    bg_correction_algo_version (missing -> "1", which never
                    matches the current version, forcing a reprocess of legacy
                    gaussian outputs) plus, since block S0P, the backend that
-                   computed it (bg_compute_path "cpu" | "gpu", tophat_footprint
+                   computed it (bg_compute_path "cpu" | "gpu" | "mps", tophat_footprint
                    "disk" | "square" | None for cucim; both None in a product
                    made before S0P, which therefore never matches and is
                    reprocessed -- its backend cannot be shown to equal this
@@ -2137,13 +2137,17 @@ def coarsest_level_stride(slide_path):
     return len(shapes) - 1, stride
 
 
-def correction_tile_size(method, impl=None):
+def correction_tile_size(method, impl=None, path=None):
     """The Save tile edge (block CG G1b). The Gaussian's halo covers its whole
     truncated kernel, so its result does not depend on the tile size --
     verified bitwise on a whole real channel, seams included, for both
     implementations. 1024 suits the OpenCV Gaussian (cache: 14.6 -> 10.0 s on
     8 workers); scipy is faster at 4096 (15.3 vs 22.8 s), and TopHat stays
-    at 4096."""
+    at 4096. On the Mac's GPU ("mps") 2048: the Save holds the device for
+    one tile at a time, and a smaller tile leaves the preview gaps
+    (docs/v17_step0_mac_gpu_correction_plan.md §3.2)."""
+    if path == "mps":
+        return 2048
     return 1024 if impl == GAUSSIAN_IMPL_OPENCV else 4096
 
 
@@ -2200,7 +2204,7 @@ class WsiCorrectionWorker(QThread):
         and writes nothing more."""
         progress_idx, channel_total, completed_units, total_units, started = progress
         page = self.loader.ch_map[ch_name]
-        if path == "gpu":
+        if path in ("gpu", "mps"):
             n = 1
         else:
             # Block CS P3: the per-tile memory of the kernel that will run --
@@ -2336,6 +2340,10 @@ class WsiCorrectionWorker(QThread):
         return True
 
     def run(self):
+        # the Mac's GPU: its one-time check runs here, on this thread, before
+        # any channel picks its backend (plan §3.1; a flag read otherwise)
+        from ...core import mps_kernels
+        mps_kernels.ensure_ready()
         try:
             rois = [
                 roi for roi in self.rois
@@ -2462,9 +2470,10 @@ class WsiCorrectionWorker(QThread):
             for info in roi_infos:
                 roi_h, roi_w = info["shape"]
                 for _, method, param in channels:
+                    _path = compute_path(method)
                     tile_counts.append(len(list(_tile_slices(
                         roi_h, roi_w,
-                        correction_tile_size(method, compute_impl(method, compute_path(method))),
+                        correction_tile_size(method, compute_impl(method, _path), _path),
                         method_overlap(method, param)))))
             total_units = sum(tile_counts)
             started = time.time()
@@ -2501,7 +2510,8 @@ class WsiCorrectionWorker(QThread):
                         # (the tiles follow the implementation: a channel
                         # recomputed with scipy goes back to 4096)
                         tiles = list(_tile_slices(roi_h, roi_w,
-                                                  correction_tile_size(method, impl), overlap))
+                                                  correction_tile_size(method, impl, path),
+                                                  overlap))
                         # (staged: the live channel, its plane and its display
                         # layers stand until the swap at the end of the run)
                         accumulator = None

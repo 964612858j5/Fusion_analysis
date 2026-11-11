@@ -45,15 +45,21 @@ MEM_PER_TILE_FAST_BYTES = _tiers.BG_MEM_PER_TILE_FAST_BYTES  # OpenCV TopHat / s
 
 
 def mem_available_bytes() -> Optional[int]:
-    """``MemAvailable`` from /proc/meminfo, or None where it cannot be read."""
+    """``MemAvailable`` from /proc/meminfo; where that file does not exist
+    (a Mac), psutil's available memory; None when neither can be read
+    (docs/v17_step0_mac_gpu_correction_plan.md §3.4)."""
     try:
         with open("/proc/meminfo", "r", encoding="ascii") as f:
             for line in f:
                 if line.startswith("MemAvailable:"):
                     return int(line.split()[1]) * 1024
     except (OSError, ValueError, IndexError):
+        pass
+    try:
+        import psutil
+        return int(psutil.virtual_memory().available)
+    except Exception:                                   # noqa: BLE001
         return None
-    return None
 
 
 def choose_workers(cpu: Optional[int], n_tiles: int, avail_bytes: Optional[int],

@@ -341,6 +341,12 @@ class Step0Page(QWidget):
 
     def __init__(self, parent=None, display_services=None):
         super().__init__(parent)
+        # The Mac's GPU for background correction: its one-time check (torch
+        # import, device start-up) runs on a background thread now, so the
+        # first Enter on a parameter does not pay it; until it passes, the
+        # CPU answers (docs/v17_step0_mac_gpu_correction_plan.md §3.3).
+        from ...core import mps_kernels
+        mps_kernels.start_warmup()
         # Block01's shared display layer. Given by the window that owns the
         # process when there is one, and built here only for a page that is
         # standing on its own (the page-level tests, a tool script) -- which

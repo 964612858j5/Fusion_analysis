@@ -18,6 +18,7 @@ from ..config import (
     BG_CORR_MAX_TILE,
 )
 from . import gpu_kernels
+from . import mps_kernels as _mps
 
 # Bump on ANY numeric change of the correction methods (cache keys and
 # provenance depend on it). "2": gaussian/cucim tiled halo widened from
@@ -450,6 +451,11 @@ def _apply_tophat_gpu_or_cpu(arr, radius):
             return _tophat_gpu(arr32, radius)
         except Exception as _e:
             _disable_gpu_morph(_e, "tophat")
+    if _mps_usable() and _mps.tophat_takes(arr32, radius):
+        try:                    # the Mac's GPU: the CPU's numbers, bit for bit
+            return _mps.tophat(arr32, radius)
+        except Exception as _e:                          # noqa: BLE001
+            _mps.disable(_e, "tophat")
     return _tophat_cpu(arr32, radius)
 
 
@@ -471,6 +477,13 @@ def _apply_cucim_or_cpu(arr, sigma, prefer_gpu=True):
             return _cucim_gpu(arr32, sigma)
         except Exception as _e:
             _disable_gpu_morph(_e, "cucim")
+    # (prefer_gpu=False keeps meaning "no GPU": callers passing the CUDA-only
+    # CUCIM_AVAILABLE stay on the CPU on a Mac; plan §3.1)
+    if prefer_gpu and _mps_usable() and _mps.gaussian_takes(arr32):
+        try:
+            return _mps.gaussian_bg_subtract(arr32, sigma)
+        except Exception as _e:                          # noqa: BLE001
+            _mps.disable(_e, "cucim")
     return _cucim_cpu(arr32, sigma)
 
 
@@ -510,6 +523,7 @@ def _cucim_gpu_legacy(arr32, sigma):
 GAUSSIAN_IMPL_OPENCV = "opencv-gaussian"
 GAUSSIAN_IMPL_SCIPY = "scipy-gaussian"
 GAUSSIAN_IMPL_GPU = "cupyx-gaussian"
+GAUSSIAN_IMPL_MPS = "torch-mps-gaussian"      # the Mac's GPU (plan v17 Mac GPU)
 
 
 class CpuImplUnavailable(RuntimeError):
@@ -570,20 +584,34 @@ class GpuBackendFailed(RuntimeError):
     """The GPU failed inside a channel frozen to the GPU backend."""
 
 
+class MpsCannotTake(GpuBackendFailed):
+    """A Gaussian tile the Mac's GPU does not take (non-finite pixels): the
+    channel is recomputed on the CPU from its first tile, and the GPU stays
+    on (docs/v17_step0_mac_gpu_correction_plan.md §3.1)."""
+
+
+def _mps_usable():
+    """The Mac's GPU: only without CUDA, and only once its smoke test passed
+    (a flag -- this never imports torch nor waits)."""
+    return not GPU_MORPH_AVAILABLE and _mps.ready()
+
+
 def compute_path(method):
-    """The backend a channel of `method` gets on this machine now: "gpu" or
-    "cpu" (the same rule the per-tile functions apply: tophat on the GPU when
-    GPU morphology works; cucim when cuCIM is also available)."""
+    """The backend a channel of `method` gets on this machine now: "gpu"
+    (CUDA), "mps" (the Mac's GPU) or "cpu" (the same rule the per-tile
+    functions apply: tophat on the GPU when GPU morphology works; cucim when
+    cuCIM is also available). Reads flags only: never imports torch, never
+    waits for the device."""
     method = str(method or "").strip().lower()
     if not GPU_MORPH_AVAILABLE:
-        return "cpu"
+        return "mps" if _mps.ready() else "cpu"
     if method == "cucim" and not CUCIM_AVAILABLE:
         return "cpu"
     return "gpu"
 
 
 def tophat_footprint(method, path):
-    """``"disk"`` (CPU) / ``"square"`` (GPU) for tophat; None for cucim."""
+    """``"disk"`` (CPU, MPS) / ``"square"`` (CUDA) for tophat; None for cucim."""
     if str(method or "").strip().lower() != "tophat":
         return None
     return "square" if path == "gpu" else "disk"
@@ -596,6 +624,8 @@ def compute_impl(method, path):
     P1), so it records None."""
     if str(method or "").strip().lower() != "cucim":
         return None
+    if path == "mps":
+        return GAUSSIAN_IMPL_MPS
     return GAUSSIAN_IMPL_GPU if path == "gpu" else gaussian_cpu_impl()
 
 
@@ -632,6 +662,21 @@ def correct_tile(arr, method, param, path, impl=None):
     arr32 = arr.astype(np.float32, copy=False)
     method = str(method).strip().lower()
     param = max(1, int(param))
+    if path == "mps":
+        # TopHat: a tile the GPU does not take is computed by the CPU kernel,
+        # which gives the same bits; a Gaussian tile it does not take
+        # restarts the channel on the CPU (never half GPU, half CPU)
+        if method == "tophat" and not _mps.tophat_takes(arr32, param):
+            return _tophat_cpu(arr32, param)
+        if method != "tophat" and not _mps.gaussian_takes(arr32):
+            raise MpsCannotTake("a tile with non-finite pixels: the Mac's GPU "
+                                "does not take it")
+        try:
+            return (_mps.tophat(arr32, param) if method == "tophat"
+                    else _mps.gaussian_bg_subtract(arr32, param))
+        except Exception as exc:                          # noqa: BLE001
+            _mps.disable(exc, method)
+            raise GpuBackendFailed(f"{method} on the Mac's GPU failed: {exc}") from exc
     if path == "gpu":
         try:
             return _tophat_gpu(arr32, param) if method == "tophat" else _cucim_gpu(arr32, param)

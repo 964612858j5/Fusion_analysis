@@ -17,6 +17,10 @@ image; since Step0 reads the shared backend switch (docs/v17_step0_engine_plan.m
 §3.2, §10.2) they keep it by default: `BLOCK01_STEP1_BACKEND=python` for each
 `test_step0_*` test that is not a `test_step0_engine_*` one, unless the
 environment already names a backend. A test that sets it still wins.
+
+Background correction on a Mac's GPU (docs/v17_step0_mac_gpu_correction_plan.md)
+is off (`BLOCK01_BG_MPS=0`) for every test but `test_mps_correction.py`: the
+older tests check the CPU's record and arithmetic.
 """
 import gc
 import json
@@ -118,3 +122,14 @@ def _step0_tests_keep_the_python_picture(request, monkeypatch):
     if (name.startswith("test_step0_") and not name.startswith("test_step0_engine")
             and "BLOCK01_STEP1_BACKEND" not in os.environ):
         monkeypatch.setenv("BLOCK01_STEP1_BACKEND", "python")
+
+
+@pytest.fixture(autouse=True)
+def _old_tests_keep_the_cpu_correction(request, monkeypatch):
+    """Background correction on a Mac's GPU (docs/v17_step0_mac_gpu_correction_plan.md):
+    the tests written before it check the CPU's record and arithmetic, so
+    every test but `test_mps_correction.py` runs with `BLOCK01_BG_MPS=0`,
+    unless the environment already names it. A test that sets it still wins."""
+    if (pathlib.Path(str(request.node.fspath)).name != "test_mps_correction.py"
+            and "BLOCK01_BG_MPS" not in os.environ):
+        monkeypatch.setenv("BLOCK01_BG_MPS", "0")

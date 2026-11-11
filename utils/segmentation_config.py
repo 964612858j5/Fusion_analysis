@@ -10,6 +10,7 @@ from copy import deepcopy
 
 CELLPOSE_WHOLECELL_FUSION = "cellpose_wholecell_fusion"
 CELLPOSE_WHOLECELL_NUCLEI = "cellpose_wholecell_nuclei"
+HYBRID_CELLPOSE_STARDIST = "hybrid_cellpose_stardist"
 CELLPOSE_NUCLEI_DAPI = "cellpose_nuclei_dapi"
 CELLPOSE_NUCLEI_EXPANSION = "cellpose_nuclei_expansion"
 CELLPOSE_NUCLEI_HQ = "cellpose_nuclei_hq"
@@ -58,6 +59,32 @@ SEGMENTATION_METHODS = {
             "nucleus_flow_threshold": 0.4,
             "nucleus_cellprob_threshold": 0.0,
             "nucleus_min_size": 15,
+            "split_cells_by_nuclei": True,     # plan §15 (v1.4)
+            "use_gpu": True,
+            "tile_size": 1024,
+            "batch_size": 8,
+        },
+        "output_type": "cell_mask_with_nuclei",
+    },
+    # docs/v17_hybrid_cellpose_stardist_plan.md (user 2026-11-10): cells from
+    # Cellpose (as CELLPOSE_WHOLECELL_FUSION), nuclei from StarDist (as
+    # STARDIST_NUCLEI_DAPI, closer to the DAPI signal), made one by the
+    # CELLPOSE_WHOLECELL_NUCLEI rules; one "hybrid" engine process.
+    HYBRID_CELLPOSE_STARDIST: {
+        "method": HYBRID_CELLPOSE_STARDIST,
+        "display_name": "Cellpose whole-cell + StarDist nuclei (Fusion + DAPI)",
+        "input_type": "fused_channel_plus_dapi",
+        "process": "cellpose_cells_stardist_nuclei_paired_cells_without_nucleus_dropped",
+        "params": {
+            "model_type": "cpsam",
+            "diameter": None,
+            "flow_threshold": 0.4,
+            "cellprob_threshold": 0.0,
+            "min_size": 15,
+            "model_name": "2D_versatile_fluo",
+            "prob_thresh": None,
+            "nms_thresh": None,
+            "split_cells_by_nuclei": True,     # plan §15 (v1.4)
             "use_gpu": True,
             "tile_size": 1024,
             "batch_size": 8,
@@ -433,6 +460,14 @@ def normalize_segmentation_config(config=None, default_method=CELLPOSE_WHOLECELL
         "nucleus_flow_threshold",
         "nucleus_cellprob_threshold",
         "nucleus_min_size",
+        # StarDist's (hybrid plan §2, codex P2): a flat file's values are
+        # kept, never replaced by the registry's defaults
+        "model_name",
+        "prob_thresh",
+        "nms_thresh",
+        # plan §15 (v1.4): the split switch and the pairing rules' version
+        "split_cells_by_nuclei",
+        "pairing_rules",
         "phase1_diameter",
         "params_source",
         "hq_channels",

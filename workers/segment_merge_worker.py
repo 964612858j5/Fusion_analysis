@@ -2715,7 +2715,8 @@ class SegmentMergeWorker(QThread):
                 # plan §13: cells and nuclei made one (union / shared out /
                 # nucleus-born cells; cells without a nucleus dropped); its
                 # events are counted by centroid like the dropped nuclei
-                combined = nuclei_pairing.combine_cells_and_nuclei(mask, raw)
+                split = bool(self._engine_params().get("split_cells_by_nuclei", True))
+                combined = nuclei_pairing.combine_cells_and_nuclei(mask, raw, split=split)
                 return {"mask": combined["cells"], "nuclei": combined["nuclei"],
                         "nuclei_cell": combined["nucleus_cell"], "nuclei_raw": raw,
                         "nuclei_dropped": dict(combined["objects"]), "qc_rows": []}

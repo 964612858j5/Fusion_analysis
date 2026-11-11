@@ -32,6 +32,8 @@ IDENT = {
                  "model_checksum": "m2", "runner_version": "r1"},
     "mesmer": {"engine": "mesmer", "lock_hash": "L1", "lib_versions": {"deepcell": "0.12"},
                "model_checksum": "m3", "runner_version": "r1"},
+    "hybrid": {"engine": "hybrid", "lock_hash": "L1", "lib_versions": {"cellpose": "4.0.1"},
+               "model_checksum": "m4", "runner_version": "r1"},
 }
 
 # One non-default combination per method; every key the method editor offers.
@@ -42,7 +44,14 @@ COMBOS = {
     "cellpose_wholecell_nuclei": {"diameter": 25.0, "flow_threshold": 0.6,
                                   "cellprob_threshold": -1.0, "min_size": 30,
                                   "nucleus_diameter": None, "nucleus_flow_threshold": 0.7,
-                                  "nucleus_cellprob_threshold": -0.5, "nucleus_min_size": 9},
+                                  "nucleus_cellprob_threshold": -0.5, "nucleus_min_size": 9,
+                                  "split_cells_by_nuclei": False},      # v1.4 switch off
+    # the hybrid (plan §4): non-default and auto StarDist thresholds
+    "hybrid_cellpose_stardist": {"diameter": 25.0, "flow_threshold": 0.6,
+                                 "cellprob_threshold": -1.0, "min_size": 30,
+                                 "prob_thresh": 0.55, "nms_thresh": None,
+                                 "model_name": "2D_versatile_fluo",
+                                 "split_cells_by_nuclei": False},
     "cellpose_nuclei_dapi": {"diameter": None, "flow_threshold": 0.4,
                              "cellprob_threshold": 0.5, "min_size": 40},
     "cellpose_nuclei_expansion": {"diameter": 18.5, "flow_threshold": 0.8,
@@ -69,7 +78,7 @@ def app():
 
 
 def _run_on_disk(step1_dir, method, params, n_patches=2, identity=None, run_engine=None,
-                 halo=200):
+                 halo=200, pairing="current"):
     """A finished run of one combination, published the way run_job does:
     params.json (with the engine that started) and one record + mask per patch."""
     import numpy as np
@@ -89,8 +98,14 @@ def _run_on_disk(step1_dir, method, params, n_patches=2, identity=None, run_engi
         run["tasks"].append(task)
         lab = np.zeros((8, 8), np.uint32)
         lab[2:5, 2:5] = 1
+        # plan §15.5: a cell + nucleus record carries its pairing rules, as
+        # run_job writes it ("current"); None = a v1.3 record
+        extra = {}
+        if pairing is not None and "pairing_rules" in pc.fixed_rules(method):
+            extra["pairing_rules"] = (pc.fixed_rules(method)["pairing_rules"]
+                                      if pairing == "current" else pairing)
         rec = preseg_run.publish_result(rdir, run, task, preseg_run.OK,
-                                        masks={"cell": lab, "nucleus": lab})
+                                        masks={"cell": lab, "nucleus": lab}, **extra)
         # What the engine said at hello, per patch (params.json may disagree).
         rec["engine_identity"] = ident[i] if isinstance(ident, list) else ident
         with open(preseg_run.record_path(rdir, task["task_id"]), "w") as f:
@@ -146,7 +161,7 @@ def test_the_chosen_combination_reaches_the_engine_unchanged(app, tmp_path, meth
         "engine_identity": IDENT[preseg_run.ps_engine(method)]}
     for k, v in want.items():                        # the file's own params: the same
         assert saved["params"][k] == v and saved[k] == v, k
-    if not method.startswith("cellpose_"):
+    if not method.startswith(("cellpose_", "hybrid_")):     # the hybrid's cells ARE Cellpose
         assert not CELLPOSE_ONLY & set(saved["params"]), "Cellpose defaults leaked in"
     if method.startswith("mesmer_"):
         assert saved["params"]["normalize_input"] is False
@@ -422,3 +437,51 @@ def test_a_restore_makes_the_chosen_parameters_from_the_run(app, tmp_path):
         assert MainWindow._rm_restore_preseg(w, {"run_dir": rdir, "used_combo": cid}) is True
     assert w._preseg_selected["combo_id"] == cid
     MainWindow._preseg_segmentation_config(w)            # no ContractError
+
+
+# ── plan §15.5: the pairing rules a cell + nucleus result was made with ───
+
+PAIRED = ("cellpose_wholecell_nuclei", "hybrid_cellpose_stardist")
+
+
+@pytest.mark.parametrize("method", PAIRED)
+def test_a_result_from_older_pairing_rules_cannot_be_used(app, tmp_path, method):
+    from block01.ui.main_window import MainWindow
+    step1 = str(tmp_path / "step1")
+    run, rdir = _run_on_disk(step1, method, COMBOS[method], pairing=None)
+    records = preseg_run.load_records(rdir)          # as reloaded from disk
+    cid = run["combos"][0]["combo_id"]
+    ok, why = preseg_run.selectable(run, records, cid, "px1", "fh1")
+    assert not ok and "older cell–nucleus pairing rules" in why
+    shown = []
+    w = types.SimpleNamespace(_preseg_run=run, _preseg_records=records,
+                              _preseg_current=lambda: ("px1", "fh1"))
+    import block01.ui.main_window as mw
+    orig = mw.QMessageBox.information
+    mw.QMessageBox.information = staticmethod(lambda *a, **k: shown.append(a[2]))
+    try:
+        assert MainWindow._on_preseg_use(w, cid) is False   # nothing is selected
+    finally:
+        mw.QMessageBox.information = orig
+    assert shown and "older cell–nucleus pairing rules" in shown[0]
+    with pytest.raises(pc.ContractError, match="older cell–nucleus pairing rules"):
+        pc.build(run, cid, records)
+
+
+@pytest.mark.parametrize("method", PAIRED)
+def test_a_finished_result_reloaded_from_disk_can_be_used(app, tmp_path, method):
+    run, rdir = _run_on_disk(str(tmp_path / "step1"), method, COMBOS[method])
+    records = preseg_run.load_records(rdir)
+    assert all(r["pairing_rules"] == pc.fixed_rules(method)["pairing_rules"]
+               for r in records.values())
+    assert preseg_run.selectable(run, records, run["combos"][0]["combo_id"], "px1", "fh1")[0]
+
+
+@pytest.mark.parametrize("method", PAIRED)
+def test_an_exported_contract_from_older_pairing_rules_is_refused(app, tmp_path, method):
+    _, out, path = _use_and_save(tmp_path, method, COMBOS[method])
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    cfg[pc.CONTRACT_KEY]["params"].pop("pairing_rules")         # as v1.3 wrote it
+    with pytest.raises(pc.ContractError, match="older cell–nucleus pairing rules"):
+        pc.validate(cfg)

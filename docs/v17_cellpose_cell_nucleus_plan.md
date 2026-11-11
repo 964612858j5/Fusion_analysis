@@ -1,4 +1,4 @@
-# Cellpose whole-cell + nucleus — plan v1.1, 2026-11-10 (codex round 1, §7)
+# Cellpose whole-cell + nucleus — plan v1.4, 2026-11-10 (v1.4: §15)
 
 Requested by the user (TG 2026-11-10, backlog #2): a new segmentation method.
 Cellpose segments the whole cells AND the nuclei from Step1's image; the two
@@ -488,3 +488,212 @@ DeepCell itself does not quantify.
 * Advisories taken: exact owned-count test; the "shared nucleus without an eligible piece is lost whole" case pinned by a test (kept as approved, the user is told).
 
 Round 2 (astra low): **PASS** — no new public-path defect; hardening stops (AGENTS rule 7).
+
+## 15. v1.4 — straddling nuclei move their cell's border; a cell with two nuclei is split; StarDist on a near-blank tile (user, TG 2026-11-10)
+
+### 15.1 Why
+
+The user looked at `hybrid_cellpose_stardist` on the Mac and asked (discussed
+with codex astra high and Fable 5.2 medium, the discussion in the session):
+
+1. a nucleus that reaches into the neighbouring cell -- today a piece
+   >= 10 % becomes a SECOND nucleus of that neighbour (wrong);
+2. two nuclei of similar size in one Cellpose cell -- today one cell with two
+   nuclei; the user wants two cells (a fragment stays with its cell).
+
+Measured on the user's whole slide (hybrid, the user's Step2 parameters, raw
+masks, 3072-px tiles + 200 px halo, objects owned by centroid; 46 535 cells,
+56 694 nuclei, median nucleus 172 px; 3 near-blank edge tiles skipped, §15.4):
+
+| piece of a nucleus in the non-dominant cell A | A has its own nucleus | A has none other |
+|---|---|---|
+| < 10 % | 14 251 | 834 |
+| 10–30 % | 2 380 | 825 |
+| >= 30 % | 266 | 647 |
+
+Cells holding >= 2 nuclei each >= 50 % inside: 3 631 (7.8 %); smaller /
+larger: < 0.25: 101, 0.25–0.5: 902, >= 0.5: 2 628.
+
+### 15.2 User rulings (TG 2026-11-10)
+
+* Case 1: when A has its own nucleus, from **10 %** the piece goes to B
+  (A's border moves, the nucleus stays whole); if that would cut A apart,
+  the piece is trimmed instead (it stays A's cytoplasm). A with no other
+  nucleus: as today.
+* Case 2: split, **on by default**, with a switch to turn it off (Fable's
+  proposal): a nucleus is a seed when its area is >= 0.5 x the largest
+  nucleus in that cell and >= 40 px; a cell with >= 2 seeds is split among
+  them; other nuclei (fragments, the uncertain 0.25–0.5) are not seeds.
+* Both methods (`cellpose_wholecell_nuclei`, `hybrid_cellpose_stardist`).
+* Fix the StarDist crash on a near-blank tile (§15.4).
+
+### 15.3 Rules (in this order; constants fixed, not parameters except the switch)
+
+1. A cell wholly inside one nucleus is removed (unchanged).
+2. **Move (new).** On the masks after 1, every measure taken once before any
+   move: `own[A]` = A is the unique largest cell of some nucleus m with
+   >= 50 % of m in A. For a nucleus n on >= 2 cells, B = the cell with the
+   unique largest piece of n (a tie: no move for n); for every other cell A
+   with piece >= 10 % of n (`MIN_PIECE`) and `own[A]` by a nucleus m != n,
+   the piece is a candidate move A -> B. For each A, all its candidate
+   losses are judged together: they are applied only if A minus them has no
+   more 8-connected components than A had (else none of them is applied;
+   the refused pieces stay in A and are trimmed: like a sliver they become
+   A's cytoplasm, not a nucleus of A). A tie for B keeps today's rule 4.
+   Order-free: losses are judged without gains.
+3. The existing rules 2–4 (nucleus on no cell, union, shared out,
+   background) run unchanged on the moved masks.
+4. Nucleus-born cells grow 2 px into background (unchanged).
+5. **Split (new, the switch, default on).** For each cell C, its kept nucleus
+   pieces (one per original nucleus by construction): seeds = pieces with
+   area >= `SEED_RATIO` 0.5 x the largest piece in C and >= `SEED_MIN_PX` 40.
+   With >= 2 seeds, C (its bounding box crop) is flooded from the seeds
+   inside C (`skimage.segmentation.watershed` on a flat image, markers =
+   the seed pieces, mask = C, 8-connectivity -- geodesic nearest seed; the
+   crop is the same in every window that holds C whole, so the result is).
+   Pixels of C the flood does not reach (a part of C cut off from every
+   seed, e.g. by a nucleus-born cell taking a bridge) take the label of the
+   nearest flooded pixel (`ndi.distance_transform_edt(..., return_indices=
+   True)` on the crop), so no pixel of C is lost. A non-seed piece then goes
+   whole to the sub-cell holding most of its pixels (tie: the larger seed's)
+   and the cell label under every pixel of that piece becomes that sub-cell
+   (every piece stays wholly in its cell). The sub-cells are new cells; no
+   growth after.
+6. A cell without a nucleus is dropped; cells 1..N, pieces 1..K (unchanged).
+
+New counted events (`objects`, owned by centroid, into Step1 `drops`, Step2
+`nuclei.pairing`, the Step1 Results line): `nuclei_moved` (per nucleus whose
+piece(s) moved), `moves_refused` (per nucleus, A would be cut apart),
+`cells_split` (per original cell).
+
+### 15.4 StarDist on a near-blank tile (pre-existing defect, all StarDist methods)
+
+Whole-slide stats crashed the engine process: a 3472² window with 0.12 %
+tissue pixels has percentile 1 == percentile 99.8 == 0, csbdeep's
+`normalize` divides by ~1e-20, distances reach 1e19 and StarDist's polygon
+NMS (ClipperLib, C++) aborts the process ("Coordinate outside allowed
+range"). Not the torch port (the Keras path normalises the same). Step2's
+"skip tiles without tissue" skips only tissue-free windows, so a Step2 tile
+with a sliver of tissue can hit it. Fix in `StardistEngine.predict`: only
+when `p99.8 - p1 <= 1e-6`, take the two percentiles over the non-zero pixels
+(no non-zero pixel, or still degenerate: an empty label image without
+calling the model). Every other tile goes through the identical call, so no
+behaviour version changes.
+
+### 15.5 Versions and the Step1 → Step2 contract
+
+The rules change the output of both methods, so `preseg_contract.fixed_rules`
+gives both methods `{"pairing_rules": 2}` (`nuclei_pairing.PAIRING_RULES`;
+carried in the contract's params like Mesmer's fixed rules; the engine
+receives it and ignores it). The value must describe the Step1 result, not
+the code that saves it (codex round 1, P2): Step1's `run_job` writes
+`pairing_rules` into every record of these two methods, and
+`preseg_contract.build` refuses a combination whose successful records do
+not all carry the current value (a v1.3 run has none). The same check sits
+in `preseg_run.selectable` (codex round 2, P2), which the Use button already
+calls before it changes the selection, so Use on an old result says "This
+result cannot be used: made with the older cell–nucleus pairing rules; run
+the pre-segmentation again" and nothing is selected. The value is written by
+`preseg_run.publish_result(..., pairing_rules=)` into the record before it
+is published (a new keyword, like `drops`). `validate` refuses an exported v1.3 contract (no
+`pairing_rules`) with the same message. The switch `split_cells_by_nuclei` is a method parameter (on / off,
+listable in Step1 so both can be compared; default on), part of the
+combination like the others; Step2 shows it as a checkbox for both methods.
+Engine identities are unchanged (the pairing is not the engine's).
+
+### 15.6 Closed whitelist
+
+* `core/nuclei_pairing.py` -- rules 2 and 5, constants, `split` argument,
+  events.
+* `core/preseg_contract.py` -- `fixed_rules`, `build` checks the records'
+  `pairing_rules`, the refusal message.
+* `core/preseg_run.py` -- `publish_result(pairing_rules=)`, `selectable`
+  refuses records without the current value (these two methods only).
+* `utils/segmentation_param_schema.py` -- a "switch" kind (on / off) and the
+  parameter for both methods.
+* `utils/segmentation_config.py` -- the default for both methods.
+* `ui/step1_presegmentation/run_job.py` -- pass the switch; records carry
+  `pairing_rules`.
+* (`method_editor.py` needs no change: it formats and parses through the
+  schema.)
+* `ui/main_window.py` -- the Results line names moved / split.
+* `ui/step2_page.py` -- the checkbox (both methods), load / save.
+* `workers/segment_merge_worker.py` -- pass the switch.
+* `seg_runner/engines.py` -- §15.4.
+* `docs/user_guide.md`, `docs/用户指南.md` -- the rules and the switch.
+* Tests: `tests/test_cellpose_cell_nucleus.py` (move, refused move, no move
+  without own nucleus, tie, split / no split for fragment and uncertain,
+  3 seeds, non-seed piece follows, switch off = v1.3 plus move, invariants),
+  `tests/test_hybrid_cellpose_stardist.py` (near-blank tile), contract /
+  schema / method-plan tests touched by the new parameter and fixed rule;
+  a cut-off seedless part keeps its pixels; switch off survives flat and
+  nested config round trips (the normaliser's flat keys include it); a v1.3
+  record / contract is refused at Use / Step2; a finished v1.4 run reloaded
+  from disk can be Used.
+
+### 15.7 Risks
+
+* Real binucleate cells are split when the switch is on (the user's ruling;
+  the switch turns it off, per combination).
+* Cell counts change (~5 % more cells from the split on this slide);
+  v1.3 Step1 results must be run again before Step2.
+* A split cell's Step4 features differ from v1.3; that is the intent.
+
+### 15.8 Codex plan review round 1 (astra low) — FAIL (P2 ×2), taken
+
+* P2: `build` stamped the CURRENT `pairing_rules` on an old result → records carry the value, `build` checks it (§15.5).
+* P2: a part of a cell cut off from every seed was lost by the flood → nearest flooded pixel (§15.3 rule 5).
+* Advisories taken: non-seed piece relabels the cell under it; flat/nested switch-off round trip; `method_editor.py` unchanged.
+
+### 15.9 Codex plan review round 2 (astra low) — FAIL (P2 ×1), taken
+
+* P2: Use called only `selectable`, so the records' check in `build` came late (at Generate) → the check also in `preseg_run.selectable`; `core/preseg_run.py` added to the whitelist (§15.5, §15.6).
+* Advisory taken: `publish_result` writes the value before publishing; acceptance "finished → reloaded → Use".
+
+## 16. v1.4 implementation (2026-11-10; user TG: "同意修复…从 10% 开始移动边界…默认开启…两者")
+
+* `core/nuclei_pairing.py`: `PAIRING_RULES = 2`, `SEED_RATIO = 0.5`,
+  `SEED_MIN_PX = 40`; `combine_cells_and_nuclei(cells, nuclei, split=True)`;
+  rule 1b `_move_straddling_pieces` (measured once on the masks after rule 1;
+  a losing cell judged on all its losses, 8-connected parts before / after;
+  refused pieces excluded from the eligible pieces = trimmed); rule 4b
+  `split_by_seeds` (per split cell: bbox crop, `watershed` on a flat image
+  from the seed pieces, 8-connectivity; unreached pixels take the nearest
+  flooded pixel via `distance_transform_edt(return_indices=True)`; a non-seed
+  piece goes whole by votes, tie: larger seed, then the seed whose first
+  pixel comes first in raster order; first sub-cell keeps the id). Events
+  `nuclei_moved`, `moves_refused`, `cells_split` in `counts` and `objects`.
+* Contract (§15.5): `fixed_rules` → `{"pairing_rules": 2}` for
+  `engines.CELL_AND_NUCLEUS_METHODS`; `publish_result(pairing_rules=)`;
+  `run_job` writes it; `selectable` and `build` refuse records without it,
+  `validate` a contract without it (`OLDER_PAIRING`).
+* Switch: schema kind "switch" (on / off, listable), `SPLIT_SPEC` on both
+  methods; registry defaults True; normaliser's flat keys
+  `split_cells_by_nuclei`, `pairing_rules`; Step2 checkbox "Split a cell
+  holding two similar nuclei" (both methods), `get_seg_config` writes the
+  switch and the fixed rule, other methods drop them; Step1 `combine_window`
+  and the Step2 worker pass the switch to the pairing.
+* StarDist (§15.4): `engines.stardist_input` -- the same percentiles and
+  `normalize_mi_ma` as csbdeep's `normalize` (a test checks equality), the
+  non-zero fallback only when `p99.8 - p1 <= 1e-6`, None → empty labels.
+  The real crashing window (3472², 0.12 % non-zero) now runs (2 nuclei).
+* Step1 Results line: "… borders moved to a nucleus (R refused) · S cells
+  split · …". User guides (EN / 中文) Appendix A rows.
+* Real data (user's slide, raw hybrid masks, one 3072² tile, owned by no
+  one -- the whole tile): 330 nuclei moved, 5 refused (cut-off parts 1–50
+  px), 272 cells split (6 722 → 7 007 cells); 0.8 s, peak ~250 MiB
+  (tracemalloc).
+* Tests: `test_cellpose_cell_nucleus.py` (+11: move, refused → trimmed, no
+  own nucleus, tie, split, switch off, fragment / uncertain, three seeds,
+  non-seed piece whole, cut-off part kept), `test_hybrid_cellpose_stardist.py`
+  (+12: csbdeep equality, near-blank fallback, StarDist and hybrid survive a
+  near-blank tile, switch parse / combos, flat + nested off, page round trip
+  and hidden for other methods, the worker passes on / off),
+  `test_preseg_contract.py` (+6: an old result cannot be Used / built, a
+  reloaded new one can, an old exported contract refused; COMBOS carry the
+  switch off).
+
+### 16.1 Codex v1.4 code review
+
+* Round 1 (astra low): FAIL, P2 ×1 — the Results line lacked `moves_refused`; fixed.
+* Round 2 (astra low): **PASS**.

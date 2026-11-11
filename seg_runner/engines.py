@@ -27,6 +27,7 @@ import pathlib
 METHOD_OUTPUTS = {
     "cellpose_wholecell_fusion": ("cell",),
     "cellpose_wholecell_nuclei": ("cell", "nucleus"),
+    "hybrid_cellpose_stardist": ("cell", "nucleus"),
     "cellpose_nuclei_dapi": ("nucleus",),
     "cellpose_nuclei_expansion": ("cell", "nucleus"),
     "stardist_nuclei_dapi": ("nucleus",),
@@ -41,7 +42,12 @@ EXPANSION_METHODS = ("cellpose_nuclei_expansion", "stardist_nuclei_expansion")
 #: (docs/v17_cellpose_cell_nucleus_plan.md): the nucleus pass reads the
 #: input's last channel -- the nucleus channel -- with its own parameters.
 #: Returned RAW; the pairing is the application's (core/nuclei_pairing.py).
-CELL_AND_NUCLEUS_METHODS = ("cellpose_wholecell_nuclei",)
+CELL_AND_NUCLEUS_METHODS = ("cellpose_wholecell_nuclei", "hybrid_cellpose_stardist")
+#: docs/v17_hybrid_cellpose_stardist_plan.md: cells from the Cellpose part,
+#: nuclei from the StarDist part of ONE "hybrid" engine process
+HYBRID_METHODS = ("hybrid_cellpose_stardist",)
+#: the engines a composite engine is made of (its manifest models, provenance)
+ENGINE_PARTS = {"hybrid": ("cellpose", "stardist")}
 #: the registry's nucleus defaults (utils/segmentation_config.py), here so
 #: the engine process imports nothing of the application
 NUCLEUS_PASS_DEFAULTS = {"diameter": None, "flow_threshold": 0.4,
@@ -76,12 +82,15 @@ IDENTITY_VERSION = 2
 #: level of floating-point rounding, so they are another behaviour.
 #: stardist 2 (user ruling 2026-11-10): the same -- the network runs on PyTorch
 #: (docs/stardist_torch_plan.md); only the inference implementation changed.
-BEHAVIOR_VERSION = {"cellpose": 1, "stardist": 2, "mesmer": 2}
+#: hybrid 1 (2026-11-10): the Cellpose and StarDist parts as their own engines
+#: run them; bump it whenever either part's output changes.
+BEHAVIOR_VERSION = {"cellpose": 1, "stardist": 2, "mesmer": 2, "hybrid": 1}
 #: The LOGICAL model of each engine (its `models.json` key). Mesmer's is the
 #: Keras model; the file it loads is that model's torch conversion, stored as
 #: `MESMER_TORCH_ENTRY` -- the same weights, so the same model identity.
 MODEL_ID = {"cellpose": "cellpose_cpsam", "stardist": "stardist_2D_versatile_fluo",
-            "mesmer": "mesmer_multiplex_segmentation"}
+            "mesmer": "mesmer_multiplex_segmentation",
+            "hybrid": "cellpose_cpsam+stardist_2D_versatile_fluo"}
 MESMER_TORCH_ENTRY = "mesmer_multiplex_segmentation_torch"
 #: StarDist's torch conversion of `stardist_2D_versatile_fluo`'s own
 #: `weights_best.h5` (docs/stardist_torch_plan.md §4): the same weights, so
@@ -346,10 +355,79 @@ class StardistEngine:
         return dict(self._artifact)
 
     def predict(self, image, params):
-        from csbdeep.utils import normalize
+        import numpy as np
         kwargs = {k: params[k] for k in ("prob_thresh", "nms_thresh") if params.get(k) is not None}
-        labels, _ = self._model.predict_instances(normalize(image, 1, 99.8, axis=(0, 1)), **kwargs)
+        x = stardist_input(image)
+        if x is None:                     # nothing to normalise: no nucleus, no model call
+            return np.zeros(np.shape(image)[:2], np.int32)
+        labels, _ = self._model.predict_instances(x, **kwargs)
         return labels
+
+
+#: plan §15.4: percentile 99.8 - percentile 1 at or below this is "no contrast"
+NEAR_BLANK = 1e-6
+
+
+def stardist_input(image):
+    """StarDist's input: csbdeep's `normalize(image, 1, 99.8, axis=(0, 1))`,
+    computed the same way (the same percentiles, `normalize_mi_ma`). Only on a
+    window with no contrast at those percentiles -- a near-blank tile, where
+    the division by ~1e-20 sends the distances to ~1e19 and StarDist's
+    polygon NMS (ClipperLib) aborts the process (plan §15.4) -- the
+    percentiles are taken over the non-zero pixels instead; None when there
+    is still no contrast (nothing to segment)."""
+    import numpy as np
+    from csbdeep.utils import normalize_mi_ma
+    mi = np.percentile(image, 1, axis=(0, 1), keepdims=True)
+    ma = np.percentile(image, 99.8, axis=(0, 1), keepdims=True)
+    if np.all(ma - mi > NEAR_BLANK):
+        return normalize_mi_ma(image, mi, ma)
+    values = np.asarray(image)[np.asarray(image) > 0]
+    if values.size == 0:
+        return None
+    mi, ma = np.percentile(values, 1), np.percentile(values, 99.8)
+    if ma - mi <= NEAR_BLANK:
+        return None
+    import sys
+    print(f"[stardist] near-blank window: normalised over its {values.size} non-zero pixels",
+          file=sys.stderr, flush=True)
+    return normalize_mi_ma(image, mi, ma)
+
+
+def _device_form(dev):
+    """One spelling of a torch device for the records: `gpu` (CUDA), `mps`,
+    `cpu` -- as StarDist and Mesmer report it."""
+    dev = str(dev)
+    return "gpu" if dev.startswith("cuda") else dev
+
+
+class HybridEngine:
+    """Cellpose whole cells + StarDist nuclei in ONE engine process
+    (docs/v17_hybrid_cellpose_stardist_plan.md): one torch device, one CUDA
+    context. StarDist is built first -- it hides TensorFlow's GPUs before its
+    Keras model exists; Cellpose imports no TensorFlow. Both parts must sit on
+    the same device, else the engine does not start."""
+
+    name = "hybrid"
+
+    def __init__(self):
+        self.stardist = StardistEngine()
+        self.cellpose = CellposeEngine()
+        a, b = _device_form(self.cellpose.device), _device_form(self.stardist.device)
+        if a != b:
+            raise RuntimeError(f"the hybrid engine's parts are on different devices: "
+                               f"Cellpose {a}, StarDist {b}")
+        self.device = a
+
+    def lib_versions(self):
+        return {**self.stardist.lib_versions(), **self.cellpose.lib_versions()}
+
+    def model_resolved_path(self):
+        return (f"cellpose: {self.cellpose.model_resolved_path()}; "
+                f"stardist: {self.stardist.model_resolved_path()}")
+
+    def model_artifact(self):
+        return self.stardist.model_artifact()
 
 
 class MesmerEngine:
@@ -432,7 +510,8 @@ def _dist_version(name):
 
 
 def load(engine):
-    return {"cellpose": CellposeEngine, "stardist": StardistEngine, "mesmer": MesmerEngine}[engine]()
+    return {"cellpose": CellposeEngine, "stardist": StardistEngine, "mesmer": MesmerEngine,
+            "hybrid": HybridEngine}[engine]()
 
 
 def run(engine_obj, method, image, params):
@@ -453,6 +532,14 @@ def run(engine_obj, method, image, params):
             nuc = masks["nuclear"]
             # nuclear-guided: the second output, library defaults, not post-processed
             result["nucleus"] = postprocess_mask(nuc, min_size) if "cell" not in outputs else nuc
+    elif method in HYBRID_METHODS:
+        # (before the generic two-pass branch, which feeds Cellpose's
+        # nucleus-pass parameters) cells as whole-cell, nuclei as StarDist
+        # nuclei-DAPI on the input's last channel
+        image = np.asarray(image)
+        result["cell"] = engine_obj.cellpose.predict(image, params)
+        result["nucleus"] = engine_obj.stardist.predict(
+            np.ascontiguousarray(image[..., -1]), params)
     elif method in CELL_AND_NUCLEUS_METHODS:
         image = np.asarray(image)
         result["cell"] = engine_obj.predict(image, params)

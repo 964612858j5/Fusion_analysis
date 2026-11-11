@@ -7493,6 +7493,9 @@ class MainWindow(QMainWindow):
                         return sum(int(d.get(key, 0)) for d in drops)
                     bits.append(f"{total('cells_from_nucleus')} cells from a nucleus · "
                                 f"{total('nuclei_shared')} nuclei shared · "
+                                f"{total('nuclei_moved')} borders moved to a nucleus "
+                                f"({total('moves_refused')} refused) · "
+                                f"{total('cells_split')} cells split · "
                                 f"{total('cells_without_nucleus')} cells without a nucleus "
                                 f"dropped")
             if st[preseg_run.FAILED]:

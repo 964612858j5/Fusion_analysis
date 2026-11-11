@@ -44,6 +44,10 @@ def test_the_models_are_the_manifests():
     import json
     models = json.loads(engines.MODELS_MANIFEST.read_text())["models"]
     for engine, model_id in engines.MODEL_ID.items():
+        if engine in engines.ENGINE_PARTS:       # a composite (the hybrid): its parts' models
+            parts = engines.ENGINE_PARTS[engine]
+            assert model_id == "+".join(engines.MODEL_ID[p] for p in parts)
+            continue
         assert models[model_id]["engine"] == engine
 
 

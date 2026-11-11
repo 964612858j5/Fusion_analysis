@@ -31,13 +31,24 @@ class ContractError(ValueError):
     """A contract that cannot be written or trusted; the message says why."""
 
 
+#: plan §15.5: said when a cell + nucleus result predates the current rules
+OLDER_PAIRING = ("made with the older cell–nucleus pairing rules; run the "
+                 "pre-segmentation again and Use the new result")
+
+
 def fixed_rules(method):
     """Settings a method always runs with, whatever the combination: Mesmer
     uses DeepCell's own preprocessing only (no extra normalisation), and its
     listed thresholds act on one output. The engine applies both by
     construction (`seg_runner/engines.py`, MESMER_THRESHOLD_TARGET); they are
     written down so the file, Step2's check and the engine message all say
-    the same. Empty for other methods."""
+    the same. The two cell + nucleus methods carry the version of the
+    pairing rules their masks were made with (plan §15.5). Empty for other
+    methods."""
+    from ..seg_runner.engines import CELL_AND_NUCLEUS_METHODS
+    if method in CELL_AND_NUCLEUS_METHODS:
+        from .nuclei_pairing import PAIRING_RULES
+        return {"pairing_rules": PAIRING_RULES}
     if not method.startswith("mesmer_"):
         return {}
     return {"normalize_input": False,
@@ -62,6 +73,9 @@ def build(run, combo_id, records):
     for rec in ok:
         if rec.get("params") != combo["params"] or rec.get("method") != method:
             raise ContractError("a patch record does not match the combination's parameters")
+    if "pairing_rules" in fixed_rules(method) and any(
+            rec.get("pairing_rules") != fixed_rules(method)["pairing_rules"] for rec in ok):
+        raise ContractError(f"this result was {OLDER_PAIRING}")
     ids = [rec.get("engine_identity") for rec in ok]
     if any(not isinstance(i, dict) or not i for i in ids):
         raise ContractError("the engine identity is missing from a patch record")
@@ -124,6 +138,8 @@ def validate(cfg):
     if not isinstance(block["params"], dict):
         raise ContractError("the contract's parameters are not a JSON object")
     rules = fixed_rules(block["method"])
+    if "pairing_rules" in rules and block["params"].get("pairing_rules") != rules["pairing_rules"]:
+        raise ContractError(f"the Step1 result in this file was {OLDER_PAIRING}")
     if any(block["params"].get(k, object()) != v for k, v in rules.items()):
         raise ContractError("the contract's parameters lack the method's fixed rules")
     reg = block.get("regions")
@@ -199,7 +215,7 @@ def ignored_settings(cfg):
     if block is not None:
         merged = dict(block.get("params") or {})
     out = []
-    if method.startswith("stardist_"):
+    if method.startswith("stardist_") or method == "hybrid_cellpose_stardist":
         name = merged.get("model_name")
         if name not in (None, "", STARDIST_MODEL):
             out.append(("model_name", name, f"the engine loads {STARDIST_MODEL} only"))

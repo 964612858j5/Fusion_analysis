@@ -39,8 +39,8 @@ def _square(a, label, y0, y1, x0, x1):
 
 # ── making cells and nuclei one (plan §12-§13, v1.3) ────────────────────
 
-def _combine(cells, nuclei):
-    r = nuclei_pairing.combine_cells_and_nuclei(cells, nuclei)
+def _combine(cells, nuclei, split=True):
+    r = nuclei_pairing.combine_cells_and_nuclei(cells, nuclei, split=split)
     c, n, parent = r["cells"], r["nuclei"], r["nucleus_cell"]
     # invariants: ids 1..N / 1..K, every piece wholly in its parent cell,
     # every cell holds a piece
@@ -184,9 +184,142 @@ def test_the_window_events_are_counted_by_owner():
     assert got == {"cells_inside_a_nucleus": 0, "nuclei_shared": 1,
                    "nuclei_shared_without_piece": 0, "nuclei_with_slivers": 1,
                    "nuclei_background_discarded": 0, "cells_without_nucleus": 1,
-                   "cells_from_nucleus": 1}
+                   "cells_from_nucleus": 1, "nuclei_moved": 0, "moves_refused": 0,
+                   "cells_split": 0}
     assert nuclei_pairing.owned_object_counts(r["objects"], (25, 40, 0, 40)) == \
         dict.fromkeys(got, 0)                # nothing of it is owned there
+
+
+# ── v1.4 (plan §15): a straddling nucleus moves its cell's border ────────
+
+def test_a_straddling_piece_moves_to_the_nucleus_s_cell():
+    cells = _two_cells()                     # A cols 0-9, B cols 10-19
+    nuclei = np.zeros_like(cells)
+    _square(nuclei, 6, 2, 6, 2, 6)           # A's own nucleus
+    _square(nuclei, 5, 3, 8, 8, 18)          # 50 px: 10 in A (20 %), 40 in B
+    r = _combine(cells, nuclei)
+    c, n = r["cells"], r["nuclei"]
+    a, b = c[0, 0], c[0, 19]
+    assert r["counts"]["nuclei_moved"] == 1 and r["counts"]["moves_refused"] == 0
+    assert (c[3:8, 8:10] == b).all()         # A's border follows the nucleus
+    assert (c == a).sum() == 90 and (c == b).sum() == 110
+    assert (n[c == b] > 0).sum() == 50 and (n[c == a] > 0).sum() == 16
+    assert len(r["nucleus_cell"]) == 3       # one nucleus each, none shared
+
+
+def test_a_move_that_would_cut_the_cell_apart_is_trimmed_instead():
+    cells = np.zeros((30, 30), np.uint32)
+    _square(cells, 1, 0, 8, 0, 10)           # A: a body ...
+    _square(cells, 1, 8, 14, 6, 10)          # ... and a tail below
+    _square(cells, 2, 6, 12, 10, 20)         # B
+    nuclei = np.zeros_like(cells)
+    _square(nuclei, 6, 1, 5, 1, 5)           # A's own nucleus
+    _square(nuclei, 5, 8, 10, 6, 16)         # 8 px in A (cuts the tail off), 12 in B
+    r = _combine(cells, nuclei)
+    c, n = r["cells"], r["nuclei"]
+    a = c[0, 0]
+    assert r["counts"]["moves_refused"] == 1 and r["counts"]["nuclei_moved"] == 0
+    assert (c[8:10, 6:10] == a).all()        # A keeps the pixels ...
+    assert not n[8:10, 6:10].any()           # ... as plain cell pixels, not a nucleus
+    assert (n[c == a] > 0).sum() == 16
+
+
+def test_no_move_when_the_cell_has_no_nucleus_of_its_own():
+    cells = _two_cells()
+    nuclei = np.zeros_like(cells)
+    _square(nuclei, 5, 3, 8, 8, 18)          # 20 % in A, A has nothing else
+    r = _combine(cells, nuclei)
+    c, n = r["cells"], r["nuclei"]
+    assert r["counts"]["nuclei_moved"] == 0
+    assert (n[c == c[0, 0]] > 0).sum() == 10  # today's rule: A keeps its piece
+
+
+def test_a_tie_for_the_nucleus_s_cell_moves_nothing():
+    cells = _two_cells()
+    nuclei = np.zeros_like(cells)
+    _square(nuclei, 6, 1, 4, 1, 4)
+    _square(nuclei, 7, 1, 4, 15, 18)
+    _square(nuclei, 5, 5, 9, 5, 15)          # 20 in A, 20 in B
+    r = _combine(cells, nuclei)
+    assert r["counts"]["nuclei_moved"] == 0 and r["counts"]["moves_refused"] == 0
+    assert (r["cells"] == r["cells"][0, 0]).sum() == 100
+
+
+# ── v1.4 (plan §15): a cell with two nuclei is split ─────────────────────
+
+def _one_cell(w=30):
+    cells = np.zeros((20, 40), np.uint32)
+    _square(cells, 1, 0, 10, 0, w)
+    return cells
+
+
+def test_two_similar_nuclei_split_their_cell():
+    cells = _one_cell()
+    nuclei = np.zeros_like(cells)
+    _square(nuclei, 5, 2, 8, 2, 10)          # 48 px
+    _square(nuclei, 6, 2, 8, 20, 28)         # 48 px
+    r = _combine(cells, nuclei)
+    c, n = r["cells"], r["nuclei"]
+    assert r["counts"]["cells_split"] == 1 and int(c.max()) == 2
+    assert (c > 0).sum() == 300              # no pixel lost
+    assert c[0, 0] != c[0, 29]
+    assert (c[nuclei == 5] == c[0, 0]).all() and (c[nuclei == 6] == c[0, 29]).all()
+
+
+def test_the_switch_off_keeps_one_cell():
+    cells = _one_cell()
+    nuclei = np.zeros_like(cells)
+    _square(nuclei, 5, 2, 8, 2, 10)
+    _square(nuclei, 6, 2, 8, 20, 28)
+    r = _combine(cells, nuclei, split=False)
+    assert r["counts"]["cells_split"] == 0 and int(r["cells"].max()) == 1
+    assert len(r["nucleus_cell"]) == 3
+
+
+@pytest.mark.parametrize("second", [(2, 6, 20, 24),      # 16 px: under 40 px
+                                    (2, 7, 20, 28)])     # 40 px vs 100: 0.4, not a seed
+def test_a_fragment_or_an_uncertain_nucleus_does_not_split(second):
+    cells = _one_cell()
+    nuclei = np.zeros_like(cells)
+    _square(nuclei, 5, 0, 10, 0, 10)         # 100 px
+    _square(nuclei, 6, *second)
+    r = _combine(cells, nuclei)
+    assert r["counts"]["cells_split"] == 0 and int(r["cells"].max()) == 1
+    assert len(r["nucleus_cell"]) == 3
+
+
+def test_three_seeds_make_three_cells():
+    cells = _one_cell(40)
+    nuclei = np.zeros_like(cells)
+    for k, x in ((5, 1), (6, 16), (7, 31)):
+        _square(nuclei, k, 2, 8, x, x + 8)
+    r = _combine(cells, nuclei)
+    assert int(r["cells"].max()) == 3 and (r["cells"] > 0).sum() == 400
+
+
+def test_a_non_seed_piece_goes_whole_to_one_sub_cell():
+    cells = _one_cell()
+    nuclei = np.zeros_like(cells)
+    _square(nuclei, 5, 2, 8, 2, 10)
+    _square(nuclei, 6, 2, 8, 20, 28)
+    _square(nuclei, 7, 4, 7, 13, 17)         # 12 px, across the middle
+    r = _combine(cells, nuclei)              # `_combine` checks it lies in one cell
+    c = r["cells"]
+    assert int(c.max()) == 2 and len(np.unique(c[nuclei == 7])) == 1
+    assert (c > 0).sum() == 300
+
+
+def test_a_part_cut_off_from_every_seed_keeps_its_pixels():
+    out = np.zeros((20, 40), np.uint32)
+    _square(out, 1, 0, 10, 0, 20)            # two seeds here ...
+    _square(out, 1, 0, 10, 25, 30)           # ... and a part with none
+    nuclei = np.zeros_like(out)
+    _square(nuclei, 5, 2, 8, 1, 8)
+    _square(nuclei, 6, 2, 8, 12, 19)
+    parent, split = nuclei_pairing.split_by_seeds(out, nuclei, [5, 6], [1, 1], [42, 42])
+    assert split.tolist() == [1] and sorted(parent.tolist()) == [1, 2]
+    assert (out > 0).sum() == 250            # nothing of the cell lost
+    assert (out[0:10, 25:30] == out[0, 19]).all()   # the nearest sub-cell
 
 
 def test_without_nuclei_every_cell_goes():
@@ -326,7 +459,7 @@ def _raw_ome(path, image):
     return str(path)
 
 
-def _step2(tmp_path, monkeypatch, **kw):
+def _step2(tmp_path, monkeypatch, method=METHOD, **kw):
     pytest.importorskip("block01.qt")
     from block01.qt import QtWidgets
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -335,7 +468,7 @@ def _step2(tmp_path, monkeypatch, **kw):
     from block01.workers import segment_merge_worker as smw
     truth = kn._truth()
     image = rp._image()
-    cfg = dict(rp.PARAMS["cellpose_wholecell_fusion"], method=METHOD)
+    cfg = dict(rp.PARAMS["cellpose_wholecell_fusion"], method=method)
     cfg["raw_ome_path"] = _raw_ome(tmp_path / "slide.ome.tif", image)
     worker = rp._worker(tmp_path, rp._fused_zarr(tmp_path, image), cfg)
     for k, v in kw.items():

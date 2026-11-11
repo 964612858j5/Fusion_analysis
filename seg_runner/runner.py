@@ -79,8 +79,10 @@ def engine_provenance(engine, engine_obj):
     manifest = env / "models.json"
     models = {}
     if manifest.is_file():
+        from . import engines
+        parts = engines.ENGINE_PARTS.get(engine, (engine,))      # a composite: its parts'
         models = {k: v for k, v in json.loads(manifest.read_text()).get("models", {}).items()
-                  if v.get("engine") == engine}
+                  if v.get("engine") in parts}
     resolved = getattr(engine_obj, "model_resolved_path", None)
     try:
         resolved = resolved() if callable(resolved) else None
@@ -137,7 +139,7 @@ def _run_task(engine_obj, msg):
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--engine", required=True, choices=["cellpose", "stardist", "mesmer"])
+    ap.add_argument("--engine", required=True, choices=["cellpose", "stardist", "mesmer", "hybrid"])
     args = ap.parse_args(argv)
 
     # The protocol keeps the real stdout; everything else printed to fd 1 --

@@ -160,7 +160,7 @@ def mask_path(rdir, task_id, kind):
 
 
 def publish_result(rdir, run, task, status, masks=None, error="", device="", runtime_s=None,
-                   paired=None, drops=None):
+                   paired=None, drops=None, pairing_rules=None):
     """Masks first, then the record; returns the record. `masks` =
     {"cell": array|None, "nucleus": array|None} for an ok task."""
     import numpy as np
@@ -192,6 +192,8 @@ def publish_result(rdir, run, task, status, masks=None, error="", device="", run
         record["paired"] = bool(paired)
     if drops is not None:          # Cellpose whole-cell + nuclei: what the pairing left out
         record["drops"] = {str(k): int(v) for k, v in drops.items()}
+    if pairing_rules is not None:  # plan §15.5: the rules these masks were made with
+        record["pairing_rules"] = int(pairing_rules)
     protocol.publish_json(record_path(rdir, task["task_id"]), record)
     return record
 
@@ -339,6 +341,13 @@ def selectable(run, records, combo_id, current_pixel_key, current_fusion_hash,
         return False, "a result file is missing"
     if not st[OK]:
         return False, "no patch succeeded"
+    from . import preseg_contract
+    combo = next((c for c in run.get("combos") or [] if c.get("combo_id") == combo_id), {})
+    want = preseg_contract.fixed_rules(combo.get("method", "")).get("pairing_rules")
+    if want is not None and any(
+            r.get("pairing_rules") != want for r in (records or {}).values()
+            if r.get("combo_id") == combo_id and r.get("status") == OK):
+        return False, preseg_contract.OLDER_PAIRING     # plan §15.5
     if is_stale(run, current_pixel_key, current_fusion_hash, current_identity,
                 current_components):
         return False, "the image or the Fusion settings changed since this run"

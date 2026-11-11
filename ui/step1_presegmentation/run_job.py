@@ -28,7 +28,7 @@ from ...seg_runner import engines as seg_engines
 from ...seg_runner.client import EngineProcess, EngineStartError
 from ...utils import error_hook, run_store
 
-ENGINE_ORDER = ("cellpose", "stardist", "mesmer")
+ENGINE_ORDER = ("cellpose", "stardist", "hybrid", "mesmer")
 
 
 def open_loader(spec):
@@ -265,7 +265,7 @@ class PresegRunJob:
             if t["method"] in seg_engines.CELL_AND_NUCLEUS_METHODS:
                 # plan §13: cells and nuclei made one first, so Regions judges
                 # the cells as they will be (nuclei follow their cell)
-                combined = combine_window(raw)
+                combined = combine_window(raw, split=t["params"].get("split_cells_by_nuclei", True))
                 raw = {"cell": combined["cells"], "nucleus": combined["nuclei"]}
             raster = self._regions_raster(t["method"])
             if raster is not None:                        # F4-2: the Regions rules, before the crop
@@ -273,9 +273,12 @@ class PresegRunJob:
                 print(f"[Preseg] {t['task_id']}: Regions dropped {dropped}")
             own = preseg_input.own_local(t["patch_bbox"], rt["_window"])
             drops = None
+            extra = {}
             if combined is not None:
                 masks, drops = own_cell_nucleus_masks(raw, combined, own)
                 paired = True
+                from ...core.nuclei_pairing import PAIRING_RULES
+                extra["pairing_rules"] = PAIRING_RULES        # plan §15.5
             else:
                 masks, paired = own_masks(t["method"], raw, own)
             for k in ("cell", "nucleus"):
@@ -283,7 +286,7 @@ class PresegRunJob:
                 if p and os.path.exists(p):
                     os.remove(p)
             self._settle(t, preseg_run.OK, "", masks=masks, device=rrec.get("device_used", ""),
-                         runtime_s=rrec.get("runtime_s"), paired=paired, drops=drops)
+                         runtime_s=rrec.get("runtime_s"), paired=paired, drops=drops, **extra)
         except Exception:  # noqa: BLE001
             self._settle(t, preseg_run.FAILED, "result: " + traceback.format_exc()[-2000:])
 
@@ -343,14 +346,15 @@ def own_masks(method, raw, own):
             paired)
 
 
-def combine_window(raw):
+def combine_window(raw, split=True):
     """Cellpose whole-cell + nuclei: the window's cells and nuclei made one
-    (`core.nuclei_pairing.combine_cells_and_nuclei`, plan §13)."""
+    (`core.nuclei_pairing.combine_cells_and_nuclei`, plan §13; `split`: the
+    combination's "split cells by nuclei", plan §15)."""
     from ...core import nuclei_pairing
     cell, nuc = raw.get("cell"), raw.get("nucleus")
     if cell is None or nuc is None:
         raise RuntimeError("the engine returned no cell or no nucleus mask")
-    return nuclei_pairing.combine_cells_and_nuclei(cell, nuc)
+    return nuclei_pairing.combine_cells_and_nuclei(cell, nuc, split=bool(split))
 
 
 def own_cell_nucleus_masks(raw, combined, own):

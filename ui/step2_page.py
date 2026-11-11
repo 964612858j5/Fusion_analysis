@@ -31,6 +31,7 @@ from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_HQ2,
     CELLPOSE_WHOLECELL_FUSION,
     CELLPOSE_WHOLECELL_NUCLEI,
+    HYBRID_CELLPOSE_STARDIST,
     SEGMENTATION_METHODS,
     MESMER_WHOLE_CELL,
     MESMER_NUCLEI,
@@ -722,6 +723,16 @@ class Step2Page(QWidget):
         self._nuc_minsize.setRange(1, 10000)
         self._nuc_minsize.setValue(15)
         r, self._nuc_minsize_label, _ = _param_row('nucleus min_size (px²):', self._nuc_minsize)
+        cpl.addLayout(r)
+        # plan §15 (v1.4): both cell + nucleus methods -- a cell holding two
+        # or more similar nuclei becomes one cell per nucleus (on by default)
+        self._split_cells = QCheckBox('Split a cell holding two similar nuclei')
+        self._split_cells.setChecked(True)
+        self._split_cells.setToolTip(
+            'A nucleus at least half the size of the largest in its cell and at least '
+            '40 px splits the cell (each pixel goes to its nearest such nucleus). Turn off '
+            'for tissue with real binucleate cells.')
+        r, self._split_cells_label, _ = _param_row('split cells:', self._split_cells)
         cpl.addLayout(r)
 
         # Every method, manual or from the index (block M): unchecked, the
@@ -1992,7 +2003,9 @@ class Step2Page(QWidget):
 
     def _is_stardist(self):
         method = self._method_combo.currentData() if hasattr(self, "_method_combo") else None
-        return method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
+        # the hybrid's StarDist part reads the same tiles (hybrid plan §2)
+        return method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION,
+                          HYBRID_CELLPOSE_STARDIST)
 
     def _run_input_shapes(self):
         """(h, w) of every input the run will segment with this ONE grid: each
@@ -3074,6 +3087,7 @@ class Step2Page(QWidget):
         self._nuc_prob.setValue(float(p.get('nucleus_cellprob_threshold',
                                             d['nucleus_cellprob_threshold'])))
         self._nuc_minsize.setValue(int(p.get('nucleus_min_size', d['nucleus_min_size'])))
+        self._split_cells.setChecked(bool(p.get('split_cells_by_nuclei', True)))
 
     def _apply_method_defaults_to_ui(self, method):
         cfg = normalize_segmentation_config({"method": method})
@@ -3333,6 +3347,11 @@ class Step2Page(QWidget):
             'params':             params,
             'model_type':         'cpsam',  # Cellpose 4.0.1+: always cpsam
             'diameter':           None if diam == 0 else diam,
+            # (hybrid plan §2) the page's StarDist values, as the flat keys
+            # are now normalised: a loaded file's own must not win over them
+            'model_name':         params.get('model_name'),
+            'prob_thresh':        params.get('prob_thresh'),
+            'nms_thresh':         params.get('nms_thresh'),
             'flow_threshold':     self._cp_flow.value(),
             'cellprob_threshold': self._cp_prob.value(),
             'min_size':           self._cp_minsize.value(),
@@ -3348,6 +3367,16 @@ class Step2Page(QWidget):
             data['skip_tiles'] = skip
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             data.update(params)
+        if method in (CELLPOSE_WHOLECELL_NUCLEI, HYBRID_CELLPOSE_STARDIST):
+            # plan §15: the split switch and the pairing rules' version
+            pair = dict(preseg_contract.fixed_rules(method),
+                        split_cells_by_nuclei=self._split_cells.isChecked())
+            data.update(pair)
+            params.update(pair)
+        else:
+            for key in ('split_cells_by_nuclei', 'pairing_rules'):
+                data.pop(key, None)
+                params.pop(key, None)
         if method != CELLPOSE_WHOLECELL_NUCLEI:
             # a file / draft of that method loaded before: its nucleus values
             # do not belong to this one (codex review 2026-11-10)
@@ -3487,8 +3516,10 @@ class Step2Page(QWidget):
             and (self._param_source_combo.currentData() or "manual") == "manual"
         ):
             self._apply_method_defaults_to_ui(method)
-        is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_WHOLECELL_NUCLEI, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)
-        is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION)
+        is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_WHOLECELL_NUCLEI,
+                                 HYBRID_CELLPOSE_STARDIST, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)
+        is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION,
+                                 HYBRID_CELLPOSE_STARDIST)
         is_expansion = method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION)
         is_hq = method == CELLPOSE_NUCLEI_HQ
         is_hq2 = method == CELLPOSE_NUCLEI_HQ2
@@ -3512,6 +3543,8 @@ class Step2Page(QWidget):
                   self._nuc_prob_label, self._nuc_prob, self._nuc_minsize_label,
                   self._nuc_minsize):
             w.setVisible(method == CELLPOSE_WHOLECELL_NUCLEI)
+        for w in (self._split_cells_label, self._split_cells):
+            w.setVisible(method in (CELLPOSE_WHOLECELL_NUCLEI, HYBRID_CELLPOSE_STARDIST))
         self._sd_expand_label.setVisible(is_expansion)
         self._sd_expand.setVisible(is_expansion)
         for w in self._hq_widgets:

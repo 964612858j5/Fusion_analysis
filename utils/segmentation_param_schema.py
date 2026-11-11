@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from .segmentation_config import (
     CELLPOSE_NUCLEI_CSD, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION,
     CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_WHOLECELL_FUSION,
-    CELLPOSE_WHOLECELL_NUCLEI,
+    CELLPOSE_WHOLECELL_NUCLEI, HYBRID_CELLPOSE_STARDIST,
     MESMER_NUCLEAR_GUIDED, MESMER_NUCLEI, MESMER_WHOLE_CELL, SEGMENTATION_METHODS,
     STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION, RETIRED_METHODS,
 )
@@ -28,7 +28,8 @@ from .segmentation_config import (
 #: The methods the new UI lists, in this order (HQ / HQ2 / CSD are retired:
 #: `segmentation_config.RETIRED_METHODS`).
 UI_METHODS = [
-    CELLPOSE_WHOLECELL_FUSION, CELLPOSE_WHOLECELL_NUCLEI, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION,
+    CELLPOSE_WHOLECELL_FUSION, CELLPOSE_WHOLECELL_NUCLEI, HYBRID_CELLPOSE_STARDIST,
+    CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION,
     STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION,
     MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED,
 ]
@@ -42,7 +43,7 @@ AUTO = "auto"
 class ParamSpec:
     key: str
     label: str
-    kind: str                 # "float" | "int" | "str"
+    kind: str                 # "float" | "int" | "str" | "switch" (on / off)
     lo: float = None
     hi: float = None
     decimals: int = 0
@@ -61,6 +62,8 @@ class ParamSpec:
 
 
 def _fmt(v):
+    if isinstance(v, bool):
+        return "on" if v else "off"
     if v is None:
         return AUTO
     if isinstance(v, float) and v.is_integer():
@@ -82,16 +85,39 @@ def _cellpose(expansion):
     return specs
 
 
+#: plan §15 (v1.4, user ruling 2026-11-10): a cell holding two or more
+#: similar nuclei is split among them; on by default, "on, off" compares both.
+SPLIT_SPEC = ParamSpec("split_cells_by_nuclei", "split cells by nuclei", "switch",
+                       default=True, listable=True,
+                       note="on: a cell with two similar nuclei becomes two cells")
+
+
 def _cellpose_with_nuclei():
     """docs/v17_cellpose_cell_nucleus_plan.md: the cell pass as whole-cell
     (its first three listable), then the nucleus pass's own single values
-    (user ruling 2026-11-10: not grid-searched)."""
+    (user ruling 2026-11-10: not grid-searched), then the split switch."""
     return _cellpose(False) + [
         ParamSpec("nucleus_diameter", "nucleus diameter", "float", 0, 300, 1, None, False,
                   True, "0 or auto: Cellpose estimates it"),
         ParamSpec("nucleus_flow_threshold", "nucleus flow", "float", 0, 3, 2, 0.4),
         ParamSpec("nucleus_cellprob_threshold", "nucleus cellprob", "float", -6, 6, 2, 0.0),
         ParamSpec("nucleus_min_size", "nucleus min size", "int", 1, 10000, 0, 15),
+        SPLIT_SPEC,
+    ]
+
+
+def _hybrid():
+    """docs/v17_hybrid_cellpose_stardist_plan.md: the whole-cell Cellpose specs
+    (their first three listable), then StarDist's thresholds as single values
+    (user ruling 2026-11-10: not grid-searched) and its fixed model."""
+    return _cellpose(False) + [
+        ParamSpec("prob_thresh", "nucleus prob", "float", 0, 1, 2, None, False, True,
+                  "auto: the StarDist model's own threshold"),
+        ParamSpec("nms_thresh", "nucleus nms", "float", 0, 1, 2, None, False, True,
+                  "auto: the StarDist model's own threshold"),
+        ParamSpec("model_name", "StarDist model", "str", default="2D_versatile_fluo",
+                  note="fixed", fixed=True),
+        SPLIT_SPEC,
     ]
 
 
@@ -127,6 +153,7 @@ def _mesmer(method):
 METHOD_PARAMS = {
     CELLPOSE_WHOLECELL_FUSION: _cellpose(False),
     CELLPOSE_WHOLECELL_NUCLEI: _cellpose_with_nuclei(),
+    HYBRID_CELLPOSE_STARDIST: _hybrid(),
     CELLPOSE_NUCLEI_DAPI: _cellpose(False),
     CELLPOSE_NUCLEI_EXPANSION: _cellpose(True),
     STARDIST_NUCLEI_DAPI: _stardist(False),
@@ -195,6 +222,13 @@ def parse_values(spec, text):
 def _parse_one(spec, tok):
     if spec.kind == "str":
         return tok
+    if spec.kind == "switch":
+        word = tok.lower()
+        if word in ("on", "true", "yes", "1"):
+            return True
+        if word in ("off", "false", "no", "0"):
+            return False
+        raise ParamError(f"'{tok}' is not on or off")
     if tok.lower() == AUTO:
         if not spec.auto:
             raise ParamError(f"'{tok}' is not allowed here")

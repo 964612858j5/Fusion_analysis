@@ -107,6 +107,7 @@ def test_each_method_gets_the_array_of_the_input_table():
         "cellpose_wholecell_fusion": np.stack([F[..., 0], F[..., 0], F[..., 1]], -1),
         # cells on all three channels, nuclei on the last (the engine slices it)
         "cellpose_wholecell_nuclei": np.stack([F[..., 0], F[..., 0], F[..., 1]], -1),
+        "hybrid_cellpose_stardist": np.stack([F[..., 0], F[..., 0], F[..., 1]], -1),
         "cellpose_nuclei_dapi": F[..., 1], "cellpose_nuclei_expansion": F[..., 1],
         "stardist_nuclei_dapi": F[..., 1], "stardist_nuclei_expansion": F[..., 1],
         "mesmer_whole_cell": np.stack([F[..., 1], F[..., 0]], -1),

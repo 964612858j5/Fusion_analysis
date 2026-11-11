@@ -744,12 +744,15 @@ class Step0Page(QWidget):
         tb_lay.setSpacing(4)
 
         # ROI/Patch 统一工具栏：模式切换 + 一键删除 + 重命名
+        # (button restyle plan §2: the ROI / Patch colours are data and stay;
+        # hover is the theme's; Rename is a neutral in-panel button)
         _ts = (
             "QPushButton{{color:{c};border:1px solid {c};border-radius:3px;"
-            "padding:3px 7px;font-size:10px;background:#161616;}}"
-            "QPushButton:hover{{background:#222;}}"
+            "padding:3px 7px;font-size:10px;background:transparent;}}"
+            "QPushButton:hover{{background:%s;}}"
             "QPushButton:checked{{background:{c};color:#111;font-weight:bold;}}"
-        )
+            "QPushButton:checked:hover{{background:{c};}}"
+        ) % theme_widgets.t()["hover"]
         tool_row = QHBoxLayout()
         tool_row.setSpacing(3)
 
@@ -771,11 +774,18 @@ class Step0Page(QWidget):
             "Delete selected item:\n"
             "  • Patch selected → delete that patch\n"
             "  • ROI selected   → delete ROI + all its patches")
-        self._btn_delete_sel.setStyleSheet(_ts.format(c="#e06c75"))
+        # never added to the row (button restyle plan §2: out of scope), so
+        # it keeps the sheet it had
+        self._btn_delete_sel.setStyleSheet(
+            "QPushButton{color:#e06c75;border:1px solid #e06c75;border-radius:3px;"
+            "padding:3px 7px;font-size:10px;background:#161616;}"
+            "QPushButton:hover{background:#222;}"
+            "QPushButton:checked{background:#e06c75;color:#111;font-weight:bold;}")
 
         self._btn_rename_roi = QPushButton("✎")
         self._btn_rename_roi.setToolTip("Rename selected ROI")
-        self._btn_rename_roi.setStyleSheet(_ts.format(c="#e5c07b"))
+        theme_widgets.button(self._btn_rename_roi, "panel",
+                             "padding:3px 7px;font-size:10px;")
 
         tool_row.addWidget(self._btn_mode_roi)
         tool_row.addWidget(self._btn_mode_patch)
@@ -835,11 +845,8 @@ class Step0Page(QWidget):
         self._btn_del_roi.setToolTip(
             "Delete selected ROI(s) and all their patches\n"
             "(Ctrl/Shift+click to multi-select)")
-        self._btn_del_roi.setStyleSheet(
-            "QPushButton{color:#e06c75;border:1px solid #e06c75;border-radius:3px;"
-            "padding:1px 6px;font-size:10px;background:#161616;}"
-            "QPushButton:hover{background:#2a1111;}"
-        )
+        theme_widgets.button(self._btn_del_roi, "danger",
+                             "padding:1px 6px;font-size:10px;")
         self._btn_del_roi.clicked.connect(self._delete_selected_rois)
         roi_hdr.addWidget(self._btn_del_roi)
         ll_lay.addLayout(roi_hdr)
@@ -865,11 +872,8 @@ class Step0Page(QWidget):
         self._btn_del_patch.setToolTip(
             "Delete selected patch(es)\n"
             "(Ctrl/Shift+click to multi-select)")
-        self._btn_del_patch.setStyleSheet(
-            "QPushButton{color:#e06c75;border:1px solid #e06c75;border-radius:3px;"
-            "padding:1px 6px;font-size:10px;background:#161616;}"
-            "QPushButton:hover{background:#2a1111;}"
-        )
+        theme_widgets.button(self._btn_del_patch, "danger",
+                             "padding:1px 6px;font-size:10px;")
         self._btn_del_patch.clicked.connect(self._delete_selected_patches)
         patch_hdr.addWidget(self._btn_del_patch)
         ll_lay.addLayout(patch_hdr)
@@ -9719,10 +9723,9 @@ class Step0Page(QWidget):
         button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         button.setToolButtonStyle(Qt.ToolButtonTextOnly)
         button.setStyleSheet(
-            "QToolButton{background:#1a1a1a;color:#ddd;border:1px solid #444;"
-            "border-radius:3px;padding:1px 6px;font-size:10px;}"
-            "QToolButton::menu-indicator{image:none;}"
-            "QToolButton:hover{background:#23354a;}")
+            theme_widgets.button_qss("panel", "padding:1px 6px;font-size:10px;",
+                                     "QToolButton")
+            + "QToolButton::menu-indicator{image:none;}")
         button.setToolTip(
             "What every correction-eligible channel is PREVIEWED and "
             "computed with, and the numbers it uses. Light up TopHat, cuCIM, "
@@ -9790,13 +9793,9 @@ class Step0Page(QWidget):
             btn.setCheckable(True)
             btn.setToolTip(tip)
             btn.setFixedWidth(72)
-            btn.setStyleSheet(
-                "QPushButton{color:#888;background:#161616;"
-                "border:1px solid #3a3a3a;border-radius:3px;"
-                "padding:2px 6px;font-size:11px;}"
-                "QPushButton:hover{background:#23354a;}"
-                "QPushButton:checked{color:#0b0b0b;background:#e5c07b;"
-                "border:1px solid #e5c07b;font-weight:bold;}")
+            # on/off, each on its own: checked = the neutral active grey
+            # (ruling 4), no longer yellow
+            theme_widgets.button(btn, "toggle", "padding:2px 6px;font-size:11px;")
             return btn
 
         self._method_tophat_btn = _toggle(
@@ -9825,11 +9824,7 @@ class Step0Page(QWidget):
             "Apply this method and these parameters to every "
             "correction-eligible channel. Nothing is written to disk and no "
             "run is started.")
-        save.setStyleSheet(
-            "QPushButton{color:#9bd0ff;background:#182230;"
-            "border:1px solid #354a63;border-radius:3px;"
-            "padding:2px 10px;font-size:11px;}"
-            "QPushButton:hover{background:#23354a;}")
+        theme_widgets.button(save, "panel", "padding:2px 10px;font-size:11px;")
         save.clicked.connect(self._on_method_menu_saved)
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)

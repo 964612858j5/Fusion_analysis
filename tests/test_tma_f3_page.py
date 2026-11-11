@@ -86,6 +86,9 @@ def env(tmp_path, monkeypatch):
         return s
     monkeypatch.setattr(ms, "parse", parse)
     monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
+    # "New candidates" is a danger confirmation (button restyle plan §3)
+    from block01.ui.theme import dialogs as theme_dialogs
+    monkeypatch.setattr(theme_dialogs, "confirm_danger", lambda *a, **k: True)
     ctx = {"project_dir": str(proj), "slide_path": slide, "slide_id": prov.ensure_raw_slide(str(proj), slide),
            "shape": (H, W), "pixel_um": (0.5, 0.5), "workspace_id": "full", "handoff_path": "/h.json",
            "handoff_sha256": "ab" * 32, "full_wsi": True, "channel_names": ["DAPI", "CD8"]}
@@ -322,6 +325,23 @@ def test_an_roi_workspace_shows_the_cores_read_only(app, env, monkeypatch):
     assert roi.cores.lbl_roi.isVisibleTo(roi.cores)
     roi._set_tool("line")
     assert roi.ctl.press(*_centre(1, 1)) is True and roi.ctl._drag is None      # no line here
+    page.shutdown()
+
+
+def test_new_candidates_over_existing_cores_ask_a_danger_question(app, env, monkeypatch):
+    """Button restyle plan §3: replacing the draft's cores is the red
+    choice; No (also Enter / Esc) leaves the cores as they are."""
+    import copy
+    page = _page(app, env, monkeypatch)
+    from block01.ui.theme import dialogs as theme_dialogs
+    asked = []
+    monkeypatch.setattr(theme_dialogs, "confirm_danger",
+                        lambda parent, title, text, **k: (asked.append((title, k)), False)[1])
+    before = copy.deepcopy(page.holder.d["cores"])
+    assert before
+    page.cores._detect_done(page.cores._gen, page.cores.candidates)
+    assert asked == [("New candidates", {"action": "Yes", "cancel": "No"})]
+    assert page.holder.d["cores"] == before
     page.shutdown()
 
 

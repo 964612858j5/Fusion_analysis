@@ -10,6 +10,8 @@ from __future__ import annotations
 from ...qt.QtGui import QCursor
 from ...qt.QtWidgets import QFileDialog, QInputDialog, QMenu, QMessageBox
 
+from ..theme import dialogs as theme_dialogs
+
 from ...core.regions import document as D
 from ...core.regions import geometry as G
 from ...core.regions import numbering as N
@@ -256,10 +258,12 @@ class CoresActions:
         n = len(rec["candidates"])
         h = page.holder
         has_cores = h is not None and not h.read_only and (bool(h.d["pieces"]) or bool(h.d.get("map_sha256")))
-        if has_cores and QMessageBox.question(
+        # replaces the draft's cores: the red choice, never the default
+        # (button restyle plan §3); the words stay Yes / No
+        if has_cores and not theme_dialogs.confirm_danger(
                 page, "New candidates", f"Found {n} candidates (v{rec['version']}). Replace the cores of the draft "
                 "with them? All numbering and position marks (missing, QC, Run) are cleared; the exclusions are "
-                "kept.") != QMessageBox.Yes:
+                "kept.", action="Yes", cancel="No"):
             page.refresh()
             return
         if h is None or h.read_only:

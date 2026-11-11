@@ -53,6 +53,7 @@ from ...core.bg_correction import (
 )
 from ...core.bg_parallel import (MEM_PER_TILE_BYTES, MEM_PER_TILE_FAST_BYTES, choose_workers,
                                  mem_available_bytes, ordered_results)
+from ..theme import widgets as theme_widgets
 from ...core import product_swap
 from ...core.io_loader import OMETIFFLoader
 from ...viewer import step1_source as sources
@@ -2669,10 +2670,9 @@ class _WsiCorrectionProgressDialog(QDialog):
         lay.addWidget(self._eta)
 
         self._cancel = QPushButton("Cancel")
-        self._cancel.setStyleSheet(
-            "QPushButton{background:#722;color:white;border-radius:4px;padding:6px 18px;}"
-            "QPushButton:hover{background:#944;}"
-        )
+        # stops the run: danger (button restyle plan §2); its hairline is
+        # paid for by one pixel of padding, so the size stays
+        theme_widgets.button(self._cancel, "danger", "padding:5px 17px;")
         self._cancel.clicked.connect(self._on_cancel)
         lay.addWidget(self._cancel, alignment=Qt.AlignRight)
 

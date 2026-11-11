@@ -25,6 +25,7 @@ from ..qt.QtWidgets import (
 
 from ..config import OUTPUT_DIR
 from ..workers.feature_extract_worker import FeatureExtractWorker
+from .theme import widgets as theme_widgets
 
 # ── column layout ──────────────────────────────────────────────────────
 COL_CHECK      = 0
@@ -273,11 +274,7 @@ class BatchStep4Dialog(QDialog):
         # Bottom: run / close
         bottom = QHBoxLayout()
         self._run_btn = QPushButton("Run Batch")
-        self._run_btn.setStyleSheet(
-            "QPushButton{background:#2a5;color:white;border-radius:4px;"
-            "padding:7px 22px;font-weight:bold;}"
-            "QPushButton:hover{background:#3b6;}"
-            "QPushButton:disabled{background:#333;color:#555;}")
+        theme_widgets.button(self._run_btn, "run", "padding:7px 22px;font-weight:bold;")
         self._run_btn.clicked.connect(self._run_batch)
         bottom.addWidget(self._run_btn)
         bottom.addStretch()

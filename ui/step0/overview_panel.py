@@ -46,6 +46,7 @@ from ...utils import dataset_trace
 from ...utils import tissue_log
 from ...utils import perf_trace
 from .roi_context_model import Patch, default_patch_name, patch_color_for_id, patch_id
+from ..theme import widgets as theme_widgets
 
 class TileSelectDialog(QDialog):
     """
@@ -1670,42 +1671,29 @@ class OverviewPanel(QWidget):
         roi_row.addWidget(self._roi_name_edit)
 
         btn_close = QPushButton("✓ Close (Enter)")
-        btn_close.setStyleSheet(
-            "QPushButton{color:#6bcb77;font-size:10px;"
-            "border:1px solid #6bcb77;border-radius:3px;padding:2px 5px;}"
-        )
+        theme_widgets.button(btn_close, "panel", "font-size:10px;padding:2px 5px;")
         btn_close.clicked.connect(self._finish_roi)
         roi_row.addWidget(btn_close)
 
         btn_undo = QPushButton("Z Undo")
-        btn_undo.setStyleSheet(
-            "QPushButton{color:#ffd93d;font-size:10px;"
-            "border:1px solid #ffd93d;border-radius:3px;padding:2px 5px;}"
-        )
+        theme_widgets.button(btn_undo, "panel", "font-size:10px;padding:2px 5px;")
         btn_undo.clicked.connect(self._undo_vertex)
         roi_row.addWidget(btn_undo)
 
         btn_del_roi = QPushButton("D Del ROI")
-        btn_del_roi.setStyleSheet(
-            "QPushButton{color:#c44;font-size:10px;"
-            "border:1px solid #c44;border-radius:3px;padding:2px 5px;}"
-        )
+        theme_widgets.button(btn_del_roi, "danger", "font-size:10px;padding:2px 5px;")
         btn_del_roi.clicked.connect(self._delete_last_roi)
         roi_row.addWidget(btn_del_roi)
         roi_row.addStretch()
         rc.addLayout(roi_row)
 
         sl_row = QHBoxLayout()
-        for label, slot, color in [
-            ("📂 Load ROIs",  self.load_rois,  "#4d96ff"),
-            ("✕ Clear ROIs", self.clear_rois, "#c44"),
+        for label, slot, role in [
+            ("📂 Load ROIs",  self.load_rois,  "panel"),
+            ("✕ Clear ROIs", self.clear_rois, "danger"),
         ]:
             btn = QPushButton(label)
-            btn.setStyleSheet(
-                f"QPushButton{{color:{color};font-size:10px;"
-                f"border:1px solid {color};border-radius:3px;"
-                f"padding:2px 5px;}}"
-            )
+            theme_widgets.button(btn, role, "font-size:10px;padding:2px 5px;")
             btn.clicked.connect(slot)
             sl_row.addWidget(btn)
         sl_row.addStretch()
@@ -1718,10 +1706,7 @@ class OverviewPanel(QWidget):
         pc = QHBoxLayout(self._patch_ctrl)
         pc.setContentsMargins(0, 0, 0, 0)
         btn_clr_p = QPushButton("✕ Clear Patches")
-        btn_clr_p.setStyleSheet(
-            "QPushButton{color:#c44;font-size:11px;"
-            "border:1px solid #c44;border-radius:3px;padding:2px;}"
-        )
+        theme_widgets.button(btn_clr_p, "danger", "font-size:11px;padding:2px;")
         btn_clr_p.clicked.connect(self.clear_patches)
         pc.addWidget(btn_clr_p)
         pc.addStretch()

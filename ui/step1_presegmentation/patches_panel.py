@@ -31,6 +31,13 @@ MAX_ROWS = 3
 EMPTY_HINT = "No patches yet — draw them in Step0 or the Tissue Navigator"
 
 
+def _danger(dark=False):
+    """The theme's danger red (pressed: one step darker)."""
+    from ...qt import QtGui
+    c = theme_widgets.t()["danger"]
+    return QtGui.QColor(c).darker(125).name() if dark else c
+
+
 class FlowLayout(QtWidgets.QLayout):
     """Left-to-right rows that wrap at the available width.
 
@@ -166,7 +173,11 @@ class PatchTile(QtWidgets.QFrame):
             self.setStyleSheet(
                 f"QFrame#patchTile{{background:{c};border:1px solid {c};border-radius:3px;}}"
                 f"QLabel{{color:#111;font-size:10px;font-weight:bold;}}"
-                f"QToolButton{{color:#111;border:none;font-size:11px;font-weight:bold;padding:0;}}")
+                f"QToolButton{{color:#111;border:none;font-size:11px;font-weight:bold;padding:0;}}"
+                # the × deletes: danger on hover / pressed, white on the red
+                # so it reads on any patch colour (button restyle plan §2)
+                f"QToolButton:hover{{background:{_danger()};color:#FFFFFF;border-radius:2px;}}"
+                f"QToolButton:pressed{{background:{_danger(dark=True)};color:#FFFFFF;}}")
         else:
             self.setStyleSheet(
                 f"QFrame#patchTile{{background:#1a1a1a;border:1px solid {c};border-radius:3px;}}"

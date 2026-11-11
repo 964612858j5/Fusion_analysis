@@ -7700,10 +7700,12 @@ class MainWindow(QMainWindow):
         if entry is None:
             return False
         if self._preseg_methods.blocks():
-            answer = QMessageBox.question(
-                self, "Load plan", "Replace the methods in the plan now?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if answer != QMessageBox.Yes:
+            # replaces what is there: the red choice, never the default
+            # (button restyle plan §3); the words stay Yes / No
+            from .theme import dialogs as theme_dialogs
+            if not theme_dialogs.confirm_danger(
+                    self, "Load plan", "Replace the methods in the plan now?",
+                    action="Yes", cancel="No"):
                 return False
         try:
             plan = plan_store.load_plan(step1_dir, entry["file"])

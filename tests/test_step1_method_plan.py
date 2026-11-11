@@ -365,6 +365,11 @@ def _load(w, monkeypatch, restore, mode=None):
                                                   else QtWidgets.QMessageBox.No)))
     monkeypatch.setattr(QtWidgets.QMessageBox, "information",
                         staticmethod(lambda *a, **k: told.append(a[2])))
+    # "Replace the methods in the plan now?" is a danger confirmation
+    # (button restyle plan §3): answered Yes, as before
+    from block01.ui.theme import dialogs as theme_dialogs
+    monkeypatch.setattr(theme_dialogs, "confirm_danger",
+                        lambda *a, **k: answers.get(a[2]) == QtWidgets.QMessageBox.Yes)
     monkeypatch.setattr(type(w), "_choose_patch_restore_mode", lambda self, n: mode)
     assert w._on_load_preseg_plan() is True
     _settle(w)
@@ -398,6 +403,27 @@ def test_loading_with_no_patch_restores_the_plans_patches_and_ticks(app, tmp_pat
                              (3, "edge", (32, 48, 32, 48))]
         assert w._preseg_patches.selected_ids() == [1, 3]
         assert [b.method for b in w._preseg_methods.blocks()] == [SDX]
+    finally:
+        w.close()
+
+
+def test_replacing_the_methods_is_a_danger_choice_and_no_keeps_them(app, tmp_path, monkeypatch):
+    """Button restyle plan §3: the question and its words stay; No (also
+    Enter / Esc, the helper's safe default) loads nothing."""
+    w = _saved_plan(app, tmp_path)
+    try:
+        asked = []
+        monkeypatch.setattr(type(w), "_choose_preseg_plan",
+                            lambda self, entries, runs: entries[0])
+        from block01.ui.theme import dialogs as theme_dialogs
+        monkeypatch.setattr(theme_dialogs, "confirm_danger",
+                            lambda parent, title, text, **k: (asked.append((title, text, k)), False)[1])
+        w._preseg_methods.set_methods([])
+        w._preseg_methods.adopt(CP, _vals(CP))
+        assert w._on_load_preseg_plan() is False
+        assert asked == [("Load plan", "Replace the methods in the plan now?",
+                          {"action": "Yes", "cancel": "No"})]
+        assert [b.method for b in w._preseg_methods.blocks()] == [CP]
     finally:
         w.close()
 

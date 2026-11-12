@@ -11422,6 +11422,22 @@ class MainWindow(QMainWindow):
             return draft
         return self._load_step0_remap_params()[0]
 
+    def _without_remap_placeholders(self, params):
+        """`params` without the 0..1 placeholders an older Step0 Save wrote
+        for channels it had no window for, on an integer slide
+        (docs/v17_step0_placeholder_windows_plan.md §2.3). After the file's
+        hash was checked; the file itself is not touched."""
+        st0 = self.__dict__.get("_step0")
+        is_int = getattr(st0, "_slide_is_integer", None)
+        try:
+            integer = bool(is_int()) if is_int is not None else False
+        except Exception:                                   # noqa: BLE001
+            integer = False
+        if not integer:
+            return params
+        from .step0 import window_tables
+        return {n: pr for n, pr in params.items() if not window_tables.is_placeholder(pr)}
+
     def _load_step0_remap_params(self):
         """Load the Step0 Channel Remap config (if any) as {channel: params}.
 
@@ -11455,7 +11471,7 @@ class MainWindow(QMainWindow):
                     return {}, ""
                 chans = cfg.get("channels") or {}
                 params = {str(n): dict(pr) for n, pr in chans.items()}
-                return params, declared
+                return self._without_remap_placeholders(params), declared
             except Exception as exc:
                 print(f"[Step1] remap config load failed {declared}: {exc}")
                 return {}, ""
@@ -11490,14 +11506,14 @@ class MainWindow(QMainWindow):
                     mt = None
                 cached = getattr(self, "_remap_cache", None)
                 if cached and cached[0] == p and cached[1] == mt:
-                    return cached[2], p
+                    return self._without_remap_placeholders(cached[2]), p
                 try:
                     cfg = load_channel_remap_config(p)
                     chans = cfg.get("channels") or {}
                     if chans:
                         params = {str(n): dict(pr) for n, pr in chans.items()}
                         self._remap_cache = (p, mt, params)
-                        return params, p
+                        return self._without_remap_placeholders(params), p
                 except Exception as exc:
                     print(f"[Step1] remap config load failed {p}: {exc}")
         return {}, ""

@@ -4772,7 +4772,7 @@ class Step0Page(QWidget):
                     self, "Nothing to save",
                     "Open Intensity and adjust a channel before saving a remap.")
             return True
-        cfg = wb.build_config(params=self._step0_save_params())
+        cfg = self._step0_save_config(wb)
         # Stamp source-aware identity only after the corrected store has been
         # reconciled. This makes the saved provenance describe the pixels Step1
         # will actually receive, not the pre-Save raw preview.
@@ -4800,6 +4800,15 @@ class Step0Page(QWidget):
             return False
         self._last_saved_remap_path = path
         print(f"[Step0] saved channel remap config -> {path}")
+        left = list(self.__dict__.get("_save_unwindowed") or ())
+        if left:
+            # docs/v17_step0_placeholder_windows_plan.md §2.2: never a 0..1
+            # placeholder; these are still being read in the background
+            print(f"[Step0] {len(left)} channel(s) saved without a window (still being read): {left[:8]}")
+            self._warn_load_row(
+                f"{len(left)} channel(s) had no display window yet (their overview is still being read) "
+                "and were saved without one. They are shown with an automatic window; Save again "
+                "in a moment to store it.")
         if notify:
             QMessageBox.information(
                 self, "Saved", f"Saved channel remap:\n{path}")
@@ -4830,8 +4839,7 @@ class Step0Page(QWidget):
         wb = getattr(self, "_cond_workbench", None)
         if wb is None or not wb.has_channel_data():
             return False
-        current = self._intensity_state_from_config(
-            wb.build_config(params=self._step0_save_params()))
+        current = self._intensity_state_from_config(self._step0_save_config(wb))
         path = self._step0_conditioning_config_path()
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -4842,16 +4850,103 @@ class Step0Page(QWidget):
 
     def _step0_save_params(self):
         """What Step0's Save writes per channel: STEP0's records, whatever the
-        Intensity window is showing; a channel with no real window keeps the
-        provisional placeholder the file has always carried."""
+        Intensity window is showing. A channel with no real window gets one
+        now from its overview when that is in memory (the on-screen seed's
+        rule, filed through the seed path); otherwise it is LEFT OUT -- never
+        the 0..1 placeholder, which saturates 8/16-bit pixels
+        (docs/v17_step0_placeholder_windows_plan.md §2.2). The left-out
+        channels are in `_save_unwindowed`."""
         wb = getattr(self, "_cond_workbench", None)
         names = list(getattr(wb, "_names", ()) or ())
         records = self._records(STEP0_TABLE)
-        out = {}
+        out, missing = {}, []
         for n in names:
             p = window_tables.get(records, n)
-            out[n] = dict(p) if p is not None else window_tables.window_params(0.0, 1.0)
+            if p is not None and (window_tables.is_user(records, n) or not self._is_stored_placeholder(p)):
+                out[n] = dict(p)                      # a typed window is never a placeholder
+                continue
+            seeded = self._seed_for_save(n, records)
+            if seeded is None:
+                missing.append(n)
+            else:
+                out[n] = seeded
+        self._save_unwindowed = missing
         return out
+
+    def _seed_for_save(self, ch, records):
+        """`ch`'s automatic window from its overview IN MEMORY, filed like an
+        on-screen seed (`fill_seed`; its persistence files Step0's record and
+        syncs the editor), or None when the overview is not here yet (its read
+        is asked for, in the background)."""
+        arr = self._slide_lowres_array(ch, blocking=False)
+        if arr is None:
+            return None
+        lo, hi = seed_display_range(arr)
+        stale = self._is_stored_placeholder(window_tables.get(records, ch))
+        if stale:
+            records["params"].pop(ch, None)            # a placeholder is not a window
+        state = getattr(getattr(self, "display", None), "state", None)
+        if state is not None:
+            try:
+                if stale and state.mapping(ch, table=STEP0_TABLE) == (0.0, 1.0, 1.0):
+                    # the same placeholder in the state: replaced there too, as a
+                    # seed (its persistence files the record and syncs the editor)
+                    state.set_mapping(ch, lo, hi, 1.0, origin="seed", table=STEP0_TABLE)
+                state.fill_seed(ch, lo, hi, 1.0)
+            except Exception as exc:                        # noqa: BLE001
+                print(f"[Step0] could not file {ch}'s window: {exc}")
+        p = window_tables.get(records, ch)
+        if p is not None and not self._is_stored_placeholder(p):
+            return dict(p)
+        return window_tables.window_params(lo, hi, 1.0, auto=True)
+
+    def _step0_save_config(self, wb):
+        """The remap config the Save writes and the change check compares:
+        `build_config` would fill a channel `_step0_save_params` left out
+        with the editor's own (0..1) params, so the built channels are
+        limited to the exported ones."""
+        params = self._step0_save_params()
+        cfg = wb.build_config(params=params)
+        cfg["channels"] = {n: e for n, e in (cfg.get("channels") or {}).items() if n in params}
+        return cfg
+
+    def _slide_is_integer(self):
+        """Whether the slide FILE's pixels are integers (uint8 / uint16),
+        from its first page, once per dataset. The overview and editor
+        arrays are float32 and cannot say. False when unknown."""
+        token = self._dataset_token()
+        hit = self.__dict__.get("_slide_int")
+        if hit is not None and hit[0] == token:
+            return hit[1]
+        answer = False
+        path = (getattr(getattr(self, "loader", None), "filepath", None)
+                or getattr(self, "ome_path", None))
+        if path and os.path.isfile(str(path)):
+            try:
+                import tifffile
+                with tifffile.TiffFile(str(path)) as tf:
+                    answer = np.dtype(tf.pages[0].dtype).kind in "ui"
+            except Exception:                               # noqa: BLE001
+                answer = False
+        self._slide_int = (token, answer)
+        return answer
+
+    def _is_stored_placeholder(self, params):
+        """A stored 0..1 placeholder on an integer slide (plan §2.3)."""
+        return params is not None and window_tables.is_placeholder(params) and self._slide_is_integer()
+
+    def _request_all_overviews(self):
+        """Ask the shared low-res store for every channel's overview, in the
+        background, so a Save finds them in memory (plan §2.1). The store's
+        own owner rule decides who reads; nothing is read here."""
+        display = getattr(self, "display", None)
+        names = list(getattr(self, "_channel_order", ()) or ())
+        if display is None or not names:
+            return
+        try:
+            display.ensure_lowres(names)
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Step0] could not request the channels' overviews: {exc}")
 
     def _correction_settings_changed(self, config, config_path):
         """Whether the current correction controls differ from the saved file."""
@@ -6478,6 +6573,9 @@ class Step0Page(QWidget):
         # Block A6 W1: an opened workspace's committed handoff, after the
         # switch has been announced.
         self._announce_opened_workspace()
+        # every channel's overview, in the background, for the Save's windows
+        # (docs/v17_step0_placeholder_windows_plan.md §2.1)
+        self._request_all_overviews()
 
     def _roi_count(self):
         """ROIs drawn on the overview the user draws on (the navigator's when
@@ -8728,6 +8826,9 @@ class Step0Page(QWidget):
         for ch, entry in (params_by_channel or {}).items():
             if not ch or not isinstance(entry, dict):
                 continue
+            typed_here = (str(ch) in user) if isinstance(user, (set, frozenset, list, tuple)) else bool(user)
+            if not typed_here and self._is_stored_placeholder(entry):
+                continue                      # a 0..1 placeholder is not a window: left to the seed
             ch = str(ch)
             base = window_tables.get(records, ch)
             merged = dict(base) if base else default_channel_remap_params()
@@ -11874,6 +11975,8 @@ class Step0Page(QWidget):
         dst["user_adjusted"].clear()
         windows = {}
         for ch, p in src["params"].items():
+            if not window_tables.is_user(src, ch) and self._is_stored_placeholder(p):
+                continue                      # never handed over as a window (plan §2.3)
             window_tables.put(dst, ch, p, user=False)
             windows[(ch, False)] = window_tables.window_of(p)
         if state is not None:

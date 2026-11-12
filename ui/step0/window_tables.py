@@ -66,6 +66,21 @@ def export(records, keys=None):
     return out
 
 
+def is_placeholder(params) -> bool:
+    """Whether a stored remap dict is the provisional 0..1 placeholder that
+    `window_params(0.0, 1.0)` writes (docs/v17_step0_placeholder_windows_plan.md
+    §2.3): min 0, max 1, gamma 1, brightness 0, contrast 1, not automatic. A
+    real automatic seed of an all-zero channel is 0..1 too, but `auto`."""
+    if not isinstance(params, dict):
+        return False
+    try:
+        return (float(params.get("min", -1)) == 0.0 and float(params.get("max", -1)) == 1.0
+                and float(params.get("gamma", 1.0)) == 1.0 and float(params.get("brightness", 0.0)) == 0.0
+                and float(params.get("contrast", 1.0)) == 1.0 and not bool(params.get("auto", False)))
+    except (TypeError, ValueError):
+        return False
+
+
 def window_of(params):
     """`(min, max, gamma)` of a remap dict."""
     return (float(params["min"]), float(params["max"]),

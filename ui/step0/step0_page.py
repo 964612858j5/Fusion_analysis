@@ -3823,7 +3823,9 @@ class Step0Page(QWidget):
         Step0 Save only): stops the strip's neighbour preparation and the
         full image's producers now and returns `(event, timings)` -- the
         event is set once the floor computation has ended and the scheduler
-        reached idle (already set when there is no stack)."""
+        reached idle (already set when there is no stack). The full image's
+        picture stays on screen through the run: Save does not reload what
+        is shown (the user's item 2, 2026-11-12)."""
         import threading
         strip = getattr(self, "_compare_strip_widget", None)
         hidden = None
@@ -3836,7 +3838,8 @@ class Step0Page(QWidget):
             done, timings = threading.Event(), {}
             done.set()
         else:
-            done, timings = explore_tab.begin_release_for_production(reason, cancelled=cancelled)
+            done, timings = explore_tab.begin_release_for_production(reason, cancelled=cancelled,
+                                                                     keep_picture=True)
         if hidden is None or hidden.is_set():
             return done, timings
         both = threading.Event()

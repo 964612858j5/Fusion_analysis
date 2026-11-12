@@ -540,14 +540,18 @@ class Step0EngineMount(QtCore.QObject):
             if slot.adapter is not None:
                 slot.adapter.set_paused(True)
 
-    def release_for_production(self, keep_picture=False) -> bool:
+    def release_for_production(self, keep_picture=False, prepare=True) -> bool:
         """A production run takes the GPU: stop, and give the tiles back --
-        or, with `keep_picture` (the patch background correction only,
-        §13-15), keep them: the wanted picture is first prepared and
-        published if it can be (§14.5 2), and whatever is on screen then
-        stays through the run. True when kept."""
+        or, with `keep_picture` (the patch background correction, §13-15;
+        Step0's Save, the user's item 2, 2026-11-12), keep them: the wanted
+        picture is first prepared and published if it can be (§14.5 2;
+        not with `prepare=False` -- Save's hand-off must not block), and
+        whatever is on screen then stays through the run. After it the
+        selection is followed as on any change: a new source (the saved
+        product) is a candidate core painted off screen while the old
+        picture stays. True when kept."""
         if keep_picture and self._can_keep():
-            if self._prepare_switch():
+            if prepare and self._prepare_switch():
                 self.host.present_now()
             for slot in self.panel.cores():           # current and standby (§13.7 3)
                 if slot.adapter is not None:

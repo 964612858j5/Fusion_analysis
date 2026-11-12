@@ -45,6 +45,7 @@ def _worker_stub(tmp_path, zarr_path, method="stardist_nuclei_expansion"):
         parameter_source="manual", n_rows=2, n_cols=2, overlap_px=64,
         created_at="2026-10-03T12:30:00", seg_config_method=method)
     ns._name_method = lambda: method
+    ns._cores_run = ns._requests_cores_run = lambda: False      # a grid run (15A)
     return SegmentMergeWorker, ns
 
 

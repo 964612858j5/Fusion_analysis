@@ -605,6 +605,12 @@ def run_extraction(run_path, output_dir, roi_name=None, statistics=None, regions
             "n_cells": int(result.ids.size), "nucleus_outside": result.nucleus_outside}
 
 
+#: The thread's stack (docs/v17_step4_worker_stack_plan.md): numba's LLVM
+#: compiles the quantification kernels on this thread when its cache is
+#: cold, and overflowed macOS's 512 KB default thread stack (Linux: 8 MB).
+STACK_BYTES = 32 * 1024 * 1024
+
+
 class FeatureExtractWorker(QThread):
     """Step4 in the background.
 
@@ -624,6 +630,7 @@ class FeatureExtractWorker(QThread):
                  features=("morphology",), write_csv=False, distribution=None, markers=None,
                  spatialdata=False, spatialdata_python=None):
         super().__init__()
+        self.setStackSize(STACK_BYTES)
         self.spatialdata = bool(spatialdata)
         self.spatialdata_python = spatialdata_python
         self.run_path = run_path

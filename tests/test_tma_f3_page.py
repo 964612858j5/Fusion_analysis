@@ -179,7 +179,8 @@ def _line(page, a, b):
 def test_number_by_line_and_clicks_merge_undo_and_lock(app, env, monkeypatch):
     page = _page(app, env, monkeypatch)
     assert all(len(p["polygon"]) >= 3 for p in page.holder.d["pieces"].values())      # outlines, not circles
-    assert page.ctl.tool is None and not any(b.isChecked() for b in page.family_buttons.values())
+    # every entry starts on Select ▸ Click (the user, 2026-11-12, B19)
+    assert page.ctl.tool == "select" and [f for f, b in page.family_buttons.items() if b.isChecked()] == ["Select"]
     _set_target(page, "X1-Y01", "X1-Y03", "Along column")
     _line(page, (1, 1), (1, 3))                                       # a drag along the column
     assert page.cores.numbering.btn_confirm.isEnabled()

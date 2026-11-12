@@ -260,6 +260,10 @@ class RegionsPage(QWidget, VersionsMixin, ShapesMixin):
         handoff_path, handoff_sha256, full_wsi, channel_names. The same
         context keeps the open document; another one reloads."""
         self.commit_transform()                   # in the old context, before anything changes
+        # every entry starts on Select ▸ Click, whatever tool was left on
+        # (the user's item 3, 2026-11-12); a half-drawn shape goes with it
+        self.ctl.set_tool("select")
+        self._show_tool()
         key = (ctx.get("project_dir"), ctx.get("slide_id"))
         if key == (self.ctx.get("project_dir"), self.ctx.get("slide_id")) and self.holder is not None:
             moved = (ctx.get("workspace_id"), ctx.get("full_wsi")) != (self.ctx.get("workspace_id"),

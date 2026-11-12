@@ -8,8 +8,9 @@ removes), `select_rect`, `select_ellipse`, `select_polygon`; Mask --
 pointer, diagonally opposite -- the press stays put: Shift a circle on that
 diameter, Alt the press is the centre),
 `polygon` (a vertex at each press), `vertex` (drag a vertex of the one
-selected shape); Annotate -- `line` (drag), `click` (click in order). None
-lit (`tool is None`) by default. With `select`, the one selected shape has
+selected shape); Annotate -- `line` (drag), `click` (click in order).
+Select ▸ Click by default and on every entry into the page (B19); Esc
+turns the tool off (`tool is None`). With `select`, the one selected shape has
 Photoshop's free-transform box (`core.regions.transform`, §10.5): it is a
 preview until Enter (Esc drops it; the page applies it before anything
 else happens).
@@ -47,7 +48,7 @@ HANDLE_TOL_PX = 8
 class ToolController:
     def __init__(self, page):
         self.page = page
-        self.tool = None
+        self.tool = "select"          # Select ▸ Click from the start (the user, 2026-11-12, B19)
         self.line = None              # ((y0, x0), (y1, x1))
         self.band = None
         self.sequence: List[str] = []

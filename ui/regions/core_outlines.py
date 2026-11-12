@@ -57,7 +57,10 @@ class CoreOutlines:
 
     def clear(self):
         if self.overlay is not None:
-            self.overlay.set_items([])
+            try:
+                self.overlay.set_items([])
+            except RuntimeError:      # deleted with its viewer: the next refresh makes a new one
+                self.overlay = None
 
     def detach(self):
         if self.overlay is not None:

@@ -107,8 +107,11 @@ class RegionsOverlay(QtWidgets.QWidget):
             self.vb.sigRangeChanged.disconnect(self._range_changed)
         except (RuntimeError, TypeError):
             pass
-        self.setParent(None)
-        self.deleteLater()
+        try:
+            self.setParent(None)
+            self.deleteLater()
+        except RuntimeError:          # already deleted with its viewer (a viewer rebuilt)
+            pass
 
     def _range_changed(self, *_a):
         # after a pan / zoom the pointer sits on another image point: the

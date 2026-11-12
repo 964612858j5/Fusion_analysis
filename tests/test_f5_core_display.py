@@ -183,6 +183,31 @@ def test_a_failed_refresh_leaves_nothing_stale_on_screen(app):
     assert co.overlay.items == []
 
 
+def test_a_rebuilt_viewer_gets_its_outlines_back(app):
+    """The viewer the outlines were on is deleted (Step1 rebuilds its viewer
+    after a Regions Save, 2026-11-12) and Qt deletes the overlay with it:
+    the next refresh draws on the new viewer, no error; clearing a deleted
+    overlay drops it."""
+    from block01.qt import QtCore
+    from block01.ui.regions.core_outlines import CoreOutlines
+    items = [{"id": "u#0", "polygon": [[10, 10], [50, 10], [50, 50]], "color": RD.GREEN}]
+    views = [_view(app)]
+    co = CoreOutlines(lambda: views[-1], lambda: items, lambda: True)
+    assert co.refresh() == 1
+
+    def rebuild():
+        views[-1].graphics.deleteLater()
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        views.append(_view(app))
+    rebuild()
+    assert co.refresh() == 1 and co.overlay.items == items
+    assert co.overlay.parentWidget() is views[-1].graphics.viewport()
+    rebuild()
+    co.clear()                                    # the error path's clean-up
+    assert co.overlay is None
+    assert co.refresh() == 1 and co.overlay.items == items
+
+
 def test_step2s_page_draws_at_its_inputs_own_origin(app, monkeypatch, tmp_path):
     from block01.core import tile_tissue
     from block01.ui.step2_page import Step2Page

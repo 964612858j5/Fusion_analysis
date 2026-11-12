@@ -265,6 +265,9 @@ def save(project_dir, d: Dict, study: Optional[Dict], channel_names: Optional[Li
            "piece_counter": piece_counter(d),
            "run": sorted(k for k, v in d["positions"].items() if v["run"]),
            "document": doc}
+    if not d.get("map_sha256") and d["cores"]:
+        # without a map sheet: the cores whose own Run tick is on (backlog 11 §3.2)
+        rec["run_cores"] = sorted(u for u, c in d["cores"].items() if c.get("run", True))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     prov.write_json_atomic(path, rec)
     entries = prov.load_entries(project_dir)
@@ -357,12 +360,20 @@ def draft_from_locked(rec: Dict) -> Dict:
     d["piece_counter"] = piece_counter(d)
     d["positions"] = {k: {f: copy.deepcopy(v.get(f, dflt)) for f, dflt in DRAFT_POSITION_FIELDS}
                       for k, v in rec["positions"].items()}
+    if not rec.get("map_sha256") and (rec.get("document") or {}).get("cores"):
+        # cores found without a map sheet have no core table: the version's
+        # own document holds them, Run ticks included (backlog 11 §3.2)
+        src = {uid: {"pieces": list(c["pieces"]), "position_key": None, "custom_label": c.get("custom_label"),
+                     "mapping": "unmatched", "run": bool(c.get("run", True))}
+               for uid, c in rec["document"]["cores"].items()}
+    else:
+        src = {uid: {"pieces": list(c["pieces"]), "position_key": c["position_key"], "custom_label": None,
+                     "mapping": "matched"} for uid, c in rec["cores"].items()}
     for p in d["pieces"].values():                    # an owner the version does not list: none
-        if p.get("owner") not in rec["cores"]:
+        if p.get("owner") not in src:
             p["owner"] = None
-    for uid, c in rec["cores"].items():
-        d["cores"][uid] = {"pieces": list(c["pieces"]), "position_key": c["position_key"], "custom_label": None,
-                           "mapping": "matched"}
+    for uid, c in src.items():
+        d["cores"][uid] = c
         for p in c["pieces"]:
             d["pieces"][p]["owner"] = uid
     keep = ("polygon", "reasons", "channels", "note", "created_in_workspace")

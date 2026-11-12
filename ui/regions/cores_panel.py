@@ -204,15 +204,18 @@ class CoresPanel(QWidget, CoresActions):
             if h is not None and h.d["pieces"]:
                 # cores found without the map sheet: listed, not numbered (plan §3.2.6)
                 d = h.d
+                own_run = self.study is None      # no map sheet at all: each core has its own Run tick
                 for uid, c in d["cores"].items():
                     cy, cx = D.core_centre(d, uid)
-                    rows.append({"kind": "core", "id": uid, "run": None,
+                    rows.append({"kind": "core", "id": uid, "run": D.core_runs(d, uid) if own_run else None,
                                  "position": c["custom_label"] or f"core at ({cy:.0f}, {cx:.0f})", "donor": "",
                                  "sample": "", "status": "未对应", "pieces": len(c["pieces"]),
                                  "tissue": self._tissue(uid)})
                 free = sum(1 for p in d["pieces"].values() if p["owner"] is None and not p["dropped"])
                 what = "Attach the map sheet" if self.study is not None else "Choose the map sheet"
-                self.table.set_rows(rows, f"{len(d['cores'])} cores found, {free} unassigned pieces. "
+                ticked = (f" ({sum(1 for u in d['cores'] if D.core_runs(d, u))} ticked to run; only they are "
+                          "analysed)" if own_run else "")
+                self.table.set_rows(rows, f"{len(d['cores'])} cores found{ticked}, {free} unassigned pieces. "
                                     f"{what} to number them.", h.read_only or not self.page.cores_editable())
                 return
             n = sum(1 for r in recs if r["donor"])

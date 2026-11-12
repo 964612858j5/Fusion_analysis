@@ -2260,18 +2260,22 @@ class MainWindow(QMainWindow):
             saved = RK.load_saved(pd, sid)
         except (RegionsError, ValueError, OSError) as exc:
             return None, f"the Regions result cannot be read ({exc}): Save again in Regions"
+        cored = False
         if not tma:
             # docs/v17_step2_exclusions_plan.md: a slide without TMA cores
             # still follows the exclusions of its Save; no Save, a map sheet
-            # without this slide's study, or no exclusion -> the old run
+            # without this slide's study, or no exclusion -> the old run.
+            # Found cores without a map sheet: only they run
+            # (docs/v17_cores_without_map_downstream_plan.md §3.5).
             doc = (saved or {}).get("document") or {}
-            if saved is None or doc.get("map_sha256") or not doc.get("exclusions"):
+            cored = saved is not None and not doc.get("map_sha256") and bool(doc.get("cores"))
+            if saved is None or doc.get("map_sha256") or not (doc.get("exclusions") or cored):
                 return None, ""
         elif saved is None:
             return None, "this TMA project has no saved Regions result: Save in Regions first"
         kind = preseg_input.INPUT_KIND.get(method)
         if kind is None:
-            what = "the TMA cores" if tma else "the Regions exclusions"
+            what = "the TMA cores" if tma else ("the Regions cores" if cored else "the Regions exclusions")
             return None, (f"{method} cannot follow {what} (it has no per-cell rules): "
                           "choose another method")
         try:
@@ -2287,7 +2291,7 @@ class MainWindow(QMainWindow):
         poly = (rois[0].get("polygon_fullres") if rois else None) or None
         parent = {"region_id": None, "bbox_fullres": [int(v) for v in bbox], "polygon_fullres": poly}
         seg = preseg_input.seg_channels(method, fcfg)
-        if not tma:
+        if not tma and not cored:
             try:
                 snap = RA.build_snapshot(pd, sid, seg, study=None, parent=parent, saved=saved)
             except RegionsError as exc:
@@ -2298,21 +2302,24 @@ class MainWindow(QMainWindow):
             return {"snapshot": snap, "identity": snap["identity"], "input_kind": kind,
                     "selection_mode": snap["selection_mode"],
                     "fusion_settings_hash": fusion.get("hash")}, ""
+        study_used = study if tma else None
         try:
             try:
-                snap = RA.build_snapshot(pd, sid, seg, study=study, parent=parent, saved=saved)
+                snap = RA.build_snapshot(pd, sid, seg, study=study_used, parent=parent, saved=saved)
             except RA.NothingTicked:
                 # the candidate is built BEFORE the question, and that one is what runs
-                snap = RA.build_snapshot(pd, sid, seg, study=study, parent=parent, saved=saved,
+                snap = RA.build_snapshot(pd, sid, seg, study=study_used, parent=parent, saved=saved,
                                          select=RA.SELECT_ALL_ELIGIBLE)
-                if not ask("No TMA core is selected (no Run tick in Regions).\n\n"
-                           f"All {len(snap['cores'])} eligible cores will be run by default. Cores "
-                           "whose numbering awaits review, QC-excluded cores and cores outside this "
-                           "region are still left out.\n\nContinue?"):
+                left_out = ("Cores whose numbering awaits review, QC-excluded cores and cores outside this "
+                            "region are still left out." if tma else
+                            "Cores without an outline and cores outside this region are still left out.")
+                if not ask(f"No {'TMA ' if tma else ''}core is selected (no Run tick in Regions).\n\n"
+                           f"All {len(snap['cores'])} eligible cores will be run by default. "
+                           f"{left_out}\n\nContinue?"):
                     return None, None
         except RegionsError as exc:
             return None, str(exc)
-        print(f"[Step2] TMA cores frozen for this run: {len(snap['cores'])} cores "
+        print(f"[Step2] {'TMA ' if tma else ''}cores frozen for this run: {len(snap['cores'])} cores "
               f"({snap['selection_mode']}), {(time.perf_counter() - t0) * 1000:.0f} ms")
         return {"snapshot": snap, "identity": snap["identity"], "input_kind": kind,
                 "selection_mode": snap["selection_mode"],
@@ -7051,13 +7058,23 @@ class MainWindow(QMainWindow):
         try:
             snap = RA.build_snapshot(pd, sid, [], parent=parent)
         except RegionsError as exc:
+            from ..core.regions import lock as RK
             from ..core.tma.study import StudyError, load_study
             try:
                 tma = load_study(pd) is not None
             except StudyError:
                 tma = False
-            return (None, None, f"Random patches go inside the selected TMA cores, but {exc}." if tma else "")
-        if snap["mode"] != "tma":
+            if not tma:
+                # cores found without a map sheet bind the patches to them too:
+                # a failure is said, never sent back to the whole tissue
+                # (docs/v17_cores_without_map_downstream_plan.md §3.4)
+                try:
+                    saved = RK.load_saved(pd, sid)
+                except (RegionsError, ValueError, OSError):
+                    saved = None
+                tma = bool(((saved or {}).get("document") or {}).get("cores"))
+            return (None, None, f"Random patches go inside the selected cores, but {exc}." if tma else "")
+        if not RA.has_cores(snap):
             return None, None, ""
         return ([[(float(x), float(y)) for x, y in c["polygon"]] for c in snap["cores"]],
                 [[(float(x), float(y)) for x, y in e["polygon"]] for e in snap["exclusions"]], "")

@@ -846,12 +846,15 @@ class SegmentMergeWorker(QThread):
         if R is None:
             return None
         snap = R["snapshot"]
-        return {"source": R.get("source", "contract"), "selection_mode": R.get("selection_mode", "ticked"),
+        meta = {"source": R.get("source", "contract"), "selection_mode": R.get("selection_mode", "ticked"),
                 "identity": R["identity"], "input_kind": R.get("input_kind"),
                 "content_sha256": (snap.get("regions") or {}).get("content_sha256"),
                 "position_keys": [c.get("position_key") for c in snap.get("cores") or []],
                 "fusion_settings_hash": R.get("fusion_settings_hash"),
                 "snapshot": self._abs(os.path.join(self.output_dir, self.REGIONS_SNAPSHOT_FILE))}
+        if snap.get("mode") == "cores":                    # cores found without a map sheet: by uid
+            meta["core_uids"] = [c.get("uid") for c in snap.get("cores") or []]
+        return meta
 
     def _workspace_slide_id(self):
         """The slide id of this workspace's source slide (computed, never

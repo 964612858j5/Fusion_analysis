@@ -261,6 +261,8 @@ def _write_h5ad(path, job, result, prov, regions=None):
         adata.uns["measurement_qc_codes"] = dict(qa.QC_CODES)
         if rin.tma:
             adata.uns["tma_cores"] = qa.tma_cores_frame(result, rin)
+        elif rin.has_cores:                     # cores found without a map sheet (backlog 11)
+            adata.uns["cores"] = qa.cores_frame(result, rin)
     adata.write_h5ad(path)
     del adata
     n, c = int(result.ids.size), len(job.channels)

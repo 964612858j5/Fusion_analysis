@@ -61,12 +61,19 @@ class RegionsInput:
     channel_masks: np.ndarray   # bool (K, C): exclusion k's channels among the job's
     pixel_um: Optional[tuple]   # (y, x) micrometres per pixel, or None
     channel_names: List[str] = field(default_factory=list)
-    areas_px: Dict[str, int] = field(default_factory=dict)   # position_key -> core area
+    areas_px: Dict[str, int] = field(default_factory=dict)   # position_key ("tma") or uid ("cores") -> core area
     pixel_size_unknown: str = ""  # why pixel_um is None ("" when known)
 
     @property
     def tma(self) -> bool:
+        """A map-sheet run: its position, donor and sample fields exist."""
         return self.snapshot.get("mode") == "tma"
+
+    @property
+    def has_cores(self) -> bool:
+        """The run's domain is its selected cores: a TMA, or cores found
+        without a map sheet (docs/v17_cores_without_map_downstream_plan.md)."""
+        return RA.has_cores(self.snapshot)
 
 
 def _path(p, run_dir):
@@ -145,6 +152,20 @@ def core_areas(snap) -> Dict[str, int]:
     return out
 
 
+def core_areas_by_uid(snap) -> Dict[str, int]:
+    """uid -> area of every core of a map-less snapshot (its pieces in
+    `display_cores`, else its analysis outline)."""
+    shape = tuple(snap["slide_shape"])
+    out = {}
+    for c in snap.get("display_cores") or []:
+        if c.get("polygons"):
+            out[c["uid"]] = outline_area_px(c["polygons"], shape)
+    for c in snap.get("cores") or []:
+        if c["uid"] not in out:
+            out[c["uid"]] = outline_area_px([c["polygon"]], shape)
+    return out
+
+
 def load_regions(job) -> Optional[RegionsInput]:
     """The job's Regions facts, checked; None for a run without Regions.
     Raises RegionsInputError when they cannot be used."""
@@ -183,7 +204,7 @@ def load_regions(job) -> Optional[RegionsInput]:
         raise RegionsInputError(f"the Regions facts list {n} objects, the labels {job.n_objects}")
     cores = snap.get("cores") or []
     core = arrays["core"]
-    if snap.get("mode") == "tma":
+    if RA.has_cores(snap):
         if n and (core.min() < 0 or core.max() >= len(cores)):
             raise RegionsInputError("an object's core is not one of the snapshot's cores")
     elif n and (core != -1).any():
@@ -214,7 +235,8 @@ def load_regions(job) -> Optional[RegionsInput]:
                         facts_path=facts_path, core=core, core_fraction=arrays["core_fraction"],
                         flags=arrays["flags"], meas_bits=bits, uids=uids, channel_masks=masks,
                         pixel_um=pixel_um, channel_names=names,
-                        areas_px=core_areas(snap) if snap.get("mode") == "tma" else {},
+                        areas_px=(core_areas(snap) if snap.get("mode") == "tma" else
+                                  core_areas_by_uid(snap) if snap.get("mode") == "cores" else {}),
                         pixel_size_unknown=pixel_unknown)
 
 
@@ -316,8 +338,56 @@ def obs_frame(result, rin, run_id):
             "cell_touches_core_edge": (flags & FLAG_TOUCHES_CORE_EDGE).astype(bool),
             "analysis_include": (flags & FLAG_ANALYSIS_INCLUDE).astype(bool),
         })
+    elif rin.has_cores:
+        # cores found without a map sheet: no position, donor, sample or QC
+        # fields exist; a core is told by its id and centre (plan §3.6)
+        cores = snap["cores"]
+        ci = rin.core[rows]
+        area_px = np.array([rin.areas_px.get(cores[i]["uid"], 0) for i in ci], dtype=np.int64)
+        um2, mm2 = _areas(rin, area_px)
+        cols.update({
+            "core_uid": cat([cores[i]["uid"] for i in ci]),
+            "core_region_id": cat([cores[i].get("region_id", "") for i in ci]),
+            "core_centre_y": np.asarray([float((cores[i].get("centre_yx") or (np.nan, np.nan))[0]) for i in ci],
+                                        dtype=np.float64),
+            "core_centre_x": np.asarray([float((cores[i].get("centre_yx") or (np.nan, np.nan))[1]) for i in ci],
+                                        dtype=np.float64),
+            "core_area_px": area_px,
+            "core_area_um2": um2,
+            "core_area_mm2": mm2,
+            "cell_core_fraction": rin.core_fraction[rows].astype(np.float32),
+            "cell_touches_core_edge": (flags & FLAG_TOUCHES_CORE_EDGE).astype(bool),
+            "analysis_include": (flags & FLAG_ANALYSIS_INCLUDE).astype(bool),
+        })
     cols["touches_region_edge"] = (flags & FLAG_TOUCHES_REGION_EDGE).astype(bool)
     return pd.DataFrame(cols, index=idx)
+
+
+def cores_frame(result, rin):
+    """One row per core of a map-less Save (its snapshot's inventory): id,
+    centre, area, whether it ran and why not, the objects it holds -- 0 for
+    a core with none (plan §3.6). `"cores"` mode only."""
+    import pandas as pd
+    snap = rin.snapshot
+    counts: Dict[str, int] = {}
+    if result.ids.size:
+        ci = rin.core[_rows(result)]
+        uids = [c["uid"] for c in snap["cores"]]
+        for i, k in zip(*np.unique(ci, return_counts=True)):
+            counts[uids[int(i)]] = int(k)
+    rows = []
+    for c in snap.get("core_inventory") or []:
+        uid = c["uid"]
+        # a degenerate outline has no area, whatever its points would rasterise to
+        area = 0.0 if c.get("reason") == "degenerate" else rin.areas_px.get(uid, c.get("area_px", 0.0))
+        rows.append({"core_uid": uid, "centre_y": float(c["centre_yx"][0]), "centre_x": float(c["centre_yx"][1]),
+                     "run": bool(c.get("run")), "selected": not c.get("reason"), "reason": c.get("reason", ""),
+                     "n_obs": counts.get(uid, 0), "area_px": float(area)})
+    frame = pd.DataFrame(rows, columns=["core_uid", "centre_y", "centre_x", "run", "selected", "reason",
+                                        "n_obs", "area_px"])
+    um2, mm2 = _areas(rin, frame["area_px"].to_numpy())
+    frame["area_um2"], frame["area_mm2"] = um2, mm2
+    return frame
 
 
 def tma_cores_frame(result, rin):
@@ -372,11 +442,13 @@ def regions_dropped(rin) -> Dict[str, int]:
 
 def provenance_summary(rin, qc_stats) -> Dict:
     u = uns_regions(rin)
-    return {"format_version": FORMAT_VERSION, "identity": u["identity"], "mode": u["mode"],
+    extra = ({"core_uids": [c["uid"] for c in rin.snapshot.get("cores") or []]}
+             if u["mode"] == "cores" else {})         # cores found without a map sheet
+    return {**extra, "format_version": FORMAT_VERSION, "identity": u["identity"], "mode": u["mode"],
             "save_content_sha256": u["save_content_sha256"], "map_sha256": u["map_sha256"],
             "selection_mode": u["selection_mode"], "source": u["source"],
             "snapshot": rin.snapshot_path, "facts": rin.facts_path,
-            "position_keys": [c["position_key"] for c in rin.snapshot.get("cores") or []],
+            "position_keys": [c.get("position_key") for c in rin.snapshot.get("cores") or []],
             "measurement_exclusions": [
                 {"bit": k, "uid": uid,
                  "channels": [nm for nm, on in zip(rin.channel_names, rin.channel_masks[k]) if on]}

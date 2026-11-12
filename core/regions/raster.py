@@ -93,7 +93,8 @@ class AnalysisRaster:
 
     def __init__(self, snapshot: Dict):
         shape = tuple(snapshot["slide_shape"])
-        self.tma = snapshot["mode"] == "tma"
+        # "cores": a map-less slide's found cores (the same rules as a TMA's)
+        self.tma = snapshot["mode"] in ("tma", "cores")
         par = snapshot.get("parent") or {}
         self.parent = ShapeRaster(par.get("polygon_fullres") or None, shape,
                                   bbox=par.get("bbox_fullres") or [0, shape[0], 0, shape[1]])

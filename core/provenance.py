@@ -512,6 +512,8 @@ def register_segmentation_run(run_dir, meta):
             regions_params = {"identity": reg.get("identity"), "input_kind": reg.get("input_kind"),
                               "position_keys": [c.get("position_key") for c in snap.get("cores") or []],
                               "source": "contract", "selection_mode": snap.get("selection_mode", "ticked")}
+            if snap.get("mode") == "cores":            # cores found without a map sheet (backlog 11)
+                regions_params["core_uids"] = [c.get("uid") for c in snap.get("cores") or []]
             contract = dict(contract, regions={k: v for k, v in reg.items() if k != "snapshot"})
         elif isinstance(meta.get("regions_run"), dict):
             # docs/f5_tma_display_plan.md 9.2: the snapshot Step2 froze for a run
@@ -527,6 +529,8 @@ def register_segmentation_run(run_dir, meta):
                 unresolved.append({"role": "regions_layout", "content_sha256": token})
             regions_params = {k: run_reg.get(k) for k in ("identity", "input_kind", "position_keys", "source",
                                                          "selection_mode", "fusion_settings_hash")}
+            if "core_uids" in run_reg:                 # cores found without a map sheet (backlog 11)
+                regions_params["core_uids"] = list(run_reg["core_uids"] or [])
         return safe_register(
             project_dir, "segmentation_run", loc, run_id, depends_on=deps,
             operates_on=scope, flags=flags, unresolved_inputs=unresolved,
@@ -586,6 +590,8 @@ def register_step4(h5ad_path, job, provenance_record):
                 unresolved.append({"role": "regions_layout", "content_sha256": token})
             regions_params = {"identity": reg.get("identity"), "selection_mode": reg.get("selection_mode"),
                               "position_keys": list(reg.get("position_keys") or [])}
+            if "core_uids" in reg:                     # cores found without a map sheet (backlog 11)
+                regions_params["core_uids"] = list(reg["core_uids"] or [])
         outputs = provenance_record.get("outputs") or {}
         return safe_register(
             project_dir, "step4_h5ad", location(project_dir, h5ad_path),

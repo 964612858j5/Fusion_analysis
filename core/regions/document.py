@@ -74,6 +74,8 @@ def attach_tma(d: Dict, study: Dict, candidates: Dict) -> None:
         raise RegionsError("the study is for another slide")
     _build_pieces(d, candidates)
     _set_positions(d, study)
+    for c in d["cores"].values():
+        c.pop("run", None)                         # with a map sheet the positions carry the Run tick
     log(d, {"kind": "attach_tma", "candidates_version": d["candidates_version"]})
 
 
@@ -90,6 +92,7 @@ def attach_map(d: Dict, study: Dict) -> None:
     _set_positions(d, study)
     for c in d["cores"].values():
         c["position_key"], c["mapping"] = None, "unmatched"
+        c.pop("run", None)                         # the map sheet's positions carry the Run tick now
     log(d, {"kind": "attach_map", "map_sha256": d["map_sha256"]})
 
 
@@ -192,6 +195,10 @@ def new_core(d: Dict, piece_ids: Sequence[str]) -> str:
     uid = "core_" + uuid.uuid4().hex[:12]
     d["cores"][uid] = {"pieces": list(piece_ids), "position_key": None, "custom_label": None,
                        "mapping": "unmatched"}
+    if not d.get("map_sha256"):
+        # without a map sheet a core has its own Run tick, on by default
+        # (docs/v17_cores_without_map_downstream_plan.md §3.2)
+        d["cores"][uid]["run"] = True
     for pid in piece_ids:
         d["pieces"][pid]["owner"] = uid
     return uid
@@ -357,6 +364,28 @@ def set_qc(d: Dict, key: str, qc: str, reasons: Sequence[str] = ()) -> None:
 def set_run(d: Dict, key: str, run: bool) -> None:
     d["positions"][key]["run"] = bool(run)
     log(d, {"kind": "run", "position_key": key, "run": bool(run)})
+
+
+def set_core_run(d: Dict, uid: str, run: bool) -> None:
+    """A map-less core's Run tick (plan §3.2)."""
+    if d.get("map_sha256"):
+        raise RegionsError("with a map sheet the Run tick is the position's")
+    d["cores"][uid]["run"] = bool(run)
+    log(d, {"kind": "run", "core": uid, "run": bool(run)})
+
+
+def set_core_runs(d: Dict, uids, run: bool) -> None:
+    """Run on / off for several map-less cores: one edit (one undo step)."""
+    if d.get("map_sha256"):
+        raise RegionsError("with a map sheet the Run tick is the position's")
+    for uid in uids:
+        d["cores"][uid]["run"] = bool(run)
+    log(d, {"kind": "run", "cores": list(uids), "run": bool(run)})
+
+
+def core_runs(d: Dict, uid: str) -> bool:
+    """A map-less core's Run tick; an older document without it: on."""
+    return bool(d["cores"][uid].get("run", True))
 
 
 def set_runs(d: Dict, keys, run: bool) -> None:

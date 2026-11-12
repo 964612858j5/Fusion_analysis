@@ -246,7 +246,9 @@ def _old_attach_tma(d, study, candidates):
     d["piece_counter"] = max(D.piece_counter(d), *[int(c["candidate_id"]) for c in candidates["candidates"]] or [0])
 
 
-def test_a_save_without_a_map_sheet_analyses_the_region(app, env, monkeypatch, no_dialog):
+def test_a_save_without_a_map_sheet_analyses_its_cores(app, env, monkeypatch, no_dialog):
+    """Stage 1 analysed such a Save as one region; stages 2-3
+    (docs/v17_cores_without_map_downstream_plan.md) analyse its cores."""
     from block01.core.regions import analysis as A
     page = _without_map(app, env, monkeypatch)
     page.edit(D.add_exclusion, [[10, 10], [60, 10], [60, 60], [10, 60]], ["blur"])
@@ -255,8 +257,16 @@ def test_a_save_without_a_map_sheet_analyses_the_region(app, env, monkeypatch, n
     rec = K.load_saved(pd, sid)
     assert len(rec["document"]["cores"]) == N_CORES and not rec["document"]["map_sha256"]
     snap = A.build_snapshot(pd, sid, seg_channels=["DAPI"])
-    assert snap["mode"] == "roi" and snap["cores"] == []
-    assert len(snap["display_cores"]) == N_CORES                            # drawn only
+    assert snap["mode"] == "cores" and len(snap["cores"]) == N_CORES      # every core ticked by default
+    assert len(snap["display_cores"]) == N_CORES and all(c["run"] for c in snap["display_cores"])
+    # the Cores tab: each core has its own Run tick; unticking one leaves it out
+    uid = next(iter(page.holder.d["cores"]))
+    page.cores.run_toggled(uid, False)
+    page.btn_save.click()
+    snap = A.build_snapshot(pd, sid, seg_channels=["DAPI"])
+    assert uid not in {c["uid"] for c in snap["cores"]} and len(snap["cores"]) == N_CORES - 1
+    page.undo()
+    assert D.core_runs(page.holder.d, uid)
     assert page.exclusions._links(page.holder.d) == {}                      # not linked to cores
     # the map sheet chosen after that Save, not saved again: refused with the new text
     page.cores.btn_map.click()

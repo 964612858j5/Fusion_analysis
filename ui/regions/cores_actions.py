@@ -138,10 +138,19 @@ class CoresActions:
         self.page.jump_to_shapes(polys)
 
     def run_toggled(self, key, on):
-        self.page.edit(D.set_run, key, on)
+        h = self.page.holder
+        if h is not None and key in h.d["cores"] and not h.d.get("map_sha256"):
+            self.page.edit(D.set_core_run, key, on)        # a map-less core's own tick (backlog 11 §3.2)
+        else:
+            self.page.edit(D.set_run, key, on)
 
     def runs_set(self, keys, on):
-        self.page.edit(D.set_runs, list(keys), on)
+        h = self.page.holder
+        keys = list(keys)
+        if h is not None and not h.d.get("map_sha256") and keys and all(k in h.d["cores"] for k in keys):
+            self.page.edit(D.set_core_runs, keys, on)
+        else:
+            self.page.edit(D.set_runs, keys, on)
 
     def row_menu(self, kind, ident, pos):
         page = self.page

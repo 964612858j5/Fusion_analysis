@@ -60,6 +60,20 @@ REASONS = {
     "outside_region": "outside the workspace's region",
 }
 
+#: A slide without a map sheet whose Save has found cores analyses only
+#: those cores (docs/v17_cores_without_map_downstream_plan.md): mode "cores".
+CORE_MODES = ("tma", "cores")
+
+
+def has_cores(snap: Dict) -> bool:
+    """Whether a snapshot's analysis domain is its selected cores."""
+    return (snap or {}).get("mode") in CORE_MODES
+
+
+def core_where(cy, cx) -> str:
+    """How a core without a name is named in a message: its centre."""
+    return f"core at ({float(cy):.0f}, {float(cx):.0f})"
+
 
 class AnalysisError(RegionsError):
     """`omitted`: every ticked core that cannot run, with its reason, when
@@ -129,6 +143,51 @@ def select_cores(doc: Dict, study: Dict, select: str = SELECT_TICKED) -> Tuple[L
     return selected, omitted
 
 
+def select_cores_without_map(doc: Dict, parent: Dict,
+                             select: str = SELECT_TICKED) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+    """(selected, omitted, inventory) over a map-less document's cores, in
+    uid order (plan §3.1). A core runs when its Run tick is on (`run`,
+    absent = on; SELECT_ALL_ELIGIBLE leaves the tick out), its outline has
+    an area and it meets the workspace's parent region. `inventory`: every
+    core of the Save -- uid, centre, area, run, reason ("" = selected)."""
+    from ..project_identity import region_id
+    from .raster import AnalysisRaster
+    from .document import core_centre
+    shape = tuple(doc["slide_shape"])
+    selected, omitted, inventory = [], [], []
+    for uid, c in sorted(doc["cores"].items()):
+        polys = [doc["pieces"][q]["polygon"] for q in c["pieces"] if q in doc["pieces"]]
+        g = G.region_outline(polys, shape) if polys else None
+        ok = g is not None and G.has_area(g)
+        cy, cx = core_centre(doc, uid) if polys else (0.0, 0.0)
+        run = bool(c.get("run", True))
+        rec = {"uid": uid, "centre_yx": [round(cy, 1), round(cx, 1)],
+               "area_px": float(G.area(g["polygon_fullres"])) if ok else 0.0, "run": run, "reason": ""}
+        reason = None
+        if not run and select != SELECT_ALL_ELIGIBLE:
+            reason = "not_ticked"
+        elif not ok:
+            reason = "degenerate"
+        else:
+            probe = AnalysisRaster({"mode": "cores", "slide_shape": list(shape), "parent": parent,
+                                    "cores": [{"polygon": g["polygon_fullres"]}], "exclusions": []})
+            if not probe.core_meets_parent(0):                 # real pixels, not just the boxes
+                reason = "outside_region"
+        if reason is not None:
+            rec["reason"] = reason
+            omitted.append({"uid": uid, "centre_yx": rec["centre_yx"], "label": core_where(cy, cx),
+                            "reason": reason})
+        else:
+            selected.append({"uid": uid, "polygon": g["polygon_fullres"], "bbox": g["bbox_fullres"],
+                             "region_id": region_id(doc["slide_id"], "TMA_core", g["bbox_fullres"],
+                                                    g["polygon_fullres"]),
+                             "centre_yx": rec["centre_yx"], "position_key": None, "position_id": None,
+                             "label": "", "donor_block_id": "", "tma_unique_sample_id": "", "annotation": "",
+                             "core_height": "", "qc": "unreviewed"})
+        inventory.append(rec)
+    return selected, omitted, inventory
+
+
 def overlapping(selected: Sequence[Dict]) -> List[Tuple[str, str]]:
     """Pairs of selected cores whose outlines share a pixel."""
     out = []
@@ -137,8 +196,16 @@ def overlapping(selected: Sequence[Dict]) -> List[Tuple[str, str]]:
         for j in range(i + 1, len(geo)):
             a, b = geo[i]["bbox_fullres"], geo[j]["bbox_fullres"]
             if a[0] < b[1] and b[0] < a[1] and a[2] < b[3] and b[2] < a[3] and G.overlap(geo[i], geo[j]):
-                out.append((selected[i]["position_key"], selected[j]["position_key"]))
+                out.append((_name_of(selected[i]), _name_of(selected[j])))
     return out
+
+
+def _name_of(c: Dict) -> str:
+    """A selected core in a message: its position key, or its centre."""
+    if c.get("position_key"):
+        return c["position_key"]
+    cy, cx = c.get("centre_yx") or (0, 0)
+    return core_where(cy, cx)
 
 
 def map_metadata(sheet: Dict) -> Dict:
@@ -192,7 +259,9 @@ def build_snapshot(project_dir, slide_id: str, seg_channels: Sequence[str],
     if study is not None and study.get("slide_id") not in (None, slide_id):
         study = None                                       # another slide's study is not this one's
     mode = "tma" if doc.get("map_sha256") or study is not None else "roi"
-    cores, omitted, meta, positions = [], [], None, []
+    if mode == "roi" and doc.get("cores"):
+        mode = "cores"                                     # found cores, no map sheet: only they are analysed
+    cores, omitted, meta, positions, inventory = [], [], None, [], None
     if mode == "tma":
         if not doc.get("map_sha256"):
             raise AnalysisError("the map sheet is chosen but not attached to the cores in the last Regions Save: "
@@ -245,6 +314,21 @@ def build_snapshot(project_dir, slide_id: str, seg_channels: Sequence[str],
                               "spot_slide": p.get("spot_slide", ""), "selected": key in chosen,
                               "reason": "" if key in chosen else why.get(key, "empty" if not p["donor_block_id"]
                                                                           else "not_ticked")})
+    if mode == "cores":
+        cores, omitted, inventory = select_cores_without_map(doc, par, select)
+        if not cores:
+            ticked = [o for o in omitted if o["reason"] != "not_ticked"]
+            if not ticked:
+                if select == SELECT_ALL_ELIGIBLE:
+                    raise AnalysisError("no core can run: none has an outline inside this region")
+                raise NothingTicked("no core is selected: tick Run for the cores to analyse in Regions")
+            listed = "; ".join(f"{o['label']}: {REASONS[o['reason']]}" for o in ticked[:10])
+            more = f"; … and {len(ticked) - 10} more" if len(ticked) > 10 else ""
+            what = "no core" if select == SELECT_ALL_ELIGIBLE else "no ticked core"
+            raise AnalysisError(f"{what} can run ({listed}{more})", omitted=ticked)
+        pairs = overlapping(cores)
+        if pairs:
+            raise AnalysisError("selected cores overlap: " + ", ".join(f"{a} / {b}" for a, b in pairs))
     exclusions = []
     for uid, e in sorted(doc["exclusions"].items()):
         g = G.region_outline([e["polygon"]], shape)
@@ -256,8 +340,12 @@ def build_snapshot(project_dir, slide_id: str, seg_channels: Sequence[str],
                            "bbox": g["bbox_fullres"], "seg_invalid": seg_invalid(chans, seg_channels)})
     from .display import display_cores
     # what the cores looked like at this freeze, for drawing only (never in `identity`)
-    shown = display_cores(doc, study if mode == "tma" else None, {c["uid"] for c in cores},
-                          {o["position_key"]: o["reason"] for o in omitted})
+    if mode == "cores":
+        shown = display_cores(doc, None, {c["uid"] for c in cores},
+                              why_uid={r["uid"]: r["reason"] for r in inventory})
+    else:
+        shown = display_cores(doc, study if mode == "tma" else None, {c["uid"] for c in cores},
+                              {o["position_key"]: o["reason"] for o in omitted})
     snap = {"snapshot_version": SNAPSHOT_VERSION, "mode": mode, "slide_id": slide_id,
             "slide_shape": list(doc["slide_shape"]),
             "regions": {"save_count": rec["save_count"], "content_sha256": rec["content_sha256"],
@@ -266,8 +354,13 @@ def build_snapshot(project_dir, slide_id: str, seg_channels: Sequence[str],
             "exclusions": exclusions, "display_cores": shown, "selection_mode": select,
             "seg_channels": sorted(set(seg_channels)),
             "policies": copy.deepcopy(POLICIES)}
+    if mode == "cores":
+        snap["core_inventory"] = inventory                 # every saved core (never in `identity`)
     snap["identity"] = identity(snap)
     return snap
+
+
+_CORE_FIELDS = ("position_key", "polygon", "donor_block_id", "tma_unique_sample_id", "annotation", "qc")
 
 
 def identity(snap: Dict) -> str:
@@ -278,8 +371,8 @@ def identity(snap: Dict) -> str:
     science = {"v": snap["snapshot_version"], "mode": snap["mode"], "slide_id": snap["slide_id"],
                "parent": {k: snap["parent"].get(k) for k in ("bbox_fullres", "polygon_fullres")},
                "map": (snap["map_sheet"] or {}).get("sha256"),
-               "cores": [{k: c[k] for k in ("position_key", "polygon", "donor_block_id",
-                                            "tma_unique_sample_id", "annotation", "qc")} for c in snap["cores"]],
+               "cores": [{k: c[k] for k in _CORE_FIELDS + (("uid",) if snap["mode"] == "cores" else ())}
+                         for c in snap["cores"]],
                "exclusions": excl,
                "seg_channels": snap["seg_channels"], "policies": snap["policies"]}
     return hashlib.sha256(json.dumps(science, sort_keys=True, separators=(",", ":")).encode()).hexdigest()

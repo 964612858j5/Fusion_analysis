@@ -36,11 +36,13 @@ def _names(study: Optional[Dict]) -> Dict[str, str]:
             for p in sheet["positions"]}
 
 
-def display_cores(doc: Dict, study: Optional[Dict], run_uids, why: Optional[Dict] = None) -> List[Dict]:
+def display_cores(doc: Dict, study: Optional[Dict], run_uids, why: Optional[Dict] = None,
+                  why_uid: Optional[Dict] = None) -> List[Dict]:
     """Every core of a Regions document, for drawing: ``{uid, position_key,
     polygons (its pieces' own outlines), name, run, reason}``, in uid
     order. `run_uids`: the cores the analysis runs; `why`: position_key ->
-    the reason a bound core does not run."""
+    the reason a bound core does not run; `why_uid`: uid -> the reason a
+    core of a map-less snapshot does not run (its inventory)."""
     names = _names(study)
     keys = set()
     if study:
@@ -59,7 +61,8 @@ def display_cores(doc: Dict, study: Optional[Dict], run_uids, why: Optional[Dict
         run = uid in run_uids
         out.append({"uid": uid, "position_key": key, "polygons": polys,
                     "name": names.get(key, "") if key else "", "run": run,
-                    "reason": "" if run else (why.get(key, "") if key else "not_bound")})
+                    "reason": "" if run else (why.get(key, "") if key else
+                                              (why_uid or {}).get(uid, "not_bound"))})
     return out
 
 

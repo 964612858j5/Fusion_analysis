@@ -24,10 +24,12 @@ is fixed.
 * On a CPU with AVX512, NumPy's float32 power differs by 1 ulp, so the Python
   fusion fallback can differ from the Rust fusion by 1 grey level in some
   pixels (suspected from CI, not yet confirmed).
-* The installer needs glibc 2.34 or newer (PySide6 6.10+ wheels), so
-  RHEL/Rocky/Alma 8, Ubuntu 20.04 and Debian 11 are refused. A conda-forge
-  PySide6 (built for glibc 2.17) would bring them back; a separate block,
-  agreed by the user 2026-11-08.
+* Linux with glibc 2.28-2.33 (RHEL/Rocky/Alma 8, Debian 10/11, Ubuntu
+  20.04) gets PySide6 6.9.3 instead of 6.11.3: PyPI's 6.10+ wheels need
+  glibc 2.34 (docs/v17_older_linux_qt_plan.md). The code must keep running
+  on 6.9.3 (the check is in `envs/fusion_mesmer/README.md`). Below 2.28 the
+  installer refuses. On RHEL/Rocky 8 `libxcb-cursor.so.0` comes from EPEL
+  (`xcb-util-cursor`). Accepted by the user on Linux 2026-11-11.
 * GPU background correction needs a CUDA toolkit (CuPy compiles against it);
   without one the CPU is used.
 * Waits still blocking the window (`docs/v17_small_review_items_plan.md`

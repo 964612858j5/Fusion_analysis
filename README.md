@@ -74,7 +74,8 @@ Step-by-step user manuals (written to onboard non-specialists):
 
 ## Quick start
 
-Linux x86_64 with an NVIDIA GPU:
+Linux x86_64 with an NVIDIA GPU, glibc 2.28 or newer (below 2.34 the interface
+uses PySide6 6.9.3, chosen by the installer):
 
 ```bash
 bash scripts/install_block01.sh     # once: environment, viewer core, SpatialData environment, models (licence shown first), self-test

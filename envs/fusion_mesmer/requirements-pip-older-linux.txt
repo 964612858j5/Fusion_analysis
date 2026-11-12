@@ -1,0 +1,6 @@
+# The interface's Qt on Linux with glibc 2.28-2.33 (docs/v17_older_linux_qt_plan.md).
+# PySide6 6.10+ has Linux wheels only for glibc >= 2.34; 6.9.3 is the last
+# release built for 2.28. scripts/install_block01.sh puts these two lines in
+# place of requirements-pip.txt's pyside6-essentials and shiboken6 lines.
+pyside6-essentials==6.9.3
+shiboken6==6.9.3

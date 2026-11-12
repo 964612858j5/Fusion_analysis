@@ -3,9 +3,12 @@
 #
 #   bash scripts/install_block01.sh [--root DIR] [--check-only] [--build-core]
 #                                   [--models DIR] [--accept-model-licences]
-#                                   [--no-spatialdata]
+#                                   [--no-spatialdata] [--older-qt]
 #
-# Linux x86_64 + NVIDIA. Everything goes under the install root (default
+# Linux x86_64 + NVIDIA, glibc 2.28 or newer. Below glibc 2.34 the interface
+# gets PySide6 6.9.3 (the last release built for it) in an environment of its
+# own; --older-qt picks that route on a newer system too
+# (docs/v17_older_linux_qt_plan.md). Everything goes under the install root (default
 # ~/.local/share/block01): the environment, the models, the tools it
 # downloads. It never modifies an environment, a model file or a link it did
 # not create; a run that stopped half-way is recognised and redone. The
@@ -20,6 +23,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SPEC="$REPO/envs/fusion_mesmer"
 SD_SPEC="$REPO/envs/block01_spatialdata"      # Step4's SpatialData export (its own NumPy 2 stack)
 MANIFEST="$SPEC/models.json"
+OLDER_PINS="$SPEC/requirements-pip-older-linux.txt"   # the Qt pins below glibc 2.34
 WHEELS_LOCK="$REPO/native/fusion_viewer_core/wheels.lock"
 CARGO_TOML="$REPO/native/fusion_viewer_core/Cargo.toml"
 RELEASE_URL="${BLOCK01_RELEASE_URL:-https://github.com/964612858j5/Fusion_analysis/releases/download}"
@@ -53,6 +57,7 @@ ROOT="${HOME}/.local/share/block01"
 CHECK_ONLY=0
 BUILD_CORE=0
 NO_SPATIALDATA=0
+OLDER_QT=0          # 1: PySide6 6.9.3 (glibc 2.28-2.33, or --older-qt)
 MODELS_IN=""
 ACCEPT_LICENCES=0
 STEP="start"
@@ -131,9 +136,13 @@ check_system_libs() {
     fi
     say "  Qt libs:  MISSING$missing"
     say "            Ubuntu/Debian: sudo apt install$pkgs"
+    say "            RHEL/Rocky: sudo dnf install the packages that provide these files"
+    say "            (libxcb-cursor.so.0 is xcb-util-cursor, from EPEL)"
     say "            (other systems: the packages that provide these files)"
     return 1
 }
+
+glibc_at_least() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | sed -n 1p)" = "$2" ]; }
 
 preflight() {
     STEP="1. checking this computer"
@@ -147,11 +156,19 @@ preflight() {
     # (no `cmd | head` here: under pipefail the writer's SIGPIPE fails the pipe)
     local glibc; glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || glibc="glibc 0"
     glibc=${glibc##* }
-    # 2.34: PySide6 6.10+ ships Linux wheels only as manylinux_2_34
-    if [ "$(printf '%s\n2.34\n' "$glibc" | sort -V | sed -n 1p)" != 2.34 ]; then
-        say "  glibc:    $glibc -- too old (2.34 or newer needed: the interface's Qt for Python packages are built for it)"; hard=1
+    # PySide6 6.10+ ships Linux wheels only as manylinux_2_34; 6.9.3 is the
+    # last one built for 2.28, the floor of the viewer core, h5py and pyarrow
+    if glibc_at_least "$glibc" 2.34; then
+        if [ "$OLDER_QT" = 1 ]; then
+            say "  glibc:    $glibc -- the interface uses PySide6 $(qt_version) (--older-qt)"
+        else
+            say "  glibc:    $glibc"
+        fi
+    elif glibc_at_least "$glibc" 2.28; then
+        OLDER_QT=1
+        say "  glibc:    $glibc -- the interface uses PySide6 $(qt_version) (the last release built for this glibc)"
     else
-        say "  glibc:    $glibc"
+        say "  glibc:    $glibc -- too old (2.28 or newer needed: PySide6, the viewer core, h5py and pyarrow packages are built for it)"; hard=1
     fi
     for tool in curl tar bzip2 sha256sum df flock; do
         command -v "$tool" >/dev/null || { say "  tool:     $tool MISSING (install it with the system package manager)"; hard=1; }
@@ -247,8 +264,44 @@ ensure_micromamba() {
 }
 
 # ── 3. the environment ────────────────────────────────────────────────────
-lock_id() { cat "$SPEC/conda-linux-64.lock" "$SPEC/requirements-pip.txt" | sha256sum | cut -c1-8; }
-env_prefix() { echo "$ROOT/envs/fusion_mesmer-$(lock_id)"; }
+# the 6.9.3 route hashes its Qt pins too and has a name of its own, so the
+# 6.11.3 environment's id and name are what they were
+lock_id() {
+    if [ "$OLDER_QT" = 1 ]; then
+        cat "$SPEC/conda-linux-64.lock" "$SPEC/requirements-pip.txt" "$OLDER_PINS" | sha256sum | cut -c1-8
+    else
+        cat "$SPEC/conda-linux-64.lock" "$SPEC/requirements-pip.txt" | sha256sum | cut -c1-8
+    fi
+}
+env_prefix() {
+    if [ "$OLDER_QT" = 1 ]; then echo "$ROOT/envs/fusion_mesmer-qt69-$(lock_id)"
+    else echo "$ROOT/envs/fusion_mesmer-$(lock_id)"; fi
+}
+# the pip list this route installs from
+pip_list() {
+    if [ "$OLDER_QT" = 1 ]; then echo "$(env_prefix).requirements-pip.txt"
+    else echo "$SPEC/requirements-pip.txt"; fi
+}
+# the PySide6 version this route installs
+qt_version() {
+    local f="$SPEC/requirements-pip.txt"; [ "$OLDER_QT" = 1 ] && f=$OLDER_PINS
+    awk -F'==' 'tolower($1) == "pyside6-essentials" {print $2; exit}' "$f"
+}
+# write_older_pip_list OUT: the main pip list with its two Qt lines replaced
+# by the older-Linux pins; stops when the main list no longer has exactly one
+# line for each
+write_older_pip_list() {
+    local out=$1 name n
+    for name in pyside6-essentials shiboken6; do
+        n=$(grep -ciE "^${name}==" "$SPEC/requirements-pip.txt" || true)
+        [ "$n" = 1 ] || fail "the pip list changed: $n lines for $name in envs/fusion_mesmer/requirements-pip.txt (exactly 1 expected)." \
+                             "update envs/fusion_mesmer/requirements-pip-older-linux.txt to match, or report it"
+    done
+    {
+        grep -viE '^(pyside6-essentials|shiboken6)==' "$SPEC/requirements-pip.txt"
+        grep -vE '^[[:space:]]*(#|$)' "$OLDER_PINS"
+    } > "$out"
+}
 sd_lock_id() { cat "$SD_SPEC/conda-linux-64.lock" "$SD_SPEC/requirements-pip.txt" | sha256sum | cut -c1-8; }
 sd_env_prefix() { echo "$ROOT/envs/block01_spatialdata-$(sd_lock_id)"; }
 core_version() { awk -F'"' '/^version = /{print $2; exit}' "$CARGO_TOML"; }
@@ -293,20 +346,22 @@ ensure_environment() {
                  "install into a new location: bash scripts/install_block01.sh --root NEW_DIR" ;;
         interrupted)
             say "an earlier install into $ENV_PREFIX stopped half-way: removing it and starting again"
-            case "$ENV_PREFIX" in "$ROOT"/envs/fusion_mesmer-????????) ;; *) fail "refusing to remove $ENV_PREFIX (unexpected path)" "" ;; esac
+            case "$ENV_PREFIX" in "$ROOT"/envs/fusion_mesmer-????????|"$ROOT"/envs/fusion_mesmer-qt69-????????) ;; *) fail "refusing to remove $ENV_PREFIX (unexpected path)" "" ;; esac
             rm -rf -- "$ENV_PREFIX" ;;
     esac
     mkdir -p "$ROOT/envs" "$ROOT/mamba"
     # ownership first, so an interruption at any later point is recognised
     printf 'created by %s\npid %s\ntime %s\ncheckout %s\n' "$0" "$$" "$(date -Is)" "$REPO" > "$ENV_PREFIX.owner"
+    # the 6.9.3 route's pip list, kept beside the prefix for the record
+    if [ "$OLDER_QT" = 1 ]; then write_older_pip_list "$(pip_list)"; fi
     say "creating the environment (conda part, about 160 packages): $ENV_PREFIX"
     # micromamba gets a HOME of its own: it would add the prefix to
     # ~/.conda/environments.txt and make ~/.mamba
     mkdir -p "$ROOT/mamba/home"
     HOME="$ROOT/mamba/home" MAMBA_ROOT_PREFIX="$ROOT/mamba" CONDA_PKGS_DIRS="$ROOT/mamba/pkgs" \
         run "$MAMBA" create -y -q -p "$ENV_PREFIX" --file "$SPEC/conda-linux-64.lock"
-    say "installing the pip part (about 220 packages, PyTorch included)"
-    run "$PY" -m pip install -q --no-deps -r "$SPEC/requirements-pip.txt"
+    say "installing the pip part (about 220 packages, PyTorch included; PySide6 $(qt_version))"
+    run "$PY" -m pip install -q --no-deps -r "$(pip_list)"
     RUN_HINT="report this output: the pinned packages do not fit together on this machine" run "$PY" -m pip check
     date -Is > "$ENV_PREFIX/.block01_env_ok"
 }
@@ -668,6 +723,7 @@ write_record() {
         printf 'BLOCK01_ROOT=%q\n' "$ROOT"
         printf 'BLOCK01_PREFIX=%q\n' "$ENV_PREFIX"
         printf 'BLOCK01_CORE_VERSION=%q\n' "$(core_version)"
+        printf 'BLOCK01_QT_VERSION=%q\n' "$(qt_version)"
         printf 'export KERAS_BACKEND=tensorflow\n'
         printf 'export KERAS_HOME=%q\n' "$ROOT/keras"
         printf 'export CUPY_CACHE_DIR=%q\n' "$ROOT/cache/cupy"
@@ -681,7 +737,7 @@ write_record() {
     printf 'core %s\ntime %s\n' "$(core_version)" "$(date -Is)" > "$ENV_PREFIX/.block01_install_ok"
 }
 
-usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
 
 main() {
     while [ $# -gt 0 ]; do
@@ -692,6 +748,7 @@ main() {
             --models) MODELS_IN=$(realpath -m "$2"); shift 2 ;;
             --accept-model-licences) ACCEPT_LICENCES=1; shift ;;
             --no-spatialdata) NO_SPATIALDATA=1; shift ;;
+            --older-qt) OLDER_QT=1; shift ;;
             -h|--help) usage; exit 0 ;;
             *) usage; exit 2 ;;
         esac

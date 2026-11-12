@@ -120,9 +120,12 @@ Install root default `~/.local/share/block01` (`--root` overrides). Plain
 bash, `set -euo pipefail`, quoted paths; every step prints what it does and
 on failure the step, the exact failing command and what to do.
 
-1. **Preflight** (writes nothing): Linux x86_64, glibc ≥ 2.34 (was 2.28; raised
-   2026-11-08 because PySide6 6.10+ ships Linux wheels only as
-   manylinux_2_34, docs/v17_pyside6_wrapup_plan.md), `nvidia-smi`
+1. **Preflight** (writes nothing): Linux x86_64, glibc ≥ 2.28 (raised to
+   2.34 on 2026-11-08 because PySide6 6.10+ ships Linux wheels only as
+   manylinux_2_34, docs/v17_pyside6_wrapup_plan.md; back to 2.28 on
+   2026-11-11: 2.28–2.33 get PySide6 6.9.3 in an environment of their own,
+   `fusion_mesmer-qt69-<id>`, docs/v17_older_linux_qt_plan.md; `--older-qt`
+   picks that route on a newer system), `nvidia-smi`
    and driver (warn below the verified 535), `tar`/`bzip2`/`curl`; free
    space on each filesystem that receives the env (~12 GB), package caches,
    models (~1.4 GB); HTTPS reachability of conda-forge, PyPI, the PyTorch

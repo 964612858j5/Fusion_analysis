@@ -328,14 +328,15 @@ ensure_models'''
     assert sorted(p.name for p in dest.parent.iterdir()) == ["cellpose_cpsam"]   # no stage left
 
 
-def _preflight(tmp_path, free, extra=""):
+def _preflight(tmp_path, free, extra="", after=""):
     body = f'''ROOT="{tmp_path}"; BUILD_CORE=0
 curl() {{ return 0; }}
 check_system_libs() {{ return 0; }}
 free_gb() {{ echo {free}; }}
 lock_id() {{ echo abcdef12; }}
 {extra}
-preflight'''
+preflight
+{after}'''
     return _bash(INSTALL, body)
 
 
@@ -592,17 +593,221 @@ def test_the_space_check_counts_the_spatialdata_environment_left(tmp_path):
     assert r.returncode == 0 and "about 1 GB" in r.stdout                  # built: 0
 
 
-def test_the_glibc_floor_is_what_the_qt_wheels_need(tmp_path):
-    """PySide6 6.10+ has Linux wheels only for glibc >= 2.34 (manylinux_2_34):
-    an older system is refused at the pre-check, not half-way through pip."""
-    stubs = '''uname() { case "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac; }
+_LINUX = '''uname() { case "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac; }
 flock() { :; }
 getconf() { echo "glibc %s"; }'''
-    for version, refused in (("2.31", True), ("2.34", False), ("2.35", False)):
-        r = _preflight(tmp_path, 100, stubs % version)
-        line = next(l for l in r.stdout.splitlines() if " glibc: " in l)   # "[install]   glibc:    2.31 ..."
-        assert line.split("glibc:", 1)[1].split()[0] == version, r.stdout
-        if refused:
-            assert "too old (2.34 or newer needed" in line and r.returncode == 1, r.stdout
-        else:
-            assert "too old" not in line and r.returncode == 0, r.stdout
+
+
+@pytest.mark.parametrize("version,route", [
+    ("2.27", "refused"),
+    ("2.28", "6.9.3"), ("2.31", "6.9.3"), ("2.33", "6.9.3"),
+    ("2.34", "6.11.3"), ("2.35", "6.11.3"),
+])
+def test_the_glibc_decides_the_qt_route(tmp_path, version, route):
+    """docs/v17_older_linux_qt_plan.md §3.2: PySide6 6.10+ has Linux wheels
+    only for glibc >= 2.34; 2.28-2.33 get 6.9.3 (the last release built for
+    2.28) in an environment of their own; older is refused at the pre-check,
+    not half-way through pip."""
+    r = _preflight(tmp_path, 100, _LINUX % version, after='echo "ROUTE=$OLDER_QT $(env_prefix)"')
+    line = next(l for l in r.stdout.splitlines() if " glibc: " in l)   # "[install]   glibc:    2.31 ..."
+    assert line.split("glibc:", 1)[1].split()[0] == version, r.stdout
+    if route == "refused":
+        assert "too old (2.28 or newer needed" in line and r.returncode == 1, r.stdout
+        return
+    assert "too old" not in line and r.returncode == 0, r.stdout + r.stderr
+    if route == "6.9.3":
+        assert "uses PySide6 6.9.3 (the last release built for this glibc)" in line
+        assert f"ROUTE=1 {tmp_path}/envs/fusion_mesmer-qt69-abcdef12" in r.stdout
+    else:
+        assert "PySide6" not in line
+        assert f"ROUTE=0 {tmp_path}/envs/fusion_mesmer-abcdef12" in r.stdout
+
+
+def test_older_qt_picks_the_6_9_route_on_a_newer_glibc(tmp_path):
+    body = f'''{_LINUX % "2.35"}
+curl() {{ return 0; }}
+check_system_libs() {{ return 0; }}
+free_gb() {{ echo 100; }}
+lock_id() {{ echo abcdef12; }}
+main --root "{tmp_path}" --check-only --older-qt'''
+    r = _bash(INSTALL, body)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "uses PySide6 6.9.3 (--older-qt)" in r.stdout and "check only: nothing was written" in r.stdout
+    assert not (tmp_path / "envs").exists()
+
+
+def _ids():
+    spec = REPO / "envs" / "fusion_mesmer"
+    main = (spec / "conda-linux-64.lock").read_bytes() + (spec / "requirements-pip.txt").read_bytes()
+    older = main + (spec / "requirements-pip-older-linux.txt").read_bytes()
+    return hashlib.sha256(main).hexdigest()[:8], hashlib.sha256(older).hexdigest()[:8]
+
+
+def test_each_route_has_its_own_prefix_and_the_6_11_one_is_unchanged(tmp_path):
+    main_id, older_id = _ids()
+    r = _bash(INSTALL, f'ROOT="{tmp_path}"; env_prefix; OLDER_QT=1; env_prefix; qt_version; OLDER_QT=0; qt_version')
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == [f"{tmp_path}/envs/fusion_mesmer-{main_id}",          # as before this block
+                                f"{tmp_path}/envs/fusion_mesmer-qt69-{older_id}", "6.9.3", "6.11.3"]
+    assert main_id != older_id
+
+
+def test_the_older_pin_list_is_exactly_the_two_qt_pins():
+    lines = [l for l in (REPO / "envs/fusion_mesmer/requirements-pip-older-linux.txt")
+             .read_text(encoding="utf-8").splitlines() if l.strip() and not l.startswith("#")]
+    assert lines == ["pyside6-essentials==6.9.3", "shiboken6==6.9.3"]
+
+
+def _spec(tmp_path, pip_lines):
+    spec = tmp_path / "spec"
+    spec.mkdir(exist_ok=True)
+    (spec / "requirements-pip.txt").write_text("\n".join(pip_lines) + "\n")
+    (spec / "requirements-pip-older-linux.txt").write_text(
+        "# why\npyside6-essentials==6.9.3\nshiboken6==6.9.3\n")
+    (spec / "conda-linux-64.lock").write_text("@EXPLICIT\n")
+    return spec
+
+
+def test_the_6_9_pip_list_replaces_exactly_the_two_qt_lines(tmp_path):
+    main = ["# pip part", "--extra-index-url https://x", "numpy==1.26.4", "pyside6-essentials==6.11.3",
+            "scipy==1.15.3", "shiboken6==6.11.3", "zarr==2.18.3"]
+    spec = _spec(tmp_path, main)
+    out = tmp_path / "out.txt"
+    r = _bash(INSTALL, f'SPEC="{spec}"; OLDER_PINS="{spec}/requirements-pip-older-linux.txt"; write_older_pip_list "{out}"')
+    assert r.returncode == 0, r.stderr
+    got = out.read_text(encoding="utf-8").splitlines()
+    assert got == [l for l in main if "6.11.3" not in l] + ["pyside6-essentials==6.9.3", "shiboken6==6.9.3"]
+    # a main list without one of them (or with two) stops: the pins no longer fit it
+    for broken in ([l for l in main if not l.startswith("shiboken6")], main + ["shiboken6==6.11.2"]):
+        spec = _spec(tmp_path, broken)
+        r = _bash(INSTALL, f'SPEC="{spec}"; OLDER_PINS="{spec}/requirements-pip-older-linux.txt"; write_older_pip_list "{out}"')
+        assert r.returncode == 1 and "the pip list changed" in r.stderr and "shiboken6" in r.stderr
+
+
+@pytest.mark.parametrize("name", ["pyside6-essentials", "shiboken6"])
+@pytest.mark.parametrize("count", [0, 2])
+def test_a_changed_main_list_stops_the_6_9_route_before_any_environment(tmp_path, name, count):
+    main = [l for l in (REPO / "envs/fusion_mesmer/requirements-pip.txt").read_text(encoding="utf-8").splitlines()
+            if not l.lower().startswith(name + "==")] + [f"{name}==6.11.{i}" for i in range(count)]
+    spec = _spec(tmp_path, main)
+    r = _ensure_env(tmp_path, f'OLDER_QT=1; SPEC="{spec}"; OLDER_PINS="{spec}/requirements-pip-older-linux.txt"')
+    assert r.returncode == 1 and "the pip list changed" in r.stderr and name in r.stderr
+    assert not (tmp_path / "calls").exists()                       # no micromamba, no pip
+    assert not (tmp_path / "envs" / "fusion_mesmer-qt69-abcdef12").exists()
+
+
+@pytest.mark.parametrize("older", [0, 1])
+def test_ensure_environment_gives_pip_the_routes_list(tmp_path, older):
+    r = _ensure_env(tmp_path, f"OLDER_QT={older}")
+    assert r.returncode == 0, r.stderr
+    calls = (tmp_path / "calls").read_text(encoding="utf-8")
+    if older:
+        prefix = tmp_path / "envs" / "fusion_mesmer-qt69-abcdef12"
+        listing = pathlib.Path(f"{prefix}.requirements-pip.txt")
+        assert f"pip install -q --no-deps -r {listing}" in calls
+        text = listing.read_text(encoding="utf-8")
+        assert "pyside6-essentials==6.9.3" in text and "6.11.3" not in text
+        assert "torch==2.5.1+cu121" in text
+        assert "PySide6 6.9.3" in r.stdout
+    else:
+        prefix = tmp_path / "envs" / "fusion_mesmer-abcdef12"
+        assert f"pip install -q --no-deps -r {REPO}/envs/fusion_mesmer/requirements-pip.txt" in calls
+        assert not list((tmp_path / "envs").glob("*.requirements-pip.txt"))
+    assert f"PREFIX={prefix}" in r.stdout and (prefix / ".block01_env_ok").exists()
+    assert "pip check" in calls
+
+
+def _complete(path):
+    path.mkdir(parents=True)
+    path.with_name(path.name + ".owner").write_text("ours")
+    (path / ".block01_install_ok").write_text("core 0.2.1")
+
+
+@pytest.mark.parametrize("state", ["absent", "interrupted", "foreign", "built", "complete"])
+def test_the_6_9_route_keeps_to_its_own_prefix(tmp_path, state):
+    """With a complete 6.11.3 environment in the same root, a 6.9.3-route
+    run creates, redoes, refuses or keeps only its own `qt69` prefix."""
+    other = tmp_path / "envs" / "fusion_mesmer-abcdef12"
+    _complete(other)
+    before = _tree(other)
+    mine = tmp_path / "envs" / "fusion_mesmer-qt69-abcdef12"
+    owner = tmp_path / "envs" / "fusion_mesmer-qt69-abcdef12.owner"
+    if state != "absent":
+        (mine / "half").mkdir(parents=True)
+        if state != "foreign":
+            owner.write_text("ours")
+        if state == "built":
+            (mine / ".block01_env_ok").write_text("t")
+        if state == "complete":
+            (mine / ".block01_install_ok").write_text("core 0.2.1")
+    r = _ensure_env(tmp_path, "OLDER_QT=1")
+    assert _tree(other) == before and other.with_name(other.name + ".owner").read_text() == "ours"
+    calls = (tmp_path / "calls").read_text(encoding="utf-8") if (tmp_path / "calls").exists() else ""
+    if state in ("absent", "interrupted"):
+        assert r.returncode == 0, r.stderr
+        assert f"create -y -q -p {mine}" in calls and not (mine / "half").exists()
+        assert (mine / ".block01_env_ok").exists()
+    elif state == "foreign":
+        assert r.returncode == 1 and "was not created by this installer" in r.stderr
+        assert (mine / "half").exists() and calls == ""
+    else:
+        assert r.returncode == 0 and calls == "" and (mine / "half").exists()
+
+
+def test_the_removal_guard_takes_only_the_two_names(tmp_path):
+    odd = tmp_path / "envs" / "fusion_mesmer-qt70-abcdef12"
+    (odd / "half").mkdir(parents=True)
+    odd.with_name(odd.name + ".owner").write_text("ours")
+    r = _ensure_env(tmp_path, f'env_prefix() {{ echo "{odd}"; }}')
+    assert r.returncode == 1 and "refusing to remove" in r.stderr
+    assert (odd / "half").exists()
+
+
+def test_the_space_check_counts_the_6_9_environment_left(tmp_path):
+    _complete(tmp_path / "envs" / "fusion_mesmer-abcdef12")          # the 6.11.3 one does not count
+    (tmp_path / "models" / "cellpose_cpsam").mkdir(parents=True)
+    (tmp_path / "models" / "cellpose_cpsam" / "cpsam").write_bytes(b"x")
+    stub = _LINUX % "2.31" + "\nsd_lock_id() { echo 5d5d5d5d; }\nNO_SPATIALDATA=1"
+    r = _preflight(tmp_path, 100, stub)
+    assert r.returncode == 0 and "about 14 GB" in r.stdout, r.stdout
+    mine = tmp_path / "envs" / "fusion_mesmer-qt69-abcdef12"
+    mine.mkdir()
+    mine.with_name(mine.name + ".owner").write_text("ours")
+    r = _preflight(tmp_path, 100, stub + '\ndu() { echo "12582912 $2"; }')   # interrupted: 12 GB back
+    assert r.returncode == 0 and "about 2 GB" in r.stdout, r.stdout
+    (mine / ".block01_env_ok").write_text("t")
+    r = _preflight(tmp_path, 100, stub)
+    assert r.returncode == 0 and "about 1 GB" in r.stdout, r.stdout
+    (mine / ".block01_install_ok").write_text("core 0.2.1")
+    r = _preflight(tmp_path, 100, stub)
+    assert r.returncode == 0 and "about 1 GB" in r.stdout, r.stdout
+    (mine / ".block01_install_ok").unlink()
+    (mine / ".block01_env_ok").unlink()
+    r = _preflight(tmp_path, 1, stub + '\ndu() { echo "0 $2"; }')     # interrupted, nothing back, 1 GB free
+    assert r.returncode == 1 and "NOT ENOUGH" in r.stdout, r.stdout
+
+
+@pytest.mark.parametrize("older,version", [(0, "6.11.3"), (1, "6.9.3")])
+def test_the_record_names_the_qt_version(tmp_path, older, version):
+    state = tmp_path / "state"
+    prefix = tmp_path / "envs" / "p"
+    prefix.mkdir(parents=True)
+    body = f'''
+ROOT="{tmp_path}"; STATE_DIR="{state}"; mkdir -p "$STATE_DIR"; OLDER_QT={older}
+ENV_PREFIX="{prefix}"; CUDA_DIR=""; SD_PREFIX=""
+model_dir() {{ echo "{tmp_path}/models/$1"; }}
+write_record
+'''
+    r = _bash(INSTALL, body)
+    assert r.returncode == 0, r.stderr
+    assert f"BLOCK01_QT_VERSION={version}\n" in (state / "install.env").read_text(encoding="utf-8")
+
+
+def test_the_missing_library_hint_names_epel_for_rhel(tmp_path):
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "ldconfig").write_text("#!/bin/sh\necho\n")
+    (fake / "ldconfig").chmod(0o755)
+    r = _bash(INSTALL, "check_system_libs", env={"PATH": f"{fake}:{os.environ['PATH']}"})
+    assert r.returncode == 1 and "libxcb-cursor.so.0" in r.stdout
+    assert "RHEL/Rocky: sudo dnf install" in r.stdout and "xcb-util-cursor, from EPEL" in r.stdout

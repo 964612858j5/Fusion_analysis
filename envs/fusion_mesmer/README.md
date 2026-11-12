@@ -11,6 +11,7 @@ as dependency sets (plan 7.10).
 |---|---|
 | `conda-linux-64.lock` | conda part, explicit lock: exact package URLs and md5, linux-64 only (161 packages) |
 | `requirements-pip.txt` | pip part: every distribution pip installed, exact versions, installed with `--no-deps` (219 packages; anndata + array-api-compat added for Step4 h5ad, block S4-2; pyarrow 25.0.1 for the object layer's Parquet tables, block A4 -- only `core/object_tables.py` imports it) |
+| `requirements-pip-older-linux.txt` | the interface's Qt on Linux with glibc 2.28-2.33: `pyside6-essentials` and `shiboken6` 6.9.3, put by the installer in place of `requirements-pip.txt`'s two Qt lines (PyPI's 6.10+ wheels need glibc 2.34; docs/v17_older_linux_qt_plan.md) |
 | `environment.yml` | human-readable export of both parts, for review and diffing only |
 | `models.json` | model manifest: where each engine loads its weights from, size and SHA-256 of every file |
 
@@ -20,6 +21,21 @@ Regenerate all four from the live environment with
 ## Target machine
 
 - Linux x86_64. The lock is platform-specific; no other platform is supported.
+- glibc 2.28 or newer. Below 2.34 the installer builds the environment with
+  PySide6 6.9.3 (`requirements-pip-older-linux.txt`) into
+  `fusion_mesmer-qt69-<id>`; `--older-qt` does the same on a newer system.
+  On RHEL/Rocky 8, `libxcb-cursor.so.0` (`xcb-util-cursor`) is in EPEL.
+- **The code must keep running on PySide6 6.9.3.** Before a release, on the
+  Mac or any test machine, put the two 6.9.3 wheels first on the path and
+  run the tests (the environment itself is left alone):
+
+  ```bash
+  python -m pip install --no-deps --target /tmp/ps693 pyside6-essentials==6.9.3 shiboken6==6.9.3
+  PYTHONPATH=/tmp/ps693:$PYTHONPATH QT_QPA_PLATFORM=offscreen python -m pytest tests
+  ```
+
+  Compare with the same run without `/tmp/ps693`: no test may fail only on
+  6.9.3.
 - An NVIDIA driver. This environment was built and verified with driver
   535.309.01 on an RTX 4090; older drivers are untested.
 - **CUDA 12.2 headers at `/usr/local/cuda-12.2`.** cupy compiles the GPU
@@ -65,7 +81,7 @@ checks, into its own root (`~/.local/share/block01`, or `--root DIR`):
 
 | what | where |
 |---|---|
-| environment | `<root>/envs/fusion_mesmer-<8 hex of lock + pip file>` (+ `.owner` beside it, `.block01_install_ok` in it when finished) |
+| environment | `<root>/envs/fusion_mesmer-<8 hex of lock + pip file>` (+ `.owner` beside it, `.block01_install_ok` in it when finished); below glibc 2.34 `fusion_mesmer-qt69-<8 hex of lock + both pip files>`, its pip list beside it as `.requirements-pip.txt` |
 | viewer core | the prebuilt wheel whose SHA-256 is in `native/fusion_viewer_core/wheels.lock`, or `--build-core` |
 | models | `<root>/models/<models.json entry>/`, found through each entry's `env_override` variable |
 | per checkout | `<repo>/.block01/install.env`, `pkg/block01` link, `run/` (working directory) |

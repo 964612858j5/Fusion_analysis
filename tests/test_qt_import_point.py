@@ -113,7 +113,9 @@ def test_the_installers_pip_list_installs_the_binding_the_import_point_names():
     """The installer builds the env from the conda lock + this pip list
     (scripts/install_block01.sh), not from environment.yml: it must carry
     the binding `qt/__init__.py` imports, at the version the other env files
-    pin, and no other binding."""
+    pin, and no other binding. Below glibc 2.34 the installer swaps in the
+    older-Linux list's two pins (docs/v17_older_linux_qt_plan.md §3.3), so
+    the running binding is one of the two lists' versions."""
     from block01 import qt
     assert qt.BINDING == "PySide6"
     pip = _pins("envs/fusion_mesmer/requirements-pip.txt")
@@ -124,8 +126,12 @@ def test_the_installers_pip_list_installs_the_binding_the_import_point_names():
             name, _, version = line.strip().lstrip("- ").partition("==")
             yml[name.strip().lower().replace("_", "-")] = version.strip()
     assert [n for n in pip if n.startswith(("pyqt5", "pyqt6", "pyside2"))] == []
+    older = _pins("envs/fusion_mesmer/requirements-pip-older-linux.txt")
+    assert sorted(older) == ["pyside6-essentials", "shiboken6"]
+    assert len(set(older.values())) == 1
     for name in ("pyside6-essentials", "shiboken6"):
-        assert pip.get(name) == ci.get(name) == yml.get(name) == qt.BINDING_VERSION, name
+        assert pip.get(name) == ci.get(name) == yml.get(name), name
+    assert qt.BINDING_VERSION in (pip["pyside6-essentials"], older["pyside6-essentials"])
 
 
 def test_the_gpu_benchmark_records_the_binding_it_runs_on():

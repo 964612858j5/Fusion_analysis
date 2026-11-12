@@ -446,6 +446,10 @@ class Step1ViewerHost(QtWidgets.QWidget):
             item = layout.itemAt(index)
             child = item.widget()
             if child is not None and child is not widget:
+                # hidden FIRST: a widget just added to this visible layout has
+                # a show queued by Qt, and a parentless widget it reaches
+                # becomes a window of its own (docs/v17_stray_viewer_window_plan.md)
+                child.hide()
                 child.setParent(None)
         if widget is not None and layout.indexOf(widget) < 0:
             layout.addWidget(widget)

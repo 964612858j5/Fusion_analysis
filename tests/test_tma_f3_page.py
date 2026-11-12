@@ -438,8 +438,8 @@ def test_save_works_before_find_cores_and_lists_it_as_open(app, env, monkeypatch
     page.cores.btn_map.click()
     page.btn_save.click()                                             # never refused
     rec = K.load_saved(page.ctx["project_dir"])
-    assert any("cores are not found yet" in p for p in rec["open_issues"]) and not rec["complete"]
-    assert "open" in page.lbl_saved.text() and "cores are not found yet" in page.lbl_saved.toolTip()
+    assert any("not attached to the cores yet" in p for p in rec["open_issues"]) and not rec["complete"]
+    assert "open" in page.lbl_saved.text() and "not attached to the cores yet" in page.lbl_saved.toolTip()
     page.shutdown()
 
 

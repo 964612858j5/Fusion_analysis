@@ -211,7 +211,7 @@ def save(project_dir, d: Dict, study: Optional[Dict], channel_names: Optional[Li
     from ..project_identity import region_id
     issues = open_issues(d, study, channel_names)
     if study is not None and d.get("map_sha256") is None and study.get("map_sheet"):
-        issues.insert(0, "the map sheet is chosen but the cores are not found yet")
+        issues.insert(0, "the map sheet is chosen but not attached to the cores yet (Find cores, or Attach map sheet)")
     path = saved_path(project_dir)
     try:
         old = load_saved(project_dir)

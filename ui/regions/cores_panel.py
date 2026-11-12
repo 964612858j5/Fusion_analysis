@@ -111,13 +111,42 @@ class CoresPanel(QWidget, CoresActions):
         self.lbl_info.setText(text)
         print(f"[Regions] {text}")
 
+    def nucleus_channel(self):
+        names = self.page.ctx.get("channel_names") or []
+        return next((n for n in names if n.strip().lower() == "dapi"), None)
+
+    def map_unattached(self) -> bool:
+        """The study exists and the open document has cores found without
+        its map sheet (docs/v17_find_cores_without_map_plan.md §3.2.4)."""
+        h = self.page.holder
+        return self.study is not None and h is not None and not h.d.get("map_sha256") and bool(h.d["pieces"])
+
+    def can_attach_map(self) -> bool:
+        """... and it can be attached here: an editable whole-slide draft."""
+        h = self.page.holder
+        return self.map_unattached() and not h.read_only and self.page.cores_editable()
+
+    def map_blocker(self):
+        """Why numbering cannot run because of the map sheet, or ""."""
+        if self.study is None:
+            return "No TMA map sheet is loaded yet: choose the map sheet to number the cores."
+        h = self.page.holder
+        if h is not None and h.d["pieces"] and not h.d.get("map_sha256"):
+            return "The map sheet is not attached to these cores yet: click Attach map sheet."
+        return ""
+
     def sync_enabled(self, editable):
         pd = self.page.ctx.get("project_dir")
         cores_ok = editable and self.page.cores_editable()
         self.lbl_roi.setVisible(bool(pd) and not self.page.cores_editable())
-        self.btn_map.setEnabled(bool(pd) and self.study is None and self.page.cores_editable())
-        self.btn_find.setEnabled(self.study is not None and not self._detecting and cores_ok)
-        self.numbering.setEnabled(cores_ok)
+        # the words follow the state, the enabled state where it can be done
+        self.btn_map.setText("Attach map sheet" if self.map_unattached() else "Choose map sheet…")
+        self.btn_map.setEnabled(bool(pd) and self.page.cores_editable()
+                                and (self.can_attach_map()
+                                     or (self.study is None and (self.page.holder is None or editable))))
+        self.btn_find.setEnabled(bool(pd) and self.nucleus_channel() is not None and not self._detecting
+                                 and cores_ok)
+        self.numbering.setEnabled(self.numbering_allowed())
 
     # ── the overlay ──
     def draw_parts(self):
@@ -172,6 +201,20 @@ class CoresPanel(QWidget, CoresActions):
             rows = [{"kind": "position", "id": r["position_key"], "run": None, "position": r["label"],
                      "donor": r["donor"], "sample": r["sample"], "status": "未对应" if r["donor"] else "空位",
                      "pieces": "", "tissue": ""} for r in recs]
+            if h is not None and h.d["pieces"]:
+                # cores found without the map sheet: listed, not numbered (plan §3.2.6)
+                d = h.d
+                for uid, c in d["cores"].items():
+                    cy, cx = D.core_centre(d, uid)
+                    rows.append({"kind": "core", "id": uid, "run": None,
+                                 "position": c["custom_label"] or f"core at ({cy:.0f}, {cx:.0f})", "donor": "",
+                                 "sample": "", "status": "未对应", "pieces": len(c["pieces"]),
+                                 "tissue": self._tissue(uid)})
+                free = sum(1 for p in d["pieces"].values() if p["owner"] is None and not p["dropped"])
+                what = "Attach the map sheet" if self.study is not None else "Choose the map sheet"
+                self.table.set_rows(rows, f"{len(d['cores'])} cores found, {free} unassigned pieces. "
+                                    f"{what} to number them.", h.read_only or not self.page.cores_editable())
+                return
             n = sum(1 for r in recs if r["donor"])
             self.table.set_rows(rows, f"With samples {n}. Find cores to start." if rows else "", True)
             if self.candidates is not None and not self._detecting:
@@ -265,8 +308,12 @@ class CoresPanel(QWidget, CoresActions):
         return out
 
     def numbering_allowed(self) -> bool:
+        """Numbering follows the DOCUMENT's map sheet, not the study alone
+        (plan §3.2.4): after an Undo of the attach the study is still there,
+        the positions are not."""
         h = self.page.holder
-        return h is not None and not h.read_only and self.study is not None and self.page.cores_editable()
+        return (h is not None and not h.read_only and self.study is not None and self.page.cores_editable()
+                and bool(h.d.get("map_sha256")))
 
     def numbering_changed(self):
         seq = self.numbering_sequence()
@@ -299,8 +346,7 @@ class CoresPanel(QWidget, CoresActions):
         """A Select ▸ Click numbering ready to confirm (Ctrl+Z drops it
         before undoing an edit, as for a line)."""
         page = self.page
-        if (page.ctl.tool != "select" or self.study is None or page.holder is None or page.holder.read_only
-                or not page.cores_editable() or not self.numbering_sequence()):
+        if (page.ctl.tool != "select" or not self.numbering_allowed() or not self.numbering_sequence()):
             return False
         plan = self.current_plan()
         d = page.holder.d                         # already bound as planned (just confirmed): nothing pending

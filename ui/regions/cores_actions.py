@@ -22,6 +22,9 @@ class CoresActions:
     # ── numbering ──
     def confirm_numbering(self):
         page = self.page
+        if not self.numbering_allowed():
+            self.say(self.map_blocker() or "Numbering is not possible here.")
+            return
         plan = self.current_plan()
         if not plan["ok"]:
             self.say("; ".join(plan["problems"]))
@@ -62,6 +65,9 @@ class CoresActions:
 
     def bind_single(self, text):
         page = self.page
+        if not self.numbering_allowed():
+            self.say(self.map_blocker() or "Numbering is not possible here.")
+            return
         obj = self._selected_object()
         if obj is None:
             self.say("Select a core on the viewer first.")
@@ -201,42 +207,38 @@ class CoresActions:
 
     # ── study, cores ──
     def choose_map(self):
+        """`Choose map sheet…` (no study yet), or `Attach map sheet` (the
+        study exists, the open draft's cores have none: after an Undo or a
+        Revert). Cores already found keep their outlines and get the
+        positions (docs/v17_find_cores_without_map_plan.md §3.2.3-4)."""
         from ...core.tma.map_sheet import MapSheetError
         from ...core.tma.study import StudyError, create_study
         page = self.page
-        path, _ = QFileDialog.getOpenFileName(page, "Choose the TMA map sheet", "", "Excel (*.xlsx)")
-        if not path:
-            return
-        try:
-            create_study(page.ctx["project_dir"], page.ctx["slide_path"], path)
-        except (MapSheetError, StudyError, ValueError) as exc:
-            QMessageBox.warning(page, "Map sheet", str(exc))
-            return
-        self.load_study()
+        if self.study is None:
+            path, _ = QFileDialog.getOpenFileName(page, "Choose the TMA map sheet", "", "Excel (*.xlsx)")
+            if not path:
+                return
+            try:
+                create_study(page.ctx["project_dir"], page.ctx["slide_path"], path)
+            except (MapSheetError, StudyError, ValueError) as exc:
+                QMessageBox.warning(page, "Map sheet", str(exc))
+                return
+            self.load_study()
+        if self.study is not None and self.can_attach_map():
+            if page.edit(D.attach_map, self.study) is not None:
+                self.say(f"Map sheet attached to the {len(page.holder.d['cores'])} core(s) found: number them.")
         page.refresh()
 
     def find_cores(self):
         from ..tma import workers
         page = self.page
-        names = page.ctx.get("channel_names") or []
-        nuc = next((n for n in names if n.strip().lower() == "dapi"), None)
-        if self.study is None or nuc is None:
-            self.say("Finding cores needs the map sheet and a channel named DAPI.")
+        nuc = self.nucleus_channel()
+        if nuc is None:
+            self.say("Finding cores needs a channel named DAPI.")
             return
+        # no diameter: the core size is estimated from the slide (plan §3.1),
+        # with or without a map sheet
         kw = {"channel": nuc}
-        mm = self.study["map_sheet"].get("diameter_mm")
-        if page.ctx.get("pixel_um"):
-            if not mm:
-                mm, ok = QInputDialog.getDouble(page, "Core diameter", "Core diameter (mm):", 1.0, 0.05, 10.0, 2)
-                if not ok:
-                    return
-            kw["core_diameter_um"] = float(mm) * 1000.0
-        else:
-            px, ok = QInputDialog.getDouble(page, "Core diameter", "The slide has no pixel size. Core diameter in "
-                                            "level-0 pixels:", 2000.0, 10.0, 1e6, 0)
-            if not ok:
-                return
-            kw["core_diameter_px"] = float(px)
         self._detecting = True
         self.say("Finding cores…")
         page.refresh()
@@ -256,6 +258,7 @@ class CoresActions:
             page.refresh()
             return
         n = len(rec["candidates"])
+        size = self.size_text(rec)
         h = page.holder
         has_cores = h is not None and not h.read_only and (bool(h.d["pieces"]) or bool(h.d.get("map_sha256")))
         # replaces the draft's cores: the red choice, never the default
@@ -270,9 +273,24 @@ class CoresActions:
             page._open_draft(D.new_document(page.ctx["slide_id"], page.shape()))
         page.selected = None
         page.ctl.cancel()
-        page.edit(D.attach_tma, self.study, rec)
-        self.say(f"Candidates v{rec['version']}: {n} found")
+        if self.study is not None:
+            page.edit(D.attach_tma, self.study, rec)
+            self.say(f"Candidates v{rec['version']}: {n} found ({size})")
+        else:
+            page.edit(D.attach_candidates, rec)
+            self.say(f"Candidates v{rec['version']}: {n} found ({size}). Choose the map sheet to number them.")
         page.refresh()
+
+    def size_text(self, rec):
+        """How big the cores were taken to be, with the map sheet's
+        diameter beside it when there is one."""
+        px = float(rec.get("core_diameter_px") or 0)
+        um = rec.get("pixel_um")
+        what = "estimated" if rec.get("core_diameter_source", "given") == "estimated" else "given"
+        text = (f"core size {what} {px * (float(um[0]) + float(um[1])) / 2 / 1000:.2f} mm" if um
+                else f"core size {what} {px:.0f} px")
+        mm = ((self.study or {}).get("map_sheet") or {}).get("diameter_mm")
+        return text + (f"; map sheet: {float(mm):g} mm" if mm else "")
 
     def _detect_failed(self, gen, msg):
         if gen != self._gen:

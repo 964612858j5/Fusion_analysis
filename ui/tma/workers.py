@@ -50,4 +50,7 @@ class DetectWorker(QThread):
             rec = da.save_candidates(self.project_dir, res, self.slide_id)
             self.done.emit(self.gen, rec)
         except Exception as exc:                            # noqa: BLE001
-            self.failed.emit(self.gen, f"{type(exc).__name__}: {exc}")
+            from ...core.tma.dearray import CoreSizeError
+            # no tissue to estimate the core size from: said as it is
+            self.failed.emit(self.gen, str(exc) if isinstance(exc, CoreSizeError)
+                             else f"{type(exc).__name__}: {exc}")

@@ -403,7 +403,11 @@ class RegionsPage(QWidget, VersionsMixin, ShapesMixin):
     def annotate_blocker(self):
         """Why numbering cannot start yet (no map sheet / no core found), or ""."""
         if getattr(self.cores, "study", None) is None:
-            return ("No TMA map sheet is loaded yet.\n\nChoose the map sheet, click Find cores, "
+            return ("No TMA map sheet is loaded yet.\n\nFind cores works without one; choose the map sheet "
+                    "to number the cores with Annotate.")
+        h = getattr(self, "holder", None)
+        if h is not None and h.d["pieces"] and not h.d.get("map_sha256"):
+            return ("The map sheet is not attached to these cores yet.\n\nClick Attach map sheet (Cores tab), "
                     "then number the cores with Annotate.")
         if not self.numbering_objects():
             return ("No TMA cores have been found yet.\n\nClick Find cores (Cores tab) first, "

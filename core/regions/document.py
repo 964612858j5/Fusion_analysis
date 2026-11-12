@@ -54,25 +54,51 @@ def new_document(slide_id: str, slide_shape: Tuple[int, int], based_on: Optional
             "operations": [], "coverage_confirmed": None, "session": None, "piece_counter": 0}
 
 
+def attach_candidates(d: Dict, candidates: Dict) -> None:
+    """(Re)build the cores from a candidate list (F2) without a map sheet
+    (docs/v17_find_cores_without_map_plan.md §3.2): every candidate is a
+    piece (its outline, or a 64-gon for a format-1 list); one of at least
+    `CORE_PIECE_FRAC` of a core's area starts as its own unmatched core, a
+    smaller one stays unassigned. The map sheet and the positions are
+    cleared; exclusions stay."""
+    _build_pieces(d, candidates)
+    d.update(map_sha256=None, positions={})
+    log(d, {"kind": "attach_candidates", "candidates_version": d["candidates_version"]})
+
+
 def attach_tma(d: Dict, study: Dict, candidates: Dict) -> None:
     """(Re)build the TMA part from the study (F1) and a candidate list (F2):
-    every candidate is a piece (its outline, or a 64-gon for a format-1
-    list); one of at least `CORE_PIECE_FRAC` of a core's area starts as its
-    own unmatched core, a smaller one stays unassigned. Exclusions stay."""
-    from ..tma.cores import position_key
+    the pieces and cores as `attach_candidates`, and one position per map
+    sheet position. Exclusions stay."""
     if study["slide_id"] != d["slide_id"]:
         raise RegionsError("the study is for another slide")
-    sheet = study["map_sheet"]
+    _build_pieces(d, candidates)
+    _set_positions(d, study)
+    log(d, {"kind": "attach_tma", "candidates_version": d["candidates_version"]})
+
+
+def attach_map(d: Dict, study: Dict) -> None:
+    """Attach the study's map sheet to cores found without one (plan
+    §3.2.3): the positions are made; every piece and core keeps its id,
+    outline, owner, `dropped` mark and custom label; every core becomes
+    unnumbered ("unmatched"); the exclusions, `piece_counter`,
+    `candidates_version` and `core_diameter_px` stay."""
+    if study["slide_id"] != d["slide_id"]:
+        raise RegionsError("the study is for another slide")
+    if d.get("map_sha256"):
+        raise RegionsError("the map sheet is already attached")
+    _set_positions(d, study)
+    for c in d["cores"].values():
+        c["position_key"], c["mapping"] = None, "unmatched"
+    log(d, {"kind": "attach_map", "map_sha256": d["map_sha256"]})
+
+
+def _build_pieces(d: Dict, candidates: Dict) -> None:
     shape = tuple(d["slide_shape"])
     dia = float(candidates["core_diameter_px"])
     core_area = math.pi * (dia / 2) ** 2
     d["piece_counter"] = piece_counter(d)          # the old pieces' highest id, before they go
-    d.update(map_sha256=sheet["sha256"], candidates_version=int(candidates["version"]), core_diameter_px=dia,
-             pieces={}, cores={}, positions={})
-    for p in sheet["positions"]:
-        key = position_key(study["slide_id"], sheet["sha256"], p["position_id"])
-        d["positions"][key] = {"observed": None, "missing_reason": "", "qc": "unreviewed", "qc_reasons": [],
-                               "run": False}
+    d.update(candidates_version=int(candidates["version"]), core_diameter_px=dia, pieces={}, cores={})
     for c in candidates["candidates"]:
         pid = f"p{int(c['candidate_id'])}"
         poly = [list(q) for q in c.get("outline") or []]
@@ -83,7 +109,17 @@ def attach_tma(d: Dict, study: Dict, candidates: Dict) -> None:
         if c["area"] >= CORE_PIECE_FRAC * core_area:
             new_core(d, [pid])
     d["piece_counter"] = max(piece_counter(d), *[int(c["candidate_id"]) for c in candidates["candidates"]] or [0])
-    log(d, {"kind": "attach_tma", "candidates_version": d["candidates_version"]})
+
+
+def _set_positions(d: Dict, study: Dict) -> None:
+    from ..tma.cores import position_key
+    sheet = study["map_sheet"]
+    d["map_sha256"] = sheet["sha256"]
+    d["positions"] = {}
+    for p in sheet["positions"]:
+        key = position_key(study["slide_id"], sheet["sha256"], p["position_id"])
+        d["positions"][key] = {"observed": None, "missing_reason": "", "qc": "unreviewed", "qc_reasons": [],
+                               "run": False}
 
 
 def set_session(d: Dict, workspace_id: str, handoff_path: str, handoff_sha256: str) -> None:

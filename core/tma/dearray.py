@@ -28,6 +28,12 @@ them for now; the TMA page lets the user do them, F3).
   edge, and its tissue fraction (foreground share of the expected-size
   disc at its centre). These are measurements, not a verdict.
 
+The expected core size (the scale of every step above) is given, or
+estimated from the slide when it is not (`estimate_core_diameter`,
+docs/v17_find_cores_without_map_plan.md §3.1): a rough foreground at about
+1024-2048 px, touching pieces split by a watershed, the area-weighted
+median of the pieces' equivalent diameters.
+
 Pixels are read through `OmeTiffSource` (the PixelSource contract). The
 candidate list is saved as ``<project>/tma/dearray_candidates_v<n>.json``
 (n counts up, nothing is overwritten) and registered as provenance kind
@@ -66,6 +72,101 @@ PARAMS = {
     "split_solidity": 0.85,           #     clearly not convex (two discs joined)
     "seed_sep_frac": 0.6,     # watershed seeds at least this many radii apart
 }
+
+
+ESTIMATE = {
+    "min_short_px": 1024,     # sampling: the coarsest level at least this short side ...
+    "max_short_px": 2048,     # ... reduced by block means to at most this short side
+    "sigma_px": 1.0,          # Gaussian smoothing of the log signal, sampling pixels
+    "speck_px": 20,           # pieces smaller than this (sampling pixels) are dropped
+    "h_frac": 0.3,            # watershed markers: h-maxima of the distance, h = this x the piece's largest distance
+}
+
+
+class CoreSizeError(ValueError):
+    """No tissue to estimate the core size from."""
+
+
+def estimate_level(level_shapes) -> int:
+    """The coarsest level whose short side is at least `min_short_px`;
+    level 0 when none is."""
+    best = 0
+    for lv, (h, w) in enumerate(level_shapes):
+        if min(h, w) >= ESTIMATE["min_short_px"]:
+            best = lv
+    return best
+
+
+def block_factor(shape) -> int:
+    """The smallest integer factor that brings the short side to
+    `max_short_px` or below."""
+    short = min(shape)
+    return max(1, -(-short // ESTIMATE["max_short_px"]))
+
+
+def _weighted_median(values, weights) -> float:
+    """The first value (ascending) where the cumulative weight reaches half
+    the total; ties go to the smaller value."""
+    order = np.argsort(values, kind="stable")
+    v, w = np.asarray(values, float)[order], np.asarray(weights, float)[order]
+    c = np.cumsum(w)
+    return float(v[int(np.searchsorted(c, c[-1] / 2.0))])
+
+
+def estimate_diameter_px(signal: np.ndarray) -> float:
+    """The typical core diameter, in pixels of `signal`, needing no core
+    size: log, Gaussian, Otsu, holes filled, specks dropped; a watershed on
+    the distance transform with h-maxima markers per piece (a plateau is one
+    marker); the area-weighted median of the parts' equivalent diameters.
+    Raises `CoreSizeError` when there is no tissue."""
+    from scipy import ndimage as ndi
+    from skimage.filters import threshold_otsu
+    from skimage.morphology import h_maxima
+    from skimage.segmentation import watershed
+    p = ESTIMATE
+    a = np.log1p(np.nan_to_num(np.asarray(signal, dtype=np.float32), nan=0.0))
+    a = ndi.gaussian_filter(a, p["sigma_px"])
+    if float(a.max()) - float(a.min()) < 1e-6:
+        raise CoreSizeError("No tissue found on the DAPI channel")
+    fg = ndi.binary_fill_holes(a > threshold_otsu(a))
+    lab, n = ndi.label(fg)
+    if n:
+        sizes = ndi.sum(fg, lab, np.arange(1, n + 1))
+        fg = np.isin(lab, 1 + np.flatnonzero(sizes >= p["speck_px"]))
+    if not fg.any():
+        raise CoreSizeError("No tissue found on the DAPI channel")
+    dist = ndi.distance_transform_edt(fg)
+    lab, n = ndi.label(fg)
+    markers = np.zeros(fg.shape, np.int32)
+    k = 0
+    for i, sl in enumerate(ndi.find_objects(lab), start=1):
+        if sl is None:
+            continue
+        d = np.where(lab[sl] == i, dist[sl], 0.0)
+        peaks, m = ndi.label(h_maxima(d, max(p["h_frac"] * float(d.max()), 1e-6)))
+        markers[sl][peaks > 0] = peaks[peaks > 0] + k
+        k += m
+    parts = watershed(-dist, markers, mask=fg)
+    areas = np.bincount(parts.ravel())[1:]
+    areas = areas[areas > 0].astype(float)
+    return _weighted_median(2.0 * np.sqrt(areas / np.pi), areas)
+
+
+def estimate_core_diameter(src, channel) -> float:
+    """The typical core diameter in level-0 pixels, from `src` (an
+    `OmeTiffSource`), reading at most about `max_short_px` on the short
+    side (plan §3.1.1)."""
+    from ..project_identity import SlideFrames
+    shapes = [src.level_shape(lv) for lv in range(src.level_count())]
+    lv = estimate_level(shapes)
+    h, w = shapes[lv]
+    signal, _origin = src.read_region(channel, lv, 0, h, 0, w)
+    f = block_factor((h, w))
+    if f > 1:
+        hh, ww = h // f * f, w // f * f
+        signal = np.asarray(signal, np.float32)[:hh, :ww].reshape(hh // f, f, ww // f, f).mean(axis=(1, 3))
+    sy, sx = SlideFrames(shapes).scale_yx(lv)
+    return estimate_diameter_px(signal) * f * float(np.sqrt(sy * sx))
 
 
 def choose_level(level_shapes, core_diameter_l0: float, min_core_px: float) -> int:
@@ -252,8 +353,9 @@ def detect_cores(slide_path: str, *, core_diameter_um: Optional[float] = None,
                  params: Optional[Dict] = None) -> Dict:
     """Candidate cores of the slide at `slide_path`. The expected core size
     is `core_diameter_um` (needs the slide's pixel size) or
-    `core_diameter_px` (level-0 pixels). `channel`: the nucleus channel
-    (index or name)."""
+    `core_diameter_px` (level-0 pixels); with neither it is estimated from
+    the slide (`estimate_core_diameter`; `CoreSizeError` when there is no
+    tissue). `channel`: the nucleus channel (index or name)."""
     from ...sources.ome_tiff import OmeTiffSource
     from ..project_identity import SlideFrames
     p = dict(PARAMS, **(params or {}))
@@ -267,10 +369,14 @@ def detect_cores(slide_path: str, *, core_diameter_um: Optional[float] = None,
     try:
         shapes = [src.level_shape(lv) for lv in range(src.level_count())]
         pixel = src.physical_size()
-        if core_diameter_px is None:
-            if core_diameter_um is None or not pixel:
-                raise ValueError("the core size needs core_diameter_px, or core_diameter_um and a pixel size")
+        source = "given"
+        if core_diameter_px is None and core_diameter_um is not None:
+            if not pixel:
+                raise ValueError("a core size in micrometres needs the slide's pixel size")
             core_diameter_px = float(core_diameter_um) / float((pixel[0] + pixel[1]) / 2)
+        if core_diameter_px is None:
+            core_diameter_px = estimate_core_diameter(src, channel)
+            source = "estimated"
         lv = choose_level(shapes, core_diameter_px, p["min_core_px"]) if level is None else int(level)
         h, w = shapes[lv]
         signal, _origin = src.read_region(channel, lv, 0, h, 0, w)
@@ -291,7 +397,7 @@ def detect_cores(slide_path: str, *, core_diameter_um: Optional[float] = None,
         "slide_path": os.path.abspath(slide_path),
         "channel": name, "level": lv, "level_shape": [h, w], "scale_yx": [round(s, 6) for s in scale],
         "pixel_um": list(pixel) if pixel else None,
-        "core_diameter_px": round(float(core_diameter_px), 2),
+        "core_diameter_px": round(float(core_diameter_px), 2), "core_diameter_source": source,
         "params": p, "candidates": cands,
     }
 

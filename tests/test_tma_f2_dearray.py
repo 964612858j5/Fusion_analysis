@@ -63,10 +63,19 @@ def test_cores_are_found_measured_and_the_glow_is_not(tmp_path):
     assert len(cands) == len(cores)
 
 
-def test_the_expected_size_needs_a_diameter(tmp_path):
-    path, _ = _slide(tmp_path)
-    with pytest.raises(ValueError):
-        da.detect_cores(path, channel=0)                               # no size, no pixel size
+def test_without_a_diameter_the_size_is_estimated(tmp_path):
+    """docs/v17_find_cores_without_map_plan.md §3.1: no size given, none
+    from the pixel size either -- the core size is estimated from the slide
+    (it used to be refused) and every whole core is found."""
+    path, cores = _slide(tmp_path)
+    r = da.detect_cores(path, channel=0, params={"min_core_px": 20})
+    assert r["core_diameter_source"] == "estimated"
+    assert abs(r["core_diameter_px"] - D) <= 0.15 * D, r["core_diameter_px"]
+    for cy, cx, _gain in cores[:-1]:
+        assert len(_near(r["candidates"], cy, cx)) == 1, (cy, cx)
+    assert not _near(r["candidates"], 700, 400, tol=40), "a smooth glow is not tissue"
+    given = da.detect_cores(path, core_diameter_px=D, channel=0, params={"min_core_px": 20})
+    assert given["core_diameter_source"] == "given"
 
 
 def test_choose_level_keeps_cores_wide_enough():

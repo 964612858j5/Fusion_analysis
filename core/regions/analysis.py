@@ -195,7 +195,8 @@ def build_snapshot(project_dir, slide_id: str, seg_channels: Sequence[str],
     cores, omitted, meta, positions = [], [], None, []
     if mode == "tma":
         if not doc.get("map_sha256"):
-            raise AnalysisError("the map sheet is chosen but the cores are not found yet: Find cores in Regions")
+            raise AnalysisError("the map sheet is chosen but not attached to the cores in the last Regions Save: "
+                                "Find cores or Attach map sheet in Regions, number, tick Run and Save")
         if study is None or study["map_sheet"]["sha256"] != doc["map_sha256"]:
             raise AnalysisError("the TMA map sheet is not the one the Regions Save was made with")
         selected, omitted = select_cores(doc, study, select)

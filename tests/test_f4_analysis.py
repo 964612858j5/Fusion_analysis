@@ -224,7 +224,7 @@ def test_a_chosen_map_sheet_before_find_cores_is_refused_not_analysed_whole(proj
     s, _ = _finished()
     d = D.new_document(SID, SHAPE)                                   # map chosen, cores not found
     K.save(project, d, s)
-    with pytest.raises(A.AnalysisError, match="cores are not found yet"):
+    with pytest.raises(A.AnalysisError, match="not attached to the cores"):
         A.build_snapshot(project, SID, ["DAPI"], study=s)
 
 

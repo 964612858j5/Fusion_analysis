@@ -97,9 +97,11 @@ class ToolController:
         return self.target() == "exclusions" or page.cores_editable()
 
     def can_number(self) -> bool:
+        """Numbering gestures only where the document has its map sheet
+        (docs/v17_find_cores_without_map_plan.md §3.2.4)."""
         page = self.page
         return (page.holder is not None and not page.holder.read_only and page.cores_editable()
-                and self.target() == "pieces")
+                and self.target() == "pieces" and bool(page.holder.d.get("map_sha256")))
 
     # ── hit tests ──
     def shown(self, sid, s):

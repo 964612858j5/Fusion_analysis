@@ -33,7 +33,7 @@ from .versions import VersionsMixin
 
 # the three tool families (docs/regions_tools_redesign.md §1, §9): a click on
 # the button opens its menu; choosing an item lights the family
-FAMILIES = (("Select", (("Click", "select", "Click a shape; Ctrl+click adds / removes; a drag on blank "
+FAMILIES = (("Select", (("Click", "select", "Click a shape; Shift+click adds / removes; a drag on blank "
                                             "ground pans. The selected shape has a transform box as Photoshop's "
                                             "Ctrl+T: drag inside to move, a handle to resize (Shift keeps the "
                                             "ratio, Alt about the centre), just outside a corner to rotate "

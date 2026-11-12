@@ -72,8 +72,9 @@ class ShapesMixin:
         self.selection = [] if sid is None else [sid]
 
     @staticmethod
-    def ctrl_held() -> bool:
-        return bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+    def shift_held() -> bool:
+        """Shift+click adds / removes (the user's item 9; Shift only, not Ctrl)."""
+        return bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
 
     def select(self, pid):
         if pid != self.selected or len(self.selection) > 1:
@@ -82,7 +83,7 @@ class ShapesMixin:
         self._selection_changed()
 
     def toggle_selection(self, sid):
-        """Ctrl+click: adds the shape, or takes it out."""
+        """Shift+click: adds the shape, or takes it out."""
         if sid is None:
             return
         self.commit_transform()
@@ -93,7 +94,7 @@ class ShapesMixin:
         self._selection_changed()
 
     def select_many(self, ids, add=False):
-        """A marquee's catch: replaces the selection (Ctrl: adds to it)."""
+        """A marquee's catch: replaces the selection (Shift: adds to it)."""
         self.commit_transform()
         out = list(self.selection) if add else []
         out += [i for i in ids if i not in out]

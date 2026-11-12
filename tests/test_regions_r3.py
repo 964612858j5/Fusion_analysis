@@ -292,7 +292,9 @@ def test_marquees_select_by_centre_and_delete_removes_several_in_one_step(app, e
     assert sorted(page.selection) == want and len(want) == 2
     page._set_tool("select_ellipse")
     c = _centre(2, 1)
-    _drag(page, (c[0] - 20, c[1] - 20), (c[0] + 20, c[1] + 20), ctrl=True)    # Ctrl adds
+    with monkeypatch.context() as m:                                # Shift+click adds (B25)
+        m.setattr(type(page), "shift_held", staticmethod(lambda: True))
+        _drag(page, (c[0] - 20, c[1] - 20), (c[0] + 20, c[1] + 20))
     assert len(page.selection) == 3
     page._set_tool("select_polygon")
     for y, x in ((lo[0], lo[1]), (lo[0], hi[1]), (hi[0], hi[1]), (hi[0], lo[1])):
@@ -1009,7 +1011,9 @@ def test_select_click_numbers_cores_in_the_clicked_order_and_one_core_alone(app,
     nb = page.cores.numbering
     page._set_tool("select")
     for y in (3, 1, 2):                                             # clicked bottom first
-        page.ctl.click(*_centre(1, y), ctrl=y != 3)
+        with monkeypatch.context() as m:                            # Shift+click adds (B25)
+            m.setattr(type(page), "shift_held", staticmethod(lambda: y != 3))
+            page.ctl.click(*_centre(1, y))
     _set_target(page, "X1-Y01", "X1-Y03")
     assert nb.count.text() == "Selected 3 / target 3" and nb.btn_confirm.isEnabled()
     nb.btn_reverse.click()                                          # only the shown numbers turn round
@@ -1101,7 +1105,9 @@ def test_a_core_mask_given_a_reason_in_the_exclusions_tab_becomes_an_exclusion(a
     page = _page(app, env, monkeypatch)
     page._set_tool("select")
     page.ctl.click(*_centre(1, 1))
-    page.ctl.click(*_centre(1, 2), ctrl=True)
+    with monkeypatch.context() as m:                                # Shift+click adds (B25)
+        m.setattr(type(page), "shift_held", staticmethod(lambda: True))
+        page.ctl.click(*_centre(1, 2))
     ids = list(page.selection)
     n_cores = len(page.holder.d["cores"])
     _open_exclusions(page)
@@ -1140,7 +1146,9 @@ def test_reverse_shows_3_2_1_in_the_list_and_turns_the_viewer_numbers_round(app,
     nb = page.cores.numbering
     page._set_tool("select")
     for y, ctrl in ((1, False), (2, True), (3, True)):
-        page.ctl.click(*_centre(1, y), ctrl=ctrl)
+        with monkeypatch.context() as m:                            # Shift+click adds (B25)
+            m.setattr(type(page), "shift_held", staticmethod(lambda: ctrl))
+            page.ctl.click(*_centre(1, y))
     _set_target(page, "X1-Y01", "X1-Y03")
     rows = lambda: [nb.preview.item(i).text().split(" →")[0] for i in range(nb.preview.count())]   # noqa: E731
     ov = page.viewer.overlay
@@ -1177,7 +1185,9 @@ def test_reverse_then_confirm_is_undone_by_one_ctrl_z_and_roi_shows_no_numbering
     nb = page.cores.numbering
     page._set_tool("select")
     for y, ctrl in ((1, False), (2, True), (3, True)):
-        page.ctl.click(*_centre(1, y), ctrl=ctrl)
+        with monkeypatch.context() as m:                            # Shift+click adds (B25)
+            m.setattr(type(page), "shift_held", staticmethod(lambda: ctrl))
+            page.ctl.click(*_centre(1, y))
     _set_target(page, "X1-Y01", "X1-Y03")
     nb.btn_reverse.click()
     nb.btn_confirm.click()

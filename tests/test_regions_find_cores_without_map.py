@@ -109,7 +109,9 @@ def test_the_map_sheet_chosen_afterwards_keeps_the_cores(app, env, monkeypatch, 
     assert gone not in d["pieces"]
     page._set_tool("select")
     page.ctl.click(cy, cx)
-    page.ctl.click(cy, cx + 100, ctrl=True)
+    with monkeypatch.context() as m:                                # Shift+click adds (B25)
+        m.setattr(type(page), "shift_held", staticmethod(lambda: True))
+        page.ctl.click(cy, cx + 100)
     f3._merge(page)
     merged = d["pieces"][drawn]["owner"]
     page.edit(D.add_exclusion, [[10, 10], [60, 10], [60, 60], [10, 60]], ["blur"])

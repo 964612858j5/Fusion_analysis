@@ -2,8 +2,8 @@
 a mouse action on the viewer means. Shapes are polygons (level-0 whole
 pixels); the overlay delivers level-0 points.
 
-Families (one dropdown each): Select -- `select` (click; Ctrl+click adds /
-removes), `select_rect`, `select_ellipse`, `select_polygon`; Mask --
+Families (one dropdown each): Select -- `select` (click; Shift+click adds /
+removes -- Shift only, the user 2026-11-12), `select_rect`, `select_ellipse`, `select_polygon`; Mask --
 `circle` (an ellipse whose outline passes through the press and the
 pointer, diagonally opposite -- the press stays put: Shift a circle on that
 diameter, Alt the press is the centre),
@@ -36,6 +36,7 @@ from ...core.regions import document as D
 from ...core.regions import geometry as G
 from ...core.regions import numbering as N
 from ...core.regions import transform as T
+from .overlay import CLICK_SLOP_PX
 
 TOOLS = (None, "select", "select_rect", "select_ellipse", "select_polygon",
          "circle", "polygon", "vertex", "line", "click")
@@ -63,6 +64,9 @@ class ToolController:
         self._swallow = False         # a gesture cancelled while the button is still down
         self.pressed = False          # the left button is down on the viewer (a press not yet released)
         self.transform = None         # the pending free transform (`T.Session`), never in the document
+        self._last_click = None       # (y, x) of the last Select click: a click again there goes deeper
+        self._xf_press = None         # (y, x, steps) of the press that began the last transform drag:
+                                      # `steps` the transform's history length before it
 
     # ── tools ──
     def set_tool(self, tool):
@@ -133,6 +137,45 @@ class ToolController:
                 sid = None
         return sid
 
+    def click_stack(self, y, x):
+        """What a Select click can pick at the point, in order (the user's
+        item 8, 2026-11-12): in the Cores tab every piece and exclusion under
+        it, smallest first -- an exclusion inside a larger core is reachable;
+        in Exclusions its exclusions smallest first, then the core masks it
+        can convert (as `shape_at`)."""
+        d = self.doc
+        if d is None:
+            return []
+
+        def under(shapes):
+            out = []
+            for sid, s in shapes.items():
+                poly = self.shown(sid, s)
+                if G.contains(poly, y, x):
+                    out.append((G.area(poly), sid))
+            return sorted(out)
+        if self.target() == "pieces":
+            return [sid for _a, sid in sorted(under(d["pieces"]) + under(d["exclusions"]))]
+        out = [sid for _a, sid in under(d["exclusions"])]
+        if self.page._can_convert_cores():
+            out += [sid for _a, sid in under(d["pieces"]) if not d["pieces"][sid]["dropped"]]
+        return out
+
+    def _pick(self, y, x):
+        """The shape a plain Select click picks: the first of the stack; a
+        click again at the same spot (within the click slop) while one of the
+        stack is selected picks the next one, round (item 8)."""
+        stack = self.click_stack(y, x)
+        last, self._last_click = self._last_click, (y, x)
+        if not stack:
+            return None
+        page = self.page
+        tol = CLICK_SLOP_PX * page.view.screen_px()
+        same = last is not None and abs(last[0] - y) + abs(last[1] - x) <= tol   # as the overlay's slop
+        if same and len(page.selection) == 1 and page.selected in stack:
+            return stack[(stack.index(page.selected) + 1) % len(stack)]
+        return stack[0]
+
     def piece_at(self, y, x) -> Optional[str]:
         d = self.doc
         return None if d is None else self._smallest_at(d["pieces"], y, x)
@@ -163,8 +206,10 @@ class ToolController:
         return None if q is None else T.hit(q, x, y, HANDLE_TOL_PX * self.page.view.screen_px())
 
     def _other_shape_at(self, y, x) -> bool:
-        sid = self.shape_at(y, x)
-        return sid is not None and sid != self.page.selected
+        """Another shape a click there would pick (an exclusion too in the
+        Cores tab, as `click_stack`): the rotate zone never hides it."""
+        stack = self.click_stack(y, x)
+        return bool(stack) and stack[0] != self.page.selected
 
     def cursor_at(self, y, x):
         """The pointer's shape over the box: "move", "rotate", or a resize
@@ -234,23 +279,25 @@ class ToolController:
             h = self.box_hit(y, x)
             if h is not None and h[0] == "rotate" and self._other_shape_at(y, x):
                 h = None                          # the rotate zone never hides a neighbour's click
-            if h is not None and not (ctrl and not (h[0] == "handle" and h[1] < 4)):
-                kind, i = h                       # the free transform (Ctrl only on a corner: distort)
+            if h is not None:
+                kind, i = h                       # the free transform (Ctrl on a corner: distort)
                 sid, poly = self._single()
                 if self.transform is None or self.transform.sid != sid:
                     if self.transform is not None:
                         page.commit_transform()
                     self.transform = T.Session(sid, poly)
-                mode = "distort" if ctrl else ("scale" if kind == "handle" else kind)
+                mode = ("distort" if ctrl and kind == "handle" and i < 4
+                        else "scale" if kind == "handle" else kind)
+                self._xf_press = (y, x, len(self.transform.history))
                 self.transform.begin(mode, i, (x, y))
                 self._drag = ("xf",)
                 page.refresh_view()               # once: the shape leaves the cached layer for the live one
                 return True
-            if ctrl:
-                return True                       # Ctrl: a selection click
-            return self.shape_at(y, x) is not None   # on a shape: a click; blank ground: pan
+            if page.shift_held():
+                return True                       # Shift: a selection click (adds / removes)
+            return bool(self.click_stack(y, x))   # on a shape: a click; blank ground: pan
         if tool in ("select_rect", "select_ellipse"):
-            self._drag = ("marquee", (y, x), ctrl)
+            self._drag = ("marquee", (y, x), page.shift_held())   # Shift adds to the selection
             return True
         if tool == "vertex":
             i = self.vertex_at(y, x) if self.can_edit() else None
@@ -336,11 +383,23 @@ class ToolController:
             if self.transform is None:
                 return
             self.transform.end()
+            xf_sid = self.transform.sid
+            # this gesture only: a still press leaves no step (`Session.end`),
+            # whatever an earlier drag left pending
+            still = self._xf_press is not None and len(self.transform.history) <= self._xf_press[2]
             if not self.transform.history and not self.transform.changed:
                 self.transform = None
             else:
                 page.say("Enter applies the transform, Esc cancels it.")
-            self._swallow = True                  # the release is no selection click
+            # the release is no selection click -- unless it was a still click
+            # inside the shape as shown (a handle can cover a shape small on
+            # screen): then it is one -- a click again goes deeper, Shift+click
+            # takes it out (items 8, 9), also with a transform pending
+            inside = False
+            if still:
+                s = self.shapes().get(xf_sid)
+                inside = s is not None and G.contains(self.shown(xf_sid, s), *self._xf_press[:2])
+            self._swallow = not inside
             page.refresh_view()
         elif kind == "vertex":
             if G.area(self.shapes()[drag[1]]["polygon"]) <= 0:
@@ -390,10 +449,13 @@ class ToolController:
         tool = self.tool
         if tool == "select":
             sid = self.shape_at(y, x)
-            if ctrl:
+            if page.shift_held():                 # Shift+click adds / removes, Shift only (item 9)
                 if sid is not None:
                     page.toggle_selection(sid)
             else:
+                sid = self._pick(y, x)
+                if sid is not None and self.target() == "pieces" and sid in d["exclusions"]:
+                    page.frame.left_tabs.setCurrentWidget(page.exclusions)   # its operations are there
                 page.select(sid)
                 if sid is None and self.target() == "exclusions" and self.piece_at(y, x) is not None:
                     page.say("Cores are selected in the Cores tab; this tab selects exclusions.")
@@ -490,7 +552,7 @@ class ToolController:
         self.poly_pts = []
         if self.tool == "select_polygon":
             inside = [sid for sid, s in self.shapes().items() if G.contains(pts, *G.centroid(self.shown(sid, s)))]
-            self.page.select_many(inside, add=self.page.ctrl_held())
+            self.page.select_many(inside, add=self.page.shift_held())
         else:
             self.page.finish_shape(pts)
         return True

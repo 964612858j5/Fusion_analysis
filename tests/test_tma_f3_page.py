@@ -209,7 +209,9 @@ def test_number_by_line_and_clicks_merge_undo_and_lock(app, env, monkeypatch):
     page.ctl.click(cy, cx)
     core = page.selected_core()
     assert not page.btn_merge.isEnabled()                             # one piece: nothing to merge
-    page.ctl.click(cy, cx + 100, ctrl=True)                           # Ctrl+click adds the fragment
+    with monkeypatch.context() as m:                                # Shift+click adds (B25)
+        m.setattr(type(page), "shift_held", staticmethod(lambda: True))
+        page.ctl.click(cy, cx + 100)
     assert page.selection[-1] == frag and page.selected is None and page.btn_merge.isEnabled()
     _merge(page)
     assert page.holder.d["pieces"][frag]["owner"] == core
@@ -406,7 +408,9 @@ def test_an_roi_workspace_cannot_edit_shapes(app, env, monkeypatch):
     roi.ctl.click(*_centre(1, 1))
     pid = roi.selected
     assert pid is not None                                            # selecting is fine
-    roi.ctl.click(*_centre(1, 2), ctrl=True)
+    with monkeypatch.context() as m:                                # Shift+click adds (B25)
+        m.setattr(type(roi), "shift_held", staticmethod(lambda: True))
+        roi.ctl.click(*_centre(1, 2))
     assert len(roi.selection) == 2 and not roi.btn_merge.isEnabled()
     before = json.dumps(roi.holder.d, sort_keys=True)
     roi.select(pid)

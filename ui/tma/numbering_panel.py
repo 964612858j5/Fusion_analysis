@@ -80,7 +80,7 @@ class NumberingPanel(QWidget):
         grid.addWidget(self.end, 0, 3)
         lay.addLayout(grid)
         hint = QLabel("Type or pick the first and the last record. Cores are numbered in the order you "
-                      "click them (Select ▸ Click, Ctrl+click for more), click them (Annotate ▸ Clicks) "
+                      "click them (Select ▸ Click, Shift+click for more), click them (Annotate ▸ Clicks) "
                       "or line them up (Annotate ▸ Line).")
         hint.setWordWrap(True)
         lay.addWidget(hint)

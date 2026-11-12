@@ -7,7 +7,9 @@ is fixed.
 ## Product
 
 * Quitting the app sometimes ends with a segmentation fault (exit 139) after
-  the window has closed; no data is affected.
+  the window has closed; no data is affected. Not seen on Ubuntu 22.04
+  (PySide6 6.11.3, RTX 2080 Ti, X11): 3 of 3 closes exit 0 (backlog 7,
+  2026-11-12).
 * Loading a slide freezes the window for about 4.8 s (deferred by the user).
 * Step0: the wheel zoom has no upper limit.
 * Step0 compare on a spinning disk: a channel switch takes ~1.1 s cold
@@ -49,7 +51,10 @@ is fixed.
   interpreter exit, after all tests passed, on the Linux A9 server with the
   viewer core and GL (docs/v17_pyside6_plan.md §8; root cause not
   re-confirmed). On macOS (no viewer core, offscreen) both exit 0: 15 passed,
-  and 2 passed / 45 skipped.
+  and 2 passed / 45 skipped. Not reproduced on Ubuntu 22.04 on a real X11
+  desktop with the viewer core (PySide6 6.11.3, 2026-11-12): 3 runs each,
+  all exit 0 (15 passed; 13 passed / 34 skipped -- the skipped ones need
+  `BLOCK01_REQUIRE_STEP1_GPU=1` and were not run).
 * macOS, PySide6 6.11.3: the root conftest's between-test `gc` sometimes
   segfaults inside shiboken6 (seen on unchanged HEAD); run one test per
   process there. `test_install_scripts.py` needs Linux tools (uname, flock,

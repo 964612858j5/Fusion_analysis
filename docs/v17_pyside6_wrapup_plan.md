@@ -244,3 +244,22 @@ PyQt5 out of fusion_test2; the exit-crash investigation. Not committed.
 Code review round 1 (astra low, 2026-11-09): PASS, no P1/P2. P3 taken: the
 glibc test also asserts exit 0 for 2.34/2.35. (A first run was cut off by a
 session restart and left no output; rerun.)
+
+## 11. Linux wrap-up on Ubuntu 22.04 (backlog 7, 2026-11-12)
+
+Run by the user's Ubuntu agent on a fresh clone of v17 at 43e18b7
+(glibc 2.35, RTX 2080 Ti, X11), checks only:
+* rebuild check (`scripts/rebuild_fusion_mesmer_env_check.sh`): conda
+  identical (161), all 220 pip pins, `pip check` clean;
+* fresh install into a new root: the 6.11.3 route (no `qt69` prefix),
+  self-test ok for Cellpose / StarDist / Mesmer on the GPU, app start check
+  accepted, `BLOCK01_QT_VERSION=6.11.3` in the record; the same command again:
+  "already installed", no rebuild;
+* `scripts/block01` start and close, Step0-Step4 opened: 3 of 3 exit 0;
+* `test_install_scripts.py` + `test_qt_import_point.py`: 65 passed;
+* `test_step1_shared_camera.py` and `test_step1_gpu_takeover.py` on the
+  desktop, 3 runs each: all exit 0 -- the interpreter-exit crash of §3 D was
+  not reproduced (34 GPU-gated cases were not run).
+Left, by the user's ruling: PyQt5 out of `fusion_test2` waits for the old
+server; nothing else.
+

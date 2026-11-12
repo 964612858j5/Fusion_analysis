@@ -32,6 +32,44 @@ from ...qt.QtCore import Qt
 from ...core.regions import transform as T
 
 LABEL_MIN_PX = 14            # a shape smaller than this on screen gets no label
+#: Outline widths in screen pixels (the user, 2026-11-12, item 10): a bound
+#: core and an exclusion are drawn this thick; a selected shape at least
+#: this, over a white halo this much wider.
+BOUND_WIDTH = 3.0
+SELECTED_WIDTH = 3.0
+SELECTED_HALO = 2.0
+#: The screen-space hatch (item 11): line width and spacing in screen
+#: pixels, the same at every zoom (fewer lines on a smaller shape), over a
+#: translucent fill of the hatch colour so the colour holds when few fit.
+HATCH_WIDTH = 1.5
+HATCH_SPACING = 10.0
+HATCH_FILL_ALPHA = 0.18
+
+
+def paint_screen_hatch(p, poly, br, color, fill_alpha=HATCH_FILL_ALPHA):
+    """Fill `poly` (widget pixels) with `color` at `fill_alpha`, then
+    diagonal lines HATCH_WIDTH wide every HATCH_SPACING pixels, clipped to
+    it; anchored at its on-screen corner, so they move with the shape."""
+    base = QtGui.QColor(color)
+    p.save()
+    fill = QtGui.QColor(base)
+    fill.setAlphaF(float(fill_alpha))
+    p.setPen(Qt.NoPen)
+    p.setBrush(fill)
+    p.drawPolygon(poly)
+    path = QtGui.QPainterPath()
+    path.addPolygon(poly)
+    path.closeSubpath()
+    p.setClipPath(path, Qt.IntersectClip)
+    pen = QtGui.QPen(base, HATCH_WIDTH)
+    pen.setCapStyle(Qt.FlatCap)
+    p.setPen(pen)
+    x0, y0, w, h = br.left(), br.top(), br.width(), br.height()
+    k = 0.0
+    while k <= w + h:                                  # "/" lines across the box
+        p.drawLine(QtCore.QPointF(x0 + k, y0), QtCore.QPointF(x0 + k - h, y0 + h))
+        k += HATCH_SPACING
+    p.restore()
 CLICK_SLOP_PX = 4
 
 
@@ -352,17 +390,32 @@ class RegionsOverlay(QtWidgets.QWidget):
             br = QtCore.QRectF(float(sx.min()), float(sy.min()),
                                float(sx.max() - sx.min()), float(sy.max() - sy.min()))
             pen = QtGui.QPen(QtGui.QColor(it["color"]))
-            width = it.get("width")                       # optional (Step2's tiles); Regions sets none
-            pen.setWidthF(float(width) if width is not None
-                          else (3.0 if it["id"] in self.selected else 1.5))
+            width = it.get("width")                       # optional: Step2's tiles and cores, bound cores
+            width = float(width) if width is not None else 1.5
+            if it["id"] in self.selected:
+                # selected: at least SELECTED_WIDTH, over a white halo so it
+                # still stands out among bound cores of that width (item 10)
+                width = max(width, SELECTED_WIDTH)
+                halo = QtGui.QPen(QtGui.QColor(255, 255, 255, 200), width + SELECTED_HALO)
+                halo.setJoinStyle(Qt.RoundJoin)
+                p.setPen(halo)
+                p.setBrush(Qt.NoBrush)
+                p.drawPolygon(poly)
+            pen.setWidthF(width)
             if it.get("dash"):
                 pen.setStyle(Qt.DashLine)
             if it.get("fill"):                            # optional solid fill under hatch and border
                 p.setPen(Qt.NoPen)
                 p.setBrush(QtGui.QColor(it["fill"]))
                 p.drawPolygon(poly)
+            screen = it.get("hatch") and it.get("hatch_style") == "screen"
+            if screen:                                    # item 11: legible at every zoom
+                paint_screen_hatch(p, poly, br, it.get("hatch_color") or it["color"],
+                                   it.get("hatch_fill_alpha", HATCH_FILL_ALPHA))
             p.setPen(pen)
-            if it.get("hatch"):                           # an exclusion: hatched, as a mark
+            if screen:
+                p.setBrush(Qt.NoBrush)
+            elif it.get("hatch"):                         # an exclusion: hatched, as a mark
                 p.setBrush(QtGui.QBrush(QtGui.QColor(it["color"]), Qt.BDiagPattern))
             else:
                 p.setBrush(Qt.NoBrush)
@@ -384,10 +437,15 @@ class RegionsOverlay(QtWidgets.QWidget):
         if self.live is not None:
             pen = QtGui.QPen(QtGui.QColor(self.live["color"]), 3.0)
             pen.setStyle(Qt.DashLine)
-            p.setPen(pen)
-            p.setBrush(QtGui.QBrush(QtGui.QColor(self.live["color"]), Qt.BDiagPattern) if self.live.get("hatch")
-                       else Qt.NoBrush)
             poly = QtGui.QPolygonF([tr.map(QtCore.QPointF(x, y)) for x, y in self.live["polygon"]])
+            screen = self.live.get("hatch") and self.live.get("hatch_style") == "screen"
+            if screen:                                    # as it is drawn when not moving (item 11)
+                paint_screen_hatch(p, poly, poly.boundingRect(),
+                                   self.live.get("hatch_color") or self.live["color"],
+                                   self.live.get("hatch_fill_alpha", HATCH_FILL_ALPHA))
+            p.setPen(pen)
+            p.setBrush(QtGui.QBrush(QtGui.QColor(self.live["color"]), Qt.BDiagPattern)
+                       if self.live.get("hatch") and not screen else Qt.NoBrush)
             p.drawPolygon(poly)
             self._label(p, self.live, poly.boundingRect(), QtGui.QFontMetricsF(p.font()))
         if self.handles_for is not None:                  # the transform box: outline + 8 handles

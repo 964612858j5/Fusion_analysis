@@ -21,6 +21,7 @@ from ...core.regions import numbering as N
 from ..tma.core_table import CoreTable
 from ..tma.numbering_panel import NumberingPanel
 from .cores_actions import CoresActions
+from .overlay import BOUND_WIDTH
 
 COLOR = {"matched": DISPLAY.GREEN, "review": "#fb8c00", "unmatched": DISPLAY.YELLOW, "piece": "#9e9e9e",
          "dropped": "#e53935", "excluded": "#e53935"}
@@ -167,6 +168,8 @@ class CoresPanel(QWidget, CoresActions):
                 c = d["cores"][p["owner"]]
                 key = c["position_key"]
                 it["color"] = COLOR["excluded"] if key and d["positions"][key]["qc"] == "excluded" else COLOR[c["mapping"]]
+                if key:                           # bound to a sheet position: as thick as a selected one
+                    it["width"] = BOUND_WIDTH
                 if c["pieces"][0] == pid:
                     if key:
                         r = labels.get(key, {})

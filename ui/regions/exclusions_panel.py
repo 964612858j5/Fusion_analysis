@@ -24,6 +24,7 @@ from ...qt.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButto
 
 from ...core.regions import document as D
 from ...core.regions import geometry as G
+from .overlay import BOUND_WIDTH
 
 EXCL_COLOR = "#e040fb"
 COLUMNS = ("#", "Reasons", "Channels", "Area", "Core")
@@ -271,6 +272,7 @@ class ExclusionsPanel(QWidget):
         out = []
         for n, (uid, e) in enumerate(h.d["exclusions"].items(), start=1):
             out.append({"id": uid, "polygon": e["polygon"], "color": EXCL_COLOR, "hatch": True,
+                        "hatch_style": "screen", "width": BOUND_WIDTH,
                         "label": f"E{n} {'/'.join(e['reasons'])}"})
         return out
 

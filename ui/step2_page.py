@@ -2227,16 +2227,22 @@ class Step2Page(QWidget):
                 it = dict(it, color=self.TILE_COLOURS['running'], width=4, fill=self.CORE_RUNNING_FILL)
             elif states.get(uid) == 'done':
                 it = dict(it, color=self.TILE_COLOURS['done'], width=2)
+            elif states.get(uid) == 'failed':                # 15B: red, labelled on its first piece
+                it = dict(it, color=self.TILE_COLOURS['error'], width=3)
+                if str(it.get("id", "")).endswith("#0"):
+                    it["label"] = " · ".join(t for t in (it.get("label"), "failed") if t)
             else:
                 it = dict(it, color=self.TILE_COLOURS['idle'], width=2)
             out.append(it)
         return out
 
     def _core_states(self):
-        """{core uid: 'running' | 'done'} of the run on screen (a cores run):
-        'running' while one of its units is being segmented, 'done' once all
-        its units are -- kept after the run, as done tiles are, until the
-        next run. From the units the worker made and the run's progress."""
+        """{core uid: 'running' | 'done' | 'failed'} of the run on screen (a
+        cores run): 'running' while one of its units is being segmented,
+        'done' once all its units are, 'failed' when the run ended with an
+        error in one of them (15B) -- done and failed kept after the run, as
+        done tiles are, until the next run. From the units the worker made
+        and the run's progress."""
         rp = self._run_progress
         if rp is None or not self._run_view_live():
             return {}
@@ -2255,11 +2261,50 @@ class Step2Page(QWidget):
             mine = [i for i, c in enumerate(cores) if c == uid]
             if all(i in done for i in mine):
                 states[uid] = 'done'
+            elif any(rp["state"].get(i) == 'failed' for i in mine):
+                states[uid] = 'failed'                      # 15B: the run ended with an error there
         if self.__dict__.get("_run_active"):
             for i, s in rp["state"].items():
                 if s == 'running' and i not in done and 0 <= i < len(cores):
                     states[cores[i]] = 'running'
         return states
+
+    def _mark_failed_cores(self, msg):
+        """A cores run ended with an error: the units being segmented then
+        are failed (15B). A Stop is not a failure: they go back to grey."""
+        rp = self._run_progress
+        if rp is None or str(msg or "").strip() == "Stopped by user.":
+            return
+        self._core_states()                                 # the unit -> core list, if not yet copied
+        if rp.get("unit_cores") is None:
+            return                                          # a grid run, or no unit made yet
+        done = rp.get("done_units", set())
+        for i, st in list(rp["state"].items()):
+            if st == 'running' and i not in done:
+                rp["state"][i] = 'failed'
+
+    def _cores_finish_text(self):
+        """A cores run's finish dialog: (the lines replacing the per-tile
+        outputs, the per-core list for "Show Details…"), or None for a grid
+        run (15B §2.3)."""
+        rp = self._run_progress
+        self._core_states()
+        cores = (rp or {}).get("unit_cores")
+        if not cores:
+            return None
+        order = list(dict.fromkeys(cores))
+        names = {str(it.get("id", "")).split("#")[0]: it.get("label")
+                 for it in self._core_source_items() if str(it.get("id", "")).endswith("#0")}
+        states = self._core_states()
+        n = len(order)
+        lines = (f'Cores: {n} run ({len(cores)} unit{"s" if len(cores) != 1 else ""})\n\n'
+                 f'Per-unit outputs:\n'
+                 f'  tile_masks/\n'
+                 f'    tile_r<k>_c0_dapi.ome.tiff / _raw_mask.ome.tiff  (unit k;\n'
+                 f'    segmentation_meta.json "units" names its core)')
+        details = "\n".join(f'{names.get(u) or f"core {k + 1} of {n}"}: {states.get(u, "not done")}'
+                             for k, u in enumerate(order))
+        return lines, details
 
     def _refresh_core_looks(self):
         """Redraw the cores' colours (both views) without re-reading the input."""
@@ -4336,6 +4381,7 @@ class Step2Page(QWidget):
                 f'Runtime summary:\n'
                 f'  {runtime_text}\n\n'
             )
+        cores_text = self._cores_finish_text()             # 15B: a cores run names its cores
         msg.setText(
             f'Total cells: {total_cells:,}\n\n'
             f'{runtime_block}'
@@ -4346,13 +4392,16 @@ class Step2Page(QWidget):
             f'  global_dapi.ome.tiff   (DAPI, uint16)\n'
             f'  run_segmentation_params.json\n'
             f'  segmentation_meta.json\n\n'
-            f'Per-tile outputs:\n'
-            f'  tile_masks/\n'
-            f'    tile_r*_c*_dapi.ome.tiff\n'
-            f'    tile_r*_c*_raw_mask.ome.tiff'
+            + (cores_text[0] if cores_text else
+               f'Per-tile outputs:\n'
+               f'  tile_masks/\n'
+               f'    tile_r*_c*_dapi.ome.tiff\n'
+               f'    tile_r*_c*_raw_mask.ome.tiff')
             + (f'\n\nStep2 now switches to the new workspace: {self._pending_context[0]}'
                if self._pending_context else '')
         )
+        if cores_text:
+            msg.setDetailedText(cores_text[1])
         btn_qc = msg.addButton('→ Open QC Viewer (Step 3)',
                                QMessageBox.AcceptRole)
         btn_feat = msg.addButton('→ Feature Extraction (Step 4)',
@@ -4369,6 +4418,7 @@ class Step2Page(QWidget):
         # v14.5d: if the worker (which re-resolves + cross-checks the attached source-aware
         # config) errors, flip the "awaiting worker validation" status to NOT applied.
         self._mark_source_aware_failed(msg)
+        self._mark_failed_cores(msg)
         self._run_grid_lbl.setVisible(False)
         self._run_active = False
         self._skip_empty_cb.setEnabled(not self.__dict__.get("_cores_preview"))   # a cores run has no grid

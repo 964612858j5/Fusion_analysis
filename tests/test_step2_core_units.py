@@ -289,3 +289,76 @@ def test_the_core_being_segmented_is_highlighted_then_turns_green():
     page._begin_run_progress(1, 1)                                   # a new run: grey again
     assert look() == {"core_a": (idle, None), "core_b": (idle, None), "core_c": (purple, None)}
     page.deleteLater()
+
+
+# ── 15B: failed, stopped, the finish dialog (docs/v17_step2_core_status_plan.md) ──
+
+def _cores_run_to_core_b(page, monkeypatch):
+    """A cores run on screen: core_a done, core_b (two units) being segmented."""
+    import types
+    from block01.ui import step2_page as SP
+    monkeypatch.setattr(SP.QMessageBox, "critical", lambda *a, **k: None)
+    page._cores_preview = 2
+    page._run_view_live = lambda: True
+    page._begin_run_progress(1, 1)
+    page._worker = types.SimpleNamespace(_units_meta={"": [
+        {"index": 0, "core_uid": "core_a"}, {"index": 1, "core_uid": "core_b"},
+        {"index": 2, "core_uid": "core_b"}]})
+    page._on_progress(0, 3, "core 1 of 2")
+    page._on_tile_done(0, 3, 5)
+    page._on_progress(1, 3, "core 2 of 2, part 1 of 2")
+
+
+def _looks(page):
+    return {it["id"].split("#")[0]: (it["color"], it.get("label")) for it in page._core_items()
+            if it["id"].endswith("#0")}
+
+
+@pytest.mark.parametrize("named", [False, True])
+def test_an_error_turns_the_core_being_segmented_red_until_the_next_run(monkeypatch, named):
+    items = _three()
+    if named:
+        items[1] = dict(items[1], label="X1-Y02 D7")
+    page = _page_with(items)
+    _cores_run_to_core_b(page, monkeypatch)
+    page._on_error("Tile [1,0] inference failed: out of memory")
+    red, green, grey = page.TILE_COLOURS['error'], page.TILE_COLOURS['done'], page.TILE_COLOURS['idle']
+    looks = _looks(page)
+    assert looks["core_a"] == (green, None)
+    assert looks["core_b"] == (red, "X1-Y02 D7 · failed" if named else "failed")
+    assert looks["core_c"][0] == page.SKIP_PURPLE
+    page._begin_run_progress(1, 1)                                   # a new run: grey again
+    assert _looks(page)["core_b"] == (grey, "X1-Y02 D7" if named else None)
+    page.deleteLater()
+
+
+def test_a_stop_is_not_a_failure(monkeypatch):
+    page = _page_with(_three())
+    _cores_run_to_core_b(page, monkeypatch)
+    page._on_error("Stopped by user.")
+    looks = _looks(page)
+    assert looks["core_a"][0] == page.TILE_COLOURS['done']
+    assert looks["core_b"] == (page.TILE_COLOURS['idle'], None)        # back to grey
+    page.deleteLater()
+
+
+def test_the_finish_dialog_names_the_cores_and_a_grid_run_keeps_its_text(monkeypatch):
+    items = _three()
+    items[0] = dict(items[0], label="X1-Y01 D3")
+    page = _page_with(items)
+    _cores_run_to_core_b(page, monkeypatch)
+    page._on_tile_done(1, 3, 4)
+    page._on_tile_done(2, 3, 4)
+    page._run_active = False
+    lines, details = page._cores_finish_text()
+    assert lines.startswith("Cores: 2 run (3 units)") and "tile_r<k>_c0" in lines and "tile_r*_c*" not in lines
+    assert details.splitlines() == ["X1-Y01 D3: done", "core 2 of 2: done"]
+    assert "cells" not in details                                    # no count per core (choice A)
+    grid = _page_with([])
+    grid._run_view_live = lambda: True
+    grid._begin_run_progress(2, 2)
+    import types
+    grid._worker = types.SimpleNamespace()                           # a grid run's worker: no units
+    assert grid._cores_finish_text() is None
+    page.deleteLater()
+    grid.deleteLater()

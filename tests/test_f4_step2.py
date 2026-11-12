@@ -88,7 +88,8 @@ def test_only_cells_in_selected_cores_are_kept_with_dense_ids_and_their_facts(tm
     lab = _labels(3)                                    # tissue in columns 60..112 only
     h, w = lab.shape
     worker, zp = _worker(tmp_path, monkeypatch, lab, ROWS, COLS, OVERLAP, name="on")
-    _with_regions(monkeypatch, worker, _snapshot(h, w, core_box=(0, 50, 60, 113), excl_box=(30, 50, 90, 113)))
+    # a Find-cores outline reaches beyond the tissue: the core's box has a margin
+    _with_regions(monkeypatch, worker, _snapshot(h, w, core_box=(0, 50, 55, 113), excl_box=(30, 50, 90, 113)))
     skipped = []
     worker.tile_skipped.connect(lambda i, n: skipped.append(i))
     n = _run(worker, zp, loop)
@@ -96,12 +97,15 @@ def test_only_cells_in_selected_cores_are_kept_with_dense_ids_and_their_facts(tm
     ids = np.unique(cells[cells > 0])
     assert n == ids.size and list(ids) == list(range(1, ids.size + 1))       # dense 1..N
     core = np.zeros_like(cells, bool)
-    core[0:50, 60:113] = True
+    core[0:50, 55:113] = True
     for i in ids:                                                           # each mostly in the core
         assert core[cells == i].mean() > 0.5, i
     assert not cells[30:50, 90:113].any()                                   # nothing on the fold
-    assert skipped and all(i in worker._regions_skipped["t" if loop == "segment_one_zarr" else ""]
-                           for i in skipped)                                # counted as Regions skips
+    # docs/v17_step2_core_by_core_plan.md: a run that follows cores runs core by
+    # core -- one unit, no grid, nothing skipped
+    assert skipped == []
+    units = worker._units_meta["t" if loop == "segment_one_zarr" else ""]
+    assert len(units) == 1 and units[0]["read_bbox"] == [0, 50, 55, 113]
     prefix = "_t" if loop == "segment_one_zarr" else ""
     facts = np.load(os.path.join(worker.output_dir, f"global_cell_regions{prefix}.npz"),
                     allow_pickle=False)                     # F4-4: no object arrays
@@ -130,9 +134,14 @@ def test_the_kept_cells_are_exactly_the_old_run_minus_the_rejected_ones(tmp_path
     _run(plain, zp0, "segment_one_zarr")
     before = _cells(plain, "segment_one_zarr")
     on, zp1 = _worker(tmp_path, monkeypatch, lab, ROWS, COLS, OVERLAP, name="on")
-    _with_regions(monkeypatch, on, _snapshot(h, w, core_box=(0, 97, 60, 113)))   # the whole tissue
+    # the core's box holds the whole tissue with a margin (a Find-cores outline)
+    _with_regions(monkeypatch, on, _snapshot(h, w, core_box=(0, 97, 50, 113)))
     _run(on, zp1, "segment_one_zarr")
-    np.testing.assert_array_equal(_cells(on, "segment_one_zarr"), before)       # everything in the core
+    on_cells = _cells(on, "segment_one_zarr")
+    # one window (the core) instead of tiles: the same cells, numbered in another order
+    assert sorted(map(tuple, np.argwhere(on_cells > 0))) == sorted(map(tuple, np.argwhere(before > 0)))
+    pairs = {(int(a), int(b)) for a, b in zip(before[before > 0], on_cells[before > 0])}
+    assert len(pairs) == len({a for a, _ in pairs}) == len({b for _, b in pairs})
 
 
 def test_the_merger_drops_rejected_winners_before_their_id_and_keeps_facts_in_id_order(tmp_path):
@@ -374,7 +383,8 @@ def test_regions_and_a_tissue_plan_skip_together_and_are_counted_apart(tmp_path,
     skipped = []
     worker.tile_skipped.connect(lambda i, n: skipped.append(i))
     _run(worker, zp, loop)
-    regions_only = worker._regions_skipped["t" if loop == "segment_one_zarr" else ""]
-    assert set(skipped) == set(empty) | set(regions_only) and regions_only
-    assert not set(regions_only) & set(empty)                      # a tile in both counts as tissue
-    assert sorted(worker._skipped_tiles) == sorted(empty)
+    # a cores run has no grid: the tissue plan is ignored and recorded so
+    # (docs/v17_step2_core_by_core_plan.md §3.4); nothing is skipped
+    assert skipped == [] and not getattr(worker, "_skipped_tiles", [])
+    meta = worker._step2_engine_meta()
+    assert meta["layout"] == "cores" and meta["skip_tiles"]["ignored"] == "the run follows cores"

@@ -36,8 +36,9 @@ def _watch(monkeypatch):
 @pytest.mark.parametrize("case", ["plan", "regions", "empty_run"])
 @pytest.mark.parametrize("loop", LOOPS)
 def test_no_tile_and_no_export_touches_the_machines_file_cache(tmp_path, monkeypatch, loop, case):
-    """plan: empty tiles skipped by the tissue plan; regions: and by the core
-    rules; empty_run: no plan, so the empty tiles run and return no labels."""
+    """plan: empty tiles skipped by the tissue plan; regions: a run that
+    follows cores (one unit per core); empty_run: no plan, so the empty tiles
+    run and return no labels."""
     lab = _labels(3)
     h, w = lab.shape
     empty = _empty_tiles(lab, ROWS, COLS, OVERLAP)
@@ -54,6 +55,8 @@ def test_no_tile_and_no_export_touches_the_machines_file_cache(tmp_path, monkeyp
     assert n                                   # tiles with cells ran
     if case == "empty_run":                    # every tile ran the model, the empty ones too
         assert not skipped and len(calls) == ROWS * COLS
+    elif case == "regions":                    # a cores run: one unit per core, no grid, nothing
+        assert not skipped and len(calls) == 1  # skipped (docs/v17_step2_core_by_core_plan.md)
     else:
         assert skipped
     assert said == []

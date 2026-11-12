@@ -378,6 +378,9 @@ class Step2Page(QWidget):
         self.saved_core_items = None          # () -> overlay items of the last Regions Save
         self.manual_regions = None            # (method, fused, rois, ask) -> (request, refusal), 9.2
         self._run_core_snapshot = None        # the snapshot the run on screen froze
+        #: how many cores a run started now would follow (0: a grid run);
+        #: docs/v17_step2_core_by_core_plan.md §3.6
+        self._cores_preview = 0
         from .regions.core_outlines import CoreOutlines
         import types
         self._core_outlines = CoreOutlines(
@@ -2059,8 +2062,8 @@ class Step2Page(QWidget):
         """The last grid check before the run's configuration is taken (so the
         skip plan follows a changed grid) and before anything is created:
         StarDist's tiles must fit (2026-10-25). Asks; False = do not run."""
-        if not self._is_stardist():
-            return True
+        if not self._is_stardist() or self.__dict__.get("_cores_preview"):
+            return True                              # a cores run splits a too-large core itself
         # (no Auto re-application here: it would reset the skip choices even
         # when nothing changes; the grid on screen is the one checked)
         nr0, nc0 = self._rows_spin.value(), self._cols_spin.value()
@@ -2087,7 +2090,8 @@ class Step2Page(QWidget):
     def _keep_stardist_tiles_safe(self):
         """With StarDist, a grid whose tiles are too big is split further at
         once (user ruling 2026-10-25); the suggestion line says so."""
-        if not self._is_stardist() or self._full_h <= 0 or self._full_w <= 0:
+        if not self._is_stardist() or self._full_h <= 0 or self._full_w <= 0 \
+                or self.__dict__.get("_cores_preview"):
             return False
         nr, nc = self._rows_spin.value(), self._cols_spin.value()
         safe = self._stardist_safe_grid(nr, nc)
@@ -2107,6 +2111,8 @@ class Step2Page(QWidget):
     def _refresh_tile_suggestion(self, apply=False):
         if self._full_h <= 0 or self._full_w <= 0:
             return
+        if self.__dict__.get("_cores_preview"):
+            return                                   # no grid to suggest; Auto never moves the overlap
         method = self._method_combo.currentData() if hasattr(self, "_method_combo") else CELLPOSE_WHOLECELL_FUSION
         cfg = self.get_seg_config() if hasattr(self, "_method_combo") else {}
         channel_count = 2
@@ -2190,14 +2196,81 @@ class Step2Page(QWidget):
             seg_config[preseg_contract.CONTRACT_KEY] = {k: v for k, v in block.items() if k != "regions"}
         return seg_config
 
-    def _core_items(self):
-        """The cores this page shows: the run on screen's frozen snapshot, else
+    def _core_source_items(self):
+        """The cores this page shows, in the Regions colours (green: runs,
+        yellow: does not): while a run is on, the snapshot it froze; else
         the last Regions Save (as Step1 shows it) -- what a run started now
-        follows, whatever the parameters' source."""
+        follows, whatever the parameters' source. (A finished run's snapshot
+        no longer hides a newer Save: 15A acceptance, 2026-11-12.)"""
         from ..core.regions import display as RD
-        if self._run_core_snapshot is not None:
+        if self._run_core_snapshot is not None and self.__dict__.get("_run_active"):
             return RD.snapshot_items(self._run_core_snapshot)
         return list(self.saved_core_items() or []) if callable(self.saved_core_items) else []
+
+    #: A core being segmented: the running tile's colour, a translucent fill.
+    CORE_RUNNING_FILL = '#59ffc832'
+
+    def _core_items(self):
+        """The cores in Step2's tile scheme (15A acceptance, 2026-11-12): a
+        core that runs is drawn like an idle tile, one left out like a
+        skipped tile; during a run the core being segmented is highlighted
+        like the running tile, and a core whose units are all done gets the
+        done tile's green border (the user, 2026-11-12)."""
+        from ..core.regions import display as RD
+        states = self._core_states()
+        out = []
+        for it in self._core_source_items():
+            uid = str(it.get("id", "")).split("#")[0]
+            if it.get("color") != RD.GREEN:
+                it = dict(it, color=self.SKIP_PURPLE)
+            elif states.get(uid) == 'running':
+                it = dict(it, color=self.TILE_COLOURS['running'], width=4, fill=self.CORE_RUNNING_FILL)
+            elif states.get(uid) == 'done':
+                it = dict(it, color=self.TILE_COLOURS['done'], width=2)
+            else:
+                it = dict(it, color=self.TILE_COLOURS['idle'], width=2)
+            out.append(it)
+        return out
+
+    def _core_states(self):
+        """{core uid: 'running' | 'done'} of the run on screen (a cores run):
+        'running' while one of its units is being segmented, 'done' once all
+        its units are -- kept after the run, as done tiles are, until the
+        next run. From the units the worker made and the run's progress."""
+        rp = self._run_progress
+        if rp is None or not self._run_view_live():
+            return {}
+        if rp.get("unit_cores") is None:                    # copied once the worker has made them
+            worker = self.__dict__.get("_worker")
+            if worker is None or worker is rp.get("prev_worker"):
+                return {}
+            meta = getattr(worker, "_units_meta", None) or {}
+            if not meta:
+                return {}
+            rp["unit_cores"] = [u["core_uid"] for u in list(meta.values())[-1]]
+        cores = rp["unit_cores"]
+        done = rp.get("done_units", set())
+        states = {}
+        for uid in set(cores):
+            mine = [i for i, c in enumerate(cores) if c == uid]
+            if all(i in done for i in mine):
+                states[uid] = 'done'
+        if self.__dict__.get("_run_active"):
+            for i, s in rp["state"].items():
+                if s == 'running' and i not in done and 0 <= i < len(cores):
+                    states[cores[i]] = 'running'
+        return states
+
+    def _refresh_core_looks(self):
+        """Redraw the cores' colours (both views) without re-reading the input."""
+        if not self.__dict__.get("_cores_preview"):
+            return
+        for co in (self._core_outlines, getattr(self.dapi_viewer, "cores", None)):
+            if co is not None and getattr(co, "overlay", None) is not None:
+                try:
+                    co.refresh()
+                except Exception as exc:                    # noqa: BLE001 -- a look only
+                    print(f"[TMA cores] step2: not redrawn ({type(exc).__name__}: {exc})")
 
     def _ov_map(self, x, y):
         """Slide pixels to the overview's: minus the shown input's origin, over its stride."""
@@ -2224,14 +2297,61 @@ class Step2Page(QWidget):
                 self._core_outlines.detach()
         else:
             self._core_outlines.detach()
+        self._apply_cores_layout()                          # before the viewer draws (no grid for cores)
         if self.dapi_viewer is not None:
             n = max(n, self.dapi_viewer.refresh())         # the cores over the zoomable picture too
         self.btn_tma_cores.setVisible(n > 0)
         return n
 
+    def cores_run_count(self):
+        """How many cores a run started now follows: the green (run) cores of
+        the run on screen's frozen snapshot, else of the last Regions Save.
+        0: no cores, a grid run."""
+        from ..core.regions import display as RD
+        try:
+            items = self._core_source_items()
+        except Exception:                                   # noqa: BLE001 -- a preview only
+            items = []
+        return len({str(it.get("id", "")).split("#")[0] for it in items if it.get("color") == RD.GREEN})
+
+    def _apply_cores_layout(self, count=None):
+        """A run that follows cores runs core by core: Rows / Cols / Auto and
+        the tile skipping step aside, no grid is drawn; the overlap stays (it
+        is the overlap between the parts of a core too large for one call).
+        Without cores the box is as before. The frozen snapshot decides at
+        Run; this is its preview (plan §3.0, §3.6)."""
+        n = int(self.cores_run_count()) if count is None else int(count)
+        was = bool(self._cores_preview)
+        self._cores_preview = n
+        cores = n > 0
+        running = bool(self.__dict__.get("_run_active"))
+        for w in (self._rows_spin, self._cols_spin, self._auto_tile_strategy, self._skip_btn_row):
+            w.setEnabled(not cores)
+        # the skip box is also locked while a run is on (it is the run's plan)
+        self._skip_empty_cb.setEnabled(not cores and not running)
+        if cores:
+            self._tile_suggestion_lbl.setText(
+                f"Runs core by core ({n} core{'s' if n != 1 else ''}); no tile grid. The overlap is used "
+                "only between the parts of a core too large for one engine call.")
+        if cores != was:
+            if not cores:
+                self._refresh_tile_suggestion()
+            self._draw_tile_grid()
+
     def _draw_tile_grid(self):
-        """Overlay tile rectangles on the overview."""
+        """Overlay tile rectangles on the overview (none for a run that
+        follows cores: it has no grid)."""
         if not hasattr(self, '_ov_h') or self._full_h == 0:
+            return
+        if self.__dict__.get("_cores_preview"):
+            self._box = None
+            self._box_preview = {}
+            self._pending = {}
+            for item in list(self._tile_rects.values()):
+                self._ov_vb.removeItem(item)
+            self._tile_rects.clear()
+            self._tile_status.clear()
+            self._tile_colour_state.clear()
             return
         nr = self._rows_spin.value()
         nc = self._cols_spin.value()
@@ -2737,6 +2857,8 @@ class Step2Page(QWidget):
         forced = ({int(i) for i in plan["user_forced"]}
                   if plan is not None and self._skip_empty_cb.isChecked() else set())
         self._run_progress = {"grid": (int(nr), int(nc)), "state": {}, "forced": forced}
+        # its cores come from this run's worker, never the one before (15A)
+        self._run_progress["prev_worker"] = self.__dict__.get("_worker")
         for key in self._tile_status:
             self._tile_status[key] = 'idle'
             self._set_tile_colour(key[0], key[1], 'idle')
@@ -2750,6 +2872,9 @@ class Step2Page(QWidget):
         if self._run_progress is None:
             return
         self._run_progress["state"][int(tile_idx)] = state
+        if state == 'done':                    # a core's highlight ends here, whatever comes after
+            self._run_progress.setdefault("done_units", set()).add(int(tile_idx))
+        self._refresh_core_looks()
         if self._shows_run_grid():
             r, c = divmod(int(tile_idx), self._run_progress["grid"][1])
             self._set_tile_colour(r, c, state)
@@ -2829,8 +2954,9 @@ class Step2Page(QWidget):
         return nr, nc, -(-self._full_h // nr), -(-self._full_w // nc), oy, ox
 
     def tile_items(self):
-        """The drawn grid as overlay items in slide pixels, in its colours."""
-        if not self._tile_rects or not self._full_h:
+        """The drawn grid as overlay items in slide pixels, in its colours
+        (none for a run that follows cores)."""
+        if not self._tile_rects or not self._full_h or self.__dict__.get("_cores_preview"):
             return []
         nr, nc, th, tw, oy, ox = self._tile_geometry()
         items = []
@@ -3714,7 +3840,10 @@ class Step2Page(QWidget):
                 f"{lines}\n\nReload the saved parameters, or choose again in Step1.")
             return False
         halo = int(block["halo_px"])
-        if halo != self._overlap_spin.value():
+        # a run that follows cores has no grid: the hand-over's HALO is its
+        # grid's (docs/v17_step2_core_by_core_plan.md §3.1); the worker decides
+        # again from the frozen snapshot
+        if halo != self._overlap_spin.value() and not self.__dict__.get("_cores_preview"):
             QMessageBox.warning(
                 self, 'Segmentation params',
                 f"The Step1 result was computed with a HALO of {halo} px, but the Tile "
@@ -3833,8 +3962,6 @@ class Step2Page(QWidget):
             ):
                 if not self._apply_selected_index_params():
                     return
-        if not self._stardist_grid_ok_for_run():
-            return
         seg_config = self.get_seg_config()
         if is_retired_method(seg_config.get("method")):
             # Defence in depth (plan §1): no route runs a retired method.
@@ -3842,6 +3969,33 @@ class Step2Page(QWidget):
             return
         if self._region_fused_paths:                # block RM: the chosen fuse run's
             seg_config["region_fused_paths"] = dict(self._region_fused_paths)
+
+        # docs/f5_tma_display_plan.md 9.2: a TMA project's run follows its cores
+        # whatever the parameters' source -- frozen here, before anything is
+        # created, so a refusal or a No leaves no run behind.
+        # User ruling 2026-10-19 (third round): the parameters are decoupled
+        # from Regions -- whatever their source, the cores are the last Regions
+        # Save's, frozen now; a Step1 hand-over's own frozen cores are not used.
+        # docs/v17_step2_core_by_core_plan.md §3.0: frozen FIRST -- the layout
+        # (cores or grid) follows this snapshot, and the checks below depend on it.
+        self._without_handover_regions(seg_config)
+        regions_request = None
+        if callable(self.manual_regions):
+            def ask(text):
+                return QMessageBox.question(self, "TMA cores", text, QMessageBox.Yes | QMessageBox.No,
+                                            QMessageBox.No) == QMessageBox.Yes
+            regions_request, why = self.manual_regions(seg_config.get("method"), self._zarr_path,
+                                                       self._rois, ask)
+            if why is None:
+                return                                    # the user said No
+            if why:
+                QMessageBox.warning(self, "Regions", f"This run cannot follow the Regions result: {why}.")
+                return
+        from ..core.regions import analysis as RA
+        frozen = (regions_request or {}).get("snapshot") if regions_request else None
+        self._apply_cores_layout(count=len(frozen.get("cores") or []) if frozen and RA.has_cores(frozen) else 0)
+        if not self._stardist_grid_ok_for_run():
+            return
         identity_confirmation = None
         if source == "index":
             if not self._check_preseg_contract(seg_config):
@@ -3897,29 +4051,16 @@ class Step2Page(QWidget):
         nc  = self._cols_spin.value()
         self._n_rows = nr
         self._n_cols = nc
+        # the skip plan of the grid that runs (the StarDist check or Auto may
+        # have changed the grid after the configuration was read)
+        skip = self.skip_tiles_config()
+        if skip is not None:
+            seg_config["skip_tiles"] = skip
+        else:
+            seg_config.pop("skip_tiles", None)
         param_file = ""
         if source == "index" and self._applied_param_file:
             param_file = self._applied_param_file
-
-        # docs/f5_tma_display_plan.md 9.2: a TMA project's run follows its cores
-        # whatever the parameters' source -- frozen here, before anything is
-        # created, so a refusal or a No leaves no run behind.
-        # User ruling 2026-10-19 (third round): the parameters are decoupled
-        # from Regions -- whatever their source, the cores are the last Regions
-        # Save's, frozen now; a Step1 hand-over's own frozen cores are not used.
-        self._without_handover_regions(seg_config)
-        regions_request = None
-        if callable(self.manual_regions):
-            def ask(text):
-                return QMessageBox.question(self, "TMA cores", text, QMessageBox.Yes | QMessageBox.No,
-                                            QMessageBox.No) == QMessageBox.Yes
-            regions_request, why = self.manual_regions(seg_config.get("method"), self._zarr_path,
-                                                       self._rois, ask)
-            if why is None:
-                return                                    # the user said No
-            if why:
-                QMessageBox.warning(self, "Regions", f"This run cannot follow the Regions result: {why}.")
-                return
 
         self._begin_run_progress(nr, nc)
         self._total_cells = 0
@@ -4124,7 +4265,8 @@ class Step2Page(QWidget):
             return
         self._run_grid_lbl.setVisible(False)
         self._run_active = False
-        self._skip_empty_cb.setEnabled(True)
+        self._skip_empty_cb.setEnabled(not self.__dict__.get("_cores_preview"))   # a cores run has no grid
+        self.refresh_core_outlines()             # no highlight; the last Save's cores again
         self._sync_skip_buttons()
         self._btn_run.setEnabled(True)
         self._btn_stop.setEnabled(False)
@@ -4155,7 +4297,8 @@ class Step2Page(QWidget):
     def _on_finished(self, output_dir, total_cells):
         self._run_grid_lbl.setVisible(False)
         self._run_active = False
-        self._skip_empty_cb.setEnabled(True)
+        self._skip_empty_cb.setEnabled(not self.__dict__.get("_cores_preview"))   # a cores run has no grid
+        self.refresh_core_outlines()             # no highlight; the last Save's cores again
         self._sync_skip_buttons()
         self._mark_source_aware_applied()
         runtime = {}
@@ -4228,7 +4371,8 @@ class Step2Page(QWidget):
         self._mark_source_aware_failed(msg)
         self._run_grid_lbl.setVisible(False)
         self._run_active = False
-        self._skip_empty_cb.setEnabled(True)
+        self._skip_empty_cb.setEnabled(not self.__dict__.get("_cores_preview"))   # a cores run has no grid
+        self.refresh_core_outlines()             # no highlight; the last Save's cores again
         self._sync_skip_buttons()
         self._prog_lbl.setText('✗ Error — see terminal')
         self._btn_run.setEnabled(True)

@@ -868,6 +868,78 @@ class SegmentMergeWorker(QThread):
         except Exception:                                   # noqa: BLE001
             return None
 
+    def _requests_cores_run(self):
+        """Whether the Regions snapshot this run will follow has cores (a TMA,
+        or cores found without a map sheet): then it runs core by core
+        (docs/v17_step2_core_by_core_plan.md). Read before anything is written."""
+        from ..core.regions import analysis as RA
+        reg = getattr(self, "_regions_request", None) or \
+            ((self._contract or {}).get("regions") if getattr(self, "_contract", None) else None)
+        return bool(reg) and RA.has_cores(reg.get("snapshot") or {})
+
+    def _cores_run(self):
+        """This run, once its Regions are checked, runs core by core."""
+        from ..core.regions import analysis as RA
+        R = getattr(self, "_regions", None)
+        return R is not None and RA.has_cores(R["snapshot"])
+
+    def _make_scheduler(self, full_h, full_w, out_prefix="", bbox=None):
+        """The grid, or -- a cores run -- one unit per selected core (plan §3.1)."""
+        if self._cores_run():
+            from ..utils.step2_units import core_units
+            oy, ox = (int(bbox[0]), int(bbox[2])) if bbox else (0, 0)
+            units = core_units(self._regions["snapshot"], [oy, oy + int(full_h), ox, ox + int(full_w)],
+                               self.method, self._part_overlap(), out_prefix)
+            if not units:
+                raise RuntimeError("none of the selected cores lies in this region")
+            self.__dict__.setdefault("_units_meta", {})[out_prefix] = [
+                {"index": u.index, "core_uid": u.core_uid, "part": list(u.part),
+                 "own_bbox": [int(v) for v in u.own_bbox], "read_bbox": [int(v) for v in u.read_bbox]}
+                for u in units]
+            return TileScheduler.from_units(full_h, full_w, units, out_prefix=out_prefix)
+        return TileScheduler(full_h=full_h, full_w=full_w, n_rows=self.n_rows, n_cols=self.n_cols,
+                             overlap_px=self.overlap_px, out_prefix=out_prefix)
+
+    def _part_overlap(self):
+        """The overlap between the parts of a core too large for one call: a
+        hand-over's HALO, else the run's overlap (plan §3.1)."""
+        contract = getattr(self, "_contract", None)
+        return int((contract or {}).get("halo_px") or self.overlap_px) if contract else int(self.overlap_px)
+
+    @staticmethod
+    def _unit_label(tiles, i):
+        """How tile i is named in progress text: "Tile [i/n]" on a grid,
+        "core k of N" (", part j of m") on a cores run."""
+        t = tiles[i]
+        if not getattr(t, "core_uid", ""):
+            return f"Tile [{i + 1}/{len(tiles)}]"
+        cores = list(dict.fromkeys(x.core_uid for x in tiles))
+        j, m = t.part
+        return f"core {cores.index(t.core_uid) + 1} of {len(cores)}" + (f", part {j + 1} of {m}" if m > 1 else "")
+
+    def _fill_dapi(self, zarr_path, z, dapi_mmap, full_h, full_w, log, block=2048):
+        """A cores run reads DAPI only inside its units: the slide's DAPI image
+        is completed over the whole region in bounded blocks (no engine call),
+        stopping when asked (plan §3.3). True when complete."""
+        rows = list(range(0, int(full_h), block))
+        cols = list(range(0, int(full_w), block))
+        n, k = len(rows) * len(cols), 0
+        for y0 in rows:
+            for x0 in cols:
+                if self._stop:
+                    return False
+                y1, x1 = min(y0 + block, int(full_h)), min(x0 + block, int(full_w))
+                if getattr(self, "_channel_store", None) is not None:
+                    d = self._channel_store.read_dapi(zarr_path, y0, y1, x0, x1)
+                else:
+                    d = self._read_dapi_from_zarr(z, y0, y1, x0, x1)
+                dapi_mmap[y0:y1, x0:x1] = d[:y1 - y0, :x1 - x0]
+                k += 1
+                if k % 8 == 0 or k == n:
+                    self.progress.emit(k, n, f"DAPI image {k}/{n}")
+        log.info(f"  DAPI image completed over the region ({n} blocks)")
+        return True
+
     def _regions_for(self, out_prefix, tiles, full_h, full_w, bbox=None, poly=None):
         """(judge, skip set) of one region: the Regions verdict of each tile's
         objects (`SeamMerger` judge) and the tiles whose read window holds no
@@ -982,7 +1054,22 @@ class SegmentMergeWorker(QThread):
                 "dropped": {"multiple_cells": 0, "partial_background": 0, "outside_cells": 0},
                 "pairing": {}}
 
-    def _nuclei_count_drops(self, state, local_raw, dropped_ids, own_local):
+    @staticmethod
+    def _count_box(tiles, i):
+        """(own box, earlier boxes) where unit i counts dropped nuclei, local
+        to its read window: a grid tile's own box; a core unit's window minus
+        the earlier units' windows (overlapping windows count a nucleus once,
+        in the first that holds it, docs/v17_step2_core_by_core_plan.md §3.2)."""
+        t = tiles[i]
+        ry0, _ry1, rx0, _rx1 = t.read_bbox
+        loc = lambda b: (b[0] - ry0, b[1] - ry0, b[2] - rx0, b[3] - rx0)   # noqa: E731
+        if not getattr(t, "core_uid", ""):
+            return loc(t.own_bbox), ()
+        # a unit counts what its window holds, minus what an earlier unit's
+        # window already held (the first window containing the centroid)
+        return loc(t.read_bbox), tuple(loc(u.read_bbox) for u in tiles[:i])
+
+    def _nuclei_count_drops(self, state, local_raw, dropped_ids, own_local, earlier=()):
         """Count the tile's dropped nuclei that this tile owns (by their own
         centroid) -- before any `continue`, so a tile without kept cells
         still counts the nuclei it dropped. Cellpose whole-cell + nuclei
@@ -991,12 +1078,30 @@ class SegmentMergeWorker(QThread):
         plain, events = {}, {}
         for reason, value in (dropped_ids or {}).items():
             (events if isinstance(value, tuple) else plain)[reason] = value
+        if earlier:
+            # a core unit: its counting box minus the earlier units' (once each)
+            plain = {r: self._not_counted_before(local_raw, ids, earlier) for r, ids in plain.items()}
+            events = {r: (lab, self._not_counted_before(lab, ids, earlier)) for r, (lab, ids) in events.items()}
         if plain:
             for reason, n in nuclei_pairing.owned_drop_counts(local_raw, plain,
                                                               own_local).items():
                 state["dropped"][reason] = state["dropped"].get(reason, 0) + n
         for reason, n in nuclei_pairing.owned_object_counts(events, own_local).items():
             state["pairing"][reason] = state["pairing"].get(reason, 0) + int(n)
+
+    @staticmethod
+    def _not_counted_before(labels, ids, earlier):
+        """`ids` whose centroid lies in none of the `earlier` boxes."""
+        from ..core.label_ownership import centroids
+        ids = np.asarray(ids, np.int64)
+        if not ids.size:
+            return ids
+        cy, cx = centroids(np.asarray(labels))
+        y, x = cy[ids - 1], cx[ids - 1]
+        seen = np.zeros(ids.shape, bool)
+        for (by0, by1, bx0, bx1) in earlier:
+            seen |= (y >= by0) & (y < by1) & (x >= bx0) & (x < bx1)
+        return ids[~seen]
 
     def _nuclei_add_tile(self, state, lut, local_nuclei, local_cell):
         """The tile's nuclei, renumbered: a nucleus stays when its cell does
@@ -1276,8 +1381,9 @@ class SegmentMergeWorker(QThread):
                 self.seg_config, default=str)).items() if k != "region_fused_paths"},
             "param_file": self.param_file or "",
             "parameter_source": self.parameter_source,
-            "tiles": {"n_rows": self.n_rows, "n_cols": self.n_cols,
-                      "overlap_px": self.overlap_px},
+            "tiles": ({"layout": "cores", "part_overlap_px": self._part_overlap()}
+                      if (self._cores_run() or self._requests_cores_run()) else
+                      {"n_rows": self.n_rows, "n_cols": self.n_cols, "overlap_px": self.overlap_px}),
             "input_zarr_path": os.path.abspath(self.zarr_path),
         }
         run_store.write_params(self.output_dir, run_store.to_records(params, project))
@@ -2009,6 +2115,25 @@ class SegmentMergeWorker(QThread):
                 "skipped_by_user_with_tissue": list(plan.get("user_forced") or []),
             }}
         R = getattr(self, "_regions", None)
+        if self._cores_run():
+            # docs/v17_step2_core_by_core_plan.md §3.5: one unit per core, no grid
+            if plan:
+                skip = {"skip_tiles": {"requested": dict(plan), "ignored": "the run follows cores"}}
+            skip["regions"] = {"identity": R["identity"], "source": R.get("source", "contract"),
+                               "selection_mode": R.get("selection_mode", "ticked")}
+            return {
+                "layout": "cores",
+                "units": {k or "whole_image": v for k, v in (getattr(self, "_units_meta", {}) or {}).items()},
+                "tile_strategy": "not used (cores run)",
+                **skip,
+                "channel_cache": cache,
+                "merge_policy": {
+                    "shadow_compare_enabled": False,
+                    "primary_enabled": self._config_bool("enable_merge_policy_primary", False),
+                    "shadow_compare_count": int(self._merge_shadow_compare_count),
+                    "shadow_mismatch_count": int(self._merge_shadow_mismatch_count),
+                },
+            }
         if R is not None:                            # F4-3: what the Regions result left out
             skip["regions"] = {"identity": R["identity"], "source": R.get("source", "contract"),
                                "selection_mode": R.get("selection_mode", "ticked"),
@@ -2075,6 +2200,12 @@ class SegmentMergeWorker(QThread):
         overlap, or for a run of several ROIs, is refused (it would skip the
         wrong parts of the image). Recovery mode never skips."""
         if getattr(self, "_skip_cache", None) is not None:
+            return self._skip_cache
+        if self._cores_run() or self._requests_cores_run():
+            # a cores run has no grid: the cores decide what runs; a plan given
+            # anyway is recorded as ignored (docs/v17_step2_core_by_core_plan.md §3.4)
+            self._skip_ignored = bool(self.seg_config.get("skip_tiles"))
+            self._skip_cache = frozenset()
             return self._skip_cache
         plan = self.seg_config.get("skip_tiles")
         if not plan:
@@ -2912,14 +3043,7 @@ class SegmentMergeWorker(QThread):
         tile_w = -(-full_w // self.n_cols)
 
         with self.step2_profiler.time_stage("build_tiles", method=self.method, tile_h=tile_h, tile_w=tile_w, overlap=self.overlap_px):
-            scheduler = TileScheduler(
-                full_h=full_h,
-                full_w=full_w,
-                n_rows=self.n_rows,
-                n_cols=self.n_cols,
-                overlap_px=self.overlap_px,
-                out_prefix=out_prefix,
-            )
+            scheduler = self._make_scheduler(full_h, full_w, out_prefix, bbox=bbox)
             tile_h = scheduler.tile_h
             tile_w = scheduler.tile_w
             tiles = list(scheduler.iter_tiles())
@@ -3026,12 +3150,12 @@ class SegmentMergeWorker(QThread):
             own_w = ox1 - ox0
 
             log.info(
-                f"  [{out_prefix}] Tile [{i+1}/{n_tiles}] "
+                f"  [{out_prefix}] {self._unit_label(tiles, i)} "
                 f"row={row} col={col}"
             )
             self.progress.emit(
                 i, n_tiles,
-                f"[{out_prefix}] Tile [{i+1}/{n_tiles}]  "
+                f"[{out_prefix}] {self._unit_label(tiles, i)}  "
                 f"({ry1-ry0}×{rx1-rx0}px)"
             )
 
@@ -3062,7 +3186,8 @@ class SegmentMergeWorker(QThread):
             dapi_own = payload["dapi_own"]
             hq_marker_channels_prefetched = payload.get("hq_marker_channels")
             mesmer_channel_source_prefetched = payload.get("mesmer_channel_source")
-            dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
+            if not self._cores_run():                  # a cores run's DAPI comes from the fill
+                dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
             stage_seconds["read_tile"] = time.perf_counter() - _t
             if payload.get("skipped"):
                 self._skip_tile(i, n_tiles, profile_tile_id, stage_seconds, tile_shape,
@@ -3180,8 +3305,9 @@ class SegmentMergeWorker(QThread):
             local_ox0 = ox0 - rx0
             local_ox1 = ox1 - rx0
             if keeps_nuclei and local_nuclei_raw is not None:
+                own_count, earlier = self._count_box(tiles, i)
                 self._nuclei_count_drops(nuclei_state, local_nuclei_raw, local_nuclei_dropped,
-                                         (local_oy0, local_oy1, local_ox0, local_ox1))
+                                         own_count, earlier)
             local_nuclei_raw = local_nuclei_dropped = None
             _t = time.perf_counter()
             with self.step2_profiler.time_stage("postprocess", **tile_profile_base):
@@ -3366,6 +3492,8 @@ class SegmentMergeWorker(QThread):
             metrics = scheduler.prefetch_metrics()
             self.step2_profiler.log_tile_stage(None, "tile_prefetch_wait", metrics.get("prefetch_wait_seconds", 0.0), **metrics)
         self._close_tile_scheduler(scheduler)
+        if self._cores_run() and not self._stop:
+            self._fill_dapi(zarr_path, z, dapi_mmap, full_h, full_w, log)   # plan §3.3
 
         if merger is not None and not self._stop:
             with self.step2_profiler.time_stage("seam_merge", method=self.method):
@@ -3517,7 +3645,8 @@ class SegmentMergeWorker(QThread):
             'mmap_path':       self._abs(mmap_path),
             'total_cells':     total_cells,
             'image_shape':      [full_h, full_w],
-            'tile_grid':        [self.n_rows, self.n_cols],
+            'tile_grid':        None if self._cores_run() else [self.n_rows, self.n_cols],
+            **({'layout': 'cores'} if self._cores_run() else {}),
             'tile_strategy':     self._step2_engine_meta(),
             'tile_strategy_mode': self._tile_strategy_info.get("tile_strategy_mode", "manual"),
             'suggested_tile_h':  self._tile_strategy_info.get("suggested_tile_h"),
@@ -3621,8 +3750,16 @@ class SegmentMergeWorker(QThread):
                     "Recovery Mode cannot run this method: the saved tiles have no "
                     "nuclei, so cells without a nucleus could not be dropped. Run it "
                     "again without Recovery Mode.")
+            cores_run = self._requests_cores_run()
+            if cores_run and self.recovery_npy_dir is not None:
+                # its files are addressed by grid row / column, a cores run has
+                # no grid (docs/v17_step2_core_by_core_plan.md §3.4)
+                raise RuntimeError(
+                    "Recovery Mode cannot run a run that follows Regions cores (it runs core by "
+                    "core, the saved tiles belong to a grid). Run it again without Recovery Mode.")
             if self._contract is not None:
-                if int(self._contract["halo_px"]) != int(self.overlap_px):
+                # the hand-over's HALO is its grid's; a cores run has no grid (plan §3.1)
+                if not cores_run and int(self._contract["halo_px"]) != int(self.overlap_px):
                     raise RuntimeError(
                         f"the Step1 result was computed with a HALO of "
                         f"{self._contract['halo_px']} px, but the Tile Grid overlap is "
@@ -3713,7 +3850,7 @@ class SegmentMergeWorker(QThread):
                         "global_dapi": region_meta.get("global_dapi"),
                         "zarr_path": region_meta.get("zarr_path"),
                         "tiles_dir": region_meta.get("tiles_dir") or self._abs(os.path.join(self.output_dir, "tile_masks", roi_name)),
-                        "tile_grid": [self.n_rows, self.n_cols],
+                        "tile_grid": None if self._cores_run() else [self.n_rows, self.n_cols],
                         "total_cells": n_cells,
                         "seg_config": self.seg_config,
                         "paths": region_meta.get("paths") or {},
@@ -3801,6 +3938,12 @@ class SegmentMergeWorker(QThread):
                 with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(summary_meta_path)):
                     write_json_atomic(summary_meta_path, summary_meta)   # block A6 G2
                 self._write_run_metadata(summary_meta)   # the remap promotion reads it
+                if self._stop:                       # a Stop while the outputs were written:
+                    if getattr(self, "_channel_store", None) is not None:   # nothing is published
+                        self._channel_store.close()
+                    self._close_active_tile_scheduler()
+                    self.error.emit('Stopped by user.')
+                    return
                 if self.roi_dir and self.roi_id:
                     self._rm_publish_segment_run()
                     register_segmentation_run(self.output_dir, summary_meta)   # block A3
@@ -3843,13 +3986,7 @@ class SegmentMergeWorker(QThread):
             tile_w = -(-full_w // self.n_cols)
 
             with self.step2_profiler.time_stage("build_tiles", method=self.method, tile_h=tile_h, tile_w=tile_w, overlap=self.overlap_px):
-                scheduler = TileScheduler(
-                    full_h=full_h,
-                    full_w=full_w,
-                    n_rows=self.n_rows,
-                    n_cols=self.n_cols,
-                    overlap_px=self.overlap_px,
-                )
+                scheduler = self._make_scheduler(full_h, full_w)
                 tile_h = scheduler.tile_h
                 tile_w = scheduler.tile_w
                 tiles = list(scheduler.iter_tiles())
@@ -3949,7 +4086,7 @@ class SegmentMergeWorker(QThread):
                 own_w = ox1 - ox0
 
                 _msg = (
-                    f"Tile [{i+1}/{n_tiles}]  row={row} col={col}  "
+                    f"{self._unit_label(tiles, i)}  row={row} col={col}  "
                     f"read=({ry1-ry0}×{rx1-rx0}px)  own=({own_h}×{own_w}px)"
                 )
                 self.progress.emit(i, n_tiles, _msg)
@@ -3983,7 +4120,8 @@ class SegmentMergeWorker(QThread):
                 dapi_own = payload["dapi_own"]
                 hq_marker_channels_prefetched = payload.get("hq_marker_channels")
                 mesmer_channel_source_prefetched = payload.get("mesmer_channel_source")
-                dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
+                if not self._cores_run():                  # a cores run's DAPI comes from the fill
+                    dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
                 stage_seconds["read_tile"] = time.perf_counter() - _t
                 if payload.get("skipped"):
                     self._skip_tile(i, n_tiles, profile_tile_id, stage_seconds, tile_shape,
@@ -4090,8 +4228,9 @@ class SegmentMergeWorker(QThread):
                 local_ox0 = ox0 - rx0
                 local_ox1 = ox1 - rx0
                 if keeps_nuclei and local_nuclei_raw is not None:
+                    own_count, earlier = self._count_box(tiles, i)
                     self._nuclei_count_drops(nuclei_state, local_nuclei_raw, local_nuclei_dropped,
-                                             (local_oy0, local_oy1, local_ox0, local_ox1))
+                                             own_count, earlier)
                 local_nuclei_raw = local_nuclei_dropped = None
                 _t = time.perf_counter()
                 with self.step2_profiler.time_stage("postprocess", **tile_profile_base):
@@ -4165,7 +4304,7 @@ class SegmentMergeWorker(QThread):
                         profile_tile_id, labels_count=n_kept,
                         output_path=self._abs(raw_mask_tile_path or mmap_path))
                     self.tile_done.emit(i, n_tiles, n_kept)
-                    self.progress.emit(i + 1, n_tiles, f"✓ Tile [{i+1}/{n_tiles}]  interior cells={n_kept} (seam cells decided at the end)")
+                    self.progress.emit(i + 1, n_tiles, f"✓ {self._unit_label(tiles, i)}  interior cells={n_kept} (seam cells decided at the end)")
                     log.info(f"  ✓ Tile [{i+1}/{n_tiles}] interior cells={n_kept} (seam cells decided at the end)")
                     stage_seconds["_profile_tile_id"] = profile_tile_id
                     self._profile_tile_line(i, n_tiles, stage_seconds, n_kept, tile_shape)
@@ -4265,7 +4404,7 @@ class SegmentMergeWorker(QThread):
 
                 self.tile_done.emit(i, n_tiles, n_kept)
                 _done_msg = (
-                    f"✓ Tile [{i+1}/{n_tiles}]  kept={n_kept} cells  "
+                    f"✓ {self._unit_label(tiles, i)}  kept={n_kept} cells  "
                     f"total so far={global_id_offset}"
                 )
                 self.progress.emit(i + 1, n_tiles, _done_msg)
@@ -4282,6 +4421,8 @@ class SegmentMergeWorker(QThread):
                 metrics = scheduler.prefetch_metrics()
                 self.step2_profiler.log_tile_stage(None, "tile_prefetch_wait", metrics.get("prefetch_wait_seconds", 0.0), **metrics)
             self._close_tile_scheduler(scheduler)
+            if self._cores_run() and not self._stop:
+                self._fill_dapi(self.zarr_path, z, dapi_mmap, full_h, full_w, log)   # plan §3.3
 
             # The Mesmer device status is read BEFORE the model goes: the
             # metadata below needs it, and `del model` used to leave that read
@@ -4447,8 +4588,9 @@ class SegmentMergeWorker(QThread):
                 'mmap_path':      self._abs(mmap_path),
                 'total_cells':    total_cells,
                 'image_shape':    [full_h, full_w],
-                'tile_grid':      [self.n_rows, self.n_cols],
-                'overlap_px':     self.overlap_px,
+                'tile_grid':      None if self._cores_run() else [self.n_rows, self.n_cols],
+                **({'layout': 'cores'} if self._cores_run() else {}),
+                'overlap_px':     self._part_overlap() if self._cores_run() else self.overlap_px,
                 'tile_strategy':   self._step2_engine_meta(),
                 'tile_strategy_mode': self._tile_strategy_info.get("tile_strategy_mode", "manual"),
                 'suggested_tile_h': self._tile_strategy_info.get("suggested_tile_h"),
@@ -4505,6 +4647,12 @@ class SegmentMergeWorker(QThread):
             with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(meta_path)):
                 write_json_atomic(meta_path, meta)              # block A6 G2
             self._write_run_metadata(meta)               # the remap promotion reads it
+            if self._stop:                               # a Stop while the outputs were written:
+                if getattr(self, "_channel_store", None) is not None:   # nothing is published
+                    self._channel_store.close()
+                self._close_active_tile_scheduler()
+                self.error.emit('Stopped by user.')
+                return
             if self.roi_dir and self.roi_id:
                 self._rm_publish_segment_run()
                 register_segmentation_run(self.output_dir, meta)           # block A3

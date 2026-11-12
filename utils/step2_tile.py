@@ -18,6 +18,10 @@ class Step2Tile:
     read_bbox: BBox
     overlap: int
     out_prefix: str = ""
+    #: a cores run's unit (docs/v17_step2_core_by_core_plan.md): the core it
+    #: belongs to and its part (j, k) when a large core is split; "" for a grid tile
+    core_uid: str = ""
+    part: Tuple[int, int] = (0, 1)
 
     @property
     def tile_id(self) -> str:

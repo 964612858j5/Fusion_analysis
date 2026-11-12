@@ -222,9 +222,16 @@ def test_step2s_page_draws_at_its_inputs_own_origin(app, monkeypatch, tmp_path):
     assert not page.btn_tma_cores.isHidden()
     snap = {"display_cores": [{"uid": "u", "polygons": [[[3000, 1000], [3010, 1000], [3010, 1010]]],
                                "name": "N", "run": True}]}
-    page._run_core_snapshot = snap                                     # the run's frozen cores win
+    assert page._core_outlines.overlay.items[0]["color"] == page.SKIP_PURPLE   # left out: a skipped tile's
+    page._run_core_snapshot = snap
+    page._run_active = True                                            # the running run's frozen cores win
     page.refresh_core_outlines()
-    assert page._core_outlines.overlay.items[0]["color"] == RD.GREEN
+    assert page._core_outlines.overlay.items[0]["color"] == page.TILE_COLOURS['idle']   # runs: an idle tile's
+    page._run_active = False                                           # ended: the last Save again
+    page.refresh_core_outlines()
+    assert page._core_outlines.overlay.items[0]["polygon"] == [[10.0, 20.0], [20.0, 20.0], [20.0, 30.0]]
+    page._run_core_snapshot = snap
+    page._run_active = True
     page.btn_tma_cores.setChecked(False)                               # the switch
     assert page._core_outlines.overlay.items == []
     page.saved_core_items = lambda: []

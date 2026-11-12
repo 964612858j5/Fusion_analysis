@@ -34,6 +34,27 @@ class TileScheduler:
         self._load_logger = None
         self.tile_h, self.tile_w, self.tiles = self._build_tiles()
 
+    @classmethod
+    def from_units(cls, full_h, full_w, units, out_prefix="", merge_policy=None):
+        """A scheduler over an explicit list of units (a cores run, one unit
+        per core or core part; `utils/step2_units.core_units`) instead of a
+        grid; loading, prefetch and cleanup as for a grid."""
+        self = cls.__new__(cls)
+        self.full_h, self.full_w = int(full_h), int(full_w)
+        self.n_rows, self.n_cols = len(units), 1
+        self.overlap_px = max([int(u.overlap) for u in units] or [0])
+        self.out_prefix = str(out_prefix or "")
+        self.merge_policy = merge_policy or CentroidOwnershipMergePolicy()
+        self.prefetcher = None
+        self.prefetch_enabled = False
+        self._load_fn = None
+        self._load_logger = None
+        self.tiles = list(units)
+        self.tile_h = max([u.own_h for u in units] or [0])
+        self.tile_w = max([u.own_w for u in units] or [0])
+        self.units = True
+        return self
+
     def _build_tiles(self):
         tile_h = -(-self.full_h // self.n_rows)
         tile_w = -(-self.full_w // self.n_cols)

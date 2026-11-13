@@ -57,6 +57,46 @@ recording is the acceptance (the blink is not testable offscreen).
 **Risk:** GL composition from start-up for the whole window (CPU repaint
 cost); rollback: revert.
 
+**Diagnosis (2026-11-13, Mac mini, real display; no product change).** A
+script opened the real window as `main.py` does, loaded two synthetic
+slides (A, then B) and logged every window event, with a screen recording.
+* Default backend: on Load A the main window is hidden, its native window
+  destroyed and recreated (raster -> OpenGL surface), shown again --
+  267 ms after the click; the recording shows it half transparent in one
+  frame (macOS fades the window out and in). Load B: nothing (the window
+  stays GL-composed, though a new host is made). With
+  `BLOCK01_STEP1_BACKEND=python` no recreation at all. So: the first GL
+  host's initialization (`engine_mount.start`: show, `grabFramebuffer`,
+  hide), once per session.
+* Also on Load, both backends: Step1's channel rows
+  (`widgets/channel_dock/template.py` `build_row_core`) create a
+  `QCheckBox()` without a parent and `setVisible` it before it is laid
+  out: for an instant each is its own window and takes the activation from
+  the main window (three times for three channels).
+* Not observed: `_discard_stack`. The Tissue Preview, opened on Load, takes
+  the activation (as designed today).
+* Fix tried in the script only: a 1x1 `QOpenGLWidget` child shown,
+  `grabFramebuffer()`, hidden -- before the window is first shown: the
+  window is created GL-composed (57 ms at start, off screen), no
+  recreation on Load A or B, no faded frame. A hidden or merely shown GL
+  child, or `QT_WIDGETS_RHI=1`, does not switch it. Cost: a whole-window
+  update before the first Load 2 ms -> 10.7 ms (after a Load it is ~10 ms
+  today anyway). The plan's persistent, reused host is not needed.
+
+**Implemented (2026-11-13, the user approved fixes 1 and 2; uncommitted).**
+`ui/gpu_warmup.py` `compose_with_gl_before_show(win)`, called in `main.py`
+before `win.show()`: when `engine_refusal()` is "" (and not
+`BLOCK01_GL_FIRST=0`), a 1x1 `QOpenGLWidget` child shown,
+`grabFramebuffer()`, hidden; a failure prints and leaves the window as it
+was. `ui/widgets/channel_dock/template.py`: the checkbox made with its row
+as parent. Checked on the real display with the product code: default
+backend -- GL surface from the first show, no recreation on Load A or B,
+no checkbox window; Python backend -- nothing done, raster as before.
+Tests `tests/test_b17_no_blink.py` (the GL one on the real display; without
+the fix that sequence recreates the window). Codex review PASS. Not
+changed: the Tissue Preview still takes the activation when it opens on a
+Load (explained to the user; their choice).
+
 ## B18 — Step0: Save reloads the view (item 2)
 
 **Cause:** Save of a correction run releases the Explore view for

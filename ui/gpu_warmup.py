@@ -90,6 +90,42 @@ class GpuWarmup(QtCore.QObject):
         perf_trace.mark("gpu.warm.ready", ok=self.imported)
 
 
+def compose_with_gl_before_show(window):
+    """Put `window` on GL composition before it is first shown (backlog 17,
+    docs/v17_acceptance_notes_plan.md B17). Step0's first GL host
+    (`step0/engine_mount.py` `start`: show, `grabFramebuffer`, hide) made
+    Qt switch the shown window from raster to GL composition: its native
+    window destroyed and recreated -- the blink on the first Load of a
+    session (measured on the Mac mini, 2026-11-13). Done here, off screen,
+    the window is created GL-composed and no Load recreates it.
+
+    Only when Step0 will use its engine (`engine_refusal() == ""`): without
+    it every view is drawn on the CPU, and GL composition from the start
+    made that slow (the 2026-10-07 note above). A 1x1 `QOpenGLWidget`
+    child is shown, initialized and hidden; a widget only shown, or hidden,
+    does not switch the window. Returns the widget (kept by the window), or
+    None when not done; a failure leaves the window as it was."""
+    if os.environ.get("BLOCK01_GL_FIRST", "1") == "0":
+        return None
+    try:
+        from .step0.engine_mount import engine_refusal
+        if engine_refusal():
+            return None
+        from ..qt import QtWidgets
+        with perf_trace.span("gpu.compose_before_show"):
+            gl = QtWidgets.QOpenGLWidget(window)
+            gl.setObjectName("gl_composition")
+            gl.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+            gl.resize(1, 1)
+            gl.show()
+            gl.grabFramebuffer()
+            gl.hide()
+    except Exception as exc:                                # noqa: BLE001 -- a look only
+        print(f"[GPU] window not put on GL composition before showing it: {exc}")
+        return None
+    return gl
+
+
 def start(window):
     """Begin the warm-up for `window` (a shown MainWindow). Returns the
     GpuWarmup, or None when it is turned off."""
@@ -100,4 +136,4 @@ def start(window):
     return warmup
 
 
-__all__ = ["start", "GpuWarmup"]
+__all__ = ["start", "GpuWarmup", "compose_with_gl_before_show"]

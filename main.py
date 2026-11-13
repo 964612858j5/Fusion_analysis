@@ -53,6 +53,8 @@ def main():
     app._gc_pacer = gc_pacer.start(app)
 
     win = MainWindow()
+    from .ui.gpu_warmup import compose_with_gl_before_show
+    win._gl_composition = compose_with_gl_before_show(win)   # no blink on the first Load (B17)
     win.show()
     # Block A9-O3-1: the GPU display path is warmed while Step0 is up
     from .ui import gpu_warmup

@@ -212,7 +212,10 @@ def build_row_core(row, name="", show_visibility=True, checkable=True,
     layout.setContentsMargins(*ROW_MARGINS)
     layout.setSpacing(ROW_SPACING)
 
-    checkbox = QtWidgets.QCheckBox()
+    # Made with its row as parent: without one, `setVisible(True)` below
+    # showed it as a window of its own for an instant, taking the activation
+    # from the main window on every Load (backlog 17).
+    checkbox = QtWidgets.QCheckBox(row)
     checkbox.setFixedSize(*CHECKBOX_SIZE)
     checkbox.setEnabled(bool(checkable))
     checkbox.setVisible(bool(show_visibility))

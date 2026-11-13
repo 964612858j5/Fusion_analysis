@@ -266,7 +266,8 @@ def test_one_bg_tab_save_button_no_run_no_page_save(app):
     assert in_slot
     assert s._decision_box.parentWidget() is s._frame.bottom_slot
     # it is wired to the full save/handoff pipeline
-    assert s._btn_continue.receivers(s._btn_continue.clicked) >= 1
+    assert s._btn_continue.isSignalConnected(               # PySide6: receivers() takes a string
+        QtCore.QMetaMethod.fromSignal(s._btn_continue.clicked))
 
 
 def test_save_button_runs_full_pipeline_handler(app):

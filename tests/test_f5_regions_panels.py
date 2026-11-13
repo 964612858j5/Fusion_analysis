@@ -27,7 +27,7 @@ def _grab(widget, name):
     img = widget.grab().toImage()
     if SHOTS:
         img.save(os.path.join(SHOTS, name))
-    ptr = img.convertToFormat(img.Format_RGB32)
+    ptr = img.convertToFormat(img.Format.Format_RGB32)          # PySide6: the scoped enum
     from block01.qt import image_bytes
     b = image_bytes(ptr)
     return np.frombuffer(b, np.uint8).reshape(ptr.height(), ptr.bytesPerLine() // 4, 4)[:, :ptr.width(), :3].copy()

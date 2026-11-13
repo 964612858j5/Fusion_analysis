@@ -270,7 +270,7 @@ def test_a_stop_after_the_last_tile_publishes_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(W, "_close_tile_scheduler",                      # Stop right after the last tile
                         staticmethod(lambda sch: (real(sch), setattr(worker, "_stop", True))))
     got = {}
-    worker.finished.connect(lambda d, n: got.setdefault("n", n))
+    worker.job_finished.connect(lambda d, n: got.setdefault("n", n))
     worker.error.connect(lambda m: got.setdefault("error", m))
     worker.run()
     assert "n" not in got and "Stopped" in got.get("error", "")

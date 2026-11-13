@@ -990,6 +990,11 @@ def test_a_panel_dropped_while_its_read_runs_is_not_kept_alive_by_it(
         del panel
         gc.collect()
         app.processEvents()
+        # PySide6 keeps the wrapper until Qt performs the deferred delete, which
+        # processEvents() does not run; the read is still blocked here
+        from block01.qt import QtCore
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+        gc.collect()
 
         assert ref() is None, (
             "the worker's connection kept the panel alive")

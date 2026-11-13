@@ -207,7 +207,7 @@ def _save(out_dir, loader=None, method="tophat", **kw):
     loader = loader or _Loader()
     w = sc.WsiCorrectionWorker(loader, str(out_dir), _cfg(method), rois=[_roi()], **kw)
     got = {"finished": [], "error": [], "canceled": []}
-    w.finished.connect(lambda p, d: got["finished"].append(p))
+    w.job_finished.connect(lambda p, d: got["finished"].append(p))
     w.error.connect(got["error"].append)
     w.canceled.connect(got["canceled"].append)
     w.run()
@@ -305,7 +305,7 @@ def _real_save(out_dir, slide, method, monkeypatch, n=None, hook=None):
            "method_params": {"tophat_radius": 3, "cucim_sigma": 6}, "channel_params": {}}
     w = sc.WsiCorrectionWorker(loader, str(out_dir), cfg, rois=[dict(ROI)])
     got = {"finished": [], "error": [], "canceled": []}
-    w.finished.connect(lambda p, d: got["finished"].append(p))
+    w.job_finished.connect(lambda p, d: got["finished"].append(p))
     w.error.connect(got["error"].append)
     w.canceled.connect(got["canceled"].append)
     if hook:

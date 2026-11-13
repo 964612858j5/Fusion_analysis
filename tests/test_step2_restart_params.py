@@ -72,6 +72,7 @@ def test_an_index_draft_edited_after_choosing_comes_back_as_edited(app, tmp_path
     assert p._restore_index_file(path, "stardist_nuclei_expansion")
     edited = p.get_seg_config()
     edited["params"] = dict(edited.get("params") or {}, prob_thresh=0.65)      # changed by hand
+    edited["prob_thresh"] = 0.65            # as the page writes it: the flat key too (it wins)
     q = Step2Page()
     assert q.apply_draft({"segmentation_config": edited, "param_file": path, "parameter_source": "index"})
     assert q._parameter_source == "manual"

@@ -42,7 +42,7 @@ SCRIPT = textwrap.dedent(r'''
     pkg = importlib.util.module_from_spec(spec)
     sys.modules["block01"] = pkg
     spec.loader.exec_module(pkg)
-    from block01.qt import QtCore, QtWidgets
+    from block01.qt import QtCore, QtWidgets, flag_value
     from block01.utils import error_hook as eh
     assert os.path.dirname(os.path.dirname(eh.__file__)) == repo, eh.__file__
     app = QtWidgets.QApplication([])
@@ -50,7 +50,7 @@ SCRIPT = textwrap.dedent(r'''
     shown = []
     real_show = QtWidgets.QMessageBox.show
     def show(box):
-        shown.append({"text": box.text(), "modal": int(box.windowModality()),
+        shown.append({"text": box.text(), "modal": flag_value(box.windowModality()),   # PySide6: an enum
                       "gui": threading.current_thread() is threading.main_thread()})
         real_show(box)
         QtCore.QTimer.singleShot(30, box.close)      # the user closes it

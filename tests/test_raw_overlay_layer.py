@@ -60,6 +60,19 @@ def _overlay(ctrl, provider, scheduler, view, channel="CD3", *,
     return layer
 
 
+def _until_calibrated(layer, budget_ms=5000):
+    """Pump until the calibration lands (bounded). The read waits its turn
+    in the controller's one-worker overview pool, behind the overview read
+    `load_overview` queued: a fixed 200 ms was too short on the Mac mini and
+    on GitHub (~1.3 s measured, 2026-11-13); the timing is not what these
+    tests check."""
+    for _ in range(budget_ms // 50):
+        if layer.calibrated:
+            return
+        _pump(50)
+    _pump(60)                        # the resync's own queued work
+
+
 def _deliver(scheduler, layer, req, value=500.0, error=None):
     """Deliver one request through the overlay's real queued path."""
     arr = np.full((512, 512), value, np.float32)
@@ -374,7 +387,7 @@ def test_calibration_requests_the_current_viewport_immediately(app):
     scheduler.requests.clear()
 
     layer.start_calibration(ctrl)
-    _pump(200)
+    _until_calibrated(layer)
 
     assert layer.calibrated is True
     assert layer._display_lo is not None and layer._display_hi is not None
@@ -809,7 +822,7 @@ def test_both_resync_paths_go_through_the_controllers_ordering(app, path):
     else:
         layer._enabled = True
         layer.start_calibration(ctrl)
-        _pump(200)
+        _until_calibrated(layer)
 
     assert calls, "the resync did not go through the controller's ordering"
     got = {(r.key.tile.tx, r.key.tile.ty)

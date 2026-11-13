@@ -302,7 +302,7 @@ def _fuse(ctx, slide, *, sources=True, remap=REMAP):
                          rois=[dict(ROI)], **kw)
     errs, done = [], []
     w.error.connect(errs.append)
-    w.finished.connect(done.append)
+    w.job_finished.connect(done.append)
     w.run()
     assert errs == [] and done
     return done[0]

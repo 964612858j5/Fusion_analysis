@@ -104,7 +104,7 @@ def test_a_stop_after_the_last_tile_does_not_publish(tmp_path):
     late._fuse_tile = _fuse_then_cancel
     errors, finished = [], []
     late.error.connect(errors.append)
-    late.finished.connect(finished.append)
+    late.job_finished.connect(finished.append)
     late.run()
 
     assert errors and not finished
@@ -224,7 +224,7 @@ class _FakeStep2Run(QtCore.QObject):
     progress = QtCore.Signal(int, int, str)
     tile_done = QtCore.Signal(int, int, int)
     tile_skipped = QtCore.Signal(int, int)
-    finished = QtCore.Signal(str, int)
+    job_finished = QtCore.Signal(str, int)
     error = QtCore.Signal(str)
 
     def __init__(self, **kw):
@@ -288,7 +288,7 @@ def test_a_step2_run_finishing_after_the_dataset_changed_shows_nothing(step2):
     label_before = p._prog_lbl.text()
 
     _switch_dataset(p)                           # another slide was loaded
-    worker.finished.emit("/old/run", 1234)       # the old run, late
+    worker.job_finished.emit("/old/run", 1234)       # the old run, late
     _pump()
 
     assert seen["done"] == []                    # no hand-off to Step3
@@ -312,7 +312,7 @@ def test_a_step2_run_failing_after_the_dataset_changed_shows_nothing(step2):
 def test_a_step2_run_in_the_same_workspace_reports_as_before(step2):
     p, seen, tmp_path = step2
     p._run()
-    p._worker.finished.emit("/run", 5)
+    p._worker.job_finished.emit("/run", 5)
     _pump()
     assert seen["done"] == ["/run"]
     assert len(seen["boxes"]) == 1
@@ -763,7 +763,7 @@ def test_r5_an_old_runs_progress_is_not_drawn_and_the_page_says_where_it_writes(
     text = p._old_run_lbl.text()
     assert "roi_A" in text and os.path.abspath(worker.output_dir) in text
     assert "still computing" in text
-    worker.finished.emit("/old/run", 5)
+    worker.job_finished.emit("/old/run", 5)
     _pump()
     assert "has finished" in p._old_run_lbl.text()
 
@@ -837,7 +837,7 @@ def test_b9_a_run_is_known_only_with_its_segmentation_run_entry(tmp_path):
 # ── real-machine finding: the fusion dialog is gone after the job ends ──
 
 def _end_normally(w, worker):
-    worker.finished.emit("/x/fused.zarr")      # the business answer
+    worker.job_finished.emit("/x/fused.zarr")      # the business answer
     worker.release()                           # the thread ends
     worker.wait(5000)
     _pump()
@@ -921,7 +921,7 @@ def test_save_as_during_a_run_keeps_step2_on_the_runs_workspace_until_it_ends(st
                       step2_dir=str(p._go_back_ctx / "step2"))   # _go_to_step2's stale copy
     worker.tile_done.emit(2, 4, 3)
     worker.tile_done.emit(3, 4, 1)
-    worker.finished.emit("/run_A", 16)
+    worker.job_finished.emit("/run_A", 16)
     _pump()
     assert seen["done"] == ["/run_A"]                       # reported as usual
     assert "roi_B" in seen["boxes"][-1]                     # the box says where it goes

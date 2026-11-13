@@ -144,7 +144,7 @@ def _worker(tmp_path, zp, cfg, rois=None, overlap=HALO, identity_confirmation=No
 def _collect(worker):
     got = {"finished": [], "error": [], "progress": []}
     d = QtCore.Qt.DirectConnection
-    worker.finished.connect(lambda o, n: got["finished"].append(n), d)
+    worker.job_finished.connect(lambda o, n: got["finished"].append(n), d)
     worker.error.connect(lambda m: got["error"].append(m), d)
     worker.progress.connect(lambda a, b, m: got["progress"].append(m), d)
     return got

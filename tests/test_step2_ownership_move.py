@@ -191,7 +191,7 @@ def test_both_loops_equal_the_legacy_inline_ownership(tmp_path, monkeypatch, cap
         sfx = "_t"
     else:
         got = {}
-        worker.finished.connect(lambda d, n: got.setdefault("n", n))
+        worker.job_finished.connect(lambda d, n: got.setdefault("n", n))
         worker.run()
         total = got.get("n")
         sfx = ""
@@ -226,7 +226,7 @@ def test_the_shadow_compare_is_off_in_the_log_and_the_metadata(tmp_path, monkeyp
     lab = _labels(0)
     worker, _ = _worker(tmp_path, monkeypatch, "cellpose_wholecell_fusion", lab, 2, 2, 8)
     got = {}
-    worker.finished.connect(lambda d, n: got.setdefault("n", n))
+    worker.job_finished.connect(lambda d, n: got.setdefault("n", n))
     worker.run()
     assert got.get("n", 0) > 0
     log_text = "".join(open(os.path.join(root, f), encoding="utf-8", errors="replace").read()

@@ -393,9 +393,10 @@ def test_closing_ends_a_running_check(tmp_path, monkeypatch):
     page.set_run(p["run_dir"], open_slide=p["slide"])
     page._output_checks["spatialdata"].setChecked(True)
     proc = page._sd_check["proc"]
-    assert proc is not None and proc.state() != 0
+    from block01.qt.QtCore import QProcess
+    assert proc is not None and proc.state() != QProcess.ProcessState.NotRunning   # PySide6: an enum
     assert page.stop_background_jobs() is False              # nothing left running
-    assert page._sd_check is None and proc.state() == 0      # QProcess.NotRunning
+    assert page._sd_check is None and proc.state() == QProcess.ProcessState.NotRunning
 
 
 def test_a_saved_spatialdata_tick_comes_back_without_a_chooser(tmp_path, monkeypatch):

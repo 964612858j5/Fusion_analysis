@@ -76,7 +76,7 @@ def _roi():
 
 def _run(worker):
     got = {"finished": [], "canceled": [], "error": []}
-    worker.finished.connect(lambda p, d: got["finished"].append((p, d)))
+    worker.job_finished.connect(lambda p, d: got["finished"].append((p, d)))
     worker.canceled.connect(lambda p: got["canceled"].append(p))
     worker.error.connect(lambda m: got["error"].append(m))
     worker.run()                      # synchronously, on this thread

@@ -84,7 +84,7 @@ def _run(worker, timeout=300):
         seen["slow_done"] = reads.slow_done.is_set() if reads else None
         seen["answer_at"] = time.perf_counter()
     d = QtCore.Qt.DirectConnection
-    worker.finished.connect(lambda o, n: answer("finished", n), d)
+    worker.job_finished.connect(lambda o, n: answer("finished", n), d)
     worker.error.connect(lambda m: answer("error", m), d)
     t0 = time.perf_counter()
     worker.start()

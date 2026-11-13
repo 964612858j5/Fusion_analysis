@@ -90,7 +90,7 @@ def _fuse(p, out, *, sources, loader=None, rois=None, decisions=None, zpath=None
         hook(w, loader)
     errs, done = [], []
     w.error.connect(errs.append)
-    w.finished.connect(done.append)
+    w.job_finished.connect(done.append)
     w.run()
     return errs, (zarr.open(done[0], mode="r")[...] if done else None)
 

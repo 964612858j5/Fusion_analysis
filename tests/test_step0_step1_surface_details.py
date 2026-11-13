@@ -100,7 +100,8 @@ def test_step0_show_all_is_kept_but_not_shown(win):
     page = win._step0
     assert not _on_screen(page._cb_all, page)
     # Kept, only withdrawn from the screen: still wired to its handler.
-    assert page._cb_all.receivers(page._cb_all.stateChanged) >= 1
+    assert page._cb_all.isSignalConnected(                  # PySide6: receivers() takes a string
+        QtCore.QMetaMethod.fromSignal(page._cb_all.stateChanged))
 
 
 # ── 4: Step1 Intensity and the nucleus line ───────────────────────────────

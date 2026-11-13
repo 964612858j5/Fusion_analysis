@@ -48,7 +48,7 @@ def _run_worker(tmp_path, decisions):
     rois = [{"name": "ROI_1", "bbox_fullres": [10, 90, 20, 120]}]
     w = WsiCorrectionWorker(_FakeLoader(), str(tmp_path), cfg, rois=rois)
     out = {}
-    w.finished.connect(lambda p, dec: out.update(path=p))
+    w.job_finished.connect(lambda p, dec: out.update(path=p))
     w.error.connect(lambda m: out.update(err=m))
     w.run()
     _settle(w)                     # what the Save page does next

@@ -20,14 +20,6 @@ from block01.qt import QtWidgets  # noqa: E402
 
 from block01.ui import patch_strip as ps  # noqa: E402
 
-#: The menu button's style sheet as Step1 wrote it before the move.
-OLD_MENU_QSS = ("QToolButton{color:#9bd0ff;background:#182230;"
-                "border:1px solid #354a63;border-radius:3px;"
-                "font-size:10px;font-weight:bold;padding:2px 8px;}"
-                "QToolButton::menu-indicator{subcontrol-position:right center;"
-                "subcontrol-origin:padding;left:-4px;}")
-
-
 @pytest.fixture(scope="module")
 def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -42,7 +34,9 @@ def strip(app):
 
 
 def test_the_look_is_step1s(strip):
-    assert strip.menu_button.styleSheet() == OLD_MENU_QSS
+    # the one shared definition (the theme's "ghost" button since the desktop UI
+    # redesign, 5501cf9), no longer the pre-theme copy below
+    assert strip.menu_button.styleSheet() == ps.MENU_BUTTON_QSS
     assert strip.menu_button.text() == "Patch" and strip.menu_button.height() == 22
     assert ps.STEP1_INLINE_PATCH_BUTTONS == 7
     assert (ps.STEP1_PATCH_BTN_W, ps.STEP1_PATCH_BTN_H, ps.STEP1_PATCH_BTN_SPACING) == (42, 22, 4)

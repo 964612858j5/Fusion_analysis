@@ -83,7 +83,7 @@ def _save(tmp_path, out, method="tophat", seed=1, hook=None, monkeypatch=None):
         _Loader(path, data), str(out), cfg,
         rois=[{"name": "R", "bbox_fullres": list(ROI), "polygon_fullres": POLY}])
     got = {"finished": [], "error": [], "canceled": []}
-    worker.finished.connect(lambda p, d: got["finished"].append(p))
+    worker.job_finished.connect(lambda p, d: got["finished"].append(p))
     worker.error.connect(got["error"].append)
     worker.canceled.connect(got["canceled"].append)
     if hook:

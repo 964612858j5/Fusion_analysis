@@ -190,7 +190,7 @@ def _run(worker, zp, loop):
         return worker._segment_one_zarr(zp, "t", model=None, use_gpu=False,
                                         log=logging.getLogger("test"))
     got = {}
-    worker.finished.connect(lambda d, n: got.setdefault("n", n))
+    worker.job_finished.connect(lambda d, n: got.setdefault("n", n))
     worker.error.connect(lambda m: got.setdefault("error", m))
     worker.run()
     assert "error" not in got, got.get("error")

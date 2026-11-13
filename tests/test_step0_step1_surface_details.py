@@ -640,22 +640,16 @@ def test_both_channels_frames_are_the_same_height_on_the_same_line(win):
     assert (s1.top(), s1.height()) == (s0.top(), s0.height())
 
 
-# ── A9 §38: Smooth (user ruling 2026-10-10) ────────────────────────────────
+# ── A9 §38: Smooth -- removed (backlog 21) ─────────────────────────────────
 
-def test_smooth_sits_right_of_fusion_and_sets_every_picture(win):
+def test_there_is_no_smooth_button_and_smooth_stays_on(win):
+    """Backlog 21: the viewer's Smooth button is gone; smooth is what
+    `gpu_memory` starts with and the session no longer holds it."""
+    from block01.qt.QtWidgets import QPushButton
     from block01.ui import gpu_memory
     _show_step(win, 1)
-    smooth, fusion = win._btn_smooth, win._btn_mode_fusion
-    assert _on_screen(smooth, win) and smooth.isCheckable()
-    assert smooth.styleSheet() == fusion.styleSheet()
-    assert abs(_geo(smooth, win).center().y() - _geo(fusion, win).center().y()) <= 1
-    assert _geo(smooth, win).left() > _geo(fusion, win).right()
-    assert smooth.isChecked() is gpu_memory.smooth_pixels()
-    try:
-        smooth.setChecked(True)
-        assert gpu_memory.smooth_pixels() is True
-        assert win._step1_session_payload()["smooth_pixels"] is True
-        smooth.setChecked(False)
-        assert gpu_memory.smooth_pixels() is False
-    finally:
-        gpu_memory.set_smooth(False)
+    assert not [b for b in win.findChildren(QPushButton) if b.text() == "Smooth"]
+    assert "_btn_smooth" not in win.__dict__
+    start = gpu_memory.smooth_pixels()          # on in the product; conftest starts tests off
+    assert "smooth_pixels" not in win._step1_session_payload()
+    assert gpu_memory.smooth_pixels() is start  # nothing in the window sets it

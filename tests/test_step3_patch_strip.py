@@ -60,6 +60,7 @@ def test_one_row_and_the_results_button_beside_the_tab(app, tmp_path, monkeypatc
         row = _row_widgets(w._step3)
         assert row == [strip.holder(),
                        w._btn_tma_cores_step3,                         # F4-3: hidden without cores
+                       w._btn_exclusions_step3,                        # backlog 21: hidden without any
                        w._btn_step3_mode_overlay, w._btn_step3_mode_fusion]
         tabs = w._step3._right_tabs
         corner = tabs.cornerWidget()

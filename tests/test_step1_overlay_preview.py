@@ -548,21 +548,18 @@ def test_the_display_state_survives_a_session_round_trip(app):
         w.close()
 
 
-@pytest.mark.parametrize("saved, start", [(True, False), (False, True), (True, True), (None, True)],
-                         ids=["on", "off", "unchanged", "old-session"])
-def test_smooth_comes_back_with_the_session(app, saved, start):
-    """A9 §38: the session's "Smooth" is restored (button and every
-    picture agree); a session written before it leaves it alone; the
-    restore itself saves nothing; a failed restore takes it back."""
+@pytest.mark.parametrize("saved", [False, True, None], ids=["off", "on", "absent"])
+def test_an_old_sessions_smooth_is_ignored(app, saved):
+    """Backlog 21 (was A9 §38): no Smooth button; a session's
+    `smooth_pixels` -- even `false` -- leaves smooth as it started (on)."""
     from block01.ui import gpu_memory
     w = _window(app)
     try:
-        w._btn_smooth.setChecked(start)
+        gpu_memory.set_smooth(True)               # the product's start (conftest starts tests off)
         w.step0_output = {"output_dir": "/tmp", "step1_dir": "/tmp"}
         payload = w._step1_session_payload()
-        if saved is None:
-            payload.pop("smooth_pixels")
-        else:
+        assert "smooth_pixels" not in payload
+        if saved is not None:
             payload["smooth_pixels"] = saved
         w._step1_session_timer.stop()
         w._step1_restore_active = True            # as the real restore path
@@ -570,24 +567,9 @@ def test_smooth_comes_back_with_the_session(app, saved, start):
             w._restore_step1_scientific_state(payload)
         finally:
             w._step1_restore_active = False
-        expected = start if saved is None else saved
-        assert gpu_memory.smooth_pixels() is expected
-        assert w._btn_smooth.isChecked() is expected
+        assert gpu_memory.smooth_pixels() is True
         assert not w._step1_session_timer.isActive(), "the restore saved"
-
-        payload["smooth_pixels"] = not expected
-        original = w._restore_step1_session_owners
-
-        def _boom(*a, **k):
-            raise RuntimeError("restore failed")
-        w._restore_step1_session_owners = _boom
-        with pytest.raises(RuntimeError):
-            w._restore_step1_scientific_state(payload)
-        w._restore_step1_session_owners = original
-        assert gpu_memory.smooth_pixels() is expected
-        assert w._btn_smooth.isChecked() is expected
     finally:
-        gpu_memory.set_smooth(False)
         w.close()
 
 

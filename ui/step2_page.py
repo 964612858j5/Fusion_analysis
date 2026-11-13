@@ -377,7 +377,18 @@ class Step2Page(QWidget):
                                       "Names (from the map sheet) appear when zoomed in.")
         self.btn_tma_cores.setVisible(False)
         self.btn_tma_cores.toggled.connect(lambda _on: self.refresh_core_outlines())
+        # The exclusions (blur, fold) of the same source, hatched as in
+        # Regions, with their own switch (backlog 21).
+        self.btn_exclusions = QPushButton("Exclusions")
+        self.btn_exclusions.setCheckable(True)
+        self.btn_exclusions.setChecked(True)
+        self.btn_exclusions.setStyleSheet(MODE_BUTTON_QSS)
+        self.btn_exclusions.setToolTip("Show the Regions exclusions (blur, fold, ...), hatched: "
+                                       "those of the run on screen, else of the last Regions Save.")
+        self.btn_exclusions.setVisible(False)
+        self.btn_exclusions.toggled.connect(lambda _on: self.refresh_core_outlines())
         self.saved_core_items = None          # () -> overlay items of the last Regions Save
+        self.saved_exclusion_items = None     # () -> the last Regions Save's exclusions (items)
         self.manual_regions = None            # (method, fused, rois, ask) -> (request, refusal), 9.2
         self._run_core_snapshot = None        # the snapshot the run on screen froze
         #: how many cores a run started now would follow (0: a grid run);
@@ -388,6 +399,9 @@ class Step2Page(QWidget):
         self._core_outlines = CoreOutlines(
             lambda: types.SimpleNamespace(graphics=self._ov_gv, view_box=self._ov_vb),
             self._core_items, self.btn_tma_cores.isChecked, to_view=self._ov_map)
+        self._exclusion_outlines = CoreOutlines(
+            lambda: types.SimpleNamespace(graphics=self._ov_gv, view_box=self._ov_vb),
+            self._exclusion_items, self.btn_exclusions.isChecked, to_view=self._ov_map)
 
         self._ov_status = QLabel('No zarr loaded')
         self._ov_status.setStyleSheet(f'color:{_TK["text3"]};font-size:10px;')
@@ -1293,6 +1307,7 @@ class Step2Page(QWidget):
         row.addWidget(self._tile_status_label)
         row.addStretch()
         row.addWidget(self.btn_tma_cores)
+        row.addWidget(self.btn_exclusions)
         frame.tool_row(self._overview_panel.layout(), row)
         frame.bottom_layout.addLayout(nav)
         self._main_split = frame.splitter
@@ -2209,6 +2224,14 @@ class Step2Page(QWidget):
             return RD.snapshot_items(self._run_core_snapshot)
         return list(self.saved_core_items() or []) if callable(self.saved_core_items) else []
 
+    def _exclusion_items(self):
+        """The exclusions of the same source as the cores (backlog 21): the
+        running run's frozen snapshot, else the last Regions Save."""
+        from ..core.regions import display as RD
+        if self._run_core_snapshot is not None and self.__dict__.get("_run_active"):
+            return RD.exclusion_items(self._run_core_snapshot)
+        return list(self.saved_exclusion_items() or []) if callable(self.saved_exclusion_items) else []
+
     #: A core being segmented: the running tile's colour, a translucent fill.
     CORE_RUNNING_FILL = '#59ffc832'
     #: A core done: its green outline over a light green fill (backlog 28).
@@ -2328,28 +2351,37 @@ class Step2Page(QWidget):
         return (x - ox) / ds, (y - oy) / ds
 
     def refresh_core_outlines(self):
-        """Draw the TMA cores over the overview now (the input's origin is
-        read from the input itself); the switch shows only while there are
-        cores to draw."""
-        n = 0
+        """Draw the TMA cores, and under them the exclusions (backlog 21),
+        over the overview now (the input's origin is read from the input
+        itself); each switch shows only while there is something to draw."""
+        n = m = 0
         if getattr(self, "_zarr_path", None) and hasattr(self, "_ov_h"):
             from ..core.tile_tissue import TissueUnavailable, fused_region
             try:
                 bbox = fused_region(self._zarr_path)[0]
                 self._ov_origin = (int(bbox[0]), int(bbox[2]))
+                try:
+                    m = self._exclusion_outlines.refresh()  # first: the cores are drawn above
+                except Exception as exc:                    # noqa: BLE001 -- a look only
+                    print(f"[Exclusions] step2: not drawn ({type(exc).__name__}: {exc})")
+                    self._exclusion_outlines.detach()
                 n = self._core_outlines.refresh()
             except (TissueUnavailable, OSError, ValueError, KeyError) as exc:
                 print(f"[TMA cores] step2: not drawn ({exc})")
                 self._core_outlines.detach()
+                self._exclusion_outlines.detach()
             except Exception as exc:                        # noqa: BLE001
                 print(f"[TMA cores] step2: not drawn ({type(exc).__name__}: {exc})")
                 self._core_outlines.detach()
         else:
             self._core_outlines.detach()
+            self._exclusion_outlines.detach()
         self._apply_cores_layout()                          # before the viewer draws (no grid for cores)
         if self.dapi_viewer is not None:
             n = max(n, self.dapi_viewer.refresh())         # the cores over the zoomable picture too
+            m = max(m, int(getattr(self.dapi_viewer, "exclusions_count", 0) or 0))
         self.btn_tma_cores.setVisible(n > 0)
+        self.btn_exclusions.setVisible(m > 0)
         return n
 
     def cores_run_count(self):

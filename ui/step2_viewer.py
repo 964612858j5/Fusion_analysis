@@ -97,6 +97,9 @@ class Step2DapiViewer:
         self.refused_key = None
         self.grid: Optional[RegionsOverlay] = None
         self.cores = CoreOutlines(self.view, page._core_items, page.btn_tma_cores.isChecked)
+        # the exclusions under the cores (backlog 21); how many the last refresh found
+        self.exclusions = CoreOutlines(self.view, page._exclusion_items, page.btn_exclusions.isChecked)
+        self.exclusions_count = 0
 
     # ── what it shows ──
     def view(self):
@@ -239,6 +242,8 @@ class Step2DapiViewer:
         """Back to the old overview; nothing of the viewer reads any more."""
         self._detach_grid()
         self.cores.detach()
+        self.exclusions.detach()
+        self.exclusions_count = 0
         m = self.mount
         if m is not None:
             try:
@@ -268,7 +273,9 @@ class Step2DapiViewer:
             self.grid = None
 
     def refresh(self):
-        """The tile grid (in slide pixels) and the cores over the viewer."""
+        """The tile grid (in slide pixels), the cores and the exclusions over
+        the viewer."""
+        self.exclusions_count = 0
         if not self.shown():
             return 0
         view = self.view()
@@ -278,6 +285,11 @@ class Step2DapiViewer:
             self.grid = RegionsOverlay(view.graphics, view.view_box, clicks)
             clicks.overlay = self.grid
         self.grid.set_items(self.page.tile_items())
+        try:
+            self.exclusions_count = self.exclusions.refresh()   # first: the cores are drawn above
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Exclusions] step2 viewer: not drawn ({type(exc).__name__}: {exc})")
+            self.exclusions.clear()
         try:
             n = self.cores.refresh()
         except Exception as exc:                            # noqa: BLE001

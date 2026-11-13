@@ -104,7 +104,6 @@ from .step1_presegmentation.montage_supply import MontageSupply, spec_channels a
 from .step1_presegmentation import montage_gpu
 from . import step1_draft_spec
 from .step1_button_styles import MODE_BUTTON_QSS, SECTION_BOX_QSS
-from . import gpu_memory
 from .step1_presegmentation.run_job import PresegRunJob, open_loader, summary_line
 from ..core import preseg_contract, preseg_input, preseg_run
 from ..seg_runner.engines import METHOD_OUTPUTS
@@ -518,6 +517,12 @@ def preseg_chosen_params(run, combo_id):
             chosen[k] = params[k]
     return chosen
 
+
+#: What Step1's and Step3's "Exclusions" switches show (backlog 21).
+EXCLUSIONS_TIPS = {
+    "step1": "Show the exclusions (blur, fold, ...) of the last Regions Save, hatched.",
+    "step3": "Show the Regions exclusions (blur, fold, ...) as they were when this run was started, hatched.",
+}
 
 #: What each step's "TMA cores" switch shows (docs/f5_tma_display_plan.md 2.4).
 TMA_CORES_TIPS = {
@@ -1210,19 +1215,11 @@ class MainWindow(QMainWindow):
         sel_row.addStretch()
         sel_row.addWidget(self._btn_mode_overlay)
         sel_row.addWidget(self._btn_mode_fusion)
-        # "Smooth" (user ruling 2026-10-10; Odon's smooth_pixels): one
-        # setting for every Step1 picture, on by default, kept in the session
-        self._btn_smooth = QPushButton("Smooth")
-        self._btn_smooth.setCheckable(True)
-        self._btn_smooth.setStyleSheet(MODE_BUTTON_QSS)
-        self._btn_smooth.setChecked(gpu_memory.smooth_pixels())
-        self._btn_smooth.setToolTip(
-            "When on, pixels are blended smoothly when zoomed in past the image's "
-            "resolution. Turn off for crisp (nearest-neighbour) pixels.")
-        self._btn_smooth.toggled.connect(self._set_smooth_pixels)
-        sel_row.addWidget(self._btn_smooth)
+        # No "Smooth" button any more (backlog 21): smooth is what
+        # `gpu_memory` starts with (on, unless BLOCK01_SMOOTH=0).
         self._btn_tma_cores_step1 = self._tma_cores_button("step1")
         sel_row.addWidget(self._btn_tma_cores_step1)
+        sel_row.addWidget(self._exclusions_button("step1"))
         sel_row.addSpacing(8)
         # The frame's tool row (block A1b S1): a fixed height, the same in
         # every step, so the viewer under it starts on the same line.
@@ -1542,6 +1539,7 @@ class MainWindow(QMainWindow):
                                 title_bar=self._frame_title_bar("Step 2 — Segmentation & Merge"))
         self._step2.go_back.connect(self._go_to_step1)
         self._step2.saved_core_items = self._saved_core_items   # the TMA cores, as Step1's
+        self._step2.saved_exclusion_items = self._saved_exclusion_items   # backlog 21
         self._step2.manual_regions = self._step2_manual_regions    # 9.2: every Step2 run follows them
         # docs/f5_tma_display_plan.md part 3: Step2's zoomable DAPI picture
         self._step2_viewer = Step2DapiViewer(self, self._step2)
@@ -1551,6 +1549,8 @@ class MainWindow(QMainWindow):
         self._btn_tma_cores_step2 = self._step2.btn_tma_cores
         self._btn_tma_cores_step2.setToolTip(TMA_CORES_TIPS["step2"])
         self._btn_tma_cores_step2.toggled.connect(lambda _on: self._on_tma_cores_toggled("step2"))
+        self._btn_exclusions_step2 = self._step2.btn_exclusions
+        self._btn_exclusions_step2.toggled.connect(lambda _on: self._on_exclusions_toggled("step2"))
         self._step2.segmentation_done.connect(self._on_step2_complete)
         # Block RM (§5, §9): the Input drop-down
         self._step2.fuse_chosen.connect(self._rm_note_viewing)
@@ -1797,7 +1797,8 @@ class MainWindow(QMainWindow):
             frame_qss=channel_template.frame_qss(),
             header_widgets=(show_all, intensity), header_margins=header_margins,
             header_spacing=header_spacing, weight_widgets=(reset, load),
-            mode_widgets=(self._tma_cores_button("step3"), self._btn_step3_mode_overlay,
+            mode_widgets=(self._tma_cores_button("step3"), self._exclusions_button("step3"),
+                          self._btn_step3_mode_overlay,
                           self._btn_step3_mode_fusion),
             mask_widgets=(strip.holder(),), mask_hint=None, corner_widget=corner)
         self._rebuild_step3_patch_strip()
@@ -2083,7 +2084,10 @@ class MainWindow(QMainWindow):
 
     def _refresh_core_outlines(self, which):
         """Draw the TMA cores over that step's viewer now; the switch shows
-        only while there is something to draw."""
+        only while there is something to draw. Its exclusions first,
+        under the cores (backlog 21)."""
+        if which in ("step1", "step3"):
+            self._refresh_exclusion_outlines(which)
         try:
             n = self._core_outlines(which).refresh()
         except Exception as exc:                            # noqa: BLE001
@@ -2094,6 +2098,86 @@ class MainWindow(QMainWindow):
         if btn is not None:
             btn.setVisible(n > 0)
         return n
+
+    # ── the exclusions over Step2 / Step3 (backlog 21) ──
+    def _exclusions_button(self, which):
+        """Step1's or Step3's "Exclusions" switch (Step2's is its page's):
+        on by default, kept in the session, hidden while there is none to
+        draw."""
+        name = f"_btn_exclusions_{which}"
+        btn = self.__dict__.get(name)
+        if btn is None:
+            btn = QPushButton("Exclusions")
+            btn.setCheckable(True)
+            btn.setChecked(True)
+            btn.setStyleSheet(MODE_BUTTON_QSS)
+            btn.setToolTip(EXCLUSIONS_TIPS[which])
+            btn.setVisible(False)
+            btn.toggled.connect(lambda _on, w=which: self._on_exclusions_toggled(w))
+            setattr(self, name, btn)
+        return btn
+
+    def _exclusions_shown(self, which):
+        btn = self.__dict__.get(f"_btn_exclusions_{which}")
+        return True if btn is None else bool(btn.isChecked())
+
+    def _set_exclusions_shown(self, which, on):
+        btn = self.__dict__.get(f"_btn_exclusions_{which}")
+        if btn is not None and btn.isChecked() != bool(on):
+            btn.setChecked(bool(on))
+
+    def _on_exclusions_toggled(self, which):
+        if which != "step2":                     # Step2's page redraws its own
+            self._refresh_core_outlines(which)
+        save = getattr(self, "_schedule_step1_session_save", None)
+        if callable(save):
+            save()
+
+    def _refresh_exclusion_outlines(self, which):
+        """Step1's or Step3's exclusions over its viewer now; the number
+        found. Step1: the last Regions Save's; Step3: the run's frozen ones."""
+        co = self.__dict__.get(f"_exclusion_outlines_{which}")
+        if co is None:
+            view = self._core_outlines(which)._view          # the same view as the cores'
+            items = self._saved_exclusion_items if which == "step1" else self._step3_exclusion_items
+            co = CoreOutlines(view, items, lambda w=which: self._exclusions_shown(w))
+            setattr(self, f"_exclusion_outlines_{which}", co)
+        try:
+            n = co.refresh()
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Exclusions] {which}: not drawn ({type(exc).__name__}: {exc})")
+            co.clear()
+            n = 0
+        btn = self.__dict__.get(f"_btn_exclusions_{which}")
+        if btn is not None:
+            btn.setVisible(n > 0)
+        return n
+
+    def _step3_exclusion_items(self):
+        """Step3: the chosen run's frozen exclusions."""
+        from ..core.regions import analysis as RA
+        from ..core.regions import display as RD
+        run_dir = self.__dict__.get("_step3_core_run_dir")
+        path = os.path.join(run_dir, "regions_snapshot.json") if run_dir else ""
+        if not path or not os.path.isfile(path):
+            return []
+        try:
+            return RD.exclusion_items(RA.load_snapshot(path))
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[Exclusions] step3: the run's Regions snapshot cannot be read ({exc})")
+            return []
+
+    def _saved_exclusion_items(self):
+        """Step1, and Step2 before a run: the last Regions Save's exclusions."""
+        from ..core.regions import display as RD
+        from ..core.regions import lock as RK
+        if not self._regions_files_present():
+            return []
+        pd, _slide, sid = self._regions_ids()
+        if not pd or not sid:
+            return []
+        rec = RK.load_saved(pd, sid)
+        return RD.saved_exclusion_items(rec["document"]) if rec is not None else []
 
     def _regions_ids(self):
         """(project dir, slide path, slide id) of this workspace -- what
@@ -4785,10 +4869,12 @@ class MainWindow(QMainWindow):
             "channel_colors": self.config.channel_colors(),
             "current_channel": self.config.current_channel(),
             "preview_mode": self._step1_preview_mode,
-            "smooth_pixels": gpu_memory.smooth_pixels(),
             "tma_cores_step1": self._tma_cores_shown("step1"),
             "tma_cores_step2": self._tma_cores_shown("step2"),
             "tma_cores_step3": self._tma_cores_shown("step3"),
+            "exclusions_step1": self._exclusions_shown("step1"),
+            "exclusions_step2": self._exclusions_shown("step2"),
+            "exclusions_step3": self._exclusions_shown("step3"),
             "p2_params": self._p2_params,
             "segmentation_preview_history": self._seg_preview_history,
             "active_segmentation_method": self._active_segmentation_method,
@@ -5014,14 +5100,12 @@ class MainWindow(QMainWindow):
         # PREVIOUS mode's picture on the shared Tissue Preview and need a
         # second frame to correct it. Set silently (`reconcile=False`): the
         # one reconcile this restore gets happens when everything is final.
-        # "Smooth" likewise (A9 §38); a session written before it existed
-        # leaves the current setting alone
-        previous_smooth = gpu_memory.smooth_pixels()
-        smooth = sess.get("smooth_pixels")
-        if isinstance(smooth, bool) and smooth != previous_smooth:
-            self._btn_smooth.setChecked(smooth)      # a display answer only
+        # An old session's "smooth_pixels" is ignored (backlog 21: no Smooth
+        # button; smooth stays as `gpu_memory` started).
         for which in ("step1", "step2", "step3"):    # the TMA core switches; on when absent
             self._set_tma_cores_shown(which, sess.get(f"tma_cores_{which}", True) is not False)
+        for which in ("step1", "step2", "step3"):    # the exclusion switches; on when absent
+            self._set_exclusions_shown(which, sess.get(f"exclusions_{which}", True) is not False)
         mode = str(sess.get("preview_mode") or "")
         mode_moved = (mode in (STEP1_PREVIEW_OVERLAY, STEP1_PREVIEW_FUSION)
                       and mode != self._step1_preview_mode)
@@ -5045,8 +5129,6 @@ class MainWindow(QMainWindow):
             if mode_moved:
                 self.set_preview_mode(previous_mode, force=True,
                                       reconcile=False)
-            if gpu_memory.smooth_pixels() != previous_smooth:
-                self._btn_smooth.setChecked(previous_smooth)
             raise
 
     def _restore_step1_session_owners(self, sess, names, identity,
@@ -8848,15 +8930,6 @@ class MainWindow(QMainWindow):
         self._restore_patch_preview_view_state(state)
 
     # ── preview mode, overlay rendering ────────────────────────────────
-    def _set_smooth_pixels(self, smooth):
-        """The "Smooth" button: every Step1 picture redraws, the session
-        remembers it. No frame request, no binding generation."""
-        if bool(smooth) == gpu_memory.smooth_pixels():
-            return
-        gpu_memory.set_smooth(bool(smooth))
-        if not getattr(self, "_restoring_display_state", False):
-            self._schedule_step1_session_save()
-
     def set_preview_mode(self, mode, force=False, reconcile=True):
         """Switch between the multi-channel overlay and the fusion preview.
 

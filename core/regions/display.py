@@ -142,6 +142,33 @@ def snapshot_items(snap: Dict) -> List[Dict]:
     return _items(cores)
 
 
+#: The Regions page's exclusion colour (`ui/regions/exclusions_panel.py`
+#: EXCL_COLOR; a test keeps them equal). Step2 / Step3 (backlog 21).
+EXCLUSION = "#e040fb"
+
+
+def _exclusion_items(found) -> List[Dict]:
+    """Overlay items for (uid, polygon) pairs: hatched as on the Regions
+    page (B27's screen hatch), no label."""
+    return [{"id": f"exclusion:{uid}", "polygon": [list(q) for q in poly], "color": EXCLUSION,
+             "hatch": True, "hatch_style": "screen", "width": CORE_WIDTH}
+            for uid, poly in found if len(poly or ()) >= 3]
+
+
+def exclusion_items(snap: Dict) -> List[Dict]:
+    """A frozen snapshot's exclusions (Step2 during its run, Step3)."""
+    return _exclusion_items((e.get("uid", k), e.get("polygon"))
+                            for k, e in enumerate(snap.get("exclusions") or []))
+
+
+def saved_exclusion_items(doc: Dict) -> List[Dict]:
+    """The last Save's exclusions (Step2 before a run): every exclusion of
+    the document, as a run started now freezes them (one without area is
+    left out there; here it draws as a line, if at all)."""
+    return _exclusion_items((uid, e.get("polygon"))
+                            for uid, e in sorted((doc.get("exclusions") or {}).items()))
+
+
 def split_keyhole(poly: Sequence) -> List[List]:
     """The rings a `geometry.keyhole` ring was joined from: every bridge is
     one edge walked there (P -> Q) and later back (Q -> P) with the joined

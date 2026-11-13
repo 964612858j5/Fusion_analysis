@@ -62,6 +62,7 @@ def _rig(app, *, broken=True, visible=("CD3", "CD8")):
     lay.addWidget(legacy)
     page = SimpleNamespace(_zarr_path=_rig_fused(), _rois=[], _core_items=lambda: [],
                            btn_tma_cores=SimpleNamespace(isChecked=lambda: True),
+                           _exclusion_items=lambda: [], btn_exclusions=SimpleNamespace(isChecked=lambda: True),
                            overview_layout=lambda: lay, overview_widget=lambda: legacy,
                            tile_items=lambda: [], tile_at=lambda y, x: None,
                            _on_tile_clicked=lambda r, c: None)
@@ -163,7 +164,8 @@ def _fuse_run(tmp_path, polygon=None, bbox=(256, 1280, 256, 1280)):
 def test_only_the_workspaces_own_input_is_drawn_zoomable(app, monkeypatch, tmp_path):
     window = _Window(_state(), _domain())                      # ROI (256, 1280, 256, 1280), nucleus DAPI
     page = SimpleNamespace(_zarr_path=_fuse_run(tmp_path), _rois=[], _core_items=lambda: [],
-                           btn_tma_cores=SimpleNamespace(isChecked=lambda: True))
+                           btn_tma_cores=SimpleNamespace(isChecked=lambda: True),
+                           _exclusion_items=lambda: [], btn_exclusions=SimpleNamespace(isChecked=lambda: True))
     assert _viewer_for(window, page, monkeypatch).compatible()
     assert not _viewer_for(window, page, monkeypatch, ((0, 1024, 256, 1280), "/x/g3.ome.tif", "DAPI")).compatible()
     assert not _viewer_for(window, page, monkeypatch, ((256, 1280, 256, 1280), "/y/other.tif", "DAPI")).compatible()

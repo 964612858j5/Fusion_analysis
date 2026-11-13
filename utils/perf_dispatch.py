@@ -43,11 +43,15 @@ def _threshold_ms():
         return DEFAULT_THRESHOLD_MS
 
 
+#: event type number -> its name ("User", "Paint", ...). PySide6 keeps the
+#: names on the `QEvent.Type` enum only, not as attributes of `QEvent` (the
+#: PyQt5 way this used to read them left the table empty: the log showed
+#: bare numbers); keyed by `flag_value`, as the lookup below is.
+from ..qt import flag_value as _flag_value  # noqa: E402
+
 _EVENT_NAMES = {}
-for _name in dir(QEvent):
-    _value = getattr(QEvent, _name)
-    if isinstance(_value, QEvent.Type):
-        _EVENT_NAMES.setdefault(int(_value), _name)
+for _member in QEvent.Type:
+    _EVENT_NAMES.setdefault(_flag_value(_member), _member.name)
 
 
 def _describe(receiver):

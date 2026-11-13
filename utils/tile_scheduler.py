@@ -114,7 +114,8 @@ class TileScheduler:
             raise RuntimeError("TileScheduler.load_tile requires attach_payload_loader() before use")
         return self._load_fn(index, tile, profile_tile_base=profile_tile_base)
 
-    def attach_prefetcher(self, load_fn=None, enabled=True, queue_size=2, logger=None, profiler=None):
+    def attach_prefetcher(self, load_fn=None, enabled=True, queue_size=2, logger=None, profiler=None,
+                          order=None):
         """
         Attach a TilePrefetcher to this scheduler.
 
@@ -122,7 +123,8 @@ class TileScheduler:
             load_fn(index, tile) -> payload
 
         This method only wires TilePrefetcher to scheduler.tiles.
-        It does not define payload loading itself.
+        It does not define payload loading itself. `order`: the indices
+        to read ahead (default all, in index order; backlog 20).
         """
         if not enabled:
             self.prefetcher = None
@@ -139,6 +141,7 @@ class TileScheduler:
             prefetch_queue_size=queue_size,
             logger=logger,
             profiler=profiler,
+            order=order,
         )
         self.prefetch_enabled = self.prefetcher is not None
         return self.prefetcher

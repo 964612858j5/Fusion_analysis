@@ -13,8 +13,12 @@ CLOSE_WAIT_S = 30.0
 class TilePrefetcher:
     """Prefetch inference-ready tile payloads with bounded concurrency."""
 
-    def __init__(self, tiles, load_fn, prefetch_queue_size=2, logger=None, profiler=None):
+    def __init__(self, tiles, load_fn, prefetch_queue_size=2, logger=None, profiler=None, order=None):
+        """`order`: the tile indices to read ahead, in the order they will be
+        asked for (default every tile, in index order). A run that skips
+        tiles gives only the tiles it segments (backlog 20)."""
         self.tiles = list(tiles or [])
+        self._order = list(range(len(self.tiles))) if order is None else [int(i) for i in order]
         self.load_fn = load_fn
         self.prefetch_queue_size = max(0, int(prefetch_queue_size or 0))
         self.logger = logger
@@ -107,8 +111,8 @@ class TilePrefetcher:
         done = [idx for idx, fut in self._futures.items() if fut.cancelled()]
         for idx in done:
             self._futures.pop(idx, None)
-        while len(self._futures) < self.prefetch_queue_size and self._next_submit < len(self.tiles):
-            idx = self._next_submit
+        while len(self._futures) < self.prefetch_queue_size and self._next_submit < len(self._order):
+            idx = self._order[self._next_submit]
             self._next_submit += 1
             if idx in self._futures:
                 continue

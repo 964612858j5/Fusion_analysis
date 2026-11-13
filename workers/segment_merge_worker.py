@@ -1497,8 +1497,11 @@ class SegmentMergeWorker(QThread):
             parts.append("RAM (psutil not installed)")
 
         try:
-            import torch
-            if torch.cuda.is_available():
+            # only when torch is already loaded (backlog 20): importing it here,
+            # for a CUDA figure the Mac never has, cost 0.5-0.8 s at a run's start
+            import sys
+            torch = sys.modules.get("torch")
+            if torch is not None and torch.cuda.is_available():
                 for i in range(torch.cuda.device_count()):
                     alloc  = torch.cuda.memory_allocated(i)  / 1e9
                     reserv = torch.cuda.memory_reserved(i)   / 1e9
@@ -2235,9 +2238,11 @@ class SegmentMergeWorker(QThread):
         self._skipped_tiles = []
         return self._skip_cache
 
-    def _skip_tile(self, i, n_tiles, profile_tile_id, stage_seconds, tile_shape, regions_prefix=None):
-        """A tile of the skip plan: its DAPI is already in the global DAPI;
-        no engine, no labels, no paste -- like a tile the engine found empty."""
+    def _skip_tile(self, i, n_tiles, profile_tile_id, stage_seconds, tile_shape, regions_prefix=None,
+                   collect=True):
+        """A tile of the skip plan: no engine, no labels, no paste -- like a
+        tile the engine found empty. Its DAPI is written apart
+        (`_fill_skipped_dapi`)."""
         self.step2_profiler.record_tile_metadata(profile_tile_id, labels_count=0, skipped=True)
         stage_seconds["_profile_tile_id"] = profile_tile_id
         self._profile_tile_line(i, n_tiles, stage_seconds, 0, tile_shape)
@@ -2246,7 +2251,62 @@ class SegmentMergeWorker(QThread):
         else:
             self._skipped_tiles.append(int(i))
         self.tile_skipped.emit(i, n_tiles)
-        gc.collect()
+        if collect:
+            gc.collect()
+
+    def _skip_ahead(self, tiles, skip_all, n_tiles, profile_base, regions_prefix):
+        """Backlog 20: every tile the run skips (the skip plan's, and the
+        tiles without a selected TMA core) is recorded and told to the page
+        at once, before the first tile to segment -- nothing is read for
+        them here and the loop starts on the first tile that runs. The
+        order of the records is the tiles' order, as before."""
+        for i in sorted(skip_all):
+            t = tiles[i]
+            base = profile_base(t)
+            self.step2_profiler.record_tile_metadata(t.tile_id, row=t.row, col=t.col, **base)
+            ry0, ry1, rx0, rx1 = t.read_bbox
+            self._skip_tile(i, n_tiles, t.tile_id, {"read_tile": 0.0}, (ry1 - ry0, rx1 - rx0),
+                            regions_prefix=regions_prefix if i not in self._tile_skip_set() else None,
+                            collect=False)
+
+    def _fill_skipped_dapi(self, zarr_path, z, tiles, skip_all, dapi_mmap, log):
+        """The skipped tiles' own DAPI, written after the segmented tiles
+        (backlog 20) with the read a skipped tile always made
+        (`_prepare_tile_payload(skip=True)`): the global DAPI has no hole
+        and the same bytes as before. Stops at a Stop."""
+        if not skip_all:
+            return
+        t0 = time.perf_counter()
+        for i in sorted(skip_all):
+            if self._stop:
+                return
+            t = tiles[i]
+            oy0, oy1, ox0, ox1 = t.own_bbox
+            payload = self._prepare_tile_payload(zarr_path, z, t, False, False, None, [], False, None,
+                                                 skip=True)
+            dapi_mmap[oy0:oy1, ox0:ox1] = payload["dapi_own"][:oy1 - oy0, :ox1 - ox0]
+        log.info(f"[Step2] DAPI of {len(skip_all)} skipped tile(s) written "
+                 f"({(time.perf_counter() - t0) * 1000:.0f} ms)")
+
+    def _timing(self, what, once=False):
+        """Backlog 20: one line "[Step2 timing] <what>: N ms after Run" on
+        the console and in the run log -- from the page's Run click
+        (`run_clicked_at`, set by the page) or, without it, from the
+        worker's start. `once`: only the first time for this `what`."""
+        if once:
+            seen = self.__dict__.setdefault("_timed", set())
+            if what in seen:
+                return
+            seen.add(what)
+        now = time.perf_counter()
+        t0 = getattr(self, "run_clicked_at", None)
+        if t0 is None:
+            t0 = self.__dict__.setdefault("_worker_started_at", now)
+        msg = f"[Step2 timing] {what}: {(now - t0) * 1000:.0f} ms after Run"
+        print(msg, flush=True)
+        log = getattr(self, "_logger", None)
+        if log is not None:
+            log.info(msg)
 
     def _prepare_tile_payload(self, zarr_path, z, tile, is_hq, is_mesmer_guided,
                               hq_group, hq_channels, is_mesmer, mesmer_group,
@@ -3133,8 +3193,28 @@ class SegmentMergeWorker(QThread):
                 queue_size=int(self.seg_config.get("prefetch_queue_size", 2) or 2),
                 logger=log,
                 profiler=self.step2_profiler,
+                order=[k for k in range(len(tiles)) if k not in skip_all],   # backlog 20
             )
             log.info("[TilePrefetch] enabled queue_size=%s", prefetcher.prefetch_queue_size)
+
+        def _profile_base(tile):
+            oy0, oy1, ox0, ox1 = tile.own_bbox
+            ry0, ry1, rx0, rx1 = tile.read_bbox
+            tile_shape = (ry1 - ry0, rx1 - rx0)
+            return {
+                "tile_id": tile.tile_id,
+                "bbox_global": list(bbox) if bbox else [oy0, oy1, ox0, ox1],
+                "bbox_local": [oy0, oy1, ox0, ox1],
+                "tile_shape": list(tile_shape),
+                "tile_h": int(tile_shape[0]),
+                "tile_w": int(tile_shape[1]),
+                "overlap": int(self.overlap_px),
+                "channels_used": list(hq_channels or []),
+                "method": self.method,
+                "dtype": str(getattr(z, "dtype", "")),
+                "input_source": self._abs(zarr_path),
+            }
+        self._skip_ahead(tiles, skip_all, n_tiles, _profile_base, out_prefix)
 
         with self.step2_profiler.time_stage("run_all_tiles", method=self.method, input_source=self._abs(zarr_path)):
           for i, tile in enumerate(tiles):
@@ -3142,6 +3222,8 @@ class SegmentMergeWorker(QThread):
                 self._close_tile_scheduler(scheduler)
                 del mmap, dapi_mmap
                 return 0
+            if i in skip_all:
+                continue                               # told before the loop (backlog 20)
 
             row, col           = tile.row, tile.col
             oy0, oy1, ox0, ox1 = tile.own_bbox
@@ -3162,19 +3244,7 @@ class SegmentMergeWorker(QThread):
             profile_tile_id = tile.tile_id
             stage_seconds = {}
             tile_shape = (ry1 - ry0, rx1 - rx0)
-            tile_profile_base = {
-                "tile_id": profile_tile_id,
-                "bbox_global": list(bbox) if bbox else [oy0, oy1, ox0, ox1],
-                "bbox_local": [oy0, oy1, ox0, ox1],
-                "tile_shape": list(tile_shape),
-                "tile_h": int(tile_shape[0]),
-                "tile_w": int(tile_shape[1]),
-                "overlap": int(self.overlap_px),
-                "channels_used": list(hq_channels or []),
-                "method": self.method,
-                "dtype": str(getattr(z, "dtype", "")),
-                "input_source": self._abs(zarr_path),
-            }
+            tile_profile_base = _profile_base(tile)
             self.step2_profiler.record_tile_metadata(profile_tile_id, row=row, col=col, **tile_profile_base)
 
             _t = time.perf_counter()
@@ -3189,6 +3259,7 @@ class SegmentMergeWorker(QThread):
             if not self._cores_run():                  # a cores run's DAPI comes from the fill
                 dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
             stage_seconds["read_tile"] = time.perf_counter() - _t
+            self._timing("first tile read, segmenting it", once=True)
             if payload.get("skipped"):
                 self._skip_tile(i, n_tiles, profile_tile_id, stage_seconds, tile_shape,
                                 regions_prefix=out_prefix if i not in self._tile_skip_set() else None)
@@ -3494,6 +3565,8 @@ class SegmentMergeWorker(QThread):
         self._close_tile_scheduler(scheduler)
         if self._cores_run() and not self._stop:
             self._fill_dapi(zarr_path, z, dapi_mmap, full_h, full_w, log)   # plan §3.3
+        elif not self._stop:
+            self._fill_skipped_dapi(zarr_path, z, tiles, skip_all, dapi_mmap, log)   # backlog 20
 
         if merger is not None and not self._stop:
             with self.step2_profiler.time_stage("seam_merge", method=self.method):
@@ -3738,6 +3811,11 @@ class SegmentMergeWorker(QThread):
             self._logger, log_path = self._setup_logger()
             log = self._logger
             log.info("=== Segmentation started ===")
+            for line in list(getattr(self, "page_timings", None) or []):
+                log.info(line)                        # the page's steps, before this log existed
+            self._timing("worker started")
+            # directly in this thread (no receiver): the first finished tile
+            self.tile_done.connect(lambda *a: self._timing("first tile done", once=True))
             # Step2 hook-up, step 3: a Step1 pre-segmentation hand-over runs
             # through the engine process (`_segment_tile_contract`). A malformed
             # contract raises ContractError here.
@@ -3768,6 +3846,7 @@ class SegmentMergeWorker(QThread):
                          f"run={self._contract['preseg_run_id']} combo={self._contract['combo_id']}")
             self._tile_skip_set()        # block S2T: a skip plan for another grid is refused
             self._regions = self._regions_begin()      # F4-3: None without a Regions hand-over
+            self._timing("Regions checked")
             config_path = self._write_run_segmentation_config()
             log.info(f"run_segmentation_params.json -> {config_path}")
 
@@ -3798,6 +3877,7 @@ class SegmentMergeWorker(QThread):
                     use_gpu = str(self.seg_config.get("use_gpu", "auto")).lower() != "cpu"
                     device = None
                 model   = self._init_segmentation_backend(use_gpu, device)
+                self._timing("segmentation engine ready")
                 if self._runtime_monitor is not None:
                     self._runtime_monitor.set_backend_context(backend=self.method, backend_obj=model, seg_config=self.seg_config)
             else:
@@ -4069,8 +4149,28 @@ class SegmentMergeWorker(QThread):
                     queue_size=int(self.seg_config.get("prefetch_queue_size", 2) or 2),
                     logger=log,
                     profiler=self.step2_profiler,
+                    order=[k for k in range(len(tiles)) if k not in skip_all],   # backlog 20
                 )
                 log.info("[TilePrefetch] enabled queue_size=%s", prefetcher.prefetch_queue_size)
+
+            def _profile_base(tile):
+                oy0, oy1, ox0, ox1 = tile.own_bbox
+                ry0, ry1, rx0, rx1 = tile.read_bbox
+                tile_shape = (ry1 - ry0, rx1 - rx0)
+                return {
+                    "tile_id": tile.tile_id,
+                    "bbox_global": [oy0, oy1, ox0, ox1],
+                    "bbox_local": [oy0, oy1, ox0, ox1],
+                    "tile_shape": list(tile_shape),
+                    "tile_h": int(tile_shape[0]),
+                    "tile_w": int(tile_shape[1]),
+                    "overlap": int(self.overlap_px),
+                    "channels_used": list(hq_channels or []),
+                    "method": self.method,
+                    "dtype": str(getattr(z, "dtype", "")),
+                    "input_source": self._abs(self.zarr_path),
+                }
+            self._skip_ahead(tiles, skip_all, n_tiles, _profile_base, "")
 
             with self.step2_profiler.time_stage("run_all_tiles", method=self.method, input_source=self._abs(self.zarr_path)):
               for i, tile in enumerate(tiles):
@@ -4078,6 +4178,8 @@ class SegmentMergeWorker(QThread):
                     self._close_tile_scheduler(scheduler)     # settled before the answer
                     self.error.emit('Stopped by user.')
                     return
+                if i in skip_all:
+                    continue                               # told before the loop (backlog 20)
 
                 row, col            = tile.row, tile.col
                 oy0, oy1, ox0, ox1  = tile.own_bbox
@@ -4096,19 +4198,7 @@ class SegmentMergeWorker(QThread):
                 profile_tile_id = tile.tile_id
                 stage_seconds = {}
                 tile_shape = (ry1 - ry0, rx1 - rx0)
-                tile_profile_base = {
-                    "tile_id": profile_tile_id,
-                    "bbox_global": [oy0, oy1, ox0, ox1],
-                    "bbox_local": [oy0, oy1, ox0, ox1],
-                    "tile_shape": list(tile_shape),
-                    "tile_h": int(tile_shape[0]),
-                    "tile_w": int(tile_shape[1]),
-                    "overlap": int(self.overlap_px),
-                    "channels_used": list(hq_channels or []),
-                    "method": self.method,
-                    "dtype": str(getattr(z, "dtype", "")),
-                    "input_source": self._abs(self.zarr_path),
-                }
+                tile_profile_base = _profile_base(tile)
                 self.step2_profiler.record_tile_metadata(profile_tile_id, row=row, col=col, **tile_profile_base)
 
                 _t = time.perf_counter()
@@ -4123,6 +4213,7 @@ class SegmentMergeWorker(QThread):
                 if not self._cores_run():                  # a cores run's DAPI comes from the fill
                     dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
                 stage_seconds["read_tile"] = time.perf_counter() - _t
+                self._timing("first tile read, segmenting it", once=True)
                 if payload.get("skipped"):
                     self._skip_tile(i, n_tiles, profile_tile_id, stage_seconds, tile_shape,
                                     regions_prefix="" if i not in self._tile_skip_set() else None)
@@ -4423,6 +4514,8 @@ class SegmentMergeWorker(QThread):
             self._close_tile_scheduler(scheduler)
             if self._cores_run() and not self._stop:
                 self._fill_dapi(self.zarr_path, z, dapi_mmap, full_h, full_w, log)   # plan §3.3
+            elif not self._stop:
+                self._fill_skipped_dapi(self.zarr_path, z, tiles, skip_all, dapi_mmap, log)   # backlog 20
 
             # The Mesmer device status is read BEFORE the model goes: the
             # metadata below needs it, and `del model` used to leave that read

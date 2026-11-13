@@ -202,6 +202,74 @@ same `global_mask`, `global_dapi`, metadata and skipped lists as before
 (byte-compared against the current code); no engine call and no
 `load_tile` for a skipped tile; the first engine call is on tile k.
 
+**Started by the user 2026-11-13**, widened: (a) the start of a Step2 run
+waits too long -- shorten it; (b) skipped tiles: start at the first tile to
+run; (c) the same for TMA cores.
+
+**Measured (2026-11-13, synthetic fused zarr, the real worker, a fake model
+that stops at its first call; cProfile):** from `run()` to the first engine
+call 1.0 s at 6400 x 6400 (4 x 4, 8 tiles skipped), 1.2 s at 20000 x 20000,
+0.85 s for a cores run of 40 cores at 20000 x 20000 (`AnalysisRaster`
+0.01 s). Of that, 0.5-0.8 s is `_mem_snapshot` importing torch only to
+report CUDA memory (none on the Mac). The skipped tiles: ~0.02 s each here
+(cached synthetic reads); on real data each reads its DAPI from the
+compressed input and runs a full `gc.collect()`, holding the prefetcher's
+two slots ahead of the first real tile. The user's TMA demo log
+(2026-11-11, grid 3 x 4): worker start to the engine process ready 3 s
+(Cellpose, MPS), first tile 16 s (as every tile: no first-call penalty).
+Not measurable without a real workspace: the page's work between the Run
+click and the worker's start (`step2_page.py` `_run`: the snapshot freeze
+`manual_regions` -> `build_snapshot`, the engine-identity and
+fusion-settings checks, the skip plan, the tile suggestion). No Step2 log
+of the user's newer runs exists on disk.
+* (c): a cores run already starts at its first core (its units are the
+  selected cores only; the DAPI is filled after them). In a grid run that
+  follows TMA cores, the tiles without a selected core (`regions_skip`)
+  are walked like the skip plan's -- the fix covers them (`skip_all`).
+* The prefetcher submits tiles in index order (`tile_prefetch.py`
+  `_next_submit`): to start at the first tile to run it takes the list of
+  tiles to segment -- `utils/tile_prefetch.py` joins the file list.
+
+**Implemented (2026-11-13, the user approved 1-3; uncommitted).**
+1. `workers/segment_merge_worker.py`, both loops: `_skip_ahead` records and
+   tells every skipped tile (plan and `regions_skip`) in tile order before
+   the loop, without a read or a `gc.collect`; the loop `continue`s over
+   them; the prefetcher gets `order` = the tiles to segment
+   (`utils/tile_prefetch.py`, `utils/tile_scheduler.py`); after the loop
+   `_fill_skipped_dapi` writes their DAPI with the same read as before
+   (not in a cores run, whose fill covers everything). `ui/step2_page.py`
+   `_on_progress`: a skipped tile announced as "next" stays skipped.
+   Byte-compared against the previous code (scratch script, 8 cases: first
+   tiles, scattered, Regions, Regions + plan; both loops): every output
+   array, JSON and the skipped lists identical.
+2. `_mem_snapshot` uses torch only if already imported.
+3. `[Step2 timing]` lines: the page's steps in `_run` (printed, and handed
+   to the worker as `page_timings` for the run log -- codex round 1 P2),
+   the worker's (`_timing`: worker started, Regions checked, engine ready,
+   first tile read, first tile done), all "ms after Run".
+Tests: `tests/test_step2_skip_ahead.py`; `test_step2_skip_empty_tiles.py`
+`test_the_prefetcher_keeps_up` updated (the skipped tiles are no longer
+read ahead). Codex review round 1 FAIL (the P2 above), round 2 PASS.
+Regression (74 files, 1755 tests): 110 failures also fail on HEAD; the
+rest are the known teardown crashes (139), passing on rerun.
+
+**The user's acceptance, round 1 (2026-11-13):** on Run the purple went
+away for a moment and the running highlight sat on tile 0 first. Fixed in
+`ui/step2_page.py`: `_run` computes the worker's skip set from the plan
+(none on a cores run or in Recovery Mode) and `_begin_run_progress`
+records those tiles skipped in the same call that resets the grid; the
+first tile that runs is marked running, not tile 0. Test added; codex PASS.
+The user's timed run (test2, StarDist, 2026-11-13): the page 42 ms, the
+worker at 44 ms, **the engine process ready at 4304 ms** (a new process
+loading torch, StarDist and its weights), the first tile read at 4877 ms,
+segmented in 19.6 s. The remaining cold start is the engine's start: only
+a pre-started engine removes it. **The user, 2026-11-13: keep it as it is.**
+**Acceptance round 2 (the user, 2026-11-13): passed;** one more ruling:
+every skipped tile hatched, not only the tissue tiles the user chose
+(`ui/step2_page.py` `HATCHED_STATES = SKIP_STATES`; the overview and the
+zoomable viewer). Three assertions of `test_step2_skip_empty_tiles.py` that
+said an empty skipped tile is not hatched updated.
+
 ## B21 — Exclusions in Step2 and Step3, with a switch; Smooth removed (item 5)
 
 **Today:** Step2 and Step3 draw cores only (`core/regions/display.py`

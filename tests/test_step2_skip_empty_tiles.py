@@ -253,7 +253,10 @@ def test_the_prefetcher_keeps_up(tmp_path, monkeypatch):
                     skip=_plan(ROWS, COLS, OVERLAP, empty))
     _run(w, zp, "segment_one_zarr")
     m = seen[-1].metrics
-    assert m["prefetch_miss"] <= 1 and m["prefetch_hit"] >= ROWS * COLS - 1
+    # backlog 20: the skipped tiles are not read ahead (only the tiles that run)
+    runs = ROWS * COLS - len(empty)
+    assert m["prefetch_miss"] <= 1 and m["prefetch_hit"] >= runs - 1
+    assert not set(seen[-1]._order) & set(empty)
 
 
 def test_the_run_records_what_it_left_out(tmp_path, monkeypatch):
@@ -489,7 +492,7 @@ def test_a_skipped_tile_is_filled_purple_with_a_thick_solid_border(page, monkeyp
     assert r.pen.color().name() == PURPLE and r.pen.widthF() == 4.0
     assert r.pen.style() == Qt.SolidLine
     assert r.fill is not None and r.fill.name() == PURPLE and abs(r.fill.alphaF() - 0.30) < 0.01
-    assert r.hatch is None
+    assert r.hatch is not None                       # every skipped tile hatched (2026-11-13)
     idle = _rect(page, tissue[0])
     assert idle.fill is None and idle.hatch is None and idle.zValue() < r.zValue()
     _questions(page, monkeypatch, True)
@@ -509,7 +512,7 @@ def test_during_a_run_purple_stays_and_the_users_tissue_tiles_stay_hatched(page,
     page._on_tile_skipped(tissue[0], 12)
     page._record_tile(auto[0] - 1 if auto[0] % 6 else auto[0] + 1, "done")
     a, f = _rect(page, auto[0]), _rect(page, tissue[0])
-    assert a.fill is not None and a.hatch is None and a.pen.widthF() == 4.0
+    assert a.fill is not None and a.hatch is not None and a.pen.widthF() == 4.0   # hatched too
     assert f.fill is not None and f.hatch is not None
     done = _rect(page, auto[0] - 1 if auto[0] % 6 else auto[0] + 1)
     assert done.pen.color().name() == page.TILE_COLOURS["done"] and done.zValue() > a.zValue()
@@ -531,7 +534,7 @@ def test_the_zoomable_items_carry_the_look_in_draw_order(page, monkeypatch):
     fo = items[ids.index("tile_%d_%d" % divmod(tissue[0], nc))]
     dn = items[ids.index("tile_%d_%d" % divmod(tissue[1], nc))]
     assert sk["color"] == PURPLE and sk["width"] == 4.0 and sk["fill"] == page.SKIP_FILL
-    assert "hatch" not in sk and fo["hatch"] is True
+    assert sk["hatch"] is True and fo["hatch"] is True                # every skipped tile
     assert "width" not in dn and "fill" not in dn                     # the overlay's own default
     idle = [k for k in range(12) if k not in (auto[0], tissue[0], tissue[1])][0]
     assert ids.index("tile_%d_%d" % divmod(idle, nc)) < ids.index(sk["id"]) < ids.index(dn["id"])

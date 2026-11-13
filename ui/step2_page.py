@@ -165,8 +165,8 @@ class _ElidedLabel(QLabel):
 class _TileRect(pg.RectROI):
     """A Tile Status tile: the RectROI outline, with the skip look under it
     (docs/v17_step2_skip_tiles_ux_plan.md §2) -- a translucent fill and, for
-    a tile with tissue the user chose to skip, diagonal hatching drawn in
-    screen pixels so its density does not change with zoom."""
+    every skipped tile, diagonal hatching drawn in screen pixels so its
+    density does not change with zoom."""
 
     fill = None                        # QColor, or None
     hatch = None                       # QColor of the hatching, or None
@@ -2927,10 +2927,13 @@ class Step2Page(QWidget):
         forced = (self._run_progress or {}).get("forced", ())
         self._record_tile(tile_idx, 'skipped_forced' if int(tile_idx) in forced else 'skipped')
 
-    def _begin_run_progress(self, nr, nc):
-        """A new run: a new progress record; every drawn tile back to idle.
-        The tissue tiles the user chose to skip are kept with it, so they
-        stay hatched while the run computes."""
+    def _begin_run_progress(self, nr, nc, skipped=()):
+        """A new run: a new progress record; every drawn tile back to idle,
+        except the tiles this run skips (`skipped`): recorded skipped at
+        once, in the same turn, so their purple never goes away on screen
+        (backlog 20, the user's acceptance 2026-11-13). The tissue tiles the
+        user chose to skip are kept with it, so they stay hatched while the
+        run computes."""
         self._run_active = True
         self._skip_empty_cb.setEnabled(False)
         self._sync_skip_buttons()
@@ -2943,6 +2946,8 @@ class Step2Page(QWidget):
         for key in self._tile_status:
             self._tile_status[key] = 'idle'
             self._set_tile_colour(key[0], key[1], 'idle')
+        for i in sorted(int(k) for k in skipped):
+            self._record_tile(i, 'skipped_forced' if i in forced else 'skipped')
         self._run_grid_lbl.setText(f'Running grid: {nr}×{nc} — its progress shows on '
                                    'this grid only')
         self._run_grid_lbl.setVisible(True)
@@ -2972,10 +2977,12 @@ class Step2Page(QWidget):
         'plan_skip': SKIP_PURPLE,      # the next run will leave it out
         'plan_forced': SKIP_PURPLE,    # ... although it holds tissue (the user's choice)
     }
-    #: The skip look (plan §2): translucent purple fill, 4 px border; the
-    #: tissue tiles the user chose are hatched too.
+    #: The skip look (plan §2): translucent purple fill, 4 px border and the
+    #: purple hatching -- every skipped tile, whether "Skip all empty" chose
+    #: it or the user did (the user's ruling 2026-11-13, backlog 20; it used
+    #: to be the user's tissue tiles only).
     SKIP_STATES = ('plan_skip', 'plan_forced', 'skipped', 'skipped_forced')
-    HATCHED_STATES = ('plan_forced', 'skipped_forced')
+    HATCHED_STATES = SKIP_STATES
     SKIP_FILL = '#4dc678dd'            # SKIP_PURPLE at alpha 0.30 (#AARRGGBB)
     SKIP_WIDTH = 4.0
     PREVIEW_COLOUR = '#ffffff'         # the frame of a tile under a Shift+drag box
@@ -4005,6 +4012,17 @@ class Step2Page(QWidget):
                                     (region_fused_paths or {}).items() if v}
 
     def _run(self):
+        # backlog 20: where the wait after Run goes, one line per step
+        t_click = time.perf_counter()
+        laps, lines = [t_click], []             # the lines go to the run log too (worker)
+
+        def lap(what):
+            now = time.perf_counter()
+            line = (f"[Step2 timing] {what}: {(now - laps[-1]) * 1000:.0f} ms "
+                    f"({(now - t_click) * 1000:.0f} ms after Run)")
+            print(line, flush=True)
+            lines.append(line)
+            laps.append(now)
         self._box_cancel()                      # a box still being dragged changes nothing
         if not self._zarr_path or not os.path.exists(self._zarr_path):
             QMessageBox.warning(self, 'No data',
@@ -4044,6 +4062,7 @@ class Step2Page(QWidget):
                 if not self._apply_selected_index_params():
                     return
         seg_config = self.get_seg_config()
+        lap("input and parameters")
         if is_retired_method(seg_config.get("method")):
             # Defence in depth (plan §1): no route runs a retired method.
             QMessageBox.warning(self, 'Step2', retired_method_message(seg_config.get("method")))
@@ -4072,6 +4091,7 @@ class Step2Page(QWidget):
             if why:
                 QMessageBox.warning(self, "Regions", f"This run cannot follow the Regions result: {why}.")
                 return
+        lap("TMA cores frozen (with any question answered)")
         from ..core.regions import analysis as RA
         frozen = (regions_request or {}).get("snapshot") if regions_request else None
         self._apply_cores_layout(count=len(frozen.get("cores") or []) if frozen and RA.has_cores(frozen) else 0)
@@ -4110,6 +4130,7 @@ class Step2Page(QWidget):
                     'using more than 3 channels can be slower and may dilute consensus.'
                 )
 
+        lap("checks (with any question answered)")
         recovery_dir = None
         if self._rec_box.isChecked():
             recovery_dir = self._rec_edit.text().strip() or None
@@ -4139,11 +4160,18 @@ class Step2Page(QWidget):
             seg_config["skip_tiles"] = skip
         else:
             seg_config.pop("skip_tiles", None)
+        lap("tile grid and skip plan")
         param_file = ""
         if source == "index" and self._applied_param_file:
             param_file = self._applied_param_file
 
-        self._begin_run_progress(nr, nc)
+        # the tiles the worker will skip (its `_tile_skip_set`); none on a cores run
+        cores_run = bool(frozen and RA.has_cores(frozen))
+        skipped = set()
+        if skip is not None and not cores_run and not recovery_dir:
+            forced_tiles = {int(e["tile"]) for e in skip["user_forced"]}
+            skipped = ((set(skip["auto"]) - set(skip["user_kept"])) | forced_tiles) & set(range(nr * nc))
+        self._begin_run_progress(nr, nc, skipped)
         self._total_cells = 0
         self._cells_lbl.setText('Total cells detected: 0')
 
@@ -4166,6 +4194,9 @@ class Step2Page(QWidget):
             identity_confirmation = identity_confirmation,
             regions_request  = regions_request,
         )
+        self._worker.run_clicked_at = t_click       # its own steps are timed from the click
+        self._worker.page_timings = lines           # written to its log when the log exists
+        lap("run prepared")
         # the cores this run follows (its hand-over's frozen snapshot), drawn as frozen
         reg = regions_request
         self._run_core_snapshot = reg["snapshot"] if reg and reg.get("snapshot") else None
@@ -4218,10 +4249,13 @@ class Step2Page(QWidget):
         # (down to its coarse) before segmentation needs the memory
         from . import gpu_memory
         gpu_memory.release_hidden("segmentation")
+        lap("drawn, hidden viewers released")
         self._worker.start()
 
-        # Mark first tile as running
-        self._record_tile(0, 'running')
+        # Mark the first tile that runs as running (not a skipped one)
+        first = next((i for i in range(max(1, nr * nc)) if i not in skipped), None)
+        if first is not None:
+            self._record_tile(first, 'running')
 
     def _stop(self):
         if self._worker:
@@ -4244,8 +4278,11 @@ class Step2Page(QWidget):
             self._prog_bar.setValue(pct)
             self._prog_lbl.setText(msg)
 
-        # Mark next tile as running
-        if done < total:
+        # Mark next tile as running -- not a skipped one: the run tells every
+        # skipped tile before its first tile (backlog 20), and a finished
+        # tile still announces the index after it
+        if done < total and not (self._run_progress is not None
+                                 and str(self._run_progress["state"].get(int(done), "")).startswith('skipped')):
             self._record_tile(done, 'running')
 
     def _on_tile_done(self, tile_idx, n_tiles, n_cells):

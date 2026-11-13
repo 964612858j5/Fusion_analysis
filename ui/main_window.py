@@ -523,7 +523,8 @@ def preseg_chosen_params(run, combo_id):
 TMA_CORES_TIPS = {
     "step1": ("Show the TMA cores of the last Regions Save: green = would be analysed in this "
               "workspace, yellow = would not.\nNames appear when zoomed in."),
-    "step2": ("Show the TMA cores this run follows: green = analysed, yellow = not.\n"
+    "step2": ("Show the TMA cores this run follows: green = analysed, yellow = not; during a run "
+              "amber = being segmented, filled green = done, red = failed.\n"
               "Before a run: the last Regions Save (a run freezes it when it starts, whatever "
               "the parameters' source). Names appear when zoomed in."),
     "step3": ("Show the TMA cores as they were when this run was started: green = analysed, "

@@ -253,41 +253,43 @@ def test_a_newer_save_after_a_finished_run_is_what_step2_follows():
 
 
 def test_the_core_being_segmented_is_highlighted_then_turns_green():
-    """15A acceptance (2026-11-12): Step2's cores in the tile scheme; the
-    core under segmentation like the running tile (with a fill); a core
-    whose units are all done gets the done tile's green border, kept after
-    the run; a later progress index (the DAPI fill) lights nothing again; a
-    new run starts grey, with its own worker's units."""
+    """15A acceptance (2026-11-12), colours of B28: waiting green, left out
+    yellow; the core under segmentation like the running tile (with a
+    fill); a core whose units are all done green over a light green fill,
+    kept after the run; a later progress index (the DAPI fill) lights
+    nothing again; a new run starts back at green, with its own worker's
+    units."""
     import types
     page = _page_with(_three())
     page._cores_preview = 2
     look = lambda: {it["id"].split("#")[0]: (it["color"], it.get("fill")) for it in page._core_items()}   # noqa: E731
-    idle, run, done = page.TILE_COLOURS['idle'], page.TILE_COLOURS['running'], page.TILE_COLOURS['done']
-    purple = page.SKIP_PURPLE
-    assert look() == {"core_a": (idle, None), "core_b": (idle, None), "core_c": (purple, None)}
+    from block01.core.regions import display as RD
+    run = page.TILE_COLOURS['running']
+    idle, done, purple = (RD.GREEN, None), (RD.GREEN, page.CORE_DONE_FILL), (RD.YELLOW, None)
+    assert look() == {"core_a": idle, "core_b": idle, "core_c": purple}
     page._run_view_live = lambda: True
     units = {"": [{"index": 0, "core_uid": "core_a"}, {"index": 1, "core_uid": "core_b"},
                   {"index": 2, "core_uid": "core_b"}]}
     page._worker = types.SimpleNamespace(_units_meta=units)          # the run before
     page._begin_run_progress(1, 1)
     page._on_progress(0, 3, "core 1 of 2")
-    assert look()["core_a"] == (idle, None)                          # not the old worker's units
+    assert look()["core_a"] == idle                                  # not the old worker's units
     page._worker = types.SimpleNamespace(_units_meta=units)          # this run's worker
     page._on_progress(0, 3, "core 1 of 2")
-    assert look()["core_a"] == (run, page.CORE_RUNNING_FILL) and look()["core_b"] == (idle, None)
+    assert look()["core_a"] == (run, page.CORE_RUNNING_FILL) and look()["core_b"] == idle
     page._on_tile_done(0, 3, 5)
     page._on_progress(1, 3, "core 2 of 2, part 1 of 2")
-    assert look()["core_a"] == (done, None) and look()["core_b"][0] == run
+    assert look()["core_a"] == done and look()["core_b"][0] == run
     page._on_tile_done(1, 3, 5)
     page._on_progress(2, 3, "core 2 of 2, part 2 of 2")
     assert look()["core_b"][0] == run                                # its second part
     page._on_tile_done(2, 3, 5)
     page._on_progress(1, 4, "DAPI image 2/4")                        # the DAPI fill reuses the indices
-    assert look() == {"core_a": (done, None), "core_b": (done, None), "core_c": (purple, None)}
+    assert look() == {"core_a": done, "core_b": done, "core_c": purple}
     page._run_active = False                                         # the run ended: green stays
-    assert look() == {"core_a": (done, None), "core_b": (done, None), "core_c": (purple, None)}
-    page._begin_run_progress(1, 1)                                   # a new run: grey again
-    assert look() == {"core_a": (idle, None), "core_b": (idle, None), "core_c": (purple, None)}
+    assert look() == {"core_a": done, "core_b": done, "core_c": purple}
+    page._begin_run_progress(1, 1)                                   # a new run: waiting again
+    assert look() == {"core_a": idle, "core_b": idle, "core_c": purple}
     page.deleteLater()
 
 
@@ -322,12 +324,13 @@ def test_an_error_turns_the_core_being_segmented_red_until_the_next_run(monkeypa
     page = _page_with(items)
     _cores_run_to_core_b(page, monkeypatch)
     page._on_error("Tile [1,0] inference failed: out of memory")
-    red, green, grey = page.TILE_COLOURS['error'], page.TILE_COLOURS['done'], page.TILE_COLOURS['idle']
+    from block01.core.regions import display as RD
+    red, green, grey = page.TILE_COLOURS['error'], RD.GREEN, RD.GREEN
     looks = _looks(page)
     assert looks["core_a"] == (green, None)
     assert looks["core_b"] == (red, "X1-Y02 D7 · failed" if named else "failed")
-    assert looks["core_c"][0] == page.SKIP_PURPLE
-    page._begin_run_progress(1, 1)                                   # a new run: grey again
+    assert looks["core_c"][0] == RD.YELLOW
+    page._begin_run_progress(1, 1)                                   # a new run: waiting (green) again
     assert _looks(page)["core_b"] == (grey, "X1-Y02 D7" if named else None)
     page.deleteLater()
 
@@ -337,8 +340,9 @@ def test_a_stop_is_not_a_failure(monkeypatch):
     _cores_run_to_core_b(page, monkeypatch)
     page._on_error("Stopped by user.")
     looks = _looks(page)
-    assert looks["core_a"][0] == page.TILE_COLOURS['done']
-    assert looks["core_b"] == (page.TILE_COLOURS['idle'], None)        # back to grey
+    from block01.core.regions import display as RD
+    assert looks["core_a"][0] == RD.GREEN
+    assert looks["core_b"] == (RD.GREEN, None)                         # back to waiting (green)
     page.deleteLater()
 
 

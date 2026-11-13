@@ -26,7 +26,7 @@ def test_bound_cores_and_exclusions_are_drawn_thick(app, env, monkeypatch):
                if piece["owner"] and not d["cores"][piece["owner"]]["position_key"]]
     assert bound and unbound
     assert all(by_id[p]["width"] == BOUND_WIDTH == 3.0 for p in bound)
-    assert all("width" not in by_id[p] for p in unbound)              # unbound: as before (1.5)
+    assert all(by_id[p]["width"] == BOUND_WIDTH for p in unbound)     # every core 3 px (B28)
     _open_exclusions(page)
     _square(page, 100, 100, 80)
     page._key("enter")

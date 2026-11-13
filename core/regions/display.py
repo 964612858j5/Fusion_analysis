@@ -15,9 +15,49 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence
 
-#: The Regions page's colours (`ui/regions/cores_panel.py` uses the same).
+#: One scheme for the cores, Step 0.5 to Step 3 (backlog 28,
+#: docs/v17_core_colours_plan.md): green analysed, yellow not.
 GREEN = "#43a047"
 YELLOW = "#fdd835"
+#: Every core outline's width in screen pixels (`ui/regions/overlay.py`
+#: BOUND_WIDTH: core has no Qt; a test keeps them equal).
+CORE_WIDTH = 3.0
+
+
+def analysed_uids(doc: Dict, study: Optional[Dict]) -> set:
+    """The cores of an open Regions document the analysis would take, by its
+    selection rules without the geometry (`analysis.select_cores`,
+    `select_cores_without_map`; plan §2.1): with a map sheet a core bound
+    alone to a position with a donor block, Run ticked, mapping `matched`,
+    QC not `excluded`; without a map sheet a core whose Run tick is on. A
+    mapped document without its sheet, or a sheet not attached to the
+    cores: none (the analysis refuses). Not checked: an outline without
+    area, a core outside a workspace's region, overlaps."""
+    cores = doc.get("cores") or {}
+    if doc.get("map_sha256"):
+        if not study or study["map_sheet"]["sha256"] != doc["map_sha256"]:
+            return set()
+        from ..tma.cores import position_key
+        sheet = study["map_sheet"]
+        holders_of: Dict[str, List[str]] = {}
+        for u, c in cores.items():
+            if c.get("position_key"):
+                holders_of.setdefault(c["position_key"], []).append(u)
+        out = set()
+        for p in sheet["positions"]:
+            if not p.get("donor_block_id"):
+                continue
+            key = position_key(study["slide_id"], sheet["sha256"], p["position_id"])
+            pos = (doc.get("positions") or {}).get(key, {})
+            if not pos.get("run") or pos.get("qc") == "excluded":
+                continue
+            holders = holders_of.get(key, [])
+            if len(holders) == 1 and cores[holders[0]].get("mapping") == "matched":
+                out.add(holders[0])
+        return out
+    if study is not None:
+        return set()
+    return {u for u, c in cores.items() if c.get("run", True)}
 
 
 def core_name(label, donor) -> str:
@@ -72,7 +112,8 @@ def _items(cores: Sequence[Dict]) -> List[Dict]:
     items = []
     for c in cores:
         for k, poly in enumerate(c["polygons"]):
-            it = {"id": f"{c['uid']}#{k}", "polygon": poly, "color": GREEN if c["run"] else YELLOW}
+            it = {"id": f"{c['uid']}#{k}", "polygon": poly, "color": GREEN if c["run"] else YELLOW,
+                  "width": CORE_WIDTH}
             if k == 0 and c.get("name"):
                 it["label"] = c["name"]
             items.append(it)

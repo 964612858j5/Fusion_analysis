@@ -372,7 +372,9 @@ class Step2Page(QWidget):
         self.btn_tma_cores.setChecked(True)
         self.btn_tma_cores.setStyleSheet(MODE_BUTTON_QSS)
         self.btn_tma_cores.setToolTip("Show the TMA cores: green = analysed by this run, "
-                                      "yellow = not analysed.\nNames (from the map sheet) appear when zoomed in.")
+                                      "yellow = not analysed; during a run amber = being segmented, "
+                                      "filled green = done, red = failed.\n"
+                                      "Names (from the map sheet) appear when zoomed in.")
         self.btn_tma_cores.setVisible(False)
         self.btn_tma_cores.toggled.connect(lambda _on: self.refresh_core_outlines())
         self.saved_core_items = None          # () -> overlay items of the last Regions Save
@@ -2209,30 +2211,32 @@ class Step2Page(QWidget):
 
     #: A core being segmented: the running tile's colour, a translucent fill.
     CORE_RUNNING_FILL = '#59ffc832'
+    #: A core done: its green outline over a light green fill (backlog 28).
+    CORE_DONE_FILL = '#4043a047'
 
     def _core_items(self):
-        """The cores in Step2's tile scheme (15A acceptance, 2026-11-12): a
-        core that runs is drawn like an idle tile, one left out like a
-        skipped tile; during a run the core being segmented is highlighted
-        like the running tile, and a core whose units are all done gets the
-        done tile's green border (the user, 2026-11-12)."""
+        """The cores in the one scheme of Step 0.5 to 3 (backlog 28,
+        docs/v17_core_colours_plan.md): green analysed (waiting), yellow
+        not; during a run the core being segmented amber with a
+        translucent fill, a core whose units are all done green over a
+        light green fill, a failed one red (15B)."""
         from ..core.regions import display as RD
         states = self._core_states()
         out = []
         for it in self._core_source_items():
             uid = str(it.get("id", "")).split("#")[0]
             if it.get("color") != RD.GREEN:
-                it = dict(it, color=self.SKIP_PURPLE)
+                it = dict(it, color=RD.YELLOW, width=RD.CORE_WIDTH)
             elif states.get(uid) == 'running':
                 it = dict(it, color=self.TILE_COLOURS['running'], width=4, fill=self.CORE_RUNNING_FILL)
             elif states.get(uid) == 'done':
-                it = dict(it, color=self.TILE_COLOURS['done'], width=2)
+                it = dict(it, color=RD.GREEN, width=RD.CORE_WIDTH, fill=self.CORE_DONE_FILL)
             elif states.get(uid) == 'failed':                # 15B: red, labelled on its first piece
-                it = dict(it, color=self.TILE_COLOURS['error'], width=3)
+                it = dict(it, color=self.TILE_COLOURS['error'], width=RD.CORE_WIDTH)
                 if str(it.get("id", "")).endswith("#0"):
                     it["label"] = " · ".join(t for t in (it.get("label"), "failed") if t)
             else:
-                it = dict(it, color=self.TILE_COLOURS['idle'], width=2)
+                it = dict(it, color=RD.GREEN, width=RD.CORE_WIDTH)
             out.append(it)
         return out
 

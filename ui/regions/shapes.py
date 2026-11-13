@@ -36,7 +36,8 @@ class ShapesMixin:
 
     def finish_shape(self, polygon):
         """A drawn polygon / circle: an exclusion in `Exclusions`, otherwise
-        a new core of its own (yellow, as Find cores'); it is selected."""
+        a new core of its own (its colour follows its Run tick, as Find cores'); it is
+        selected."""
         if self.exclusions_tab_open():
             reasons, channels, note = self.exclusions.defaults()
             sid = self.edit(D.add_exclusion, polygon, reasons, channels, note)

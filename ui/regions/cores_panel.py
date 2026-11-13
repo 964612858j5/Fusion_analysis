@@ -23,8 +23,11 @@ from ..tma.numbering_panel import NumberingPanel
 from .cores_actions import CoresActions
 from .overlay import BOUND_WIDTH
 
-COLOR = {"matched": DISPLAY.GREEN, "review": "#fb8c00", "unmatched": DISPLAY.YELLOW, "piece": "#9e9e9e",
-         "dropped": "#e53935", "excluded": "#e53935"}
+#: The outlines (backlog 28, docs/v17_core_colours_plan.md): a core green
+#: when the analysis takes it, else yellow, as in Step 1 to 3; two
+#: numbering reminders of this page only: orange (numbering to check), grey
+#: dashed (a piece of no core). A left-out piece: yellow dashed.
+COLOR = {"analysed": DISPLAY.GREEN, "not_analysed": DISPLAY.YELLOW, "review": "#fb8c00", "piece": "#9e9e9e"}
 
 
 class CoresPanel(QWidget, CoresActions):
@@ -157,19 +160,20 @@ class CoresPanel(QWidget, CoresActions):
             return [], set(), None, {}
         d = h.d
         labels = self.labels_by_key()
+        analysed = DISPLAY.analysed_uids(d, self.study)
         items = []
         for pid, p in d["pieces"].items():
             it = {"id": pid, "polygon": p["polygon"]}
             if p["dropped"]:
-                it.update(color=COLOR["dropped"], dash=True)
+                it.update(color=COLOR["not_analysed"], dash=True)
             elif p["owner"] is None:
                 it.update(color=COLOR["piece"], dash=True)
             else:
                 c = d["cores"][p["owner"]]
                 key = c["position_key"]
-                it["color"] = COLOR["excluded"] if key and d["positions"][key]["qc"] == "excluded" else COLOR[c["mapping"]]
-                if key:                           # bound to a sheet position: as thick as a selected one
-                    it["width"] = BOUND_WIDTH
+                it["color"] = (COLOR["review"] if c["mapping"] == "review" else
+                               COLOR["analysed"] if p["owner"] in analysed else COLOR["not_analysed"])
+                it["width"] = BOUND_WIDTH         # every core as thick (backlog 26, 28)
                 if c["pieces"][0] == pid:
                     if key:
                         r = labels.get(key, {})

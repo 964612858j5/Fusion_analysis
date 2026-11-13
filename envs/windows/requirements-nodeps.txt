@@ -1,0 +1,7 @@
+# Mesmer (docs/v17_windows_native_plan.md W0, step 4 of requirements.txt):
+# installed with `pip install --no-deps`, as on the Mac -- their declared
+# dependencies pin TensorFlow GPU versions this environment does not use.
+# deepcell-toolbox has a compiled part (compute_overlap): W0 reports whether
+# Windows has a wheel or builds it (plan risk R2).
+DeepCell==0.12.10
+DeepCell-Toolbox==0.12.1

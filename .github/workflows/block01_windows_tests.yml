@@ -1,0 +1,175 @@
+# docs/v17_windows_native_plan.md phase W0: what breaks on native Windows.
+# A report, not a gate: the job never fails a push (continue-on-error) until
+# phase W1b makes it one. Python 3.10 in a micromamba environment (decision
+# D2), the Windows candidate environment (envs/windows), the viewer core
+# built from this checkout, then the Linux lane's modules
+# (tests/ci_cpu_modules.txt), one pytest process each, offscreen Qt.
+name: block01_windows_tests
+
+on:
+  push:
+    branches: [v17]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-report:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          micromamba-version: "2.0.5-0"
+          environment-name: block01
+          create-args: python=3.10
+          init-shell: bash
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+      - name: Install the candidate environment, one part at a time
+        run: |
+          set +e                         # a failed part is recorded, never the end of the job
+          R="$RUNNER_TEMP/report"; mkdir -p "$R"; : > "$R/install.txt"
+          step() {                       # step NAME COMMAND... : its result recorded, never fatal
+            name=$1; shift
+            if "$@" > "$R/install_$name.log" 2>&1; then echo "OK    $name" >> "$R/install.txt"
+            else echo "FAIL  $name (see install_$name.log)" >> "$R/install.txt"; fi
+          }
+          echo "CI_PY=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"   # first: the report needs it
+          step pip      python -m pip install --upgrade "pip<27"
+          step base     python -m pip install -r envs/ci/requirements-cpu.txt
+          step torch    python -m pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
+          step engines  python -m pip install -r envs/windows/requirements.txt
+          step nodeps   python -m pip install --no-deps -r envs/windows/requirements-nodeps.txt
+          step maturin  python -m pip install "maturin>=1.15,<2"
+          step core     maturin build --release -m native/fusion_viewer_core/Cargo.toml -o "$RUNNER_TEMP/dist"
+          step core_whl bash -c 'python -m pip install --no-deps "$RUNNER_TEMP"/dist/*.whl'
+          cat "$R/install.txt"
+      - name: The checkout as the package block01 (a junction, no symlink rights)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\pkg" | Out-Null
+          New-Item -ItemType Junction -Path "$env:RUNNER_TEMP\pkg\block01" -Target "$env:GITHUB_WORKSPACE" | Out-Null
+          "PYTHONPATH=$env:RUNNER_TEMP\pkg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Imports
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          "$CI_PY" - > "$RUNNER_TEMP/report/imports.txt" 2>&1 <<'PY'
+          import importlib, os, sys, traceback
+          mods = ["PySide6.QtWidgets", "pyqtgraph", "OpenGL.GL", "numpy", "scipy", "skimage", "zarr",
+                  "tifffile", "imagecodecs", "numba", "psutil", "h5py", "fusion_viewer_core", "torch",
+                  "cellpose.models", "stardist.models", "csbdeep", "tensorflow", "cupy",
+                  "deepcell", "deepcell_toolbox", "deepcell_toolbox.compute_overlap", "block01",
+                  "block01.ui.main_window", "block01.workers.segment_merge_worker", "block01.seg_runner.client",
+                  "block01.seg_runner.mesmer_torch.prepare", "block01.ui.step0.gl_host"]
+          for m in mods:
+              try:
+                  importlib.import_module(m)
+                  print(f"OK    {m}")
+              except BaseException as exc:                      # noqa: BLE001 -- a report
+                  last = traceback.format_exception_only(type(exc), exc)[-1].strip()
+                  frames = [f"{os.path.basename(fr.filename)}:{fr.lineno}" for fr in traceback.extract_tb(exc.__traceback__)
+                            if "block01" in fr.filename.replace("\\", "/") or "site-packages" in fr.filename]
+                  print(f"FAIL  {m}: {last}  [{' <- '.join(frames[-3:][::-1])}]")
+          PY
+          cat "$RUNNER_TEMP/report/imports.txt"
+      - name: Test modules
+        env:
+          NPY_DISABLE_CPU_FEATURES: "AVX512F AVX512CD AVX512_KNL AVX512_KNM AVX512_SKX AVX512_CLX AVX512_CNL AVX512_ICL"
+        run: |
+          bash scripts/ci_run_modules.sh "$CI_PY" tests/ci_cpu_modules.txt \
+            "$RUNNER_TEMP/pkg/block01/tests" "$RUNNER_TEMP/logs" 4 || true
+      - name: The report (causes grouped)
+        if: always()
+        run: |
+          PYX="${CI_PY:-python}"
+          "$PYX" - "$RUNNER_TEMP/logs" "$RUNNER_TEMP/report" tests/ci_cpu_modules.txt <<'PY'
+          import collections, os, re, sys
+          logs, rep, listed = sys.argv[1], sys.argv[2], sys.argv[3]
+          os.makedirs(rep, exist_ok=True)
+          expected = [l.split("#")[0].strip() for l in open(listed, encoding="utf-8")]
+          expected = [m for m in expected if m]
+          causes = [
+              ("POSIX call: os.killpg / process groups", r"killpg|getpgid|start_new_session"),
+              ("POSIX module: fcntl / resource / pwd", r"No module named '(fcntl|resource|pwd|termios)'"),
+              ("select on a pipe", r"WinError 10038|select\(\).*not a socket|selectors"),
+              ("file in use (rename / replace / delete)", r"WinError 32|WinError 5\b|PermissionError"),
+              ("symlink rights", r"WinError 1314|symbolic link"),
+              ("relpath across drives", r"path is on mount|different drive"),
+              ("text encoding (cp1252)", r"UnicodeDecodeError|UnicodeEncodeError|charmap"),
+              ("/proc or other POSIX path", r"/proc/|/dev/shm|/tmp/"),
+              ("GL library", r"libGL|opengl32"),
+              ("path separator / case", r"\\\\|backslash"),
+              ("timeout", r"Timeout|timed out"),
+              ("crash", r"Fatal Python error|Segmentation fault|access violation"),
+          ]
+          sp = os.path.join(logs, "status.txt")
+          status = open(sp, encoding="utf-8").read().splitlines() if os.path.exists(sp) else None
+          # ci_run_modules.sh: one "module rc seconds" line per module
+          rows = [l.split() for l in (status or []) if len(l.split()) >= 2]
+          missing = sorted(set(expected) - {r[0] for r in rows})
+          FRAME = re.compile(r'File "([^"]+)", line (\d+)')                  # Python's tracebacks
+          PYTEST_FRAME = re.compile(r'^((?:[A-Za-z]:)?[^\s:"]+\.py):(\d+): ', re.M)    # pytest's "path.py:85: Error"
+          ERROR = re.compile(r"^E\s+(\w+(?:Error|Exception|Exit)\b.*)$|^(\w+(?:Error|Exception)\b: .*)$", re.M)
+          bad = [r for r in rows if r[1] != "0"]
+          groups = collections.defaultdict(list)
+          for row in bad:
+              mod = f"{row[0]} (rc {row[1]})"
+              text = ""
+              p = os.path.join(logs, row[0] + ".log")
+              if os.path.exists(p):
+                  text = open(p, encoding="utf-8", errors="replace").read()
+              hit = [name for name, rx in causes if re.search(rx, text)]
+              frames = [(f.replace("\\", "/"), n) for f, n in FRAME.findall(text) + PYTEST_FRAME.findall(text)]
+              own = [f"{f.split('/block01/', 1)[-1]}:{n}" for f, n in frames
+                     if "/block01/" in f and "/tests/" not in f]
+              err = ERROR.search(text)
+              mod += f" -- {(err.group(1) or err.group(2)).strip()[:160] if err else 'no error line'}"
+              if own:
+                  mod += f" -- at {', '.join(dict.fromkeys(own[-3:]))}"
+              if row[1] in ("124", "137"):
+                  hit = ["time limit"]
+              elif row[1] in ("139", "134", "135", "3221225477", "-1073741819"):   # incl. Windows' access violation
+                  hit = ["crash"] + hit
+              groups[hit[0] if hit else "other (see the log)"].append(mod)
+          out = ["# Windows W0 report", "",
+                 f"modules listed: {len(expected)}, reported: {len(rows)}, not passing: {len(bad)}"
+                 + ("" if status is not None else " -- **the test run wrote no status (it did not run)**"),
+                 ""]
+          if missing:
+              out += [f"**not reported ({len(missing)})**: " + ", ".join(missing), ""]
+          for f in ("install.txt", "imports.txt"):
+              p = os.path.join(rep, f)
+              if os.path.exists(p):
+                  out += [f"## {f}", "```", open(p, encoding="utf-8", errors="replace").read().strip(), "```", ""]
+          out.append("## not passing, by first matching cause")
+          for g, mods in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+              out.append(f"### {g} ({len(mods)})")
+              out += [f"- {m}" for m in sorted(mods)]
+          text = "\n".join(out) + "\n"
+          open(os.path.join(rep, "report.md"), "w", encoding="utf-8").write(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write(text)
+          print(text)
+          PY
+      - name: Upload the logs and the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: block01-windows-w0
+          path: |
+            ${{ runner.temp }}/logs
+            ${{ runner.temp }}/report
+          if-no-files-found: warn

@@ -1,0 +1,26 @@
+# Windows candidate environment (docs/v17_windows_native_plan.md, phase W0):
+# the Mac's engine set (envs/block01_mac, 2026-11-10) on top of the CPU test
+# set. Python 3.10, made with micromamba (decision D2). Installed in order:
+#   1. pip install -r envs/ci/requirements-cpu.txt
+#   2. torch / torchvision from the PyTorch index: CUDA 12 on a machine with
+#      an NVIDIA GPU (https://download.pytorch.org/whl/cu121), CPU on CI
+#      (https://download.pytorch.org/whl/cpu)
+#   3. pip install -r envs/windows/requirements.txt          (this file)
+#   4. pip install --no-deps -r envs/windows/requirements-nodeps.txt
+# A candidate: W0 reports whether every line installs and imports on
+# Windows; W2 pins it on the Windows machine.
+cellpose==4.1.1
+segment-anything==1.0
+fastremap==1.21.0
+stardist==0.9.2
+csbdeep==0.8.2
+# StarDist's model shell only (the network runs in PyTorch); CPU wheels on
+# Windows up to 2.15 (tensorflow-intel); ml-dtypes 0.3.x as on the Mac
+tensorflow==2.15.1
+keras==2.15.0
+ml-dtypes==0.3.2
+protobuf==4.25.9
+onnx==1.16.2
+# Step0 GPU background correction (CUDA 12; 13.3 as the product pins it,
+# docs/v17_install_plan.md); imports without a GPU
+cupy-cuda12x==13.3.0

@@ -39,6 +39,61 @@ _OME_NS = {"ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"}
 _HANDLE_MODES = ("per_call", "per_thread", "shared_lock")
 
 
+_WIN_READ = []
+
+
+def _win_read():
+    """`ReadFile` and the OVERLAPPED type, made once (Windows only)."""
+    if not _WIN_READ:
+        import ctypes
+        from ctypes import wintypes
+
+        class Overlapped(ctypes.Structure):
+            _fields_ = [("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t),
+                        ("Offset", wintypes.DWORD), ("OffsetHigh", wintypes.DWORD),
+                        ("hEvent", wintypes.HANDLE)]
+
+        read_file = ctypes.WinDLL("kernel32", use_last_error=True).ReadFile
+        read_file.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                              ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(Overlapped)]
+        read_file.restype = wintypes.BOOL
+        _WIN_READ.append((read_file, Overlapped))
+    return _WIN_READ[0]
+
+
+def _pread_windows(fd, count, offset):
+    """`os.pread` for Windows, which lacks it: `ReadFile` at `offset` (an
+    OVERLAPPED position on the descriptor's handle), so threads share no
+    file position, as with `pread`. Loops over short reads; fewer bytes
+    only at the end of the file."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+    read_file, overlapped = _win_read()
+    handle = msvcrt.get_osfhandle(fd)
+    out = bytearray(count)
+    base = (ctypes.c_char * count).from_buffer(out) if count else None
+    done = 0
+    while done < count:
+        pos = offset + done
+        ov = overlapped(0, 0, pos & 0xFFFFFFFF, pos >> 32, None)
+        got = wintypes.DWORD(0)
+        if not read_file(handle, ctypes.addressof(base) + done, count - done,
+                         ctypes.byref(got), ctypes.byref(ov)):
+            err = ctypes.get_last_error()
+            if err == 38:                                   # ERROR_HANDLE_EOF
+                break
+            raise ctypes.WinError(err)
+        if got.value == 0:
+            break
+        done += got.value
+    del base                                                # release the export
+    return bytes(out[:done])
+
+
+_pread = os.pread if hasattr(os, "pread") else _pread_windows
+
+
 class _ChunkPlan:
     """One pyramid level's tile table for direct reads (block A9 §32)."""
 
@@ -309,7 +364,7 @@ class RawTileProvider:
             if compression not in decoders or predictor not in (1, 2):
                 return False
             if self._chunk_fd is None:
-                self._chunk_fd = os.open(self.path, os.O_RDONLY)
+                self._chunk_fd = os.open(self.path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
             height, width = self._level_shapes[level][-2:]
             return _ChunkPlan(tile=tile, across=-(-int(width) // tile[1]),
                               height=int(height), width=int(width), dtype=dtype,
@@ -335,7 +390,7 @@ class RawTileProvider:
                 elif tile_trace.ON:
                     # A9 §44 step 0, measurement only: the same steps, timed
                     t0 = time.perf_counter()
-                    raw = os.pread(self._chunk_fd, count, int(plan.offsets[c][index]))
+                    raw = _pread(self._chunk_fd, count, int(plan.offsets[c][index]))
                     t1 = time.perf_counter()
                     if plan.decode is not None:
                         raw = _decode(plan, raw)
@@ -347,7 +402,7 @@ class RawTileProvider:
                     tile_trace.add("decode_ms", (t2 - t1) * 1000.0)
                     tile_trace.add("bytes", count)
                 else:
-                    raw = os.pread(self._chunk_fd, count, int(plan.offsets[c][index]))
+                    raw = _pread(self._chunk_fd, count, int(plan.offsets[c][index]))
                     if plan.decode is not None:
                         raw = _decode(plan, raw)
                     tile = np.frombuffer(raw, plan.dtype, count=th * tw).reshape(th, tw)

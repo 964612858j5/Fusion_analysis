@@ -53,7 +53,7 @@ class TestEquivalence(unittest.TestCase):
             self.assertTrue(np.array_equal(np.asarray(new["final_labels"]), ref["final_labels"]))
             self.assertTrue(np.array_equal(np.asarray(mm), ref["final_labels"]))
             self.assertGreater(int(np.count_nonzero(np.asarray(mm))), 0)
-            del mm
+            del mm, new       # both hold the file open (Windows cannot delete it)
 
 
 class TestCacheRecycle(unittest.TestCase):
@@ -101,6 +101,7 @@ print("MAXRSS_KB", resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
 """
 
 
+@unittest.skipIf(os.name == "nt", "peak memory by resource.getrusage in a child (POSIX)")
 class TestMemoryCap(unittest.TestCase):
     def test_large_image_streaming_stays_bounded(self):
         env = dict(os.environ)

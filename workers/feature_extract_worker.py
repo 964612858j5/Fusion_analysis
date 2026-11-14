@@ -99,6 +99,11 @@ def _peak_rss_bytes():
         import resource
         return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
     except (ImportError, AttributeError, ValueError):
+        pass
+    try:                                    # Windows: no `resource`; the peak working set
+        import psutil
+        return int(psutil.Process().memory_info().peak_wset)
+    except Exception:                       # noqa: BLE001 -- a record field, not the result
         return None
 
 
@@ -145,7 +150,9 @@ def _write_csv(path, result, regions_frame=None):
     extra = _region_csv_columns(regions_frame) if regions_frame is not None else []
     rust = _csv_formatter()
     integer = [c in INTEGER_COLUMNS for c in names]
-    with open(path, "w", encoding="utf-8") as f:
+    # `newline=""`: "\n" written as it is on every system -- a text cell's own
+    # line break included (Windows' text mode made it "\r\n": another value)
+    with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(",".join([names[0]] + [e[0] for e in extra] + names[1:]) + "\n")
         if rust is not None:
             f.flush()                          # the header, before the bytes below
@@ -188,20 +195,20 @@ def _write_csv_rows_rust(out, result, n, cols, integer, extra, regions_frame, ru
     by `CSV_BLOCK_ROWS` (its chunk rows); each block is formatted and
     written in parts of `CSV_RUST_BLOCK_ROWS` by one helper thread while the
     next block is read -- at most two blocks and one part's text in memory.
-    Line ends as the text file would write "\n" (`os.linesep`)."""
+    Line ends "\n" on every system, as the text file writes them."""
     from concurrent.futures import ThreadPoolExecutor
 
     def emit(block, texts):
         out.write(rust(np.ascontiguousarray(block, np.float64).tobytes(), cols, integer, texts,
-                       CSV_THREADS, os.linesep))
+                       CSV_THREADS, "\n"))
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="step4-csv") as pool:
         pending = None
         for r0 in range(0, n, CSV_BLOCK_ROWS):            # the sink's own chunk rows
             r1 = min(n, r0 + CSV_BLOCK_ROWS)
             block = result.block(r0, r1)
-            # every "\n" of the text as the text file would write it (a
-            # Regions field may hold a line break), record ends included
-            texts = [[str(t).replace("\n", os.linesep) for t in fn(regions_frame[name].to_numpy()[r0:r1])]
+            # a Regions field may hold a line break: kept as "\n", as the
+            # text file (`newline=""`) writes it
+            texts = [[str(t) for t in fn(regions_frame[name].to_numpy()[r0:r1])]
                      for name, fn in extra]
             for s0 in range(0, r1 - r0, CSV_RUST_BLOCK_ROWS):
                 s1 = min(r1 - r0, s0 + CSV_RUST_BLOCK_ROWS)

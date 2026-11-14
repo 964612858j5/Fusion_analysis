@@ -3,6 +3,14 @@
 **Windows has not been run for this block.** Everything below is a checklist
 for the person who runs it, plus the gaps the repository still has.
 
+**Native Windows (2026-11-13):** `docs/v17_windows_native_plan.md` now
+carries the native version. W0 (CI, `.github/workflows/block01_windows_tests.yml`)
+installs `envs/windows/` on `windows-latest`; W1 made the engine processes,
+the raw reads, Step1's commit and the CSV portable. §0 to §2 below describe
+the state before that plan and stay until its W3 (installer, launcher)
+replaces them. §4 was brought in line with `UI_SURFACE_RULES.md` and §4b
+added (plan W1).
+
 ## 0. What actually exists for Windows today
 
 | | State |
@@ -81,7 +89,7 @@ Repeat the table once at **100 %** and once at **150 %**.
 | # | Check | OK |
 |---|---|---|
 | 4.1 | Open a **copy** of a project; thumbnails fill the channel list | |
-| 4.2 | `Show all` / `Hide all` change display visibility only | |
+| 4.2 | Step0: `Show all` / `Hide all` change display visibility only. Step1: its ticks (and `Show all`, which sweeps them) choose what is **fused**, not only what is shown; the nucleus is left alone | |
 | 4.3 | TopHat radius / cuCIM sigma change → one refresh, no 4–5 s pause | |
 | 4.4 | Enter in a parameter box updates once, not twice | |
 | 4.5 | Save: the product is written **and can be re-opened**; not just a new timestamp | |
@@ -90,9 +98,21 @@ Repeat the table once at **100 %** and once at **150 %**.
 | 4.8 | Step2 grid: change rows/cols twice (no leftovers, no crash) | |
 | 4.9 | Step3 mask bar: colour, dash, alpha update live | |
 | 4.10 | Regions: draw polygon/circle(Shift)/band(Alt); drag; zoom while dragging | |
-| 4.11 | Regions: select several, Delete removes them, labels renumber | |
+| 4.11 | Regions: select several, Delete removes them; the remaining ones **keep their numbers** (nobody is renumbered) | |
 | 4.12 | Step1 ↔ Regions twice: no black picture, no crash | |
 | 4.13 | Dark and light themes: text readable everywhere | |
+
+## 4b. Native Windows items (plan W1)
+
+| # | Check | OK |
+|---|---|---|
+| 4b.1 | Step0 compare panels: the gaps between panels are painted (no garbage, no black) at 100 % and 150 % | |
+| 4b.2 | Step0 / Step1 / TMA raw views show the image (the direct-tile read) | |
+| 4b.3 | Step1 Generate commits (no "Access is denied" on `fusion_meta.json`) | |
+| 4b.4 | Step2 Cellpose run, GPU and "Use GPU" off; Stop during the run: the run ends, Task Manager shows no leftover `python` engine process | |
+| 4b.5 | Step2 Stop while the engine still loads its model: the same, within a few seconds | |
+| 4b.6 | Step2 run folder: `dir /AL` lists `global_mask.zarr` as `<JUNCTION>`; `fsutil hardlink list global_mask.ome.tiff` names the ROI's mask too (no copy) | |
+| 4b.7 | Step4 run (h5ad, CSV on): the CSV opens in Excel; a Region name with a line break stays one cell | |
 
 ## 5. GPU vs CPU
 

@@ -30,7 +30,12 @@ def _peak_rss_mib(pid):
                     return round(int(line.split()[1]) / 1024, 1)
     except OSError:
         pass
-    return None
+    try:                                    # Windows: no /proc; the peak working set
+        import psutil
+        peak = getattr(psutil.Process(pid).memory_info(), "peak_wset", None)
+        return None if peak is None else round(peak / (1024 * 1024), 1)
+    except Exception:                       # noqa: BLE001 -- a report field
+        return None
 
 
 def _gpu_mib(pid):

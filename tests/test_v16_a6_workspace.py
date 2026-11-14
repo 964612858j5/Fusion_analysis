@@ -376,7 +376,7 @@ def test_an_opened_workspace_announces_its_committed_handoff_unchanged(page, tmp
     assert sent[0]["roi_id"] == made[0]["roi_id"]
     with open(os.path.join(step0, "step0_roi_result.json")) as f:   # block RM: the correct run
         assert sent[0]["corrected_zarr_path"] == json.load(f)["corrected_zarr_path"]
-    assert "/runs/correct_" in sent[0]["corrected_zarr_path"]
+    assert "/runs/correct_" in sent[0]["corrected_zarr_path"].replace(os.sep, "/")
     assert _tree(made[0]["roi_dir"]) == before         # nothing rewritten
     assert page._announce_opened_workspace() is False  # once
 

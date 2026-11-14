@@ -61,7 +61,7 @@ class TestStreamingEquivalence(unittest.TestCase):
             self.assertTrue(np.array_equal(np.asarray(new["final_labels"]), ref["final_labels"]))
             self.assertTrue(np.array_equal(np.asarray(mm), ref["final_labels"]))
             self.assertGreater(reads["count"], 0)        # loader actually used, per block
-            del mm
+            del mm, new       # both hold the file open (Windows cannot delete it)
 
 
 class TestTerritoryGpuCpuEquivalence(unittest.TestCase):
@@ -111,6 +111,7 @@ print("MAXRSS_KB", resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
 """
 
 
+@unittest.skipIf(os.name == "nt", "peak memory by resource.getrusage in a child (POSIX)")
 class TestStreamingMemory(unittest.TestCase):
     def _run(self, mode, vlimit_kb=None):
         env = dict(os.environ)

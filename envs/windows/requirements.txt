@@ -21,6 +21,9 @@ keras==2.15.0
 ml-dtypes==0.3.2
 protobuf==4.25.9
 onnx==1.16.2
+# DeepCell imports it (W0: `import deepcell` failed without it); wheels for
+# Python 3.10 with numpy 1.26 and scipy 1.15
+scikit-learn==1.5.2
 # Step0 GPU background correction (CUDA 12; 13.3 as the product pins it,
 # docs/v17_install_plan.md); imports without a GPU
 cupy-cuda12x==13.3.0

@@ -10,17 +10,20 @@ once and never replaced:
     into `failed`.
   * the process died without being stopped   -> failed (exit code + stderr tail)
 
-The process runs in its own session, so ending it ends everything it started.
+The process runs in its own session (its own process group on Windows), so
+ending it ends everything it started (`proc.end_tree`).
 """
 import os
 import pathlib
+import queue
 import selectors
-import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
+from . import proc as _proc
 from . import protocol
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -45,6 +48,10 @@ class EngineProcess:
         self._stopped = False
         self._log = None
         self._buf = b""
+        # Windows: `select` takes sockets only, so a thread reads the pipe
+        # into this queue (b"" = end of stream); POSIX reads it directly.
+        self._chunks = None
+        self._eof = False
 
     # ── lifecycle ────────────────────────────────────────────────────
     def start(self):
@@ -66,8 +73,13 @@ class EngineProcess:
             # Not the repository: CUDA libraries drop files such as cufile.log
             # into the working directory. Imports come from PYTHONPATH.
             cwd=tempfile.gettempdir(), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=self._log, bufsize=0, start_new_session=True)
+            stderr=self._log, bufsize=0, **_proc.group_kwargs())
         self._buf = b""
+        self._eof = False
+        if _proc.IS_WINDOWS:
+            self._chunks = queue.Queue()
+            threading.Thread(target=self._pump, args=(self.proc.stdout.fileno(), self._chunks),
+                             name=f"engine-{self.engine}-stdout", daemon=True).start()
         msg = self._read(self.start_timeout)
         if msg is None or msg.get("type") != "hello":
             self.terminate()
@@ -76,21 +88,16 @@ class EngineProcess:
         return msg
 
     def terminate(self, grace=5.0):
-        """End the process group: SIGTERM, then SIGKILL after `grace` seconds."""
+        """End the process tree: SIGTERM, then SIGKILL after `grace` seconds
+        (Windows: `taskkill /T`, then `/T /F`; `proc.end_tree`)."""
         if self.proc is None:
             return
-        if self.proc.poll() is None:
-            for sig in (signal.SIGTERM, signal.SIGKILL):
-                try:
-                    os.killpg(self.proc.pid, sig)
-                except ProcessLookupError:
-                    break
-                try:
-                    self.proc.wait(timeout=grace)
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
-        self.proc.wait()
+        left = _proc.end_tree(self.proc, grace)
+        if left and self._log not in (None, subprocess.DEVNULL):
+            try:
+                self._log.write(f"[engine] still alive after the stop: pids {left}\n".encode())
+            except (OSError, ValueError):
+                pass
         for stream in (self.proc.stdin, self.proc.stdout):
             try:
                 stream.close()
@@ -182,6 +189,8 @@ class EngineProcess:
         Reads the raw descriptor into our own buffer: a buffered reader could
         hold a complete line that `select` then never reports.
         """
+        if self._chunks is not None:
+            return self._read_queued(timeout)
         fd = self.proc.stdout.fileno()
         deadline = time.monotonic() + timeout
         sel = selectors.DefaultSelector()
@@ -202,6 +211,41 @@ class EngineProcess:
                 self._buf += chunk
         finally:
             sel.close()
+
+    @staticmethod
+    def _pump(fd, chunks):
+        """Windows: the pipe's bytes into `chunks`, then b"" at its end."""
+        try:
+            while True:
+                chunk = os.read(fd, 65536)
+                chunks.put(chunk)
+                if not chunk:
+                    return
+        except OSError:                          # closed by `terminate`
+            chunks.put(b"")
+
+    def _read_queued(self, timeout):
+        """`_read` on Windows: the same buffer and timeout, fed by `_pump`."""
+        deadline = time.monotonic() + timeout
+        while True:
+            if b"\n" in self._buf:
+                line, self._buf = self._buf.split(b"\n", 1)
+                if line.strip():
+                    return protocol.decode(line.decode("utf-8"))
+                continue
+            if self._eof:
+                return None
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None
+            try:
+                chunk = self._chunks.get(timeout=left)
+            except queue.Empty:
+                return None
+            if not chunk:
+                self._eof = True
+                return None
+            self._buf += chunk
 
     def _stderr_tail(self, n=2000):
         if not self.log_path or not os.path.exists(self.log_path):

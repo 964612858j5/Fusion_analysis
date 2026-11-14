@@ -127,6 +127,8 @@ def test_a2_tiles_waiting_for_room_are_not_handed_over_once_left(slide):
         raw.close()
 
 
+@pytest.mark.skipif(not os.path.isdir("/proc/self/task"),
+                    reason="counts the reader threads by name in /proc (Linux)")
 def test_b_closing_with_a_full_queue_ends_every_reader(slide):
     raw, c = _core(slide, result_bytes=1)
     try:

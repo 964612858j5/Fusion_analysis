@@ -7,7 +7,6 @@ import gc
 import json
 import re
 import shutil
-import signal
 import traceback
 import logging
 import threading
@@ -67,6 +66,7 @@ from ..seg_runner.client import EngineProcess, EngineStartError
 from ..seg_runner.engines import (CELL_AND_NUCLEUS_METHODS, EXPANSION_METHODS, METHOD_ENGINE,
                                   METHOD_OUTPUTS)
 from ..seg_runner import engines as seg_engines
+from ..seg_runner import proc as seg_proc
 from ..utils.mesmer_utils import mesmer_metadata
 from ..utils import segmentation_param_schema as param_schema
 from .hq_marker_segmentation import (
@@ -125,6 +125,21 @@ def write_tiled_ome_tiff(path, arr, dtype=None):
                   tile=(OME_TILE, OME_TILE), compression='lzw',
                   photometric='minisblack', metadata=None)
 
+
+
+def _windows_alias(source_path, dst):
+    """Windows: `dst` as a junction to the folder `source_path`, or a hard
+    link to the file; True when made. Neither needs a special right; both
+    need the same drive (a hard link) or a local one (a junction)."""
+    try:
+        if os.path.isdir(source_path):
+            import _winapi
+            _winapi.CreateJunction(os.path.abspath(source_path), dst)
+        else:
+            os.link(source_path, dst)
+        return True
+    except (OSError, ImportError, AttributeError):
+        return False
 
 class _ContractStopped(Exception):
     """A Step1 hand-over run stopped by the user (Step2 hook-up, step 3):
@@ -1400,10 +1415,18 @@ class SegmentMergeWorker(QThread):
             rel = os.path.relpath(source_path, os.path.dirname(dst))
             os.symlink(rel, dst, target_is_directory=os.path.isdir(source_path))
         except Exception:
-            if os.path.isdir(source_path):
-                shutil.copytree(source_path, dst)
-            else:
-                shutil.copy2(source_path, dst)
+            # Windows without the symlink right (the usual case): a junction
+            # for a folder, a hard link for a file -- no copy of a large
+            # source; a copy only when neither can be made (another drive).
+            if not (seg_proc.IS_WINDOWS and _windows_alias(source_path, dst)):
+                msg = f"[alias] {alias_name}: no link possible, copying {source_path}"
+                print(msg)
+                if self._logger:
+                    self._logger.info(msg)
+                if os.path.isdir(source_path):
+                    shutil.copytree(source_path, dst)
+                else:
+                    shutil.copy2(source_path, dst)
         return self._abs(dst)
 
     def _write_roi_canonical_aliases(self, roi_meta_all):
@@ -1435,10 +1458,7 @@ class SegmentMergeWorker(QThread):
             if ep.hello is None and proc is not None and proc.poll() is None:
                 # Still loading its model: nothing to lose, and `start()` would
                 # otherwise wait for its hello. The read ends at EOF.
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
+                seg_proc.kill_tree_now(proc)
 
     # ── logging helpers ──────────────────────────────────────────────
 

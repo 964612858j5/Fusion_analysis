@@ -28,7 +28,8 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 INSTALL = REPO / "scripts" / "install_block01.sh"
 LAUNCH = REPO / "scripts" / "block01"
 
-pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+pytestmark = pytest.mark.skipif(shutil.which("bash") is None or os.name == "nt",
+                                reason="the Linux / Mac bash installers (Windows: phase W3)")
 
 
 def _bash(script, body, env=None, cwd=None):

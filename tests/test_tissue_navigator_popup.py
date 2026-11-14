@@ -220,10 +220,11 @@ def test_overview_completion_clears_loading(app):
 
 # B: native window controls — windowType is a real Window (not Tool) with min/max/close.
 def test_window_has_native_min_max_close(app):
+    from block01.qt import flag_value
     from block01.qt.QtCore import Qt
     p = _mk(app)
     assert p.windowType() == Qt.Window               # NOT Qt.Tool (no min/max on X11)
-    f = int(p.windowFlags())
+    f = flag_value(p.windowFlags())
     assert f & flag_value(Qt.WindowMinimizeButtonHint)
     assert f & flag_value(Qt.WindowMaximizeButtonHint)
     assert f & flag_value(Qt.WindowCloseButtonHint)

@@ -14,13 +14,18 @@ SOURCE.txt only describes the published file and is always regenerated from
 it, so it can be missing or stale for a moment but never describes other
 weights. It is not part of success; an unwritable directory costs a warning.
 """
-import fcntl
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 from . import convert, weights
 
@@ -78,12 +83,10 @@ def ensure(root, source_root, expected_digest, log, force=False):
         raise PrepareError(f"cannot write the Mesmer torch weights into {root} ({exc}); "
                            "point BLOCK01_MESMER_TORCH_PATH at a writable directory") from exc
     with lock:
-        try:                                      # released when the file closes
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        if not _lock(lock, wait=False):           # released when the file closes
             log("[Mesmer] another run is preparing the PyTorch weights; waiting for it. "
                 f"Should this start time out, run {HAND_RUN} by hand, then start again.")
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            _lock(lock, wait=True)
         for stale in root.glob(TEMP_PREFIX + "*"):    # left by a killed run
             if stale.is_dir():
                 shutil.rmtree(stale, ignore_errors=True)
@@ -110,6 +113,28 @@ def ensure(root, source_root, expected_digest, log, force=False):
         log(f"[Mesmer] PyTorch weights ready: {target}")
         refresh_source(root, log)
         return digest
+
+
+def _lock(f, wait):
+    """An exclusive lock on the open file `f`; False when another holder
+    has it and `wait` is False. POSIX `flock`; Windows `msvcrt.locking` on
+    its first byte (polled: its own blocking mode gives up after ~10 s).
+    Both are released when the file is closed."""
+    if os.name != "nt":
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+            return True
+        except BlockingIOError:
+            return False
+    f.seek(0)
+    while True:
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            if not wait:
+                return False
+            time.sleep(0.5)
 
 
 def run_converter(source_root, out, workdir):

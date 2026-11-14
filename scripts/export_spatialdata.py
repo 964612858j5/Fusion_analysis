@@ -17,7 +17,6 @@ Prints one JSON line: {"ok": true, ...} or {"ok": false, "error": ...}.
 """
 import json
 import os
-import resource
 import sys
 import time
 
@@ -25,6 +24,11 @@ import numpy as np
 
 
 def _rss_mb():
+    try:
+        import resource
+    except ImportError:                     # Windows: the peak working set (psutil)
+        import psutil
+        return psutil.Process().memory_info().peak_wset / (1024 * 1024)
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 
 

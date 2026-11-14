@@ -127,6 +127,21 @@ def test_d_a_file_changed_after_the_manifest_is_refused(tmp_path):
         core.RawReader(dict(manifest))
 
 
+def _replace_under(other, path, provider):
+    """`other` moved onto `path` while `provider` holds it open. Windows
+    refuses that move itself (the file is open): the case cannot arise
+    there, so the test ends with that refusal."""
+    if os.name != "nt":
+        os.replace(other, path)
+        return
+    try:
+        with pytest.raises(PermissionError):
+            os.replace(other, path)
+    finally:
+        provider.close()
+    pytest.skip("Windows refuses to replace an open file; nothing to pair")
+
+
 def test_d2_a_file_replaced_under_an_open_provider_is_refused(tmp_path):
     """The provider parsed its block tables from the first file; a new file
     moved onto the path afterwards must not be paired with those tables."""
@@ -136,7 +151,7 @@ def test_d2_a_file_replaced_under_an_open_provider_is_refused(tmp_path):
     provider.warm_thread_handle()                     # tables built, descriptor open
     other = _ome(tmp_path / "other.ome.tif",
                  rng.integers(0, 255, size=(3,) + SHAPE, dtype=np.uint8), compression="lzw")
-    os.replace(other, path)
+    _replace_under(other, path, provider)
     try:
         with pytest.raises(ValueError, match="changed after this provider opened it"):
             build_raw_manifest(provider)
@@ -156,7 +171,7 @@ def test_d3_an_all_stripped_file_replaced_under_its_provider_is_refused(tmp_path
     other = _ome(tmp_path / "os.ome.tif",
                  rng.integers(0, 255, size=(3,) + SHAPE, dtype=np.uint8), compression="zlib",
                  tile=None, rowsperstrip=7)
-    os.replace(other, path)
+    _replace_under(other, path, provider)
     try:
         with pytest.raises(ValueError, match="changed after this provider opened it"):
             build_raw_manifest(provider)

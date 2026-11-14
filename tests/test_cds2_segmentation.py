@@ -120,6 +120,7 @@ print("MAXRSS_KB", resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
 """
 
 
+@unittest.skipIf(os.name == "nt", "peak memory by resource.getrusage in a child (POSIX)")
 class TestStreamingMemory(unittest.TestCase):
     def test_cds2_streaming_bounded(self):
         env = dict(os.environ)

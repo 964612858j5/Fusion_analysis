@@ -11964,7 +11964,9 @@ class MainWindow(QMainWindow):
             mpath = os.path.join(run_dir, meta_name)
             if os.path.isfile(mpath):
                 with open(mpath, encoding="utf-8") as f:
-                    run_store.write_json_atomic(mpath, run_store.to_records(json.load(f), project))
+                    meta = json.load(f)
+                # closed before the replace: Windows refuses to replace an open file
+                run_store.write_json_atomic(mpath, run_store.to_records(meta, project))
         params = dict(pending["params"], regions=regions)
         identity = (self._pending_fused_zarr_meta or self._pending_dapi_input_meta or {})
         params["identity"] = json.loads(json.dumps(identity, default=str))

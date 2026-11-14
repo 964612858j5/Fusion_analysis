@@ -41,6 +41,7 @@ host attributes (`current`, `published_level`, `request_switch`, ...) are
 the full-image panel's.
 """
 
+import os
 import time
 from typing import Any, Callable, Dict, Optional
 
@@ -92,7 +93,10 @@ def _libgl():
     if not _LIBGL:
         import ctypes
         import ctypes.util
-        _LIBGL.append(ctypes.CDLL(ctypes.util.find_library("GL") or "libGL.so.1"))
+        if os.name == "nt":                                 # Windows: the system's GL 1.1
+            _LIBGL.append(ctypes.WinDLL("opengl32"))
+        else:
+            _LIBGL.append(ctypes.CDLL(ctypes.util.find_library("GL") or "libGL.so.1"))
     return _LIBGL[0]
 
 

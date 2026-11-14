@@ -78,7 +78,7 @@ SCRIPT = textwrap.dedent(r'''
 
 
 def test_a_real_event_loop_survives_logs_and_notifies(tmp_path):
-    env = dict(os.environ, HOME=str(tmp_path),
+    env = dict(os.environ, HOME=str(tmp_path), USERPROFILE=str(tmp_path),   # Windows' home
                BLOCK01_TEST_REPO=os.path.dirname(os.path.dirname(os.path.abspath(eh.__file__))))
     out = subprocess.run([sys.executable, "-c", SCRIPT], env=env, capture_output=True,
                          text=True, timeout=120)

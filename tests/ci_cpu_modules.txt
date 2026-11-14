@@ -94,6 +94,7 @@ test_marker_only_projection.py
 test_mask_renderer.py
 test_merge_policy.py
 test_mesmer_backend.py
+test_mesmer_prepare_lock.py
 test_mesmer_remap.py
 test_multichannel_prefetch.py
 test_navigator_restore.py
@@ -128,12 +129,14 @@ test_remap_promotion.py
 test_request_planning.py
 test_retired_methods.py
 test_review_fixes.py
+test_run_alias.py
 test_runtime_resource_monitor.py
 test_scheduler_idle.py
 test_scheduler_keeps_no_callbacks.py
 test_seam_merge.py
 test_seg_runner_engines.py
 test_seg_runner.py
+test_seg_runner_proc.py
 test_source_aware_promotion.py
 test_source_aware_runtime.py
 test_source_identity_schema.py

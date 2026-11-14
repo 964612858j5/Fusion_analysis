@@ -1,11 +1,13 @@
-# A native Windows version (backlog 23) — plan v0.3
+# A native Windows version (backlog 23) — plan v0.4
 
 Status: draft for the user (2026-11-13). Codex plan review round 1 FAIL
 (one P1: the SpatialData export script; four P2: file aliases, closed file
 lists, W1 needing W2's environment, the GL impact) -- all taken in v0.2.
 Round 2 FAIL (P1: ending a process tree on Windows; P2: W4's file list,
 the SpatialData prerequisite, the old checklist's §4) -- taken in v0.3.
-Round 3 PASS.
+Round 3 PASS. v0.4 (2026-11-13): W0's result (§3, "W0 result") and what
+it adds to W1 and W1b. Codex review of v0.4: PASS (one wording fix taken:
+the CSV's Rust path).
 
 **The user's decisions (2026-11-13):** W0 started. D1 as proposed
 (Windows 10 / 11, x64, NVIDIA CUDA 12, CPU fallback). D2 micromamba.
@@ -133,6 +135,54 @@ produces it and the user approves it before the block starts.
   cause, each POSIX call or `PermissionError` with its file:line, and
   whether the environment installs. From it, W1b's exact file list.
 
+### W0 result (run 43450861449, HEAD 19f1c73)
+
+* Install: every part OK (base, torch CPU, the engines, DeepCell
+  `--no-deps`, the viewer core built with Rust). R2 is gone:
+  `deepcell_toolbox.compute_overlap` installs and imports. CuPy imports
+  and falls back to the CPU (no GPU on the runner).
+* Imports: all OK except `deepcell` (`No module named 'sklearn'`: the
+  Windows set lacks scikit-learn) and `seg_runner.mesmer_torch.prepare`
+  (`fcntl`, known).
+* Tests: 292 modules, 240 pass, 52 do not. By cause:
+  * known blockers: `selectors` on a pipe (WinError 10038,
+    `seg_runner/client.py:112`, `seg_runner/engines.py:443`),
+    `signal.SIGKILL` / `killpg` (`seg_runner/client.py:83`, via
+    `workers/segment_merge_worker.py:2934`), `fcntl` -- about 9 modules;
+  * **new: `os.pread`** (`viewer/raw_tile_provider.py:338` and `:350`, the
+    direct-tile read, A9 §32; `BLOCK01_DIRECT_TILES`) -- 11 modules,
+    every raw view (Step0, Step1, TMA);
+  * **new: a file replaced while it is still open**:
+    `ui/main_window.py:11967` (`_rm_commit_fuse`) rewrites
+    `fusion_meta.json` through `run_store.write_json_atomic` inside the
+    `with open(mpath)` that read it -- Windows refuses the replace
+    (WinError 5): **Step1's Generate fails to commit on Windows**;
+  * **new: the CSV's line ends**: `workers/feature_extract_worker.py:148`
+    opens the CSV in text mode without `newline=""`: on Windows every
+    `\n` becomes `\r\n`, inside a quoted text cell too (a value changes:
+    `test_f4_step4`); the Rust row path copies that on purpose
+    (`os.linesep` at `:196` and `:204`), so both paths change the value;
+  * test-only (W1 adapts the tests, no product change): paths compared
+    with `/` (`test_v16_a6_workspace`), `/proc/self/task`
+    (`test_v16_5_r1_cancel`), a memmap left open in a temporary folder
+    (`test_lean_carve_streaming`, `test_lean_carve_memory`), a file
+    replaced under an open reader that Windows itself refuses
+    (`test_v16_5_r0_decode` d2/d3), `flag_value` not imported
+    (`test_tissue_navigator_popup`), the bash install scripts
+    (`test_install_scripts`, Linux/Mac only; W3 has its own);
+  * still to read (W1's first step, from the logs): `test_error_hook`
+    (`errors.log` not found -- the home folder on Windows), the
+    timing / behaviour assertions (`test_preseg_run`,
+    `test_step0_tissue_preview`, `test_step1_shared_camera`,
+    `test_overview_middle_drag_pan`, `test_perf_trace`, `test_step3_masks`),
+    rc 127 / 139 / 3 exits and the `test_step4_page` time limit -- the
+    same crashes as on Linux (teardown) until a log shows otherwise.
+* W1b's list from W0: `ui/main_window.py:11967` moves to W1 (a plain
+  bug, the fix is one read closed before the write). No other product
+  `PermissionError` shows on the runner; W1b keeps `core/product_swap.py`
+  (Step0 Save in place) and the Windows machine's acceptance as its
+  source -- its file list is proposed after W1's acceptance.
+
 ### Phase W1 — portability (closed file list)
 
 * `seg_runner/proc.py` (new): start an engine in its own process group
@@ -154,12 +204,26 @@ produces it and the user approves it before the block starts.
 * `seg_runner/mesmer_torch/prepare.py`: the lock with `msvcrt.locking`
   on Windows (`fcntl` imported only on POSIX).
 * `ui/step0/gl_host.py`: `_libgl` loads `opengl32.dll` on Windows.
+* `viewer/raw_tile_provider.py` (v0.4): the direct-tile read without
+  `os.pread` on Windows -- a positioned read that shares no offset
+  between threads (an `mmap` of the file, or one handle per thread with
+  `seek` + `read`); POSIX unchanged. Its descriptor (`:312`, `:519`) is
+  closed as today.
+* `ui/main_window.py:11967` (v0.4): the meta file read and closed before
+  `write_json_atomic` replaces it.
+* `workers/feature_extract_worker.py:148` (v0.4): the CSV opened with
+  `newline=""` and `\n` written everywhere, the Rust path's `os.linesep`
+  (`:196`, `:204`) included (POSIX output byte-identical).
+* `envs/windows/requirements.txt` (v0.4): `scikit-learn` (DeepCell's
+  import; the Mac's version).
 * `workers/feature_extract_worker.py`, `scripts/export_spatialdata.py`,
   `seg_runner/selftest.py`: psutil where `resource` / `/proc` are missing.
 * Paths: `core/provenance.py`, `utils/run_store.py`,
   `utils/roi_project.py`, `utils/trash.py`, `core/label_pyramid.py`
   (`relpath` across drives: an absolute path kept instead of a
   `ValueError`), as far as W0 shows them failing.
+* Tests adapted for Windows (v0.4, the test-only causes above; no
+  product change).
 * Tests (new): `tests/test_seg_runner_proc.py` (start, reply, stop, a
   kill while the model loads -- with a tiny fake engine),
   a stop that leaves no child of a child alive),

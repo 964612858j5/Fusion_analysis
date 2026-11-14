@@ -5,6 +5,16 @@ block01/main.py — Entry point for the Fusion GUI application.
 import sys
 import multiprocessing as mp
 
+# Windows (W1b): a Chinese console encodes with GBK and a "✓" in a status
+# line raised UnicodeEncodeError inside a Qt slot. A character the console
+# cannot show is escaped instead; set before anything below prints.
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError):        # None (pythonw) or not a text stream
+            pass
+
 from .qt import QtGui
 import pyqtgraph as pg
 

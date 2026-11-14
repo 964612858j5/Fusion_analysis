@@ -170,8 +170,12 @@ def _assert_nothing_left(worker, pgid=None):
     assert worker._engine is None
     assert not os.path.exists(os.path.join(worker.output_dir, "runner_io"))
     if pgid is not None:
-        with pytest.raises(ProcessLookupError):
-            os.killpg(pgid, 0)
+        if os.name == "nt":                  # no process groups: the engine itself is gone
+            import psutil
+            assert not psutil.pid_exists(pgid)
+        else:
+            with pytest.raises(ProcessLookupError):
+                os.killpg(pgid, 0)
 
 
 #: Block N2: the methods whose nuclei are kept next to the cells.

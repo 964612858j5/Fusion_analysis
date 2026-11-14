@@ -316,3 +316,4 @@ test_worker_source_aware_descriptor.py
 test_worker_source_aware_prepare.py
 test_worker_source_aware_read.py
 test_wsi_cancel.py
+test_cuda_dlls.py

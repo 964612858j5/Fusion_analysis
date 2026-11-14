@@ -117,7 +117,7 @@ def test_a_failed_manual_tile_ends_the_run(app, tmp_path):
     worker.start()
     try:
         rp._wait_for(lambda: rp._in_flight(worker))
-        os.kill(worker._engine.proc.pid, signal.SIGKILL)       # the engine child, not Step2
+        os.kill(worker._engine.proc.pid, getattr(signal, "SIGKILL", signal.SIGTERM))  # the engine child, not Step2 (Windows: TerminateProcess)
         rp._wait_for(lambda: worker.isFinished())
     finally:
         worker.wait(60000)

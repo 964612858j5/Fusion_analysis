@@ -64,6 +64,10 @@ import time
 
 import numpy as np
 
+from . import cuda_dlls
+
+cuda_dlls.register()                    # Windows: NVRTC from torch's folder
+
 try:                                    # CuPy is optional: the CPU path is
     import cupy as cp                   # the contract for machines without it
 except Exception:                       # noqa: BLE001 -- import-time probe

@@ -13,9 +13,6 @@ CELLPOSE_WHOLECELL_NUCLEI = "cellpose_wholecell_nuclei"
 HYBRID_CELLPOSE_STARDIST = "hybrid_cellpose_stardist"
 CELLPOSE_NUCLEI_DAPI = "cellpose_nuclei_dapi"
 CELLPOSE_NUCLEI_EXPANSION = "cellpose_nuclei_expansion"
-CELLPOSE_NUCLEI_HQ = "cellpose_nuclei_hq"
-CELLPOSE_NUCLEI_HQ2 = "cellpose_nuclei_hq2"
-CELLPOSE_NUCLEI_CSD = "cellpose_nuclei_csd"
 STARDIST_NUCLEI_DAPI = "stardist_nuclei_dapi"
 STARDIST_NUCLEI_EXPANSION = "stardist_nuclei_expansion"
 MESMER_WHOLE_CELL = "mesmer_whole_cell"
@@ -124,135 +121,6 @@ SEGMENTATION_METHODS = {
             "batch_size": 8,
         },
         "output_type": "expanded_pseudo_cell_mask",
-    },
-    CELLPOSE_NUCLEI_HQ: {
-        "method": CELLPOSE_NUCLEI_HQ,
-        "display_name": "Cellpose nuclei + HQ",
-        "input_type": "dapi_plus_hq_structural_channels",
-        "process": "cellpose_nuclei_then_hq_seeded_watershed_consensus",
-        "params": {
-            "model_type": "cpsam",
-            "diameter": None,
-            "flow_threshold": 0.4,
-            "cellprob_threshold": 0.0,
-            "min_size": 15,
-            "use_gpu": True,
-            "tile_size": 1024,
-            "batch_size": 8,
-            "hq_channels": [],
-            "hq_input_mode": "selected_channels_from_source",
-            "max_cell_radius": 12,
-            "normalization_percentile_low": 1.0,
-            "normalization_percentile_high": 99.5,
-            "consensus_mode": "adaptive_best_channel",
-            "channel_weights": {},
-            "min_signal_threshold": 0.08,
-        },
-        "output_type": "whole_cell_mask",
-    },
-    CELLPOSE_NUCLEI_HQ2: {
-        "method": CELLPOSE_NUCLEI_HQ2,
-        "display_name": "Cellpose nuclei + HQ2",
-        "input_type": "dapi_plus_hq_structural_channels",
-        "process": "cellpose_nuclei_then_hq2_multialgorithm_continuous_expansion",
-        "params": {
-            "model_type": "cpsam",
-            "diameter": None,
-            "flow_threshold": 0.4,
-            "cellprob_threshold": 0.0,
-            "min_size": 15,
-            "use_gpu": True,
-            "tile_size": 1024,
-            "batch_size": 8,
-            "hq_channels": [],
-            "hq_input_mode": "selected_channels_from_source",
-            "max_cell_radius": 18,
-            "normalization_percentile_low": 1.0,
-            "normalization_percentile_high": 99.5,
-            "consensus_mode": "adaptive_best_channel",
-            "channel_weights": {},
-            "min_signal_threshold": 0.08,
-            "imagej_blur_sigma": 1.0,
-            "imagej_background_radius": 20,
-            "imagej_threshold_method": "adaptive",
-            "imagej_threshold_percentile": 75.0,
-            "imagej_min_object_size": 20,
-            "imagej_closing_radius": 2,
-            "imagej_opening_radius": 1,
-            "core_mode": "weighted_support",
-            "min_core_area": 8,
-            "signal_map_mode": "per_cell_best_channel",
-            "min_continuous_signal": 0.08,
-            "max_expansion_radius": 25,
-            "boundary_gradient_weight": 0.25,
-            "distance_penalty_weight": 0.02,
-            "neighbor_nucleus_penalty_weight": 0.15,
-            "allow_irregular_shape": True,
-            "macrophage_channels": "CD68;CD206",
-            "macrophage_max_radius": 35,
-            "macrophage_min_signal": 0.08,
-        },
-        "output_type": "whole_cell_mask",
-    },
-    CELLPOSE_NUCLEI_CSD: {
-        "method": CELLPOSE_NUCLEI_CSD,
-        "display_name": "Cellpose nuclei + CDS",
-        "input_type": "dapi_plus_hq_structural_channels",
-        "process": "cellpose_nuclei_then_constrained_signal_donut",
-        "params": {
-            "model_type": "cpsam",
-            "diameter": None,
-            "flow_threshold": 0.4,
-            "cellprob_threshold": 0.0,
-            "min_size": 15,
-            "use_gpu": True,
-            "tile_size": 1024,
-            "batch_size": 8,
-            "hq_channels": [],
-            "hq_input_mode": "selected_channels_from_source",
-            "minimal_radius": 3,
-            "default_lymphocyte_radius": 6,
-            "donut_size": 18,
-            "max_cell_radius": 18,
-            "shrink_pixels": 2,
-            "strong_support_threshold": 0.12,
-            "weak_hotspot_threshold": 1.5,
-            "gi_kernel_size": 7,
-            "gi_background_kernel_size": 31,
-            "gi_background_mode": "local",
-            "weak_hotspot_connectivity": 8,
-            "max_added_area_fraction": 3.0,
-            "max_cell_to_nucleus_ratio": 8.0,
-            "lymphocyte_max_cell_to_nucleus_ratio": 4.0,
-            "large_cell_max_cell_to_nucleus_ratio": 12.0,
-            "enable_weak_hotspot": True,
-            "enable_strong_signal_keep": True,
-            "support_weight": 1.0,
-            "weak_support_weight": 0.5,
-            "distance_penalty_weight": 0.03,
-            "neighbor_penalty_weight": 0.0,
-            "boundary_gradient_weight": 0.25,
-            "constraint_low_percentile": 0.5,
-            "constraint_high_percentile": 99.5,
-            "constraint_mode": "per_cell_best_channel",
-            "weak_local_z_threshold": 0.75,
-            "weak_min_component_area": 8,
-            "local_contrast_enabled": False,
-            "local_contrast_radius": 15,
-            "cytoplasm_engine": "lean_carve",
-            "outside_in_z_threshold": 0.5,
-            "outside_in_auto_threshold": False,
-            "outside_in_auto_percentile": 35.0,
-            "fusion_mode": "union",
-            "vote_k": 2,
-            "inner_union_radius": 6.0,
-            "lean_block_size": 4096,
-            "lean_halo_margin": 8,
-            "cds2_area_frac": 0.20,
-            "cds2_strength_lo": 0.50,
-            "cds2_strength_hi": 0.90,
-        },
-        "output_type": "whole_cell_mask",
     },
     STARDIST_NUCLEI_DAPI: {
         "method": STARDIST_NUCLEI_DAPI,
@@ -368,56 +236,9 @@ SEGMENTATION_METHODS = {
 }
 
 
-def is_hq2_csd_method(method):
-    """HQ2/CSD manual-remap algorithm family.
-
-    Single predicate (2.1c-b.1) for the method-in-set test used by the worker
-    (``self.method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)``). The HQ marker
-    source policy and Step1.5 remap-config validity are derived from this family,
-    never from any config-declared field. Lives here (light module) so both the
-    worker and promotion can reuse it without importing the heavy worker.
-    """
-    return method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)
-
-
-STEP2_SOURCE_AWARE_RUNTIME_ENV = "ENABLE_STEP2_SOURCE_AWARE_REMAP_RUNTIME"
-
-
-def step2_source_aware_runtime_enabled():
-    """v14.5d feature flag (default OFF). Gates the per-channel source-aware Step2
-    remap runtime end to end: the launch orchestration must not attach a runtime
-    config, and the worker must hard-reject any runtime config, while this is False.
-    Read from the environment on every call so an internal release can toggle it
-    without a code change; flip the default only after raw + corrected GPU
-    acceptance."""
-    import os
-    return str(os.environ.get(STEP2_SOURCE_AWARE_RUNTIME_ENV, "")).strip().lower() \
-        in {"1", "true", "yes", "on"}
-
-
-#: Methods no longer maintained (user ruling 2026-10-31,
-#: docs/v17_review_fixes_plan.md §1): not listed, not applied, not run. Their
-#: registry entries and worker code stay; no run made by them exists.
-RETIRED_METHODS = (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)
-
-
-class RetiredMethodError(ValueError):
-    """A configuration names a retired method: always said to the user,
-    even on a path that is otherwise quiet."""
-
-
-def is_retired_method(method):
-    return str(method or "") in RETIRED_METHODS
-
-
-def retired_method_message(method):
-    name = SEGMENTATION_METHODS.get(str(method), {}).get("display_name") or str(method)
-    return f"{name} is no longer available in Block01."
-
-
 def available_segmentation_methods():
-    """The methods a method box lists: the registry without the retired ones."""
-    return [m for m in SEGMENTATION_METHODS if m not in RETIRED_METHODS]
+    """The methods a method box lists: every registered method."""
+    return list(SEGMENTATION_METHODS)
 
 
 def get_segmentation_method_config(method):
@@ -470,75 +291,9 @@ def normalize_segmentation_config(config=None, default_method=CELLPOSE_WHOLECELL
         "pairing_rules",
         "phase1_diameter",
         "params_source",
-        "hq_channels",
-        "hq_input_mode",
-        "max_cell_radius",
         "normalization_percentile_low",
         "normalization_percentile_high",
-        "consensus_mode",
         "channel_weights",
-        "min_signal_threshold",
-        "imagej_blur_sigma",
-        "imagej_background_radius",
-        "imagej_threshold_method",
-        "imagej_threshold_percentile",
-        "imagej_min_object_size",
-        "imagej_closing_radius",
-        "imagej_opening_radius",
-        "core_mode",
-        "min_core_area",
-        "signal_map_mode",
-        "min_continuous_signal",
-        "max_expansion_radius",
-        "boundary_gradient_weight",
-        "distance_penalty_weight",
-        "neighbor_nucleus_penalty_weight",
-        "allow_irregular_shape",
-        "macrophage_channels",
-        "macrophage_max_radius",
-        "macrophage_min_signal",
-        "donut_size",
-        "nucleus_shrink",
-        "minimal_radius",
-        "default_lymphocyte_radius",
-        "max_cell_radius",
-        "shrink_pixels",
-        "strong_support_threshold",
-        "weak_hotspot_threshold",
-        "gi_kernel_size",
-        "gi_background_kernel_size",
-        "gi_background_mode",
-        "weak_hotspot_connectivity",
-        "max_added_area_fraction",
-        "max_cell_to_nucleus_ratio",
-        "lymphocyte_max_cell_to_nucleus_ratio",
-        "large_cell_max_cell_to_nucleus_ratio",
-        "enable_weak_hotspot",
-        "enable_strong_signal_keep",
-        "support_weight",
-        "weak_support_weight",
-        "distance_penalty_weight",
-        "neighbor_penalty_weight",
-        "boundary_gradient_weight",
-        "constraint_low_percentile",
-        "constraint_high_percentile",
-        "constraint_mode",
-        "weak_local_z_threshold",
-        "weak_min_component_area",
-        "local_contrast_enabled",
-        "local_contrast_radius",
-        "cytoplasm_engine",
-        "outside_in_z_threshold",
-        "outside_in_auto_threshold",
-        "outside_in_auto_percentile",
-        "fusion_mode",
-        "vote_k",
-        "inner_union_radius",
-        "lean_block_size",
-        "lean_halo_margin",
-        "cds2_area_frac",
-        "cds2_strength_lo",
-        "cds2_strength_hi",
         "mesmer_mode",
         "nuclear_channel",
         "membrane_channels",

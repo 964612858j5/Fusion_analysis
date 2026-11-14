@@ -32,10 +32,12 @@ def _spec(method, key):
 
 
 # ── the parameter table ─────────────────────────────────────────────────────
-def test_the_ui_lists_the_ten_methods_and_hides_hq():
-    # ten since v17's Cellpose whole-cell + nuclei and the hybrid
+def test_the_ui_lists_the_ten_methods():
+    # ten since v17's Cellpose whole-cell + nuclei and the hybrid; the same
+    # ten the seg_runner engine runs (Windows plan W2: nothing else is left)
+    from block01.seg_runner.engines import METHOD_OUTPUTS
     assert len(ps.UI_METHODS) == 10
-    assert not set(ps.HIDDEN_METHODS) & set(ps.UI_METHODS)
+    assert set(ps.UI_METHODS) == set(METHOD_OUTPUTS)
     for m in ps.UI_METHODS:                       # every default is a valid value
         for s in ps.specs(m):
             ps.parse_values(s, ps.format_values(s, [s.default]))

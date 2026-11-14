@@ -1,15 +1,14 @@
 """v14.5a: source-aware schema primitives (schema-only, no runtime consumption).
 
 Covers SourceRequest / CalibrationSourceIdentity / source_mixture_mode /
-camp_source_policy validators, and the validate_step2_remap_config HARD guard
-that rejects a source-aware step2_ready config until v14.5c/v14.5d runtime exists.
+camp_source_policy validators and the source-aware detection (the Step2
+runtime guard that consumed it went with HQ2 / CSD, Windows plan W2).
 """
 
 import pytest
 
 from block01.utils import source_identity as si
-from block01.utils.channel_remap_config import (
-    validate_step2_remap_config, default_channel_remap_config)
+from block01.utils.channel_remap_config import default_channel_remap_config
 
 
 def _ready_config(channels=("CD68",)):
@@ -97,42 +96,34 @@ def test_preview_config_may_carry_source_aware_fields():
     assert cfg["source_policy"]["step2_ready"] is False
 
 
-# ── 8. HARD reject: source-aware + step2_ready ───────────────────────────────
-def test_source_aware_step2_ready_hard_rejected():
+# ── 8. source-aware detection ────────────────────────────────────────────────
+def test_a_source_request_makes_the_config_source_aware():
     cfg = _ready_config()
     cfg["channels"]["CD68"]["source_request"] = si.make_source_request(
         "CD68", "corrected_zarr")
-    errs, resolved = validate_step2_remap_config(cfg, allow_preview_remap=False)
-    assert any("source-aware" in e for e in errs)   # hard error, not a warning
-    assert resolved == {}                            # not runnable
+    assert si.config_is_source_aware(cfg) is True
 
 
-def test_source_aware_via_mixture_mode_also_rejected_when_ready():
+def test_a_mixture_mode_makes_the_config_source_aware():
     cfg = _ready_config()
     cfg["source_mixture_mode"] = "mixed_raw_corrected"
-    errs, resolved = validate_step2_remap_config(cfg, allow_preview_remap=False)
-    assert any("source-aware" in e for e in errs)
-    assert resolved == {}
+    assert si.config_is_source_aware(cfg) is True
 
 
 def test_non_default_camp_policy_makes_config_source_aware():
     cfg = _ready_config()
     cfg["camp_source_policy"] = "selected_source"
-    errs, _ = validate_step2_remap_config(cfg, allow_preview_remap=False)
-    assert any("source-aware" in e for e in errs)
+    assert si.config_is_source_aware(cfg) is True
     # default raw_gi_only is NOT source-aware
     cfg2 = _ready_config()
     cfg2["camp_source_policy"] = "raw_gi_only"
     assert si.config_is_source_aware(cfg2) is False
 
 
-# ── 9. Existing non-source-aware step2_ready behavior unchanged ──────────────
-def test_plain_step2_ready_still_passes():
+# ── 9. a plain config is not source-aware ────────────────────────────────────
+def test_plain_step2_ready_is_not_source_aware():
     cfg = _ready_config()
     assert si.config_is_source_aware(cfg) is False
-    errs, resolved = validate_step2_remap_config(cfg, allow_preview_remap=False)
-    assert errs == []          # baseline still valid
-    assert "CD68" in resolved
 
 
 # ── v14.5a.1 hardening: central registry + recursive scan + registry tests ───
@@ -176,17 +167,6 @@ def test_config_is_source_aware_detects_marker_at_location(marker, location):
     assert si.config_is_source_aware(cfg) is True
 
 
-# 6-7. Every registered marker at every location HARD-rejects step2_ready=true.
-@pytest.mark.parametrize("marker", sorted(si.SOURCE_AWARE_FIELD_REGISTRY))
-@pytest.mark.parametrize("location", _LOCATIONS)
-def test_every_marker_hard_rejects_step2_ready(marker, location):
-    cfg = _ready_config()                         # step2_ready=true baseline
-    _place_marker(cfg, marker, si.source_aware_trigger_value(marker), location)
-    errs, resolved = validate_step2_remap_config(cfg, allow_preview_remap=False)
-    assert any("source-aware" in e for e in errs), (marker, location)
-    assert resolved == {}                         # not runnable
-
-
 # 9. Old promoted / non-source-aware config fields are NOT source-aware.
 def test_old_promoted_fields_not_source_aware():
     cfg = _ready_config()
@@ -198,9 +178,6 @@ def test_old_promoted_fields_not_source_aware():
         "source_kind": "raw_ome", "source_path": "/x", "source_shape": [16, 16],
         "intensity_space": "raw_ome_native_float"}
     assert si.config_is_source_aware(cfg) is False
-    errs, resolved = validate_step2_remap_config(cfg, allow_preview_remap=False)
-    assert not any("source-aware" in e for e in errs)
-    assert "CD68" in resolved
 
 
 # 10. Registration-enforcement meta-test (Approach B): every SOURCE_AWARE_KEY_*

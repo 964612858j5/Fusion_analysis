@@ -50,7 +50,6 @@ _EXPANSIONS = frozenset({"cellpose_nuclei_expansion", "stardist_nuclei_expansion
 _PRIMARY_CELL_AND_NUCLEI = frozenset({
     "mesmer_nuclear_guided", "cellpose_nuclei_expansion", "stardist_nuclei_expansion",
     "cellpose_wholecell_nuclei", "hybrid_cellpose_stardist",
-    "cellpose_nuclei_hq", "cellpose_nuclei_hq2", "cellpose_nuclei_csd",
 })
 
 # The kind block N records for each Step2 file, whatever the method.

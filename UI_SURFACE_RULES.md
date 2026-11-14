@@ -161,8 +161,8 @@ row, and the duplicate Tissue Preview button in the step bar.
   of its values, its combination count, `Edit`, `×`; `No method yet — add one
   with +` when empty), then `+`, `Save plan`, `Load plan…` and the line
   `Total: k patches × m combinations = N tasks`. `+` opens the method dialog:
-  the eight methods only (HQ / HQ2 / CDS are hidden, R2; Mesmer disabled with
-  the reason where DeepCell is missing), comma-separated values for a list
+  the methods the seg_runner engine runs (HQ / HQ2 / CDS were removed,
+  Windows plan W2; Mesmer disabled with the reason where its model is missing), comma-separated values for a list
   parameter, one value otherwise (the StarDist model is fixed and read-only,
   block M), each field checked as typed, the live
   combination count, Save / Cancel. A method already in the plan asks to

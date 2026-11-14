@@ -113,7 +113,7 @@ def test_the_freeze_refuses_what_cannot_follow_the_cores(project, monkeypatch, t
     freeze, _f = _window(project, monkeypatch, tmp_path, s)
     assert "Save in Regions first" in freeze()[1]                  # TMA, never saved
     K.save(project, d, s)
-    assert "cannot follow the TMA cores" in freeze(method="cellpose_nuclei_hq2")[1]
+    assert "cannot follow the TMA cores" in freeze(method="a_method_without_an_input_kind")[1]
     freeze2, _f = _window(project, monkeypatch, tmp_path, s, fusion=None)
     assert "no fusion settings" in freeze2()[1]
     freeze3, _f = _window(project, monkeypatch, tmp_path, None)     # not a TMA project
@@ -174,7 +174,7 @@ def test_the_worker_refuses_a_broken_or_mismatched_request(tmp_path, monkeypatch
     with pytest.raises(RuntimeError, match="identity"):
         W._regions_begin(worker)
     req["identity"] = snap["identity"]
-    worker.method = "cellpose_nuclei_hq2"
+    worker.method = "a_method_without_an_input_kind"
     with pytest.raises(RuntimeError, match="cannot follow"):
         W._regions_begin(worker)
     worker.method = "cellpose_wholecell_fusion"
@@ -314,7 +314,7 @@ def test_a_slide_without_cores_keeps_the_old_run_without_exclusions_or_a_save(pr
 def test_a_slide_without_cores_refuses_what_cannot_follow_its_exclusions(project, monkeypatch, tmp_path):
     _no_map_save(project, (400, 400, ["blur"], "all"))
     freeze, _f = _window(project, monkeypatch, tmp_path, None)
-    req, why = freeze(method="cellpose_nuclei_hq2")
+    req, why = freeze(method="a_method_without_an_input_kind")
     assert req is None and "cannot follow the Regions exclusions" in why and "TMA" not in why
     freeze2, _f = _window(project, monkeypatch, tmp_path, None, fusion=None)
     assert "no fusion settings" in freeze2()[1]

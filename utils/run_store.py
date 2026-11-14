@@ -368,7 +368,7 @@ def update_session(roi_dir, **fields) -> Dict:
 # ── records with paths ───────────────────────────────────────────────────
 
 # Path fields whose names do not end in _path / _dir.
-_PATH_KEYS = ("ome_tiff", "background_correction_source", "hq_source_zarr", "param_file")
+_PATH_KEYS = ("ome_tiff", "background_correction_source", "param_file")
 
 
 def _is_path_key(key) -> bool:

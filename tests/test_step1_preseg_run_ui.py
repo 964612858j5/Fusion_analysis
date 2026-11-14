@@ -283,24 +283,6 @@ def test_closing_the_window_ends_the_run(app, tmp_path, monkeypatch):
     assert not job.is_running() and job._engine is None
 
 
-# ── the old flow: arrival is never a choice ─────────────────────────────────
-def test_an_arriving_result_does_not_become_the_saved_params(app, tmp_path, monkeypatch):
-    w = _window(app, tmp_path, monkeypatch)
-    try:
-        params = {"method": "cellpose_wholecell_fusion", "diameter": 30.0, "_phase": 2}
-        assert w._record_segmentation_preview_result(0, params, np.ones((4, 4), np.uint32)) is False
-        assert w._p2_params is None and not w.btn_save.isEnabled()
-        picked = []
-        monkeypatch.setattr(w.result_grid, "_select", lambda col: picked.append(col))
-        monkeypatch.setattr(w.result_grid, "get_selected", lambda: None)
-        w.result_grid._params = [dict(params)]
-        w._auto_select_p1()
-        assert picked == []                              # a Phase 2 column is not auto-picked
-        w.result_grid._params = [dict(params, _phase=1)]
-        w._auto_select_p1()
-        assert picked == [0]                             # Phase 1 still hands on its diameter
-    finally:
-        w.close()
 
 
 # ── saving says it worked (user ruling, 2026-09-24) ─────────────────────────

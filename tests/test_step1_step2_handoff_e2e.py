@@ -126,7 +126,6 @@ def test_the_old_panel_and_patch_results_are_off_the_screen(app, tmp_path, monke
         tabs = w.right_tabs
         assert not tabs.isTabVisible(tabs.indexOf(w.patch_results_tab))
         assert w.result_grid is not None                     # kept
-        w._show_step1_patch_results_tab("test")               # an old caller
         assert tabs.currentWidget() is not w.patch_results_tab
     finally:
         w.close()

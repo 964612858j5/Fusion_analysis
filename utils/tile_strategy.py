@@ -16,10 +16,7 @@ _CELLPOSE_METHODS = {
     "legacy_cellpose_wholecell_fusion",
     "cellpose_nuclei_dapi",
     "cellpose_nuclei_expansion",
-    "cellpose_nuclei_hq",
-    "cellpose_nuclei_hq2",
 }
-_HQ_METHODS = {"cellpose_nuclei_hq", "cellpose_nuclei_hq2"}
 _MESMER_METHODS = {"mesmer_whole_cell", "mesmer_nuclei", "mesmer_nuclear_guided"}
 
 
@@ -35,9 +32,6 @@ def _target_mpx(backend, vram_gb=None, channel_count=1, target_tile_mpx=None):
     vram = float(vram_gb or 0.0)
     channels = max(1, int(channel_count or 1))
 
-    if b in _HQ_METHODS or "hq" in b:
-        # HQ/HQ2 are CPU/memory-heavy and often read extra channels.
-        return max(10.0, min(30.0, 24.0 - max(0, channels - 2) * 2.0))
     if b in _MESMER_METHODS or "mesmer" in b:
         if vram >= 40:
             return 35.0
@@ -59,8 +53,6 @@ def _overlap_for_backend(backend):
     b = _norm_backend(backend)
     if b in _MESMER_METHODS or "mesmer" in b:
         return 160
-    if b in _HQ_METHODS or "hq" in b:
-        return 224
     return 200
 
 
@@ -103,9 +95,7 @@ def suggest_tile_strategy(
     # Rough Step2 working set: input + normalized float32 + backend temp.
     backend_factor = 5.5
     b = _norm_backend(backend)
-    if b in _HQ_METHODS or "hq" in b:
-        backend_factor = 4.0 + min(channels, 8) * 0.7
-    elif b in _MESMER_METHODS or "mesmer" in b:
+    if b in _MESMER_METHODS or "mesmer" in b:
         backend_factor = 6.5
     estimated_vram = tile_h * tile_w * max(2, channels) * 4 * backend_factor / (1024.0 ** 3)
 

@@ -24,16 +24,11 @@ from ..qt.QtCore import QThread, Signal
 
 from ..core import (label_ownership, label_pyramid, nuclei_pairing, preseg_contract,
                     preseg_input, seam_merge)
-from ..core.io_loader import OMETIFFLoader
 from ..core.provenance import register_segmentation_run, write_json_atomic
-from ..utils import error_hook, run_store
+from ..utils import run_store
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
-    CELLPOSE_NUCLEI_CSD,
-    CELLPOSE_NUCLEI_HQ,
-    CELLPOSE_NUCLEI_HQ2,
-    is_hq2_csd_method,
     CELLPOSE_WHOLECELL_FUSION,
     MESMER_WHOLE_CELL,
     MESMER_NUCLEI,
@@ -52,12 +47,6 @@ from ..utils.roi_project import (
 from ..utils.step2_profiler import Step2Profiler
 from ..utils.runtime_resource_monitor import RuntimeResourceMonitor
 from ..utils.channel_cache import SharedChannelStore
-from ..utils.channel_remap_config import (
-    normalize_channel_remap_config,
-    validate_step2_remap_config,
-    validate_remap_covers_selected_channels,
-    channel_remap_config_hash,
-)
 from ..utils.step2_tile import compute_tile_grid_metrics, crop_valid_region
 from ..utils.tile_scheduler import TileScheduler
 from ..utils.tile_strategy import suggest_tile_strategy
@@ -69,31 +58,6 @@ from ..seg_runner import engines as seg_engines
 from ..seg_runner import proc as seg_proc
 from ..utils.mesmer_utils import mesmer_metadata
 from ..utils import segmentation_param_schema as param_schema
-from .hq_marker_segmentation import (
-    parse_hq_channels,
-    resolve_hq_channels,
-    segment_nuclei_hq,
-    validate_hq_channels,
-    write_hq_qc_table,
-)
-from .hq2_marker_segmentation import (
-    hq2_metadata_fields,
-    run_hq2_segmentation,
-    write_hq2_qc_table,
-)
-from .hq_source_resolver import (
-    resolve_hq_marker_source,
-    open_hq_channel_group,
-    channel_array_names as _resolver_channel_array_names,
-    read_per_channel_marker_blocks,
-    SOURCE_MODE_CORRECTED_THEN_RAW,
-    SOURCE_MODE_RAW_ONLY,
-)
-from .constrained_donut_segmentation import (
-    csd_metadata_fields,
-    run_constrained_donut_segmentation,
-    write_csd_qc_table,
-)
 
 
 OME_TILE = 512
@@ -184,16 +148,6 @@ class SegmentMergeWorker(QThread):
         self.roi_id = str(self.roi_manifest.get("roi_id") or self._roi_id_from_rois(rois) or "")
         self.roi_display_name = str(self.roi_manifest.get("display_name") or self._roi_display_from_rois(rois) or "ROI_1")
         self.result_id, self.output_dir, self.created_at = self._create_output_dir()
-        # v13.1 Phase 5b: optional manual channel remap. Loads/validates once;
-        # no config -> unchanged v13 behavior. Raises on a rejected config.
-        self._manual_remap_enabled = False
-        self._remap_provenance = {}
-        # v14.5d: a source-aware RUNTIME remap descriptor is only validated+stashed at
-        # construction; its per-channel source re-resolve + full-image gate + cross-check
-        # run later at the HQ marker-source preparation stage (context not ready here).
-        self._pending_source_aware_runtime = None
-        self._source_aware_per_channel = None
-        self._resolve_channel_remap()
         self.recovery_npy_dir = recovery_npy_dir
         #: Block N2: the `*.partial` outputs not yet renamed, removed by
         #: `run()` on its way out whatever happened.
@@ -229,23 +183,10 @@ class SegmentMergeWorker(QThread):
         self._runtime_partial_path = ""
         self._resource_sample_header_written = False
         self._last_region_meta = None
-        self._current_region_bbox = None
-        self._hq_resolved_source_path = ""
-        # 2.1c-b.1: HQ marker source policy, decided ONCE from the active algorithm
-        # (never from config-declared fields) and stored as the single source of
-        # truth every HQ2/CSD marker-open path must read. HQ2/CSD manual-remap
-        # defaults to raw_ome_only (corrected is never silently stacked in front of
-        # the manual remap); all other methods keep corrected_then_raw_fallback.
-        self._hq_source_mode = (
-            SOURCE_MODE_RAW_ONLY if is_hq2_csd_method(self.method)
-            else SOURCE_MODE_CORRECTED_THEN_RAW)
         self.write_tile_tiffs = self._config_bool("write_tile_tiffs", False)
-        self.write_hq2_debug_layers = self._config_bool("write_hq2_debug_layers", False)
-        self.write_hq2_debug_tiffs = self._config_bool("write_hq2_debug_tiffs", False)
-        self._hq2_tile_metadata = []
         # 2.1c-b.2: this run's actual segmentation-input geometry (nuclei mask zarr
-        # [H,W]) + mask zarr paths, recorded into run_metadata.json for remap
-        # promotion. First ROI wins; never mutates old runs.
+        # [H,W]) + mask zarr paths, recorded into run_metadata.json. First ROI
+        # wins; never mutates old runs.
         self._step2_geometry = {}
         self.step2_profiler = Step2Profiler(
             enabled=self._step2_profiling_enabled(),
@@ -299,13 +240,8 @@ class SegmentMergeWorker(QThread):
         return ""
 
     def _name_method(self):
-        """Naming method: append _cds2 only for CSD with the cds2 cytoplasm engine,
-        so cds2 runs are distinguishable from default lean_carve (cds) results."""
-        m = str(self.seg_config.get("method", self.method))
-        eng = str(self.seg_config.get("cytoplasm_engine", "") or "").strip().lower()
-        if m == "cellpose_nuclei_csd" and eng == "cds2":
-            return m + "_cds2"
-        return m
+        """The method name used for the run folder and run_metadata.json."""
+        return str(self.seg_config.get("method", self.method))
 
     def _create_output_dir(self):
         now = datetime.now()
@@ -330,300 +266,6 @@ class SegmentMergeWorker(QThread):
             os.makedirs(out_dir, exist_ok=True)
             return run_id, out_dir, created_at
         return create_result_dir(self.project_output_dir, self.method)
-
-    def _resolve_channel_remap(self):
-        """Load + validate the optional channel remap config once per run.
-
-        No `channel_remap_config_path` in seg_config -> manual remap stays off and
-        v13 behavior is unchanged. A provided config is validated for Step2 use
-        (source-aligned, no reference layers, concrete Min/Max). Preview-only
-        configs require allow_preview_remap=true. On rejection this raises with a
-        clear, channel-level reason. On success it injects resolved per-channel
-        params into seg_config (consumed by HQ2/CDS2/lean_carve) and writes
-        provenance into the run output dir. h5ad / feature extraction untouched.
-        """
-        path = str(self.seg_config.get("channel_remap_config_path") or "").strip()
-        if not path:
-            return
-        allow = str(self.seg_config.get("allow_preview_remap", False)).strip().lower() \
-            in {"1", "true", "yes", "on"}
-        # Read the RAW config (not load_channel_remap_config, which normalizes and
-        # would force used_for) so used_for is validated as written on disk.
-        if not os.path.isfile(path):
-            raise FileNotFoundError(f"channel remap config not found: {path}")
-        with open(path, "r", encoding="utf-8") as f:
-            raw_cfg = json.load(f)
-
-        # v14.5d: ANY config carrying a source-aware promotion/runtime marker takes the
-        # per-channel descriptor path, NOT the single-source validation below — so a
-        # malformed runtime config or a bare candidate can never fall back to the legacy
-        # validator. The runtime context (ROI/geometry/active marker source) is not ready
-        # this early, so here we only flag-gate, gate the method/input-mode, validate the
-        # descriptor SHAPE + selected-marker coverage, and stash it; source re-resolve +
-        # full-image gate + kind/path/group/shape cross-check run later in the HQ
-        # marker-source preparation stage.
-        if raw_cfg.get("created_by_source_aware_promotion") or raw_cfg.get("runtime_supported"):
-            self._accept_source_aware_runtime_descriptor(raw_cfg)
-            return
-
-        errors, resolved = validate_step2_remap_config(raw_cfg, allow_preview_remap=allow)
-        if errors:
-            raise ValueError(
-                "channel_remap_config rejected for Step2 segmentation:\n  "
-                + "\n  ".join(errors))
-
-        # Every active Step2 marker channel must be covered by the remap config —
-        # no silent mixed (remap + legacy gate) mode.
-        selected = (self.seg_config.get("hq_channels")
-                    or self.seg_config.get("channel_names") or [])
-        cov_errors = validate_remap_covers_selected_channels(
-            resolved, selected, self.seg_config.get("hq_input_mode"))
-        if cov_errors:
-            raise ValueError(
-                "channel_remap_config rejected for Step2 segmentation:\n  "
-                + "\n  ".join(cov_errors))
-
-        cfg = normalize_channel_remap_config(raw_cfg)  # for provenance / hash
-        gate_mode = str(self.seg_config.get("remap_gate_mode", "remap") or "remap").strip().lower()
-        gate_thr = float(self.seg_config.get("remap_gate_threshold", 0.05) or 0.05)
-        # Reserved keys consumed by the engines (HQ2 reads params; CDS2/lean read p).
-        self.seg_config["_channel_remap_params"] = resolved
-        self.seg_config["_remap_gate_mode"] = gate_mode
-        self.seg_config["_remap_gate_threshold"] = gate_thr
-        self._manual_remap_enabled = True
-        self._remap_provenance = {
-            "manual_remap_enabled": True,
-            "channel_remap_config_path": os.path.abspath(path),
-            "channel_remap_config_hash": channel_remap_config_hash(cfg),
-            "allow_preview_remap": allow,
-            "gate_mode": gate_mode,
-            "remap_gate_threshold": gate_thr,
-            "used_for": cfg.get("used_for"),
-            "source_policy": cfg.get("source_policy", {}),
-            "channels": sorted(resolved.keys()),
-        }
-        try:
-            self._write_remap_provenance(cfg)
-        except Exception as exc:  # provenance is best-effort, never fail the run
-            error_hook.report(exc, "Step2: remap provenance not written")
-
-    def _accept_source_aware_runtime_descriptor(self, raw_cfg):
-        """v14.5d B3b (construction stage): flag-gate + validate + stash a source-aware
-        runtime remap DESCRIPTOR. Does NOT resolve sources or read pixels — the runtime
-        context (ROI / input geometry / active marker source) is not ready this early.
-        Source re-resolve, full-image gate, and kind/path/group/shape cross-check run
-        later in the HQ marker-source preparation stage (_prepare_source_aware_runtime).
-
-        Flag OFF -> HARD REJECT before segmentation starts (contract: never fall back to
-        a single-source read of a runtime config).
-        """
-        from ..utils.segmentation_config import (
-            step2_source_aware_runtime_enabled, is_hq2_csd_method)
-        from ..utils.channel_remap_config import (
-            validate_source_aware_runtime_config,
-            validate_remap_covers_selected_channels)
-
-        if not step2_source_aware_runtime_enabled():
-            raise ValueError(
-                "source-aware runtime remap config present but "
-                "ENABLE_STEP2_SOURCE_AWARE_REMAP_RUNTIME is off; refusing before "
-                "segmentation (no fallback to single-source read).")
-
-        # Method + input-mode gate: only HQ2/CSD selected_channels_from_source reaches
-        # the per-channel marker-prep branch. Any other method/mode would stash the
-        # descriptor and then run the legacy un-remapped path — reject up front.
-        method = self.seg_config.get("method")
-        if not is_hq2_csd_method(method):
-            raise ValueError(
-                "source-aware runtime remap is HQ2/CSD only "
-                f"(method={method!r}); refusing.")
-        hq_mode = str(self.seg_config.get("hq_input_mode") or "")
-        if hq_mode == "step1_weighted_fusion":
-            raise ValueError(
-                "source-aware runtime remap is not supported with "
-                "hq_input_mode='step1_weighted_fusion'; refusing.")
-        if hq_mode != "selected_channels_from_source":
-            raise ValueError(
-                "source-aware runtime remap requires "
-                f"hq_input_mode='selected_channels_from_source'; got {hq_mode!r}.")
-
-        errs = validate_source_aware_runtime_config(raw_cfg)
-        if errs:
-            raise ValueError(
-                "source-aware runtime remap config invalid:\n  " + "\n  ".join(errs))
-
-        # Coverage: every SELECTED Step2 marker must be present in the runtime config
-        # (a manual config covering only some markers must not silently under-remap).
-        cov = validate_remap_covers_selected_channels(
-            raw_cfg.get("channels") or {}, self.seg_config.get("hq_channels") or [],
-            hq_mode)
-        if cov:
-            raise ValueError(
-                "source-aware runtime config does not cover the selected markers:\n  "
-                + "\n  ".join(cov))
-
-        self._pending_source_aware_runtime = raw_cfg
-        self._manual_remap_enabled = True
-        print(
-            "[Step2] source-aware runtime remap descriptor accepted "
-            f"({len(raw_cfg.get('channels') or {})} markers, "
-            f"mixture={raw_cfg.get('source_mixture_mode')}); per-channel source "
-            "re-resolve deferred to marker-source preparation.")
-
-    def _prepare_source_aware_runtime(self, step2_input_shape):
-        """v14.5d B3b-2 (marker-source prep stage): re-resolve every marker source in the
-        WORKER, cross-check against the stashed runtime descriptor, and store the opened
-        per-channel handles for reuse (no per-tile reopen).
-
-        step2_input_shape : the REAL [H, W] of the opened segmentation input (the caller
-            passes the actual zarr/tile-grid geometry). Every marker must satisfy
-            resolved_shape == descriptor_shape == step2_input_shape, so the remap acts on
-            the SAME full-image coordinate frame the segmentation reads — not merely a
-            descriptor↔source agreement. Unknown geometry -> refuse.
-
-        Runs only when a descriptor was accepted at construction. ALL-OR-NOTHING: on any
-        resolution or identity mismatch it raises BEFORE any segmentation output, and
-        self._source_aware_per_channel / self._channel_remap_params are left unset so the
-        run can never fall through to the single-source path. The worker does its OWN
-        resolution (does not trust the config's paths/handles) and exact-matches the
-        descriptor per channel (kind, canonical path, group name, shape).
-        """
-        raw_cfg = self._pending_source_aware_runtime
-        if not raw_cfg:
-            return
-        from .hq_source_resolver import (
-            resolve_per_channel_marker_sources, PerChannelResolutionError,
-            require_homogeneous_source)
-        from ..utils.source_identity import (
-            REQUESTED_SOURCE_RAW_OME, REQUESTED_SOURCE_CORRECTED_ZARR)
-
-        # Worker-side full-image gate (never trust the UI gate alone). v14.5d is
-        # full-image only; ROI coordinate contract is v14.5e.
-        if self.rois:
-            raise ValueError(
-                "source-aware runtime remap is full-image only in v14.5d; this run has "
-                "ROI(s). Refusing (ROI coordinate contract is v14.5e).")
-
-        def _canon(p):
-            return os.path.realpath(os.path.abspath(str(p or "")))
-
-        def _hw(s):
-            try:
-                seq = list(s)
-            except TypeError:
-                return None
-            return [int(seq[-2]), int(seq[-1])] if len(seq) >= 2 else None
-
-        # Geometry gate up front (before the expensive resolve): the real Step2 input
-        # geometry must be known.
-        step2_hw = _hw(step2_input_shape)
-        if step2_hw is None:
-            raise ValueError(
-                "source-aware runtime: unknown Step2 input geometry; refusing "
-                "(the geometry gate is never skipped).")
-
-        channels = raw_cfg.get("channels", {}) or {}
-        requests = {}
-        for ch, params in channels.items():
-            kind = (params or {}).get("resolved_source_kind")
-            if kind == "corrected_zarr":
-                requests[ch] = REQUESTED_SOURCE_CORRECTED_ZARR
-            elif kind == "raw_ome":
-                requests[ch] = REQUESTED_SOURCE_RAW_OME
-            else:
-                raise ValueError(f"channel '{ch}': bad resolved_source_kind {kind!r}")
-
-        try:
-            per_channel = resolve_per_channel_marker_sources(
-                requests,
-                raw_channel_source_path=self._raw_channel_source_path(),
-                corrected_zarr_path=self._multichannel_source_path(),
-                roi_id=str(self.seg_config.get("roi_id") or self.roi_id or ""),
-                requested_roi_names=self._requested_roi_names(),
-                param_file=self.param_file or "",
-                abs_fn=self._abs, loader_factory=OMETIFFLoader,
-                allow_corrected_to_raw_fallback=False)
-        except PerChannelResolutionError as exc:
-            raise ValueError(
-                f"worker could not re-resolve marker source for channel "
-                f"'{exc.channel}' (requested {exc.requested_source}): {exc.reason}")
-
-        require_homogeneous_source(per_channel)
-
-        # Marker set must match EXACTLY (no extra, no missing).
-        resolved_map = getattr(per_channel, "per_channel", {}) or {}
-        if set(resolved_map) != set(channels):
-            raise ValueError(
-                "source-aware re-resolve marker-set mismatch: descriptor="
-                f"{sorted(channels)} resolved={sorted(resolved_map)}")
-
-        for ch, params in channels.items():
-            params = params or {}
-            rs = resolved_map[ch]
-            rec_kind = str(params.get("resolved_source_kind"))
-            if str(getattr(rs, "kind", "")) != rec_kind:
-                raise ValueError(
-                    f"channel '{ch}': re-resolved kind {getattr(rs, 'kind', '')!r} != "
-                    f"descriptor {rec_kind!r}")
-            if _canon(getattr(rs, "source_path", "")) != _canon(params.get("resolved_source_path")):
-                raise ValueError(
-                    f"channel '{ch}': re-resolved source_path != descriptor "
-                    "resolved_source_path")
-            # Group name is exact-checked for EVERY marker (raw must be 'raw_ome').
-            rec_group = str(params.get("resolved_group_name") or "")
-            if not rec_group:
-                raise ValueError(f"channel '{ch}': descriptor missing resolved_group_name")
-            if rec_kind == "raw_ome" and rec_group != "raw_ome":
-                raise ValueError(
-                    f"channel '{ch}': raw marker descriptor resolved_group_name must be "
-                    f"'raw_ome', got {rec_group!r}")
-            if str(getattr(rs, "group_name", "") or "") != rec_group:
-                raise ValueError(
-                    f"channel '{ch}': re-resolved group_name "
-                    f"{getattr(rs, 'group_name', '')!r} != descriptor {rec_group!r}")
-            # Shape: resolved == descriptor == real Step2 input geometry (same frame).
-            rec_shape = _hw(params.get("resolved_source_shape"))
-            if rec_shape is None:
-                raise ValueError(
-                    f"channel '{ch}': descriptor missing/invalid resolved_source_shape")
-            res_shape = _hw(rs.channel_shape(ch))
-            if res_shape is None:
-                raise ValueError(f"channel '{ch}': re-resolved shape unavailable")
-            if not (res_shape == rec_shape == step2_hw):
-                raise ValueError(
-                    f"channel '{ch}': shape frame mismatch — re-resolved {res_shape}, "
-                    f"descriptor {rec_shape}, step2_input {step2_hw} (must be equal)")
-
-        # All checks passed -> COMMIT (only now are the runtime attributes set, so any
-        # earlier raise leaves the run with no _channel_remap_params -> no per-channel
-        # branch entry and no single-source fallback for a runtime config).
-        self._source_aware_per_channel = per_channel
-        self._channel_remap_params = {ch: dict(params or {}) for ch, params in channels.items()}
-        self.seg_config["_channel_remap_params"] = self._channel_remap_params
-        self._manual_remap_enabled = True
-        self._remap_provenance = {
-            "manual_remap_enabled": True,
-            "source_aware_runtime": True,
-            "source_mixture_mode": raw_cfg.get("source_mixture_mode"),
-            "channels": sorted(channels.keys()),
-        }
-        try:
-            self._write_remap_provenance(raw_cfg)
-        except Exception as exc:
-            error_hook.report(exc, "Step2: remap provenance not written")
-        print(f"[Step2] source-aware runtime remap prepared: {len(channels)} markers, "
-              f"mixture={raw_cfg.get('source_mixture_mode')}")
-
-    def _write_remap_provenance(self, cfg):
-        """Copy the used remap config + provenance into the run output dir."""
-        out = self.output_dir
-        os.makedirs(out, exist_ok=True)
-        with open(os.path.join(out, "channel_remap_config.used.json"), "w",
-                  encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2)
-        with open(os.path.join(out, "channel_remap_provenance.json"), "w",
-                  encoding="utf-8") as f:
-            json.dump(self._remap_provenance, f, indent=2)
 
     @staticmethod
     def _abs(path):
@@ -697,7 +339,7 @@ class SegmentMergeWorker(QThread):
     #: The methods whose nuclei are a SECOND output next to the cells: the
     #: two expansions and nuclear-guided. Their nuclei are paired to their
     #: cells (`core.nuclei_pairing`), numbered on their own and mapped to a
-    #: cell by the nucleus -> cell table. HQ / HQ2 / CDS keep their own path.
+    #: cell by the nucleus -> cell table.
     SECONDARY_NUCLEI_METHODS = (frozenset(EXPANSION_METHODS) | {MESMER_NUCLEAR_GUIDED}
                                 | frozenset(CELL_AND_NUCLEUS_METHODS))
     #: docs/v17_cellpose_cell_nucleus_plan.md: a cell without a nucleus is
@@ -731,9 +373,8 @@ class SegmentMergeWorker(QThread):
 
     def _seam_begin(self, tiles, full_h, full_w, out_prefix, keeps_nuclei, nuclei_state=None,
                     zarr_path=None, judge=None):
-        """Block N3: the region's seam merger for the engine methods (HQ /
-        HQ2 / CDS keep the old paste). Its spill folder is cleaned up with
-        the run's partials whatever happens."""
+        """Block N3: the region's seam merger for the engine methods. Its
+        spill folder is cleaned up with the run's partials whatever happens."""
         if self.method not in METHOD_ENGINE:
             return None
         spill = os.path.join(self.output_dir, f".seam_candidates_{out_prefix or 'whole_image'}")
@@ -1179,7 +820,7 @@ class SegmentMergeWorker(QThread):
                      shape, seam=None, regions=None):
         """The region's semantic entry (block N2): which array holds the
         cells, which the nuclei, and how nuclei map to cells. File names stay
-        historical; this is the authority. None for HQ / HQ2 / CDS."""
+        historical; this is the authority. None outside the engine methods."""
         if self.method not in METHOD_ENGINE:
             return None
         if int(n_cells) > self.UINT32_LIMIT:
@@ -1264,12 +905,12 @@ class SegmentMergeWorker(QThread):
 
     def _record_step2_geometry(self, full_h, full_w, nuclei_zarr_path="",
                                global_mask_zarr_path=""):
-        """Record this run's actual segmentation-input geometry for promotion.
+        """Record this run's actual segmentation-input geometry for run_metadata.json.
 
         step2_input_shape is the nuclei-mask zarr geometry [H, W] (the real
         segmentation input), NOT a tile/display/patch shape. First ROI's geometry
-        is authoritative for the run-level metadata. Absolute zarr paths so the
-        promotion CLI can read geometry structurally instead of guessing.
+        is authoritative for the run-level metadata. Absolute zarr paths so a
+        reader can take the geometry structurally instead of guessing.
         """
         if self._step2_geometry:
             return  # first ROI wins
@@ -1313,9 +954,7 @@ class SegmentMergeWorker(QThread):
                 return self._abs(zpath)
         param_cfg = self._load_param_file_config()
         explicit = [
-            self.seg_config.get("hq_source_zarr"),
             self.seg_config.get("multichannel_source_path"),
-            param_cfg.get("hq_source_zarr"),
             param_cfg.get("multichannel_source_path"),
             param_cfg.get("corrected_channels_zarr"),
         ]
@@ -1575,9 +1214,6 @@ class SegmentMergeWorker(QThread):
             CELLPOSE_WHOLECELL_FUSION,
             CELLPOSE_NUCLEI_DAPI,
             CELLPOSE_NUCLEI_EXPANSION,
-            CELLPOSE_NUCLEI_HQ,
-            CELLPOSE_NUCLEI_HQ2,
-            CELLPOSE_NUCLEI_CSD,
         )
 
     @staticmethod
@@ -2302,8 +1938,7 @@ class SegmentMergeWorker(QThread):
                 return
             t = tiles[i]
             oy0, oy1, ox0, ox1 = t.own_bbox
-            payload = self._prepare_tile_payload(zarr_path, z, t, False, False, None, [], False, None,
-                                                 skip=True)
+            payload = self._prepare_tile_payload(zarr_path, z, t, skip=True)
             dapi_mmap[oy0:oy1, ox0:ox1] = payload["dapi_own"][:oy1 - oy0, :ox1 - ox0]
         log.info(f"[Step2] DAPI of {len(skip_all)} skipped tile(s) written "
                  f"({(time.perf_counter() - t0) * 1000:.0f} ms)")
@@ -2328,8 +1963,7 @@ class SegmentMergeWorker(QThread):
         if log is not None:
             log.info(msg)
 
-    def _prepare_tile_payload(self, zarr_path, z, tile, is_hq, is_mesmer_guided,
-                              hq_group, hq_channels, is_mesmer, mesmer_group,
+    def _prepare_tile_payload(self, zarr_path, z, tile,
                               dapi_mmap=None, profile_tile_base=None, skip=False):
         if skip:
             # Block S2T: a skipped tile still reads its own DAPI (the global
@@ -2339,8 +1973,7 @@ class SegmentMergeWorker(QThread):
                 dapi_own = self._channel_store.read_dapi(zarr_path, oy0, oy1, ox0, ox1)
             else:
                 dapi_own = self._read_dapi_from_zarr(z, oy0, oy1, ox0, ox1)
-            return {"skipped": True, "tile_data": None, "dapi_own": dapi_own,
-                    "hq_marker_channels": None, "mesmer_channel_source": None}
+            return {"skipped": True, "tile_data": None, "dapi_own": dapi_own}
         if hasattr(tile, "read_bbox"):
             ry0, ry1, rx0, rx1 = tile.read_bbox
             oy0, oy1, ox0, ox1 = tile.own_bbox
@@ -2360,406 +1993,15 @@ class SegmentMergeWorker(QThread):
                 dapi_own = self._read_dapi_from_zarr(z, oy0, oy1, ox0, ox1)
         if dapi_mmap is not None:
             dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
-        hq_marker_channels = None
-        mesmer_channel_source = None
-        prepare_ctx = self.step2_profiler.time_stage("tile_prepare", **profile_tile_base) if profile_tile_base else nullcontext()
-        with prepare_ctx:
-            if is_hq and not is_mesmer_guided and not self._is_lean_csd():
-                hq_marker_channels = self._read_hq_marker_channels(hq_group, hq_channels, ry0, ry1, rx0, rx1)
-            if is_mesmer and mesmer_group is not None:
-                mesmer_channel_source = self._read_mesmer_channel_source(mesmer_group, ry0, ry1, rx0, rx1)
         return {
             "tile_data": tile_data,
             "dapi_own": dapi_own,
-            "hq_marker_channels": hq_marker_channels,
-            "mesmer_channel_source": mesmer_channel_source,
         }
-
-    @staticmethod
-    def _group_keys(root):
-        groups = list(getattr(root, "group_keys", lambda: [])())
-        if not groups and hasattr(root, "groups"):
-            groups = [name for name, _group in root.groups()]
-        return groups
-
-    def _available_groups_debug(self, root):
-        debug = []
-        for group_name in self._group_keys(root):
-            group = root[group_name]
-            debug.append(
-                {
-                    "group": group_name,
-                    "attrs": dict(group.attrs),
-                    "channels": self._channel_array_names(group),
-                }
-            )
-        return debug
-
-    def _requested_roi_names(self, roi_name=None):
-        names = [
-            roi_name,
-            self.seg_config.get("roi_name"),
-            self.seg_config.get("roi_display_name"),
-            self.roi_display_name,
-        ]
-        return {str(name) for name in names if str(name or "").strip()}
-
-    def _open_hq_channel_group(self, roi_name=None):
-        # HQ marker source policy is the single stored self._hq_source_mode. Under
-        # raw_ome_only (HQ2/CSD) resolve raw directly — corrected is never opened.
-        if self._hq_source_mode == SOURCE_MODE_RAW_ONLY:
-            res = resolve_hq_marker_source(
-                requested_channels=[],
-                multichannel_source_path="",  # corrected never touched under raw_ome_only
-                raw_channel_source_path=self._raw_channel_source_path(),
-                roi_id=str(self.seg_config.get("roi_id") or self.roi_id or ""),
-                requested_roi_names=self._requested_roi_names(roi_name),
-                param_file=self.param_file, abs_fn=self._abs, loader_factory=OMETIFFLoader,
-                source_mode=SOURCE_MODE_RAW_ONLY)
-            self._hq_resolved_source_path = res.source_path
-            return res.group
-        # Step A (initial corrected-vs-raw choice + ROI-group match) is defined
-        # once in hq_source_resolver.open_hq_channel_group. The worker keeps its
-        # own side effect: tracking the resolved source path. No missing-channel
-        # fallback here (that is Step B, only in _validate_hq_config).
-        group, _kind, source_path = open_hq_channel_group(
-            multichannel_source_path=self._multichannel_source_path(),
-            raw_channel_source_path=self._raw_channel_source_path(),
-            roi_id=str(self.seg_config.get("roi_id") or self.roi_id or ""),
-            requested_roi_names=self._requested_roi_names(roi_name),
-            param_file=self.param_file, abs_fn=self._abs, loader_factory=OMETIFFLoader)
-        self._hq_resolved_source_path = source_path
-        return group
-
-    @staticmethod
-    def _channel_array_names(group):
-        return _resolver_channel_array_names(group)
-
-    def _validate_hq_selection(self):
-        """Source-INDEPENDENT HQ marker selection: normalize the input mode, parse the
-        requested channels + fusion weights, and pick the pre-availability channel list.
-        No source open. Shared by the single-source path (_validate_hq_config) and the
-        source-aware runtime path so the selection semantics are identical.
-        Returns (mode, channels, requested, fusion_weights)."""
-        mode = str(self.seg_config.get("hq_input_mode") or "selected_channels_from_source").strip()
-        if mode not in {"selected_channels_from_source", "step1_weighted_fusion", "hybrid"}:
-            mode = "selected_channels_from_source"
-        if self.method == CELLPOSE_NUCLEI_CSD and mode == "step1_weighted_fusion":
-            mode = "selected_channels_from_source"
-        requested = parse_hq_channels(self.seg_config.get("hq_channels") or [])
-        fusion_weights = dict(self.seg_config.get("step1_fusion_weights") or self.seg_config.get("channel_weights") or {})
-        channels = requested if mode != "step1_weighted_fusion" else [ch for ch, w in fusion_weights.items() if float(w or 0) > 0]
-        return mode, channels, requested, fusion_weights
-
-    def _validate_hq_config(self, roi_name=None):
-        mode, channels, requested, fusion_weights = self._validate_hq_selection()
-        return self._open_hq_single_source(mode, channels, requested, fusion_weights, roi_name)
-
-    def _open_hq_single_source(self, mode, channels, requested, fusion_weights, roi_name=None):
-        # Source DECISION (Step A initial choice + Step B corrected->raw whole-source
-        # fallback) is delegated to the shared pure resolver. The worker keeps every
-        # side effect: _hq_resolved_source_path tracking, the [Step2-HQ] debug prints,
-        # validate_hq_channels raises and seg_config mutation, all below — identical.
-        resolved_source = resolve_hq_marker_source(
-            requested_channels=channels,
-            multichannel_source_path=self._multichannel_source_path(),
-            raw_channel_source_path=self._raw_channel_source_path(),
-            roi_id=str(self.seg_config.get("roi_id") or self.roi_id or ""),
-            requested_roi_names=self._requested_roi_names(roi_name),
-            param_file=self.param_file, abs_fn=self._abs, loader_factory=OMETIFFLoader,
-            source_mode=self._hq_source_mode)
-        group = resolved_source.group
-        available = resolved_source.available_channels
-        source_path = resolved_source.source_path
-        resolved = resolved_source.resolved_channels
-        missing = resolved_source.missing_channels
-        warnings = resolved_source.warnings
-        self._hq_resolved_source_path = source_path
-        if resolved_source.fallback_error:
-            print(f"[Step2-HQ] failed to inspect raw OME fallback source "
-                  f"{self._raw_channel_source_path()}: {resolved_source.fallback_error}")
-        elif resolved_source.fell_back_to_raw:
-            print(
-                "[Step2-HQ] corrected zarr missing requested channels; "
-                f"falling back to raw OME channel source: {source_path}"
-            )
-        root_attrs = resolved_source.root_attrs
-        group_name = resolved_source.group_name
-        group_attrs = resolved_source.group_attrs
-        context = (
-            "HQ source debug:\n"
-            f"  loaded param_file path: {self.param_file or '(none)'}\n"
-            f"  selected hq_source_zarr: {source_path or '(none)'}\n"
-            f"  requested channels: {channels}\n"
-            f"  zarr attrs mode: {root_attrs}\n"
-            f"  requested roi_id: {self.seg_config.get('roi_id') or self.roi_id or '(none)'}\n"
-            f"  requested roi_name: {self.seg_config.get('roi_name') or self.seg_config.get('roi_display_name') or roi_name or self.roi_display_name or '(none)'}\n"
-            f"  selected ROI group name: {group_name or '(root)'}\n"
-            f"  selected ROI group attrs: {group_attrs}\n"
-            f"  available channels from full source: {available}\n"
-            f"  available channels from Step1 fusion weights: {sorted(fusion_weights.keys())}"
-        )
-        print(f"[Step2-HQ] hq_input_mode: {mode}")
-        print(f"[Step2-HQ] requested hq_channels: {requested}")
-        print(f"[Step2-HQ] full source path: {source_path or '(none)'}")
-        print(f"[Step2-HQ] available channels from full source: {available}")
-        print(f"[Step2-HQ] available channels from fusion weights: {sorted(fusion_weights.keys())}")
-        print(f"[Step2-HQ] resolved channels: {resolved}")
-        print(f"[Step2-HQ] missing channels: {missing}")
-        if warnings:
-            for msg in warnings:
-                print(f"[Step2-HQ] warning: {msg}")
-        channels = validate_hq_channels(channels, available, context=context)
-        if mode == "hybrid":
-            weights = {ch: float(fusion_weights.get(ch, 1.0)) for ch in channels}
-            self.seg_config["channel_weights"] = weights
-        elif mode == "step1_weighted_fusion":
-            weights = {ch: float(fusion_weights.get(ch, 1.0)) for ch in channels}
-            self.seg_config["channel_weights"] = weights
-        self.seg_config["hq_channels"] = channels
-        self.seg_config["hq_input_mode"] = mode
-        if self._logger:
-            root = zarr.open(source_path, mode="r") if source_path and str(source_path).endswith(".zarr") else None
-            self._logger.debug("[HQ] loaded param_file path: %s", self.param_file or "")
-            self._logger.debug("[HQ] seg_config hq_channels: %s", channels)
-            self._logger.debug("[HQ] selected hq_source_zarr: %s", source_path)
-            self._logger.debug("[HQ] zarr attrs mode: %s", dict(root.attrs) if root is not None else {})
-            self._logger.debug("[HQ] selected ROI group name: %s", group_name or "(root)")
-            self._logger.debug("[HQ] selected ROI group attrs: %s", group_attrs)
-            self._logger.debug("[HQ] available channel array_keys: %s", available)
-        return channels, group
-
-    def _hq_source_aware_selection(self):
-        """Source-aware runtime HQ selection: run the source-INDEPENDENT selection, then
-        validate it against the RE-RESOLVED per-channel descriptor map with EXACT set
-        equality (reference names excluded) instead of opening the single hq source.
-        Requires _pending_source_aware_runtime. Returns (channels, None) — markers are read
-        from the stored per-channel handles, so there is no hq_group.
-        """
-        from ..utils.channel_remap_config import _is_reference_channel_name
-        mode, channels, requested, fusion_weights = self._validate_hq_selection()
-        descriptor = self._pending_source_aware_runtime or {}
-        desc_channels = list((descriptor.get("channels") or {}).keys())
-        context = ("source-aware HQ selection:\n"
-                   f"  requested channels: {channels}\n"
-                   f"  runtime descriptor channels: {desc_channels}")
-        # Normalize/dedup + subset-of-descriptor via the SAME validator the single-source
-        # path uses (the descriptor channels act as 'available').
-        channels = validate_hq_channels(channels, desc_channels, context=context)
-        # Exact equality AFTER normalization, excluding reference names: the descriptor
-        # must not carry an extra 'resolved-but-unused' marker (validate_hq_channels above
-        # already rejects a selected marker absent from the descriptor).
-        sel = {c for c in channels if not _is_reference_channel_name(c)}
-        desc = {c for c in desc_channels if not _is_reference_channel_name(c)}
-        if sel != desc:
-            raise ValueError(
-                "source-aware runtime marker set must equal the selected markers exactly "
-                f"(selected={sorted(sel)}, descriptor={sorted(desc)}).")
-        if mode == "hybrid":
-            self.seg_config["channel_weights"] = {
-                ch: float(fusion_weights.get(ch, 1.0)) for ch in channels}
-        self.seg_config["hq_channels"] = channels
-        self.seg_config["hq_input_mode"] = mode
-        return channels, None
-
-    def _validate_mesmer_config(self, roi_name=None):
-        # Every Mesmer run goes through the engine process and reads the fused
-        # tile only (plan 7.11.1, block M); no channel group is opened.
-        self.seg_config["mesmer_input_source"] = "fused_zarr"
-        return None
-
-    def _hq_meta_fields(self, nuclei_mask_path="", final_cell_mask_path="", qc_table_path=""):
-        return {
-            "method": "cellpose_nuclei_hq",
-            "display_name": "Cellpose nuclei + HQ",
-            "cellpose_nuclei_parameters": {
-                "model_type": self.seg_config.get("model_type", "cpsam"),
-                "diameter": self.seg_config.get("diameter"),
-                "flow_threshold": self.seg_config.get("flow_threshold", 0.4),
-                "cellprob_threshold": self.seg_config.get("cellprob_threshold", 0.0),
-                "min_size": self.seg_config.get("min_size", 15),
-            },
-            "hq_input_mode": self.seg_config.get("hq_input_mode", "selected_channels_from_source"),
-            "hq_channels": parse_hq_channels(self.seg_config.get("hq_channels") or []),
-            "max_cell_radius": self.seg_config.get("max_cell_radius", 12),
-            "normalization_percentiles": [
-                self.seg_config.get("normalization_percentile_low", 1.0),
-                self.seg_config.get("normalization_percentile_high", 99.5),
-            ],
-            "consensus_mode": self.seg_config.get("consensus_mode", "adaptive_best_channel"),
-            "channel_weights": self.seg_config.get("channel_weights") or {},
-            "min_signal_threshold": self.seg_config.get("min_signal_threshold", 0.08),
-            "nuclei_mask_path": self._abs(nuclei_mask_path),
-            "final_cell_mask_path": self._abs(final_cell_mask_path),
-            "qc_table_path": self._abs(qc_table_path),
-        }
-
-    def _write_label_memmap_outputs(self, mmap_path, shape, zarr_path, ome_path, log_label):
-        """Stream a uint32 memmap label image to zarr and optionally OME-TIFF."""
-        full_h, full_w = shape
-        chunk_rows = 4096
-        arr_ro = np.memmap(mmap_path, dtype='uint32', mode='r', shape=(full_h, full_w))
-        out_z = zarr.open(
-            zarr_path, mode='w',
-            shape=(full_h, full_w), dtype='uint32',
-            chunks=(1024, 1024),
-        )
-        with self.step2_profiler.time_stage("write_mask_zarr", method=self.method, output_path=self._abs(zarr_path)):
-            for y in range(0, full_h, chunk_rows):
-                out_z[y:y + chunk_rows, :] = arr_ro[y:y + chunk_rows, :]
-        if ome_path:
-            with self.step2_profiler.time_stage("export_mask_ome_tiff", method=self.method, output_path=self._abs(ome_path)):
-                with tifffile.TiffWriter(ome_path, bigtiff=True) as tif:
-                    tif.write(
-                        arr_ro.astype(np.float32),
-                        tile=(512, 512),
-                        compression='lzw',
-                        photometric='minisblack',
-                        metadata=None,
-                    )
-        if self._logger:
-            self._logger.info("%s → %s", log_label, ome_path or zarr_path)
-        del arr_ro
-
-    def _write_hq2_layer_outputs(self, layer_mmap_paths, shape, out_prefix=""):
-        """Write optional HQ2 debug/proposal layers and return metadata path keys."""
-        paths = {}
-        if not self.write_hq2_debug_layers:
-            return paths
-        name_map = {
-            "hq_proposal": "hq_proposal_mask_path",
-            "imagej_proposal": "imagej_proposal_mask_path",
-            "core": "core_mask_path",
-            "expansion": "expansion_mask_path",
-        }
-        suffix = f"_{out_prefix}" if out_prefix else ""
-        for layer_key, meta_key in name_map.items():
-            mmap_path = layer_mmap_paths.get(layer_key)
-            if not mmap_path:
-                continue
-            base = f"global_hq2_{layer_key}_mask{suffix}"
-            zarr_path = os.path.join(self.output_dir, f"{base}.zarr")
-            ome_path = os.path.join(self.output_dir, f"{base}.ome.tiff")
-            self._write_label_memmap_outputs(
-                mmap_path, shape, zarr_path,
-                ome_path if self.write_hq2_debug_tiffs else "",
-                f"HQ2 {layer_key}",
-            )
-            paths[meta_key] = self._abs(ome_path if self.write_hq2_debug_tiffs else zarr_path)
-        return paths
-
-    def _read_one_marker_block(self, group, ch, y0, y1, x0, x1):
-        """Read ONE marker channel's RAW native block (normalize=False) from ITS group —
-        a raw_ome loader dict {kind,loader} (with the region-bbox full-image offset) or an
-        open corrected zarr group. This is the SINGLE read implementation shared by the
-        single-source loop and the source-aware per-channel reader, so the two never drift.
-        """
-        if isinstance(group, dict) and group.get("kind") == "raw_ome":
-            loader = group["loader"]
-            by0, bx0 = 0, 0
-            if self._current_region_bbox and len(self._current_region_bbox) == 4:
-                by0, _by1, bx0, _bx1 = [int(v) for v in self._current_region_bbox]
-            fy0, fy1 = by0 + int(y0), by0 + int(y1)
-            fx0, fx1 = bx0 + int(x0), bx0 + int(x1)
-            if getattr(self, "_channel_store", None) is not None:
-                return self._channel_store.read_raw_ome(loader, ch, fy0, fy1, fx0, fx1, normalize=False)
-            return loader.read_region(ch, fy0, fy1, fx0, fx1, downsample=1, normalize=False)
-        if getattr(self, "_channel_store", None) is not None:
-            return self._channel_store.read_zarr_channel(getattr(group, "store", ""), group, ch, y0, y1, x0, x1)
-        return np.asarray(group[ch][y0:y1, x0:x1], dtype=np.float32)
-
-    def _read_hq_marker_channels(self, group, channels, y0, y1, x0, x1):
-        # v14.5d: a pending descriptor that was NOT prepared is a hard failure — never
-        # read markers single-source for a runtime config.
-        if self._pending_source_aware_runtime and self._source_aware_per_channel is None:
-            raise RuntimeError(
-                "source-aware runtime descriptor is pending but per-channel sources were "
-                "not prepared; refusing to read markers (no single-source fallback).")
-        # v14.5d: source-aware runtime -> read each marker from ITS per-channel handle
-        # (selected_channels_from_source only, so no weighted-fusion branch). Same
-        # _read_one_marker_block primitive as below.
-        if self._source_aware_per_channel is not None:
-            blocks = read_per_channel_marker_blocks(
-                self._source_aware_per_channel, channels, (y0, y1, x0, x1),
-                read_block=self._read_one_marker_block)
-            return [blocks[ch] for ch in channels]
-
-        mode = str(self.seg_config.get("hq_input_mode") or "selected_channels_from_source")
-        if mode == "step1_weighted_fusion" and self.method != CELLPOSE_NUCLEI_CSD:
-            fused = None
-            weights = dict(self.seg_config.get("channel_weights") or {})
-            for ch in channels:
-                arr = self._normalize01(self._read_one_marker_block(group, ch, y0, y1, x0, x1)) \
-                    * float(weights.get(ch, 1.0))
-                fused = arr if fused is None else np.maximum(fused, arr)
-            return [fused if fused is not None else np.zeros((y1 - y0, x1 - x0), dtype=np.float32)]
-        return [self._read_one_marker_block(group, ch, y0, y1, x0, x1) for ch in channels]
-
-    def _is_lean_csd(self):
-        """True when the active method is CSD with the streaming lean_carve engine."""
-        if self.method != CELLPOSE_NUCLEI_CSD:
-            return False
-        eng = str(self.seg_config.get("cytoplasm_engine", "lean_carve") or "lean_carve").strip().lower()
-        return eng == "lean_carve"
-
-    def _hq_block_loader(self, group, channels, ry0, rx0):
-        """Lazy per-block channel loader for lean_carve (no whole-ROI channel arrays).
-
-        Reuses the exact single-channel read path of ``_read_hq_marker_channels``,
-        windowed to the requested block, so values are byte-identical to reading
-        the whole tile and slicing. ``y0..x1`` are tile/read-bbox-local coords.
-        """
-        known = set(channels or [])
-        def loader(name, y0, y1, x0, x1):
-            if name not in known:
-                return None
-            sub = self._read_hq_marker_channels(group, [name], ry0 + y0, ry0 + y1, rx0 + x0, rx0 + x1)
-            return np.asarray(sub[0], dtype=np.float32) if sub else None
-        return loader
-
-    def _read_mesmer_channel_source(self, group, y0, y1, x0, x1):
-        nuclear = str(self.seg_config.get("nuclear_channel") or "DAPI").strip() or "DAPI"
-        membrane_channels = parse_hq_channels(self.seg_config.get("membrane_channels") or [])
-        requested = [nuclear] + [ch for ch in membrane_channels if ch != nuclear]
-        source = {}
-        if isinstance(group, dict) and group.get("kind") == "raw_ome":
-            loader = group["loader"]
-            by0, _by1, bx0, _bx1 = [0, 0, 0, 0]
-            if self._current_region_bbox and len(self._current_region_bbox) == 4:
-                by0, _by1, bx0, _bx1 = [int(v) for v in self._current_region_bbox]
-            fy0, fy1 = by0 + int(y0), by0 + int(y1)
-            fx0, fx1 = bx0 + int(x0), bx0 + int(x1)
-            for ch in requested:
-                if getattr(self, "_channel_store", None) is not None:
-                    source[ch] = self._channel_store.read_raw_ome(loader, ch, fy0, fy1, fx0, fx1, normalize=False)
-                else:
-                    source[ch] = loader.read_region(ch, fy0, fy1, fx0, fx1, downsample=1, normalize=False)
-            return source
-        for ch in requested:
-            if getattr(self, "_channel_store", None) is not None:
-                source[ch] = self._channel_store.read_zarr_channel(getattr(group, "store", ""), group, ch, y0, y1, x0, x1)
-            else:
-                source[ch] = np.asarray(group[ch][y0:y1, x0:x1], dtype=np.float32)
-        return source
-
-    @staticmethod
-    def _normalize01(arr):
-        arr = np.asarray(arr, dtype=np.float32)
-        nz = arr[arr > 0]
-        if nz.size > 100:
-            lo, hi = np.percentile(nz, [1.0, 99.8])
-            if hi > lo:
-                return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
-        vmax = float(arr.max()) if arr.size else 0.0
-        if vmax > 0:
-            return np.clip(arr / vmax, 0.0, 1.0)
-        return np.zeros_like(arr, dtype=np.float32)
 
     def _runs_on_engine(self):
         """Block M: the eight Cellpose / StarDist / Mesmer methods always run
         in the engine process -- a Step1 hand-over, manual parameters or an
-        old params file alike. HQ / HQ2 / CDS (no longer maintained) keep the
-        in-process path; a recovery run segments nothing."""
+        old params file alike; a recovery run segments nothing."""
         return self.method in METHOD_ENGINE and self.recovery_npy_dir is None
 
     def _wants_gpu(self):
@@ -2788,35 +2030,6 @@ class SegmentMergeWorker(QThread):
         method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
         if self._runs_on_engine():
             return self._start_contract_engine(method)
-        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
-            if device is None:
-                raise RuntimeError("PyTorch is required for Cellpose/HQ segmentation but is not available.")
-            from cellpose import models as cp_models
-            requested_use_gpu = str(self.seg_config.get("use_gpu", True)).strip().lower() not in {"0", "false", "no", "off", "cpu"}
-            torch_cuda_available = False
-            torch_cuda_version = "unknown"
-            gpu_check_result = "not_run"
-            try:
-                import torch
-                torch_cuda_version = str(getattr(torch.version, "cuda", None))
-                torch_cuda_available = bool(torch.cuda.is_available())
-                gpu_check_result = "torch_cuda_available" if torch_cuda_available else "torch_cuda_unavailable"
-            except Exception as exc:
-                gpu_check_result = f"torch_cuda_check_failed: {exc}"
-            selected_device = str(device)
-            print(f"[Cellpose-GPU] requested_use_gpu={requested_use_gpu}")
-            print(f"[Cellpose-GPU] torch.cuda.is_available={torch_cuda_available}")
-            print(f"[Cellpose-GPU] torch.version.cuda={torch_cuda_version}")
-            print(f"[Cellpose-GPU] device selected={selected_device}")
-            model = cp_models.CellposeModel(device=device)
-            model_device = str(getattr(model, "device", "unknown"))
-            print(f"[Cellpose-GPU] model_device={model_device}")
-            print(f"[Cellpose-GPU] gpu_check_result={gpu_check_result}")
-            if requested_use_gpu and "cuda" not in selected_device.lower() and "cuda" not in model_device.lower():
-                print("[Cellpose-GPU] WARNING: requested GPU but Cellpose is running on CPU.")
-            if self._logger:
-                self._logger.info("[Cellpose-GPU] requested_use_gpu=%s torch_cuda=%s torch.version.cuda=%s selected=%s model_device=%s gpu_check_result=%s", requested_use_gpu, torch_cuda_available, torch_cuda_version, selected_device, model_device, gpu_check_result)
-            return {"cellpose": model}
         raise ValueError(f"Unknown segmentation method: {method}")
 
     def _start_contract_engine(self, method):
@@ -2933,11 +2146,11 @@ class SegmentMergeWorker(QThread):
                 combined = nuclei_pairing.combine_cells_and_nuclei(mask, raw, split=split)
                 return {"mask": combined["cells"], "nuclei": combined["nuclei"],
                         "nuclei_cell": combined["nucleus_cell"], "nuclei_raw": raw,
-                        "nuclei_dropped": dict(combined["objects"]), "qc_rows": []}
+                        "nuclei_dropped": dict(combined["objects"])}
             else:
                 kept, nucleus_cell, counts, dropped = nuclei_pairing.pair_nuclei(mask, raw)
             return {"mask": mask, "nuclei": kept, "nuclei_cell": nucleus_cell,
-                    "nuclei_raw": raw, "nuclei_dropped": dropped, "qc_rows": []}
+                    "nuclei_raw": raw, "nuclei_dropped": dropped}
         return mask
 
     def _close_contract_engine(self):
@@ -2955,119 +2168,10 @@ class SegmentMergeWorker(QThread):
         if self._runner_io:
             shutil.rmtree(self._runner_io, ignore_errors=True)
 
-    def _segment_tile(self, tile_data, backend, hq_marker_channels=None, mesmer_channel_source=None,
-                      profile_tile_id=None, hq_block_loader=None, output_labels=None):
-        """Return a uint32 label mask for one read tile."""
-        method = self.seg_config.get("method", CELLPOSE_WHOLECELL_FUSION)
-        if self._runs_on_engine():
-            return self._segment_tile_contract(tile_data, backend, profile_tile_id)
-        self._set_runtime_stage("preprocess")
-        with self.step2_profiler.time_stage("preprocess", tile_id=profile_tile_id, method=method):
-            tile_f32 = tile_data.astype(np.float32) / 65535.0
-
-        dapi = np.ascontiguousarray(tile_f32[:, :, 1])
-        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
-            self._set_runtime_stage("model_inference")
-            with self.step2_profiler.time_stage("model_inference", tile_id=profile_tile_id, method=method):
-                masks, _, _ = backend["cellpose"].eval(
-                    dapi,
-                    diameter=self.seg_config.get("diameter"),
-                    flow_threshold=self.seg_config.get("flow_threshold", 0.4),
-                    cellprob_threshold=self.seg_config.get("cellprob_threshold", 0.0),
-                    min_size=self.seg_config.get("min_size", 15),
-                    do_3D=False,
-                )
-            if method == CELLPOSE_NUCLEI_HQ:
-                hq_names = self.seg_config.get("hq_channels") or []
-                if str(self.seg_config.get("hq_input_mode") or "") == "step1_weighted_fusion":
-                    hq_names = ["step1_weighted_fusion"]
-                with self.step2_profiler.time_stage("postprocess", tile_id=profile_tile_id, method=method):
-                    final_mask, nuclei_mask, qc_rows = segment_nuclei_hq(
-                        masks.astype(np.uint32, copy=False),
-                        hq_marker_channels or [],
-                        hq_names,
-                        max_cell_radius=self.seg_config.get("max_cell_radius", 12),
-                        normalization_low=self.seg_config.get("normalization_percentile_low", 1.0),
-                        normalization_high=self.seg_config.get("normalization_percentile_high", 99.5),
-                        consensus_mode=self.seg_config.get("consensus_mode", "adaptive_best_channel"),
-                        channel_weights=self.seg_config.get("channel_weights") or {},
-                        min_signal_threshold=self.seg_config.get("min_signal_threshold", 0.08),
-                        channel_remap_params=self.seg_config.get("_channel_remap_params") or {},
-                    )
-                return {
-                    "mask": final_mask.astype(np.uint32, copy=False),
-                    "nuclei": nuclei_mask.astype(np.uint32, copy=False),
-                    "qc_rows": qc_rows,
-                }
-            if method == CELLPOSE_NUCLEI_HQ2:
-                hq_names = self.seg_config.get("hq_channels") or []
-                if str(self.seg_config.get("hq_input_mode") or "") == "step1_weighted_fusion":
-                    hq_names = ["step1_weighted_fusion"]
-                with self.step2_profiler.time_stage("postprocess", tile_id=profile_tile_id, method=method):
-                    hq2 = run_hq2_segmentation(
-                        masks.astype(np.uint32, copy=False),
-                        hq_marker_channels or [],
-                        hq_names,
-                        self.seg_config,
-                        logger=self._logger,
-                        return_layers=self.write_hq2_debug_layers,
-                        progress_callback=lambda msg: self.progress.emit(0, 1, msg),
-                        cancel_check=lambda: bool(self._stop),
-                    )
-                return {
-                    "mask": hq2["final_labels"].astype(np.uint32, copy=False),
-                    "nuclei": hq2["nuclei_labels"].astype(np.uint32, copy=False),
-                    "qc_rows": hq2.get("qc_rows") or [],
-                    "hq2_metadata": hq2.get("metadata") or {},
-                    "hq2_layers": ({
-                        "hq_proposal": hq2["hq_proposal_labels"].astype(np.uint32, copy=False),
-                        "imagej_proposal": hq2["imagej_proposal_labels"].astype(np.uint32, copy=False),
-                        "core": hq2["high_confidence_core_labels"].astype(np.uint32, copy=False),
-                        "expansion": hq2["expansion_added_pixels"].astype(np.uint32, copy=False),
-                    } if self.write_hq2_debug_layers else {}),
-                }
-            if method == CELLPOSE_NUCLEI_CSD:
-                hq_names = self.seg_config.get("hq_channels") or []
-                if hq_block_loader is not None:
-                    # lean_carve streams channels per block; free DAPI + GPU cache
-                    # and shrink the channel cache (drop the one-shot whole-image
-                    # fused/dapi entries) before the carve so peak memory stays low.
-                    del dapi
-                    import gc as _gc
-                    _gc.collect()
-                    self._empty_torch_cache_if_available()
-                    if getattr(self, "_channel_store", None) is not None:
-                        self._channel_store.set_max_cache_items(
-                            int(self.seg_config.get("lean_cache_max_items", 2) or 2)
-                        )
-                with self.step2_profiler.time_stage("postprocess", tile_id=profile_tile_id, method=method):
-                    csd = run_constrained_donut_segmentation(
-                        masks.astype(np.uint32, copy=False),
-                        hq_marker_channels or [],
-                        hq_names,
-                        self.seg_config,
-                        logger=self._logger,
-                        return_layers=self.write_hq2_debug_layers,
-                        progress_callback=lambda msg: self.progress.emit(0, 1, msg),
-                        cancel_check=lambda: bool(self._stop),
-                        marker_channels_loader=hq_block_loader,
-                        output_labels=output_labels,
-                    )
-                return {
-                    "mask": csd["final_labels"].astype(np.uint32, copy=False),
-                    "nuclei": csd["nuclei_labels"].astype(np.uint32, copy=False),
-                    "qc_rows": csd.get("qc_rows") or [],
-                    "hq2_metadata": csd.get("metadata") or {},
-                    "hq2_layers": ({
-                        "hq_proposal": csd.get("hq_proposal_labels", np.zeros_like(masks, dtype=np.uint32)).astype(np.uint32, copy=False),
-                        "imagej_proposal": csd.get("imagej_proposal_labels", np.zeros_like(masks, dtype=np.uint32)).astype(np.uint32, copy=False),
-                        "core": csd.get("high_confidence_core_labels", np.zeros_like(masks, dtype=np.uint32)).astype(np.uint32, copy=False),
-                        "expansion": csd.get("expansion_added_pixels", np.zeros_like(masks, dtype=np.uint32)).astype(np.uint32, copy=False),
-                    } if self.write_hq2_debug_layers else {}),
-                }
-            return masks.astype(np.uint32)
-
-        raise ValueError(f"Unknown segmentation method: {method}")
+    def _segment_tile(self, tile_data, backend, profile_tile_id=None):
+        """One read tile through the engine process: a uint32 label mask, or
+        the cell + nuclei dict of a method that keeps its nuclei."""
+        return self._segment_tile_contract(tile_data, backend, profile_tile_id)
 
     @staticmethod
     def _write_tile_ometiff(path, arr, description=""):
@@ -3100,25 +2204,13 @@ class SegmentMergeWorker(QThread):
 
         Returns total cell count.
         """
-        self._current_region_bbox = list(bbox) if bbox else None
         with self.step2_profiler.time_stage("load_roi", input_source=self._abs(zarr_path), method=self.method):
             z      = zarr.open(zarr_path, mode='r')
             full_h = z.shape[0]
             full_w = z.shape[1]
         log.info(f"  zarr: {full_h}×{full_w} px")
 
-        # v14.5d: re-resolve + cross-check the source-aware runtime remap IMMEDIATELY
-        # after opening the segmentation-input zarr and BEFORE creating any scheduler /
-        # memmap / tile output — so a source/geometry failure aborts with no output
-        # (all-or-nothing before any segmentation output).
-        if self._pending_source_aware_runtime:
-            self._prepare_source_aware_runtime((full_h, full_w))
-
-        strategy_info = self._record_tile_strategy(
-            full_h,
-            full_w,
-            channel_count=max(2, len(parse_hq_channels(self.seg_config.get("hq_channels") or [])) or 2),
-        )
+        strategy_info = self._record_tile_strategy(full_h, full_w, channel_count=2)
         tile_h = -(-full_h // self.n_rows)
         tile_w = -(-full_w // self.n_cols)
 
@@ -3147,14 +2239,9 @@ class SegmentMergeWorker(QThread):
                               shape=(full_h, full_w))
         dapi_mmap[:] = 0
 
-        is_hq2 = is_hq2_csd_method(self.method)
-        is_mesmer_guided = self.method == MESMER_NUCLEAR_GUIDED
-        is_mesmer = self.method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
-        is_hq = self.method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD) or is_mesmer_guided
-        # Block N2: nuclear-guided and the expansions keep their nuclei on the
-        # new path (paired, own ids, nucleus -> cell table); HQ keeps its own.
+        # Block N2: nuclear-guided and the expansions keep their nuclei
+        # (paired, own ids, nucleus -> cell table).
         keeps_nuclei = self._keeps_secondary_nuclei()
-        hq_nuclei = is_hq and not is_mesmer_guided
         nuclei_state = self._nuclei_begin(out_prefix) if keeps_nuclei else None
         regions_judge, regions_skip = self._regions_for(out_prefix, tiles, full_h, full_w,
                                                         bbox=bbox, poly=poly_fullres)
@@ -3162,38 +2249,15 @@ class SegmentMergeWorker(QThread):
                                   zarr_path=zarr_path, judge=regions_judge)
         skip_all = self._tile_skip_set() | regions_skip      # fixed before the prefetcher starts
         seam_record = None
-        hq_channels, hq_group = ([], None)
-        mesmer_group = None
         nuclei_mmap = None
         nuclei_mmap_path = ""
-        hq_qc_rows = []
-        hq2_layer_mmaps = {}
-        hq2_layer_mmap_paths = {}
-        if is_hq and not is_mesmer_guided:
-            # prepare already ran right after zarr.open (above); here only select.
-            if self._source_aware_per_channel is not None:
-                hq_channels, hq_group = self._hq_source_aware_selection()
-            else:
-                hq_channels, hq_group = self._validate_hq_config(out_prefix)
-        if is_mesmer:
-            mesmer_group = self._validate_mesmer_config(out_prefix)
-        if hq_nuclei or keeps_nuclei:
+        if keeps_nuclei:
             nuclei_mmap_path = os.path.join(
                 self.output_dir, f'global_nuclei_mask_{out_prefix}.dat'
             )
             nuclei_mmap = np.memmap(nuclei_mmap_path, dtype='uint32', mode='w+',
                                     shape=(full_h, full_w))
             nuclei_mmap[:] = 0
-        if is_hq2 and self.write_hq2_debug_layers:
-            for layer_key in ("hq_proposal", "imagej_proposal", "core", "expansion"):
-                layer_path = os.path.join(
-                    self.output_dir, f'global_hq2_{layer_key}_mask_{out_prefix}.dat'
-                )
-                hq2_layer_mmap_paths[layer_key] = layer_path
-                hq2_layer_mmaps[layer_key] = np.memmap(
-                    layer_path, dtype='uint32', mode='w+', shape=(full_h, full_w)
-                )
-                hq2_layer_mmaps[layer_key][:] = 0
 
         global_id_offset = 0
         tile_stats = []
@@ -3201,8 +2265,7 @@ class SegmentMergeWorker(QThread):
         self._active_tile_scheduler = scheduler    # closed before the run answers
         scheduler.attach_payload_loader(
             lambda idx, t, profile_tile_base=None: self._prepare_tile_payload(
-                zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
-                is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=profile_tile_base,
+                zarr_path, z, t, dapi_mmap=None, profile_tile_base=profile_tile_base,
                 skip=idx in skip_all,
             ),
             logger=log,
@@ -3229,7 +2292,7 @@ class SegmentMergeWorker(QThread):
                 "tile_h": int(tile_shape[0]),
                 "tile_w": int(tile_shape[1]),
                 "overlap": int(self.overlap_px),
-                "channels_used": list(hq_channels or []),
+                "channels_used": [],
                 "method": self.method,
                 "dtype": str(getattr(z, "dtype", "")),
                 "input_source": self._abs(zarr_path),
@@ -3274,8 +2337,6 @@ class SegmentMergeWorker(QThread):
             )
             tile_data = payload["tile_data"]
             dapi_own = payload["dapi_own"]
-            hq_marker_channels_prefetched = payload.get("hq_marker_channels")
-            mesmer_channel_source_prefetched = payload.get("mesmer_channel_source")
             if not self._cores_run():                  # a cores run's DAPI comes from the fill
                 dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
             stage_seconds["read_tile"] = time.perf_counter() - _t
@@ -3288,9 +2349,6 @@ class SegmentMergeWorker(QThread):
             if self.recovery_npy_dir is not None:
                 local_nuclei = None
                 local_nuclei_cell = local_nuclei_raw = local_nuclei_dropped = None
-                local_qc_rows = []
-                local_hq2_layers = {}
-                local_hq2_metadata = {}
                 npy_path = os.path.join(
                     self.recovery_npy_dir,
                     f'tile_{out_prefix}_{row}_{col}.npy'
@@ -3306,71 +2364,26 @@ class SegmentMergeWorker(QThread):
                 stage_seconds["model_inference"] = time.perf_counter() - _t
             else:
                 try:
-                    hq_marker_channels = hq_marker_channels_prefetched
-                    mesmer_channel_source = mesmer_channel_source_prefetched
-                    _t = time.perf_counter()
-                    if hq_marker_channels is None and mesmer_channel_source is None:
-                        self._set_runtime_stage("read_tile")
-                        with self.step2_profiler.time_stage("read_tile", **tile_profile_base):
-                            if is_hq and not is_mesmer_guided:
-                                hq_marker_channels = self._read_hq_marker_channels(
-                                    hq_group, hq_channels, ry0, ry1, rx0, rx1
-                                )
-                            if is_mesmer and mesmer_group is not None:
-                                mesmer_channel_source = self._read_mesmer_channel_source(
-                                    mesmer_group, ry0, ry1, rx0, rx1
-                                )
-                        stage_seconds["read_tile"] += time.perf_counter() - _t
-                    hq_block_loader = (
-                        self._hq_block_loader(hq_group, hq_channels, ry0, rx0)
-                        if (is_hq and not is_mesmer_guided and self._is_lean_csd()) else None
-                    )
-                    # Whole-ROI (single tile, no overlap): let lean_carve write its
-                    # labels straight into the global-mask memmap view instead of a
-                    # RAM-resident whole-image array (the later lut remap overwrites
-                    # cell pixels with global ids; background 0 stays 0).
-                    csd_output = (
-                        mmap[ry0:ry1, rx0:rx1]
-                        if (hq_block_loader is not None and n_tiles == 1) else None
-                    )
                     local_result = self._segment_tile(
                         tile_data,
                         model,
-                        hq_marker_channels,
-                        mesmer_channel_source=mesmer_channel_source,
                         profile_tile_id=profile_tile_id,
-                        hq_block_loader=hq_block_loader,
-                        output_labels=csd_output,
                     )
-                    local_nuclei = None
-                    local_nuclei_cell = local_nuclei_raw = local_nuclei_dropped = None
-                    local_qc_rows = []
-                    local_hq2_layers = {}
-                    local_hq2_metadata = {}
-                    if isinstance(local_result, dict):
-                        local_mask = local_result["mask"]
-                        local_nuclei = local_result.get("nuclei")
-                        local_nuclei_cell = local_result.get("nuclei_cell")
-                        local_nuclei_raw = local_result.get("nuclei_raw")
-                        local_nuclei_dropped = local_result.get("nuclei_dropped")
-                        local_qc_rows = local_result.get("qc_rows") or []
-                        local_hq2_layers = local_result.get("hq2_layers") or {}
-                        local_hq2_metadata = local_result.get("hq2_metadata") or {}
-                    else:
-                        local_mask = local_result
-                except Exception as e:
-                    if self._runs_on_engine():
-                        # An engine tile that failed or was stopped is never
-                        # stored as an empty result: the run ends here.
-                        self._close_tile_scheduler(scheduler)
-                        raise
-                    log.error(f"  Tile [{row},{col}] failed: {traceback.format_exc()}")
-                    local_mask = np.zeros((ry1-ry0, rx1-rx0), dtype=np.uint32)
-                    local_nuclei = None
-                    local_nuclei_cell = local_nuclei_raw = local_nuclei_dropped = None
-                    local_qc_rows = []
-                    local_hq2_layers = {}
-                    local_hq2_metadata = {}
+                except Exception:
+                    # An engine tile that failed or was stopped is never
+                    # stored as an empty result: the run ends here.
+                    self._close_tile_scheduler(scheduler)
+                    raise
+                local_nuclei = None
+                local_nuclei_cell = local_nuclei_raw = local_nuclei_dropped = None
+                if isinstance(local_result, dict):
+                    local_mask = local_result["mask"]
+                    local_nuclei = local_result.get("nuclei")
+                    local_nuclei_cell = local_result.get("nuclei_cell")
+                    local_nuclei_raw = local_result.get("nuclei_raw")
+                    local_nuclei_dropped = local_result.get("nuclei_dropped")
+                else:
+                    local_mask = local_result
                 if use_gpu:
                     self._empty_torch_cache_if_available()
                 self.step2_profiler.log_tile_stage(
@@ -3498,28 +2511,6 @@ class SegmentMergeWorker(QThread):
                     if keeps_nuclei and local_nuclei is not None:
                         remapped_nuclei = self._nuclei_add_tile(nuclei_state, lut, local_nuclei,
                                                                 local_nuclei_cell)
-                    elif hq_nuclei and local_nuclei is not None:
-                        safe_nuclei = np.where(local_nuclei <= n_raw, local_nuclei, 0).astype(np.uint32, copy=False)
-                        remapped_nuclei = lut[safe_nuclei]
-                    remapped_hq2_layers = {}
-                    if is_hq2 and local_hq2_layers:
-                        for layer_key, layer_arr in local_hq2_layers.items():
-                            layer_arr = np.asarray(layer_arr, dtype=np.uint32)
-                            safe = np.where(layer_arr <= n_raw, layer_arr, 0).astype(np.uint32, copy=False)
-                            remapped_hq2_layers[layer_key] = lut[safe]
-                    if is_hq and local_qc_rows:
-                        kept_set = set(keep_labels)
-                        for row_qc in local_qc_rows:
-                            old_id = int(row_qc.get("cell_id", 0) or 0)
-                            if old_id not in kept_set:
-                                continue
-                            new_row = dict(row_qc)
-                            new_row["cell_id"] = int(lut[old_id])
-                            hq_qc_rows.append(new_row)
-                    if is_hq2 and local_hq2_metadata:
-                        tile_meta = dict(local_hq2_metadata)
-                        tile_meta.update({"row": row, "col": col, "out_prefix": out_prefix})
-                        self._hq2_tile_metadata.append(tile_meta)
             stage_seconds["relabel"] = stage_seconds.get("relabel", 0.0) + (time.perf_counter() - _t)
 
             if not keep_labels:
@@ -3542,14 +2533,6 @@ class SegmentMergeWorker(QThread):
                     ndst = nuclei_mmap[ry0:ry1, rx0:rx1]
                     np.copyto(ndst, remapped_nuclei, where=(remapped_nuclei > 0))
                     del remapped_nuclei
-                if is_hq2 and remapped_hq2_layers:
-                    for layer_key, layer_arr in remapped_hq2_layers.items():
-                        layer_mmap = hq2_layer_mmaps.get(layer_key)
-                        if layer_mmap is None:
-                            continue
-                        ldst = layer_mmap[ry0:ry1, rx0:rx1]
-                        np.copyto(ldst, layer_arr, where=(layer_arr > 0))
-                    del remapped_hq2_layers
             stage_seconds["merge_or_write"] = stage_seconds.get("merge_or_write", 0.0) + (time.perf_counter() - _t)
             self.step2_profiler.log_tile_stage(
                 profile_tile_id,
@@ -3599,16 +2582,12 @@ class SegmentMergeWorker(QThread):
             dapi_mmap.flush()
             if nuclei_mmap is not None:
                 nuclei_mmap.flush()
-            for layer_mmap in hq2_layer_mmaps.values():
-                layer_mmap.flush()
         total_cells = int(global_id_offset)
         log.info(f"  [{out_prefix}] total_cells={total_cells:,}")
 
         del mmap, dapi_mmap
         if nuclei_mmap is not None:
             del nuclei_mmap
-        for layer_key in list(hq2_layer_mmaps.keys()):
-            del hq2_layer_mmaps[layer_key]
         gc.collect()
 
         if self._stop:
@@ -3621,7 +2600,7 @@ class SegmentMergeWorker(QThread):
         dapi_mmap_ro = np.memmap(dapi_mmap_path, dtype='uint16', mode='r',
                                  shape=(full_h, full_w))
         nuclei_mmap_ro = None
-        if (hq_nuclei or keeps_nuclei) and nuclei_mmap_path:
+        if keeps_nuclei and nuclei_mmap_path:
             nuclei_mmap_ro = np.memmap(nuclei_mmap_path, dtype='uint32', mode='r',
                                        shape=(full_h, full_w))
 
@@ -3659,41 +2638,13 @@ class SegmentMergeWorker(QThread):
         with self.step2_profiler.time_stage("export_ome_tiff", method=self.method, output_path=self._abs(global_dapi_path)):
             write_tiled_ome_tiff(global_dapi_path, dapi_mmap_ro)
 
-        nuclei_ome_path = ""
+        nuclei_ome_path = ""        # no nuclei OME-TIFF (Block N2); Mesmer metadata names it
         nuclei_zarr_path = ""
         nuclei_table_path = ""
-        qc_table_path = ""
         if keeps_nuclei and nuclei_mmap_ro is not None:
             # Block N2: zarr only (no float32 OME-TIFF), through `*.partial`.
             nuclei_zarr_path, nuclei_table_path = self._nuclei_finish(
                 nuclei_state, nuclei_mmap_ro, full_h, full_w, out_prefix)
-            del nuclei_mmap_ro
-        elif hq_nuclei and nuclei_mmap_ro is not None:
-            nuclei_zarr_path = os.path.join(
-                self.output_dir, f'global_nuclei_mask_{out_prefix}.zarr'
-            )
-            nz = zarr.open(nuclei_zarr_path, mode='w',
-                           shape=(full_h, full_w), dtype='uint32',
-                           chunks=(1024, 1024))
-            with self.step2_profiler.time_stage("write_mask_zarr", method=self.method, output_path=self._abs(nuclei_zarr_path)):
-                for y in range(0, full_h, CHUNK):
-                    nz[y:y+CHUNK, :] = nuclei_mmap_ro[y:y+CHUNK, :]
-            nuclei_ome_path = os.path.join(
-                self.output_dir, f'global_nuclei_mask_{out_prefix}.ome.tiff'
-            )
-            with self.step2_profiler.time_stage("export_mask_ome_tiff", method=self.method, output_path=self._abs(nuclei_ome_path)):
-                write_tiled_ome_tiff(nuclei_ome_path, nuclei_mmap_ro, np.float32)
-            if is_mesmer_guided:
-                qc_table_path = ""
-            elif is_hq2:
-                qc_name = "csd_qc_table" if self.method == CELLPOSE_NUCLEI_CSD else "hq2_qc_table"
-                qc_table_path = os.path.join(self.output_dir, f'{qc_name}_{out_prefix}.csv')
-                with self.step2_profiler.time_stage("metadata_write", method=self.method, output_path=self._abs(qc_table_path)):
-                    (write_csd_qc_table if self.method == CELLPOSE_NUCLEI_CSD else write_hq2_qc_table)(qc_table_path, hq_qc_rows)
-            else:
-                qc_table_path = os.path.join(self.output_dir, f'hq_qc_table_{out_prefix}.csv')
-                with self.step2_profiler.time_stage("metadata_write", method=self.method, output_path=self._abs(qc_table_path)):
-                    write_hq_qc_table(qc_table_path, hq_qc_rows)
             del nuclei_mmap_ro
 
         self._record_step2_geometry(full_h, full_w, nuclei_zarr_path, out_zarr_path)
@@ -3704,12 +2655,6 @@ class SegmentMergeWorker(QThread):
         self._log_nuclei(out_prefix, label_store)
         if keeps_nuclei and nuclei_mmap_path and os.path.exists(nuclei_mmap_path):
             os.remove(nuclei_mmap_path)          # nobody reads it; the zarr is the store
-
-        hq2_paths = {}
-        if is_hq2:
-            hq2_paths = self._write_hq2_layer_outputs(
-                hq2_layer_mmap_paths, (full_h, full_w), out_prefix=out_prefix
-            )
 
         del mmap_ro, dapi_mmap_ro
         gc.collect()
@@ -3764,17 +2709,6 @@ class SegmentMergeWorker(QThread):
                     "whole_cell_mask_path": self._abs(ome_path) if self.method != MESMER_NUCLEI else "",
                 },
             ))
-        if is_hq2:
-            hq2_meta_paths = dict(hq2_paths)
-            hq2_meta_paths.update({
-                "nuclei_mask_path": self._abs(nuclei_ome_path),
-                "final_cell_mask_path": self._abs(ome_path),
-                "qc_table_path": self._abs(qc_table_path),
-            })
-            meta.update((csd_metadata_fields if self.method == CELLPOSE_NUCLEI_CSD else hq2_metadata_fields)(self.seg_config, hq2_meta_paths))
-            meta["hq2_tile_metadata"] = list(self._hq2_tile_metadata)
-        elif is_hq:
-            meta.update(self._hq_meta_fields(nuclei_ome_path, ome_path, qc_table_path))
         if self.roi_id:
             mask_roi_id = os.path.join(self.output_dir, f"global_mask_{self.roi_id}.ome.tiff")
             dapi_roi_id = os.path.join(self.output_dir, f"global_dapi_{self.roi_id}.ome.tiff")
@@ -3888,7 +2822,7 @@ class SegmentMergeWorker(QThread):
                         import torch
                     except ImportError as exc:
                         raise RuntimeError(
-                            "PyTorch is required for Cellpose/HQ Step2 segmentation, "
+                            "PyTorch is required for Cellpose Step2 segmentation, "
                             "but it is not installed in the current environment."
                         ) from exc
                     use_gpu = torch.cuda.is_available()
@@ -4014,30 +2948,13 @@ class SegmentMergeWorker(QThread):
                     "tile_strategy": self._step2_engine_meta(),
                     **({"regions_run": self._regions_run_meta()} if getattr(self, "_regions", None) else {}),
                 }
-                if self.method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
-                    summary_meta.update((csd_metadata_fields if self.method == CELLPOSE_NUCLEI_CSD else hq2_metadata_fields)(self.seg_config, {
-                        "nuclei_mask_path": first_roi_meta.get("nuclei_mask_path", ""),
-                        "hq_proposal_mask_path": first_roi_meta.get("hq_proposal_mask_path", ""),
-                        "imagej_proposal_mask_path": first_roi_meta.get("imagej_proposal_mask_path", ""),
-                        "core_mask_path": first_roi_meta.get("core_mask_path", ""),
-                        "expansion_mask_path": first_roi_meta.get("expansion_mask_path", ""),
-                        "final_cell_mask_path": first_roi_meta.get("final_cell_mask_path") or first_roi_meta.get("ome_tiff", ""),
-                        "qc_table_path": first_roi_meta.get("qc_table_path", ""),
-                    }))
-                    summary_meta["hq2_tile_metadata"] = list(self._hq2_tile_metadata)
-                elif self.method == CELLPOSE_NUCLEI_HQ:
-                    summary_meta.update(self._hq_meta_fields(
-                        first_roi_meta.get("nuclei_mask_path", ""),
-                        first_roi_meta.get("final_cell_mask_path") or first_roi_meta.get("ome_tiff", ""),
-                        first_roi_meta.get("qc_table_path", ""),
-                    ))
                 runtime_meta = self._finish_runtime_monitor()
                 summary_meta["runtime"] = runtime_meta
                 summary_meta["seg_engine"] = self._engine_meta
                 summary_meta_path = os.path.join(self.output_dir, "segmentation_meta.json")
                 with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(summary_meta_path)):
                     write_json_atomic(summary_meta_path, summary_meta)   # block A6 G2
-                self._write_run_metadata(summary_meta)   # the remap promotion reads it
+                self._write_run_metadata(summary_meta)
                 if self._stop:                       # a Stop while the outputs were written:
                     if getattr(self, "_channel_store", None) is not None:   # nothing is published
                         self._channel_store.close()
@@ -4071,17 +2988,7 @@ class SegmentMergeWorker(QThread):
                 full_w  = z.shape[1]
             log.info(f"Input zarr: {full_h}×{full_w} px")
 
-            # v14.5d: re-resolve + cross-check the source-aware runtime remap IMMEDIATELY
-            # after opening the zarr and BEFORE any scheduler / memmap / tile output
-            # (all-or-nothing before any segmentation output).
-            if self._pending_source_aware_runtime:
-                self._prepare_source_aware_runtime((full_h, full_w))
-
-            strategy_info = self._record_tile_strategy(
-                full_h,
-                full_w,
-                channel_count=max(2, len(parse_hq_channels(self.seg_config.get("hq_channels") or [])) or 2),
-            )
+            strategy_info = self._record_tile_strategy(full_h, full_w, channel_count=2)
             tile_h = -(-full_h // self.n_rows)
             tile_w = -(-full_w // self.n_cols)
 
@@ -4108,48 +3015,22 @@ class SegmentMergeWorker(QThread):
                                   shape=(full_h, full_w))
             dapi_mmap[:] = 0
 
-            is_hq2 = is_hq2_csd_method(self.method)
-            is_mesmer_guided = self.method == MESMER_NUCLEAR_GUIDED
-            is_mesmer = self.method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
-            is_hq = self.method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD) or is_mesmer_guided
-            # Block N2: nuclear-guided and the expansions keep their nuclei on the
-            # new path (paired, own ids, nucleus -> cell table); HQ keeps its own.
+            # Block N2: nuclear-guided and the expansions keep their nuclei
+            # (paired, own ids, nucleus -> cell table).
             keeps_nuclei = self._keeps_secondary_nuclei()
-            hq_nuclei = is_hq and not is_mesmer_guided
             nuclei_state = self._nuclei_begin("") if keeps_nuclei else None
             regions_judge, regions_skip = self._regions_for("", tiles, full_h, full_w)
             merger = self._seam_begin(tiles, full_h, full_w, "", keeps_nuclei, nuclei_state,
                                       judge=regions_judge)
             skip_all = self._tile_skip_set() | regions_skip  # fixed before the prefetcher starts
             seam_record = None
-            hq_channels, hq_group = ([], None)
-            mesmer_group = None
             nuclei_mmap = None
             nuclei_mmap_path = ""
-            hq_qc_rows = []
-            hq2_layer_mmaps = {}
-            hq2_layer_mmap_paths = {}
-            if is_hq and not is_mesmer_guided:
-                # prepare already ran right after zarr.open (above); here only select.
-                if self._source_aware_per_channel is not None:
-                    hq_channels, hq_group = self._hq_source_aware_selection()
-                else:
-                    hq_channels, hq_group = self._validate_hq_config()
-            if is_mesmer:
-                mesmer_group = self._validate_mesmer_config()
-            if hq_nuclei or keeps_nuclei:
+            if keeps_nuclei:
                 nuclei_mmap_path = os.path.join(self.output_dir, 'global_nuclei_mask.dat')
                 nuclei_mmap = np.memmap(nuclei_mmap_path, dtype='uint32', mode='w+',
                                         shape=(full_h, full_w))
                 nuclei_mmap[:] = 0
-            if is_hq2 and self.write_hq2_debug_layers:
-                for layer_key in ("hq_proposal", "imagej_proposal", "core", "expansion"):
-                    layer_path = os.path.join(self.output_dir, f'global_hq2_{layer_key}_mask.dat')
-                    hq2_layer_mmap_paths[layer_key] = layer_path
-                    hq2_layer_mmaps[layer_key] = np.memmap(
-                        layer_path, dtype='uint32', mode='w+', shape=(full_h, full_w)
-                    )
-                    hq2_layer_mmaps[layer_key][:] = 0
 
             global_id_offset = 0
             tile_stats = []
@@ -4157,8 +3038,7 @@ class SegmentMergeWorker(QThread):
             self._active_tile_scheduler = scheduler    # closed before the run answers
             scheduler.attach_payload_loader(
                 lambda idx, t, profile_tile_base=None: self._prepare_tile_payload(
-                    self.zarr_path, z, t, is_hq, is_mesmer_guided, hq_group, hq_channels,
-                    is_mesmer, mesmer_group, dapi_mmap=None, profile_tile_base=profile_tile_base,
+                    self.zarr_path, z, t, dapi_mmap=None, profile_tile_base=profile_tile_base,
                     skip=idx in skip_all,
                 ),
                 logger=log,
@@ -4185,7 +3065,7 @@ class SegmentMergeWorker(QThread):
                     "tile_h": int(tile_shape[0]),
                     "tile_w": int(tile_shape[1]),
                     "overlap": int(self.overlap_px),
-                    "channels_used": list(hq_channels or []),
+                    "channels_used": [],
                     "method": self.method,
                     "dtype": str(getattr(z, "dtype", "")),
                     "input_source": self._abs(self.zarr_path),
@@ -4228,8 +3108,6 @@ class SegmentMergeWorker(QThread):
                 )
                 tile_data = payload["tile_data"]
                 dapi_own = payload["dapi_own"]
-                hq_marker_channels_prefetched = payload.get("hq_marker_channels")
-                mesmer_channel_source_prefetched = payload.get("mesmer_channel_source")
                 if not self._cores_run():                  # a cores run's DAPI comes from the fill
                     dapi_mmap[oy0:oy1, ox0:ox1] = dapi_own[:own_h, :own_w]
                 stage_seconds["read_tile"] = time.perf_counter() - _t
@@ -4242,9 +3120,6 @@ class SegmentMergeWorker(QThread):
                 if self.recovery_npy_dir is not None:
                     local_nuclei = None
                     local_nuclei_cell = local_nuclei_raw = local_nuclei_dropped = None
-                    local_qc_rows = []
-                    local_hq2_layers = {}
-                    local_hq2_metadata = {}
                     npy_path = os.path.join(
                         self.recovery_npy_dir, f'tile_{row}_{col}.npy'
                     )
@@ -4261,69 +3136,25 @@ class SegmentMergeWorker(QThread):
                     stage_seconds["model_inference"] = time.perf_counter() - _t
                 else:
                     try:
-                        hq_marker_channels = hq_marker_channels_prefetched
-                        mesmer_channel_source = mesmer_channel_source_prefetched
-                        _t = time.perf_counter()
-                        if hq_marker_channels is None and mesmer_channel_source is None:
-                            self._set_runtime_stage("read_tile")
-                            with self.step2_profiler.time_stage("read_tile", **tile_profile_base):
-                                if is_hq and not is_mesmer_guided and not self._is_lean_csd():
-                                    hq_marker_channels = self._read_hq_marker_channels(
-                                        hq_group, hq_channels, ry0, ry1, rx0, rx1
-                                    )
-                                if is_mesmer and mesmer_group is not None:
-                                    mesmer_channel_source = self._read_mesmer_channel_source(
-                                        mesmer_group, ry0, ry1, rx0, rx1
-                                    )
-                            stage_seconds["read_tile"] += time.perf_counter() - _t
-                        hq_block_loader = (
-                            self._hq_block_loader(hq_group, hq_channels, ry0, rx0)
-                            if (is_hq and not is_mesmer_guided and self._is_lean_csd()) else None
-                        )
-                        # Whole-ROI single tile: write straight into the global-mask
-                        # memmap view rather than a RAM whole-image array.
-                        csd_output = (
-                            mmap[ry0:ry1, rx0:rx1]
-                            if (hq_block_loader is not None and n_tiles == 1) else None
-                        )
                         local_result = self._segment_tile(
                             tile_data,
                             model,
-                            hq_marker_channels,
-                            mesmer_channel_source=mesmer_channel_source,
                             profile_tile_id=profile_tile_id,
-                            hq_block_loader=hq_block_loader,
-                            output_labels=csd_output,
                         )
-                        local_nuclei = None
-                        local_nuclei_cell = local_nuclei_raw = local_nuclei_dropped = None
-                        local_qc_rows = []
-                        local_hq2_layers = {}
-                        local_hq2_metadata = {}
-                        if isinstance(local_result, dict):
-                            local_mask = local_result["mask"]
-                            local_nuclei = local_result.get("nuclei")
-                            local_nuclei_cell = local_result.get("nuclei_cell")
-                            local_nuclei_raw = local_result.get("nuclei_raw")
-                            local_nuclei_dropped = local_result.get("nuclei_dropped")
-                            local_qc_rows = local_result.get("qc_rows") or []
-                            local_hq2_layers = local_result.get("hq2_layers") or {}
-                            local_hq2_metadata = local_result.get("hq2_metadata") or {}
-                        else:
-                            local_mask = local_result
-                    except Exception as e:
-                        if self._runs_on_engine():
-                            # As in the ROI loop: failed or stopped, the run ends.
-                            self._close_tile_scheduler(scheduler)
-                            raise
-                        log.error(f'Tile [{row},{col}] inference failed:\n{traceback.format_exc()}')
-                        self.error.emit(f'Tile [{row},{col}] inference failed: {e}')
-                        local_mask = np.zeros((ry1-ry0, rx1-rx0), dtype=np.uint32)
-                        local_nuclei = None
-                        local_nuclei_cell = local_nuclei_raw = local_nuclei_dropped = None
-                        local_qc_rows = []
-                        local_hq2_layers = {}
-                        local_hq2_metadata = {}
+                    except Exception:
+                        # As in the ROI loop: failed or stopped, the run ends.
+                        self._close_tile_scheduler(scheduler)
+                        raise
+                    local_nuclei = None
+                    local_nuclei_cell = local_nuclei_raw = local_nuclei_dropped = None
+                    if isinstance(local_result, dict):
+                        local_mask = local_result["mask"]
+                        local_nuclei = local_result.get("nuclei")
+                        local_nuclei_cell = local_result.get("nuclei_cell")
+                        local_nuclei_raw = local_result.get("nuclei_raw")
+                        local_nuclei_dropped = local_result.get("nuclei_dropped")
+                    else:
+                        local_mask = local_result
                     del tile_data
                     if use_gpu:
                         self._empty_torch_cache_if_available()
@@ -4446,28 +3277,6 @@ class SegmentMergeWorker(QThread):
                     if keeps_nuclei and local_nuclei is not None:
                         remapped_nuclei = self._nuclei_add_tile(nuclei_state, lut, local_nuclei,
                                                                 local_nuclei_cell)
-                    elif hq_nuclei and local_nuclei is not None:
-                        safe_nuclei = np.where(local_nuclei <= n_raw, local_nuclei, 0).astype(np.uint32, copy=False)
-                        remapped_nuclei = lut[safe_nuclei]
-                    remapped_hq2_layers = {}
-                    if is_hq2 and local_hq2_layers:
-                        for layer_key, layer_arr in local_hq2_layers.items():
-                            layer_arr = np.asarray(layer_arr, dtype=np.uint32)
-                            safe = np.where(layer_arr <= n_raw, layer_arr, 0).astype(np.uint32, copy=False)
-                            remapped_hq2_layers[layer_key] = lut[safe]
-                    if is_hq and local_qc_rows:
-                        kept_set = set(keep_labels)
-                        for row_qc in local_qc_rows:
-                            old_id = int(row_qc.get("cell_id", 0) or 0)
-                            if old_id not in kept_set:
-                                continue
-                            new_row = dict(row_qc)
-                            new_row["cell_id"] = int(lut[old_id])
-                            hq_qc_rows.append(new_row)
-                    if is_hq2 and local_hq2_metadata:
-                        tile_meta = dict(local_hq2_metadata)
-                        tile_meta.update({"row": row, "col": col, "out_prefix": ""})
-                        self._hq2_tile_metadata.append(tile_meta)
                 stage_seconds["relabel"] = stage_seconds.get("relabel", 0.0) + (time.perf_counter() - _t)
                 del local_mask, lut
 
@@ -4481,14 +3290,6 @@ class SegmentMergeWorker(QThread):
                         ndst = nuclei_mmap[ry0:ry1, rx0:rx1]
                         np.copyto(ndst, remapped_nuclei, where=(remapped_nuclei > 0))
                         del remapped_nuclei
-                    if is_hq2 and remapped_hq2_layers:
-                        for layer_key, layer_arr in remapped_hq2_layers.items():
-                            layer_mmap = hq2_layer_mmaps.get(layer_key)
-                            if layer_mmap is None:
-                                continue
-                            ldst = layer_mmap[ry0:ry1, rx0:rx1]
-                            np.copyto(ldst, layer_arr, where=(layer_arr > 0))
-                        del remapped_hq2_layers
                 stage_seconds["merge_or_write"] = stage_seconds.get("merge_or_write", 0.0) + (time.perf_counter() - _t)
                 self.step2_profiler.log_tile_stage(
                     profile_tile_id,
@@ -4564,8 +3365,6 @@ class SegmentMergeWorker(QThread):
                 dapi_mmap.flush()
                 if nuclei_mmap is not None:
                     nuclei_mmap.flush()
-                for layer_mmap in hq2_layer_mmaps.values():
-                    layer_mmap.flush()
             total_cells = int(global_id_offset)
             _out_msg = f"Inference done. Total cells: {total_cells:,}. Writing outputs…"
             self.progress.emit(n_tiles, n_tiles, _out_msg)
@@ -4574,8 +3373,6 @@ class SegmentMergeWorker(QThread):
             del mmap, dapi_mmap
             if nuclei_mmap is not None:
                 del nuclei_mmap
-            for layer_key in list(hq2_layer_mmaps.keys()):
-                del hq2_layer_mmaps[layer_key]
             gc.collect()
 
             mmap_ro      = np.memmap(mmap_path,      dtype='uint32', mode='r',
@@ -4583,7 +3380,7 @@ class SegmentMergeWorker(QThread):
             dapi_mmap_ro = np.memmap(dapi_mmap_path, dtype='uint16', mode='r',
                                      shape=(full_h, full_w))
             nuclei_mmap_ro = None
-            if (hq_nuclei or keeps_nuclei) and nuclei_mmap_path:
+            if keeps_nuclei and nuclei_mmap_path:
                 nuclei_mmap_ro = np.memmap(nuclei_mmap_path, dtype='uint32', mode='r',
                                            shape=(full_h, full_w))
 
@@ -4620,41 +3417,12 @@ class SegmentMergeWorker(QThread):
             self.progress.emit(n_tiles, n_tiles, '✓ global DAPI OME-TIFF written')
             log.info(f"DAPI OME-TIFF → {global_dapi_path}  {self._mem_snapshot()}")
 
-            nuclei_ome_path = ""
+            nuclei_ome_path = ""        # no nuclei OME-TIFF (Block N2); Mesmer metadata names it
             nuclei_zarr_path = ""
-            qc_table_path = ""
             nuclei_table_path = ""
             if keeps_nuclei and nuclei_mmap_ro is not None:
                 nuclei_zarr_path, nuclei_table_path = self._nuclei_finish(
                     nuclei_state, nuclei_mmap_ro, full_h, full_w, "")
-                del nuclei_mmap_ro
-            elif hq_nuclei and nuclei_mmap_ro is not None:
-                nuclei_zarr_path = os.path.join(self.output_dir, 'global_nuclei_mask.zarr')
-                nz = zarr.open(
-                    nuclei_zarr_path, mode='w',
-                    shape=(full_h, full_w), dtype='uint32',
-                    chunks=(1024, 1024),
-                )
-                with self.step2_profiler.time_stage("write_mask_zarr", method=self.method, output_path=self._abs(nuclei_zarr_path)):
-                    for ci, y in enumerate(range(0, full_h, CHUNK_ROWS)):
-                        y1 = min(y + CHUNK_ROWS, full_h)
-                        nz[y:y1, :] = nuclei_mmap_ro[y:y1, :]
-                nuclei_ome_path = os.path.join(self.output_dir, 'global_nuclei_mask.ome.tiff')
-                with self.step2_profiler.time_stage("export_mask_ome_tiff", method=self.method, output_path=self._abs(nuclei_ome_path)):
-                    write_tiled_ome_tiff(nuclei_ome_path, nuclei_mmap_ro, np.float32)
-                if is_mesmer_guided:
-                    qc_table_path = ""
-                elif is_hq2:
-                    qc_table_path = os.path.join(
-                        self.output_dir,
-                        'csd_qc_table.csv' if self.method == CELLPOSE_NUCLEI_CSD else 'hq2_qc_table.csv',
-                    )
-                    with self.step2_profiler.time_stage("metadata_write", method=self.method, output_path=self._abs(qc_table_path)):
-                        (write_csd_qc_table if self.method == CELLPOSE_NUCLEI_CSD else write_hq2_qc_table)(qc_table_path, hq_qc_rows)
-                else:
-                    qc_table_path = os.path.join(self.output_dir, 'hq_qc_table.csv')
-                    with self.step2_profiler.time_stage("metadata_write", method=self.method, output_path=self._abs(qc_table_path)):
-                        write_hq_qc_table(qc_table_path, hq_qc_rows)
                 del nuclei_mmap_ro
 
             self._record_step2_geometry(full_h, full_w, nuclei_zarr_path, out_zarr_path)
@@ -4666,12 +3434,6 @@ class SegmentMergeWorker(QThread):
             self._log_nuclei("", label_store)
             if keeps_nuclei and nuclei_mmap_path and os.path.exists(nuclei_mmap_path):
                 os.remove(nuclei_mmap_path)
-
-            hq2_paths = {}
-            if is_hq2:
-                hq2_paths = self._write_hq2_layer_outputs(
-                    hq2_layer_mmap_paths, (full_h, full_w), out_prefix=""
-                )
 
             del mmap_ro, dapi_mmap_ro
             gc.collect()
@@ -4728,17 +3490,6 @@ class SegmentMergeWorker(QThread):
                         "whole_cell_mask_path": self._abs(ome_path) if self.method != MESMER_NUCLEI else "",
                     },
                 ))
-            elif is_hq2:
-                hq2_meta_paths = dict(hq2_paths)
-                hq2_meta_paths.update({
-                    "nuclei_mask_path": self._abs(nuclei_ome_path),
-                    "final_cell_mask_path": self._abs(ome_path),
-                    "qc_table_path": self._abs(qc_table_path),
-                })
-                meta.update((csd_metadata_fields if self.method == CELLPOSE_NUCLEI_CSD else hq2_metadata_fields)(self.seg_config, hq2_meta_paths))
-                meta["hq2_tile_metadata"] = list(self._hq2_tile_metadata)
-            elif is_hq:
-                meta.update(self._hq_meta_fields(nuclei_ome_path, ome_path, qc_table_path))
             fusion_path = self._fusion_source_path()
             meta["fused_zarr_path"] = fusion_path
             meta["input_zarr"] = fusion_path
@@ -4759,7 +3510,7 @@ class SegmentMergeWorker(QThread):
             meta_path = os.path.join(self.output_dir, 'segmentation_meta.json')
             with self.step2_profiler.time_stage("write_segmentation_meta", method=self.method, output_path=self._abs(meta_path)):
                 write_json_atomic(meta_path, meta)              # block A6 G2
-            self._write_run_metadata(meta)               # the remap promotion reads it
+            self._write_run_metadata(meta)
             if self._stop:                               # a Stop while the outputs were written:
                 if getattr(self, "_channel_store", None) is not None:   # nothing is published
                     self._channel_store.close()

@@ -174,12 +174,8 @@ def test_the_stardist_model_is_always_the_fixed_one(app, tmp_path):
     assert worker._engine_params()["model_name"] == preseg_contract.STARDIST_MODEL
 
 
-def test_hq_methods_keep_their_own_path(app, tmp_path):
+def test_every_method_runs_on_the_engine(app, tmp_path):
     from block01.workers.segment_merge_worker import SegmentMergeWorker
-    for method in ("cellpose_nuclei_hq", "cellpose_nuclei_hq2", "cellpose_nuclei_csd"):
-        worker = SegmentMergeWorker("unused.zarr", seg_config={"method": method},
-                                    output_dir=str(tmp_path / method))
-        assert not worker._runs_on_engine()
     for method in ENGINE_METHODS:
         worker = SegmentMergeWorker("unused.zarr", seg_config={"method": method},
                                     output_dir=str(tmp_path / method))
@@ -213,7 +209,6 @@ def test_a_stardist_model_other_than_the_fixed_one_is_listed():
         ("model_name", "2D_paper_dsb2018", "the engine loads 2D_versatile_fluo only")]
     assert preseg_contract.ignored_settings(
         {"method": "stardist_nuclei_dapi", "model_name": "2D_versatile_fluo"}) == []
-    assert preseg_contract.ignored_settings({"method": "cellpose_nuclei_hq", "tile_size": 9}) == []
 
 
 # ── the page ──────────────────────────────────────────────────────────

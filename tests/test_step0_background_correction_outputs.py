@@ -204,14 +204,6 @@ def test_provenance_stamp_no_step2_ready(tmp_path):
     assert "step2_ready" not in attrs   # never marked Step2-ready
 
 
-# ── HQ2/CSD raw_ome_only source policy unchanged (not touched by v14.4) ──────
-def test_hq2_csd_source_policy_unchanged():
-    from block01.workers.hq_source_resolver import (
-        SOURCE_MODE_RAW_ONLY, SOURCE_MODE_CORRECTED_THEN_RAW)
-    assert SOURCE_MODE_RAW_ONLY == "raw_ome_only"
-    assert SOURCE_MODE_CORRECTED_THEN_RAW == "corrected_then_raw_fallback"
-
-
 # ── dependency wall: BG layer adds no resolver/promotion/runtime imports ─────
 def test_no_forbidden_imports_in_bg_layer():
     # No resolver/promotion/runtime imports (check import lines; docstring prose

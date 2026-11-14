@@ -1,4 +1,4 @@
-# A native Windows version (backlog 23) — plan v0.4
+# A native Windows version (backlog 23) — plan v0.5
 
 Status: draft for the user (2026-11-13). Codex plan review round 1 FAIL
 (one P1: the SpatialData export script; four P2: file aliases, closed file
@@ -8,6 +8,9 @@ the SpatialData prerequisite, the old checklist's §4) -- taken in v0.3.
 Round 3 PASS. v0.4 (2026-11-13): W0's result (§3, "W0 result") and what
 it adds to W1 and W1b. Codex review of v0.4: PASS (one wording fix taken:
 the CSV's Rust path).
+v0.5 (2026-11-14): the laptop acceptance of W1, what W1b became, and W2's
+removal of every segmentation path that bypasses the engine (user rulings
+of 2026-11-14, below).
 
 **The user's decisions (2026-11-13):** W0 started. D1 as proposed
 (Windows 10 / 11, x64, NVIDIA CUDA 12, CPU fallback). D2 micromamba.
@@ -272,6 +275,51 @@ a Step2 run's clean-up, on the Windows machine.
 * TensorFlow: kept (CPU) in this phase. Removing it (StarDist's own pre /
   post without the Keras shell; Mesmer's weights read with h5py) is a
   separate option (§7 D4), useful on every system.
+
+### W1 laptop acceptance and W1b, as done (v0.5)
+
+The W1 acceptance on the lab's Windows laptop (2026-11-14, Dell G16, RTX
+3060 6 GB, 16 GB) passed the deployment and the whole chain Step0 -> Step4
+(Cellpose on the GPU); no illegal-instruction exit (that one is CI's VM).
+No file-handle failure showed (Step0 Save in place, Step1 commit, a Step2
+run's clean-up), so W1b's file-handle list is empty. W1b instead took the
+acceptance's three Windows findings (pushed 9142e07): CuPy finds torch's
+CUDA 12 DLLs (`core/cuda_dlls.py`, before CuPy is first used), the
+console escapes what a GBK console cannot encode (`main.py`), and two
+POSIX-only test helpers.
+
+### W2 addition: one segmentation path, the engine (v0.5, user ruling 2026-11-14)
+
+Found while preparing W2: Step1's old patch panel (off the screen since
+block E, 2026-09-25) still ran Cellpose in-process and StarDist / Mesmer
+through Keras -- `import deepcell` fails on the Mac and Windows (keras
+2.15) -- and Step2's retired HQ / HQ2 / CSD ran Cellpose in-process. The
+user ruled: delete them, so no segmentation path bypasses the engine, the
+retired methods' registry entries and their "no longer available" message
+included (a development stage: no result made by them exists).
+
+* Step1: `workers/mesmer_worker.py` (deleted); `workers/cellpose_worker.py`
+  keeps only its two image loaders; the panel (`ui/step0/search_ctrl.py`)
+  keeps the method parameters and loses Phase 1 / Phase 2 / Patch Preview /
+  progress / Stop; `ui/main_window.py` loses their launch and polling;
+  `utils/mesmer_utils.py` keeps the names, the channel list, the mask
+  post-processing and the run's metadata.
+* Step2: the HQ / HQ2 / CSD modules (`workers/hq_marker_segmentation.py`,
+  `hq2_marker_segmentation.py`, `constrained_donut_segmentation.py`,
+  `cds2_segmentation.py`, `lean_carve_segmentation.py`,
+  `outside_in_segmentation.py`, `hq_source_resolver.py`, deleted); their
+  code in `workers/segment_merge_worker.py` and `ui/step2_page.py`; the
+  Step2 channel remap that served only HQ2 / CSD (`utils/remap_promotion.py`,
+  the Step2 validators of `utils/channel_remap_config.py`,
+  `scripts/promote_remap_config.py`, `scripts/smoke_test_step2_remap_small_roi.py`,
+  `scripts/qc_step2_remap_run.py`); `utils/segmentation_config.py`,
+  `utils/segmentation_param_schema.py`, `utils/tile_strategy.py`,
+  `utils/channel_cache.py`, `core/step3_masks.py`, `utils/run_store.py`
+  lose their HQ entries. Step0 / Step1's own remap stays.
+* A live bug goes with it: a per-ROI Step2 run of Mesmer nuclear-guided
+  wrote `method: cellpose_nuclei_hq` and HQ fields into its
+  `segmentation_meta_<roi>.json`; it now keeps Mesmer's metadata (test).
+* Tests only for the removed code are deleted; the others adapted.
 
 ### Phase W3 — installer, launcher, Windows CI
 

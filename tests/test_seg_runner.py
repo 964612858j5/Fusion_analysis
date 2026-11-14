@@ -11,9 +11,7 @@ import threading
 
 # The direct-call references import StarDist in THIS process. Keras picks its
 # backend at first import and defaults to torch in some environments, which
-# csbdeep refuses; the application sets the same variable before loading
-# StarDist (workers/cellpose_worker.py:181), the engine child gets it from
-# the client.
+# csbdeep refuses; the engine child gets the same variable from the client.
 os.environ.setdefault("KERAS_BACKEND", "tensorflow")
 
 import numpy as np

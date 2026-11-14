@@ -218,31 +218,6 @@ def test_partial_fallback_is_mixed(app, tmp_path):
     assert cfg["source_mixture_mode"] == "mixed_raw_corrected"     # NOT homogeneous_corrected
 
 
-# 10. Flip the produced preview config to step2_ready -> hard reject.
-def test_flip_to_step2_ready_hard_rejects(app, tmp_path):
-    from block01.utils.channel_remap_config import validate_step2_remap_config
-    s = _step0(app, _corrected_zarr(tmp_path))
-    s.set_channel_source_request("CD68", "corrected_zarr")
-    cfg = _cfg(("CD68",))
-    # give the channel concrete step2-shaped params so only the source-aware
-    # guard (not other validators) is what trips on the flip
-    cfg["channels"]["CD68"].update(
-        min=0.0, max=1.0, step2_compatible=True,
-        calibration_source_matches_step2=True,
-        intensity_space="raw_ome_native_float",
-        step2_pre_remap_source="raw_ome_native_float")
-    cfg["source_policy"].update(
-        calibration_source_matches_step2=True,
-        source_alignment_mode="single_native_source")
-    s._apply_source_aware_identity(cfg)
-    # manual tamper: claim step2_ready
-    cfg["source_policy"]["preview_only"] = False
-    cfg["source_policy"]["step2_ready"] = True
-    errs, resolved = validate_step2_remap_config(cfg, allow_preview_remap=False)
-    assert any("source-aware" in e for e in errs)
-    assert resolved == {}
-
-
 # 11. No corrected zarr at all -> default raw, no crash.
 def test_no_corrected_zarr_defaults_raw(app):
     s = _step0(app, corrected_path=None)

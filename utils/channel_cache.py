@@ -6,12 +6,11 @@ import threading
 from collections import OrderedDict
 
 import numpy as np
-import tifffile
 import zarr
 
 
 class SharedChannelStore:
-    """Cache zarr/TIFF handles and repeated channel tile reads.
+    """Cache zarr handles and repeated fused / DAPI tile reads.
 
     Reads return copies so downstream segmentation code can mutate arrays
     without corrupting cached data.
@@ -22,7 +21,6 @@ class SharedChannelStore:
         self.logger = logger
         self._lock = threading.RLock()
         self._zarr = {}
-        self._tiffs = {}
         self._cache = OrderedDict()
         self.metrics = {
             "cache_hit": 0,
@@ -33,12 +31,6 @@ class SharedChannelStore:
 
     def close(self):
         with self._lock:
-            for item in self._tiffs.values():
-                try:
-                    item["tif"].close()
-                except Exception:
-                    pass
-            self._tiffs.clear()
             self._zarr.clear()
             self._cache.clear()
             self.metrics["cache_bytes"] = 0
@@ -46,20 +38,6 @@ class SharedChannelStore:
     def snapshot_metrics(self):
         with self._lock:
             return dict(self.metrics)
-
-    def set_max_cache_items(self, n):
-        """Shrink (or grow) the cache cap and immediately evict down to it.
-
-        Used by whole-ROI (1x1) lean_carve so the one-shot whole-image fused/dapi
-        entries and per-block reads don't sit resident; correctness is unchanged
-        (hits still return correct data), only the resident count drops.
-        """
-        with self._lock:
-            self.max_cache_items = max(1, int(n or 1))
-            while len(self._cache) > self.max_cache_items:
-                _old_key, old = self._cache.popitem(last=False)
-                self.metrics["cache_bytes"] -= int(getattr(old, "nbytes", 0))
-                self.metrics["cache_evictions"] += 1
 
     def zarr_group(self, path):
         path = str(path)
@@ -78,58 +56,6 @@ class SharedChannelStore:
     def read_dapi(self, path, y0, y1, x0, x1):
         key = ("dapi", str(path), int(y0), int(y1), int(x0), int(x1), 1)
         return self._cached(key, lambda: np.asarray(self.zarr_group(path)[y0:y1, x0:x1, 1]))
-
-    def read_zarr_channel(self, source_id, group, channel_name, y0, y1, x0, x1):
-        key = ("zarr_channel", str(source_id), str(channel_name), int(y0), int(y1), int(x0), int(x1), 1)
-        return self._cached(key, lambda: np.asarray(group[channel_name][y0:y1, x0:x1], dtype=np.float32))
-
-    def read_raw_ome(self, loader, channel_name, y0, y1, x0, x1, normalize=False):
-        key = ("raw_ome", str(loader.filepath), str(channel_name), int(y0), int(y1), int(x0), int(x1), 1, bool(normalize))
-
-        def _read():
-            arr = self._read_raw_ome_region(loader, channel_name, y0, y1, x0, x1)
-            arr = loader._apply_configured_correction(channel_name, arr, loader.correction_config)
-            if normalize:
-                return loader._norm(arr)
-            return arr.astype(np.float32, copy=False)
-
-        return self._cached(key, _read)
-
-    def _read_raw_ome_region(self, loader, channel_name, y0, y1, x0, x1):
-        if channel_name not in loader.ch_map:
-            raise KeyError(f"Channel '{channel_name}' not found")
-        item = self._tiff_item(loader.filepath)
-        z0 = item["z0"]
-        page_idx = int(loader.ch_map[channel_name])
-        with self._lock:
-            if z0.ndim == 3:
-                return np.asarray(z0[page_idx, y0:y1, x0:x1])
-            if z0.ndim == 4:
-                return np.asarray(z0[0, page_idx, y0:y1, x0:x1])
-            if z0.ndim == 2:
-                return np.asarray(z0[y0:y1, x0:x1])
-        raise ValueError(f"Unknown zarr dimensions: {z0.ndim}")
-
-    def _tiff_item(self, path):
-        path = str(path)
-        with self._lock:
-            item = self._tiffs.get(path)
-            if item is not None:
-                return item
-            tif = tifffile.TiffFile(path)
-            store = tif.aszarr()
-            z = zarr.open(store, mode="r")
-            group_type = getattr(getattr(zarr, "hierarchy", None), "Group", None)
-            if group_type is not None and isinstance(z, group_type):
-                z0 = z[0] if "0" in z else next(iter(z.values()))
-            elif hasattr(z, "array_keys") or hasattr(z, "groups"):
-                z0 = z[0] if "0" in z else next(iter(z.values()))
-            else:
-                z0 = z
-            item = {"tif": tif, "store": store, "z": z, "z0": z0}
-            self._tiffs[path] = item
-            self._log(f"[ChannelCache] opened TIFF path={path}")
-            return item
 
     def _cached(self, key, loader):
         with self._lock:

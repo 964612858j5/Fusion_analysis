@@ -4,7 +4,6 @@ block01/ui/main_window.py — MainWindow.
 
 import dataclasses
 import os
-import gc
 import hashlib
 import json
 import math
@@ -15,8 +14,6 @@ import time
 import weakref
 import shutil
 import traceback
-import multiprocessing as mp
-from queue import Empty
 
 import numpy as np
 import pyqtgraph as pg
@@ -52,18 +49,11 @@ from ..utils import error_hook, perf_trace
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
-    CELLPOSE_NUCLEI_CSD,
-    CELLPOSE_NUCLEI_HQ,
-    CELLPOSE_NUCLEI_HQ2,
     CELLPOSE_WHOLECELL_FUSION,
-    MESMER_WHOLE_CELL,
-    MESMER_NUCLEI,
-    MESMER_NUCLEAR_GUIDED,
     STARDIST_NUCLEI_DAPI,
     STARDIST_NUCLEI_EXPANSION,
     normalize_segmentation_config,
 )
-from ..workers.hq_marker_segmentation import parse_hq_channels, validate_hq_channels
 from ..utils.segmentation_params import (
     save_segmentation_params,
 )
@@ -73,9 +63,8 @@ from ..utils.roi_project import (
 )
 from ..utils import roi_project, run_store
 from ..core import step0_handoff
-from ..workers.cellpose_worker import PreviewLoaderThread, run_cellpose_process
+from ..workers.cellpose_worker import PreviewLoaderThread
 from ..workers.preview_compose_worker import PreviewComposeWorker
-from ..workers.mesmer_worker import run_mesmer_patch_preview
 from .step0.step0_page import Step0Page, patch_button_qss
 from .step0.roi_context_model import (
     Patch, patch_color as _patch_color_of, patch_from_record, patch_id as _patch_id_of,
@@ -691,10 +680,6 @@ class MainWindow(QMainWindow):
         self._corrected_zarr_mode = ""
         self._corrected_decisions = {}
         self._params_source      = None  # 'phase2'|'loaded'|'manual' — tracks how params were set
-        self.proc                = None
-        self._proc_queue         = None
-        self._proc_stop_flag     = None
-        self._proc_stopped       = False
         self.is_sequential_flow  = False
         self.step0_output        = {}
         self.step1_output        = None
@@ -748,10 +733,6 @@ class MainWindow(QMainWindow):
         # restarted per event, which is what made a drag publish only after
         # the hand stopped. See `_schedule_preview_update`.
         self._prev_timer.timeout.connect(self._apply_pending_preview_update)
-
-        self._proc_poll_timer = QTimer()
-        self._proc_poll_timer.setInterval(100)
-        self._proc_poll_timer.timeout.connect(self._poll_cellpose_process)
 
         self._step1_restore_active = False
         # The GUI thread's own heartbeat, with the switch off it is None and
@@ -1311,10 +1292,6 @@ class MainWindow(QMainWindow):
         self.search._method_params_scroll = method_params_scroll
         self.search.setMinimumHeight(390)
         self.search.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.search.run_p1.connect(self._run_p1)
-        self.search.run_p2.connect(self._run_p2)
-        self.search.run_preview.connect(self._run_direct_patch_preview)
-        self.search.stop.connect(self._stop)
         self.search.params_ready.connect(self._on_params_ready)
         self.search.method_changed.connect(self._on_step1_segmentation_mode_changed)
         method_params_scroll.setWidget(self.search)
@@ -1964,15 +1941,6 @@ class MainWindow(QMainWindow):
             tabs.setCurrentWidget(tab)
             print(f"[Step1-Tabs] switched to Viewer due to {reason}")
 
-    def _show_step1_patch_results_tab(self, reason):
-        tabs = getattr(self, "right_tabs", None)
-        tab = getattr(self, "patch_results_tab", None)
-        if tabs is not None and tab is not None and not tabs.isTabVisible(tabs.indexOf(tab)):
-            return                       # block E: the old tab is off the screen
-        if tabs is not None and tab is not None:
-            tabs.setCurrentWidget(tab)
-            print(f"[Step1-Tabs] switched to Patch Results due to {reason}")
-
     def _show_step1_method_params_tab(self, reason):
         # It lives in the LEFT column now. Asked for by the tab that owns it,
         # not by a hard-coded column, so a later move needs no caller change.
@@ -1997,7 +1965,6 @@ class MainWindow(QMainWindow):
             print(f"[Layout-Step1] {where} right panel size={self._layout_desc(getattr(self, 'right_tabs', None))}")
             print(f"[Layout-Step1] {where} method group height/min/sizeHint={self._layout_height_desc(getattr(search, '_method_box', None))}")
             print(f"[Layout-Step1] {where} params scroll height/min/sizeHint={self._layout_height_desc(getattr(search, '_manual_params_scroll', None))}")
-            print(f"[Layout-Step1] {where} HQ2 params scroll height/min/sizeHint={self._layout_height_desc(getattr(search, '_hq2_params_scroll', None))}")
             print(f"[Layout-Step1] {where} patch results height/min/sizeHint={self._layout_height_desc(getattr(self, 'result_grid', None))}")
             tabs = getattr(self, "right_tabs", None)
             current_tab = tabs.tabText(tabs.currentIndex()) if tabs is not None and tabs.count() else "none"
@@ -3980,8 +3947,6 @@ class MainWindow(QMainWindow):
         self._stop_compose_worker("the Step1 context was discarded")
         self._step1_session_timer.stop()
         self._retire_fusion_worker("the Step1 context was discarded")
-        if self.proc is not None:
-            self._stop()
         self._close_preseg_job()
         self._close_montage_supply()
         self._preseg_run = None
@@ -4902,108 +4867,6 @@ class MainWindow(QMainWindow):
             except Exception:
                 return str(value)
 
-    def _record_segmentation_preview_result(self, patch_idx, params, masks):
-        params = normalize_segmentation_config(params or {})
-        method = params.get("method") or CELLPOSE_WHOLECELL_FUSION
-        patch_name = self._patch_key(int(patch_idx))
-        cells = int(np.asarray(masks).max()) if masks is not None else 0
-        device = str(params.get("device_used") or params.get("device") or "unknown")
-        record = {
-            "params": self._json_safe_step1_value(params),
-            "cells": cells,
-            "device": device,
-            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-
-        patch_hist = self._seg_preview_history.setdefault(patch_name, {})
-        method_hist = patch_hist.setdefault(method, {})
-        history = method_hist.setdefault("history", [])
-        history.append(record)
-        method_hist["latest"] = record
-
-        # A result arriving is never a choice (plan 4.4, block C): the params
-        # become active only when the user selects them in the result grid.
-        return False
-
-    def _handle_patch_segmentation_result(self, item):
-        patch_idx = int(item.get("patch_idx", 0) or 0)
-        params = normalize_segmentation_config(item.get("params") or {})
-        phase = int(params.get("_phase") or item.get("phase") or 0)
-        phase_key = "phase2" if phase == 2 else "phase1" if phase == 1 else "preview"
-        masks = item.get("masks")
-        mask_arr = None if masks is None else np.asarray(masks, dtype=np.uint32)
-        labels = int(mask_arr.max()) if mask_arr is not None and mask_arr.size else 0
-        bbox = tuple(int(v) for v in self._all_patches[patch_idx]) if 0 <= patch_idx < len(self._all_patches) else ()
-        result = {
-            "patch_id": self._patch_key(patch_idx),
-            "patch_idx": patch_idx,
-            "bbox_global": list(bbox),
-            "bbox_fullres": list(bbox),
-            "local_mask": mask_arr,
-            "preview_image_shape": list(mask_arr.shape) if mask_arr is not None else [],
-            "params_used": self._json_safe_step1_value(params),
-            "method": params.get("method", CELLPOSE_WHOLECELL_FUSION),
-            "phase": f"phase{phase}" if phase else "",
-            "result_path": item.get("result_path", ""),
-            "labels_count": labels,
-            "success": bool(item.get("success", True)),
-        }
-        rec = self._patch_seg_results.setdefault(patch_idx, {})
-        print(f"[Step1-CellposeResult] received phase={phase}")
-        target_viewer = "phase2" if phase == 2 else "phase1" if phase == 1 else "preview"
-        print(f"[Step1-CellposeResult] dispatch to {target_viewer} viewer")
-        print(f"[Step1-Phase2] result received patch_idx={patch_idx}" if phase == 2 else f"[Step1-Phase1] result received patch_idx={patch_idx}")
-        print(f"[Step1-Phase2] result phase={phase}" if phase == 2 else f"[Step1-Phase1] result phase={phase}")
-        print(f"[Step1-Phase2] masks shape={None if mask_arr is None else mask_arr.shape}" if phase == 2 else f"[Step1-Phase1] masks shape={None if mask_arr is None else mask_arr.shape}")
-        print(f"[Step1-Phase2] labels count={labels}" if phase == 2 else f"[Step1-Phase1] labels count={labels}")
-        if phase == 2:
-            if bool(item.get("success", labels > 0)):
-                rec[phase_key] = result
-                print("[Step1-Phase2] cached as phase2")
-            else:
-                print(f"[Step1-UI] phase2 empty; keeping phase1 overlay patch_id=P{patch_idx + 1}")
-        else:
-            rec[phase_key] = result
-        if phase == 1:
-            print(f"[Step1-Phase1Viewer] mask labels={labels}")
-        elif phase == 2:
-            print(f"[Step1-Phase2Viewer] mask labels={labels}")
-        updating = patch_idx == self._preview_patch_idx
-        if phase == 2:
-            print(f"[Step1-Phase2] current_patch_idx={self._preview_patch_idx}")
-            print("[Step1-Phase2] updating overlay now=False")
-        print("[Step1-FusionPreview] no mask overlay rendered")
-
-    def _update_patch_phase_result(self, item):
-        self._handle_patch_segmentation_result(item)
-
-    def _cellpose_result_rgb_for_grid(self, item):
-        rgb = item.get("rgb_raw")
-        if rgb is not None:
-            return rgb
-        result_path = item.get("result_path") or ""
-        if result_path and os.path.exists(result_path):
-            try:
-                with np.load(result_path, allow_pickle=False) as data:
-                    if "rgb_raw" in data:
-                        rgb = data["rgb_raw"]
-                        print(f"[Phase2-debug] loaded rgb_raw fallback from result_path={result_path}")
-                        return rgb
-            except Exception:
-                print(f"[Phase2-debug] failed to load rgb fallback result_path={result_path}")
-        masks = item.get("masks")
-        if masks is not None:
-            print("[Phase2-debug] using mask label image fallback")
-            mask_arr = np.asarray(masks, dtype=np.uint32)
-            n = int(mask_arr.max()) if mask_arr.size else 0
-            if n > 0:
-                rng = np.random.default_rng(12345)
-                lut = rng.integers(40, 255, size=(n + 1, 3), dtype=np.uint8)
-                lut[0] = 0
-                return lut[np.clip(mask_arr, 0, n).astype(np.int32)]
-            return np.zeros((*mask_arr.shape, 3), dtype=np.uint8)
-        return None
-
     def _schedule_step1_session_save(self):
         if self._step1_restore_active:
             return
@@ -5462,8 +5325,8 @@ class MainWindow(QMainWindow):
             self._refuse_session("This session names no Step0 manifest.")
             return False
         # Checked BEFORE anything is restored (docs/v17_review_fixes_plan.md
-        # §1): segmentation parameters naming a retired or unknown method are
-        # dropped -- the rest of the session is still valid and restores.
+        # §1): segmentation parameters naming a method the panel does not
+        # offer are dropped -- the rest of the session is still valid and restores.
         sess, dropped = self._step1_session_without_unoffered_method(sess)
 
         # Preserve and validate an already-bound handoff before replacing the
@@ -9925,313 +9788,6 @@ class MainWindow(QMainWindow):
         since = (self._frame_now() - self._frame_last_publish) * 1000.0
         self._arm_frame_timer(max(0.0, PREVIEW_FRAME_MS - since))
 
-    # ── Phase 1 ─────────────────────────────────────────────────────
-
-    def _run_p1(self, diameters):
-        """
-        diameters is a single-element list: [None] for auto, [float] for override.
-        Phase 1 now runs ONE inference per patch (not a grid search),
-        showing the auto-diameter result for the user to visually confirm.
-        After completion, diameter is automatically passed to Phase 2.
-        """
-        if not self._require_committed_fusion_settings("Phase 1"):
-            return
-        self._show_step1_patch_results_tab("phase1")
-        patches = list(self._all_patches)
-        if not patches:
-            QMessageBox.warning(self, "Info", "Please add at least one Patch first")
-            return
-
-        diam = diameters[0]   # None or float
-        method_cfg = self.search.get_selected_method_config()
-        param_list = [
-            {"diameter": diam,
-             "flow_threshold": 0.4,
-             "cellprob_threshold": 0.0,
-             "_phase": 1,
-             **method_cfg}
-        ]
-        tasks = [
-            (pi, roi, dict(param_list[0]))
-            for pi, roi in enumerate(patches)
-        ]
-        diam_str = "auto" if diam is None else f"{diam} px"
-        method = param_list[0].get("method", CELLPOSE_WHOLECELL_FUSION)
-        self.result_grid.setup_grid(
-            len(patches), param_list,
-            f"Phase 1 — {method}  (diameter={diam_str},"
-            f"  {len(patches)} patch(es))"
-        )
-        self._launch_worker(tasks)
-
-    # ── Phase 2 ─────────────────────────────────────────────────────
-
-    def _run_p2(self, cfg):
-        if not self._require_committed_fusion_settings("Phase 2"):
-            return
-        self._show_step1_patch_results_tab("phase2")
-        patches = list(self._all_patches)
-        if not patches:
-            QMessageBox.warning(self, "Info", "Please add Patches first")
-            return
-
-        diam  = cfg["diameter"]
-        method_cfg = {
-            "method": cfg.get("method", CELLPOSE_WHOLECELL_FUSION),
-            "params": dict(cfg.get("params") or {}),
-        }
-        param_list = [
-            {"diameter": diam,
-             "flow_threshold": f,
-             "cellprob_threshold": p,
-             "_phase": 2,
-             **method_cfg}
-            for f in cfg["flow"]
-            for p in cfg["prob"]
-        ]
-        tasks = [
-            (pi, roi, dict(p))
-            for pi, roi in enumerate(patches)
-            for p in param_list
-        ]
-        method = method_cfg["method"]
-        self.result_grid.setup_grid(
-            len(patches), param_list,
-            f"Phase 2 — {method}  flow × cellprob  diameter={diam}  ({len(tasks)} inferences)"
-        )
-        self._launch_worker(tasks)
-
-    def _run_direct_patch_preview(self, params):
-        if not self._require_committed_fusion_settings("A patch preview"):
-            return
-        self._show_step1_patch_results_tab("run_patch_preview")
-        method = (params or {}).get("method", CELLPOSE_WHOLECELL_FUSION)
-        if method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION):
-            QMessageBox.information(
-                self, "Segmentation mode",
-                "Use Phase 1 / Phase 2 for Cellpose patch preview."
-            )
-            return
-        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
-            params = normalize_segmentation_config(params or {})
-            hq_channels = parse_hq_channels(params.get("hq_channels") or [])
-            if not hq_channels:
-                QMessageBox.warning(
-                    self,
-                    "HQ channels required",
-                    "Please enter HQ channels, e.g. PanCK;CD45;CD68",
-                )
-                return
-            try:
-                validate_hq_channels(hq_channels, self.loader.channel_names() if self.loader else [])
-            except Exception as e:
-                QMessageBox.warning(self, "Missing channels", str(e))
-                return
-        patches = list(self._all_patches)
-        if not patches:
-            QMessageBox.warning(self, "Info", "Please add at least one Patch first")
-            return
-        params = normalize_segmentation_config(params or {})
-        # Stamped from the snapshot this run is about to be launched with; the
-        # gate above has already refused a dirty draft, so these are the same
-        # settings `_launch_worker` will stamp into the tasks.
-        self._p2_params = self._stamp_with_fusion_settings(params)
-        self._params_source = "direct_patch_preview"
-        self._check_save_unlock()
-
-        nuc_ch, _ = self._display.fusion.nucleus()
-        print(f"[Step1] patch preview mode={method}")
-        print(f"[Step1] preview patches={len(patches)}")
-        print(f"[Step1] input=DAPI channel={nuc_ch}")
-        print(f"[Step1] params={params.get('params') or params}")
-
-        tasks = [
-            (pi, roi, dict(params))
-            for pi, roi in enumerate(patches)
-        ]
-        self.result_grid.setup_grid(
-            len(patches),
-            [dict(params)],
-            f"Patch Preview — {method}  ({len(patches)} patch(es))"
-        )
-        self._launch_worker(tasks)
-
-    # ── Worker ──────────────────────────────────────────────────────
-
-    def _launch_worker(self, tasks):
-        if self.proc is not None and self.proc.is_alive():
-            return
-        # THE SNAPSHOT, copied here on the GUI thread and never read again:
-        # the panel and the Intensity window stay live for the user, and this
-        # job keeps the settings it was started with for as long as it runs.
-        snapshot = self._committed_fusion_settings()
-        if not snapshot:
-            print("[Step1] refusing to launch: no committed fusion settings")
-            return
-        fcfg = copy.deepcopy(snapshot.get("fusion_config") or {})
-        groups = {name: dict(data.get("channels") or {})
-                  for name, data in (fcfg.get("groups") or {}).items()}
-        group_weights = {name: float(data.get("group_weight", 1.0) or 0.0)
-                         for name, data in (fcfg.get("groups") or {}).items()}
-        nucleus = fcfg.get("nucleus") or {}
-        nuc_ch = nucleus.get("channel", "")
-        nuc_w = float(nucleus.get("weight", 0.0) or 0.0)
-        # Stamped into the TASKS, not onto the result when somebody clicks it.
-        # The worker returns these params verbatim, so the history, the result
-        # grid and whatever the user selects all carry the hash of the settings
-        # that actually produced them — rather than the hash of whatever ran
-        # most recently, which is a guess.
-        stamp = snapshot.get("hash")
-        tasks = [(pi, roi, dict(params, fusion_settings_hash=stamp))
-                 for pi, roi, params in tasks]
-        self._running_fusion_settings_hash = stamp
-        self._proc_stopped = False
-        self._proc_queue = mp.Queue()
-        self._proc_stop_flag = mp.Event()
-        args = {
-            "tasks": tasks,
-            "ome_path": self.loader.filepath,
-            "name_map": self.loader.name_map,
-            "correction_config": self.loader.correction_config,
-            "groups": groups,
-            "group_weights": group_weights,
-            "nuc_ch": nuc_ch,
-            "nuc_w": nuc_w,
-            "corrected_zarr_path": self._corrected_zarr_path,
-            "corrected_decisions": self._corrected_decisions,
-            "channel_remap_params": copy.deepcopy(
-                snapshot.get("display_mapping") or {}),
-            "output_dir": (self.step0_output or {}).get("output_dir") or OUTPUT_DIR,
-        }
-        first_method = ""
-        if tasks:
-            try:
-                first_method = normalize_segmentation_config(tasks[0][2]).get("method", "")
-            except Exception:
-                first_method = ""
-        target = run_mesmer_patch_preview if first_method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED) else run_cellpose_process
-        self.proc = mp.Process(
-            target=target,
-            args=(args, self._proc_queue, self._proc_stop_flag),
-            daemon=True,
-        )
-        self.search.set_running(True)
-        self.search.update_progress(0, len(tasks), "Starting...")
-        self.proc.start()
-        self._proc_poll_timer.start()
-
-    def _stop(self):
-        if self.proc is not None:
-            self._proc_stopped = True
-            if self._proc_stop_flag is not None:
-                self._proc_stop_flag.set()
-            self.proc.terminate()
-            self.proc.join(timeout=1.0)
-            if self.proc.is_alive():
-                self.proc.kill()
-                self.proc.join(timeout=1.0)
-            self._cleanup_cellpose_process()
-            # No `torch.cuda.empty_cache()` here: the trial runs in its own
-            # process, this one holds no CUDA cache, and importing torch on
-            # the GUI thread cost seconds (docs/v17_small_review_items_plan.md §3).
-            gc.collect()
-            self.search.set_running(False)
-            self.search.update_progress(0, 100, "Stopped")
-
-    def _on_done(self):
-        self.search.set_running(False)
-        self.search.update_progress(100, 100, "Done! Click to select params in the result grid")
-        # Delay auto-select so all queued result_ready signals are processed
-        # before we call _select(0), which triggers param_selected → Phase 2 unlock.
-        QTimer.singleShot(200, self._auto_select_p1)
-
-    def _auto_select_p1(self):
-        """Auto-select column 0 after Phase 1, only if nothing is selected yet.
-        Only a Phase 1 column: selecting that sets the Phase 2 diameter, while
-        selecting any other column would make it the saved params unasked."""
-        grid = self.result_grid
-        if grid.get_selected() is None and grid._params \
-                and int((grid._params[0] or {}).get("_phase") or 0) == 1:
-            grid._select(0)
-
-    def _poll_cellpose_process(self):
-        if self._proc_queue is None:
-            return
-        while True:
-            try:
-                item = self._proc_queue.get_nowait()
-            except Empty:
-                break
-
-            kind = item.get("type")
-            phase_dbg = item.get("phase")
-            if phase_dbg is None and isinstance(item.get("params"), dict):
-                phase_dbg = item["params"].get("_phase")
-            print(f"[Phase2-debug] queue message type={kind}")
-            print(f"[Phase2-debug] phase={phase_dbg}")
-            print(f"[Phase2-debug] patch_idx={item.get('patch_idx')}")
-            print(f"[Phase2-debug] has masks={item.get('masks') is not None}")
-            print(f"[Phase2-debug] has rgb_raw={item.get('rgb_raw') is not None}")
-            print(f"[Phase2-debug] result_path={item.get('result_path', '')}")
-            if kind == "result":
-                print(f"[Step1] received result patch_idx={item.get('patch_idx')}")
-                masks = item.get("masks")
-                self._update_patch_phase_result(item)
-                # Recorded, never selected: arrival is not a choice.
-                self._record_segmentation_preview_result(
-                    item.get("patch_idx", 0),
-                    item.get("params") or {},
-                    masks,
-                )
-                self._schedule_step1_session_save()
-                if masks is not None:
-                    params = item.get("params") or {}
-                    method = params.get("method")
-                    if method and method != CELLPOSE_WHOLECELL_FUSION:
-                        print(f"[Step1] cells={int(np.asarray(masks).max())}")
-                self.result_grid.add_result(
-                    item["patch_idx"],
-                    item["params"],
-                    item.get("rgb_overlay"),
-                    self._cellpose_result_rgb_for_grid(item),
-                    item.get("masks"),
-                )
-            elif kind == "progress":
-                self.search.update_progress(
-                    item.get("done", 0),
-                    item.get("total", 0),
-                    item.get("msg", ""),
-                )
-            elif kind == "error":
-                print(f"[Worker] {item.get('msg', '')}")
-            elif kind == "finished":
-                self._cleanup_cellpose_process()
-                if not self._proc_stopped:
-                    self._on_done()
-                return
-
-        if self.proc is not None and not self.proc.is_alive():
-            self._cleanup_cellpose_process()
-            if not self._proc_stopped:
-                self._on_done()
-
-    def _cleanup_cellpose_process(self):
-        self._proc_poll_timer.stop()
-        if self.proc is not None:
-            try:
-                self.proc.close()
-            except Exception:
-                pass
-        self.proc = None
-        if self._proc_queue is not None:
-            try:
-                self._proc_queue.close()
-                self._proc_queue.join_thread()
-            except Exception:
-                pass
-        self._proc_queue = None
-        self._proc_stop_flag = None
-
     def _on_params_ready(self, params):
         """Called when user loads a JSON file or clicks 'Use These Params'."""
         self._p2_params    = params
@@ -10247,9 +9803,6 @@ class MainWindow(QMainWindow):
             CELLPOSE_WHOLECELL_FUSION: "wholecell_phase1_phase2",
             CELLPOSE_NUCLEI_DAPI: "nuclei_cellpose",
             CELLPOSE_NUCLEI_EXPANSION: "nuclei_cellpose_expansion",
-            CELLPOSE_NUCLEI_HQ: "cellpose_nuclei_hq_patch_preview",
-            CELLPOSE_NUCLEI_HQ2: "cellpose_nuclei_hq2_patch_preview",
-            CELLPOSE_NUCLEI_CSD: "cellpose_nuclei_csd_patch_preview",
             STARDIST_NUCLEI_DAPI: "stardist",
             STARDIST_NUCLEI_EXPANSION: "stardist_expansion",
         }.get(method, "unknown")
@@ -10282,19 +9835,12 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda: self._log_step1_layout("after method change sizes"))
 
     def _on_param_sel(self, params):
-        if params.get("_phase") == 1:
-            # Auto-unlock Phase 2 with the diameter used in Phase 1
-            # (may be None for auto-diameter mode)
-            diam = params.get("diameter")   # None or float
-            self._p1_diam = diam
-            self.search.set_p2_diam(diam)
-        else:
-            # Phase 2 grid selection
-            # Whatever the result carries, unchanged: the hash belongs to the
-            # run that produced it and must not be re-guessed here.
-            self._p2_params    = params
-            self._params_source = "phase2"
-            self._check_save_unlock()
+        # The old result grid (off the screen; nothing fills it since the
+        # in-process Phase 1 / Phase 2 were removed, Windows plan W2).
+        # Whatever the result carries, unchanged.
+        self._p2_params    = params
+        self._params_source = "phase2"
+        self._check_save_unlock()
         self._schedule_step1_session_save()
 
     def _stamp_with_fusion_settings(self, params):
@@ -11702,63 +11248,6 @@ class MainWindow(QMainWindow):
         # only a chosen pre-segmentation result's.
         cpcfg = preseg_cfg
         selected_method = (cpcfg or {}).get("method") or ""
-        if selected_method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
-            step1_weights = {}
-            for gdata in (fcfg.get("groups") or {}).values():
-                for ch, weight in (gdata.get("channels") or {}).items():
-                    step1_weights[str(ch)] = float(weight)
-            nuc_cfg = fcfg.get("nucleus") or {}
-            if nuc_cfg.get("channel"):
-                step1_weights[str(nuc_cfg.get("channel"))] = float(nuc_cfg.get("weight", 0.0) or 0.0)
-            hq_source = (
-                self._corrected_zarr_path
-                or (self.step0_output or {}).get("corrected_zarr_path")
-                or ""
-            )
-            raw_source = getattr(self.loader, "filepath", OME_TIFF_FILE)
-            roi_id = (self.step0_output or {}).get("roi_id", "")
-            roi_name = (
-                (self._active_roi or {}).get("name")
-                or (self._active_roi or {}).get("display_name")
-                or (self.step0_output or {}).get("display_name")
-                or ""
-            )
-            available_at_save = []
-            if hq_source and os.path.exists(hq_source):
-                try:
-                    root = zarr.open(hq_source, mode="r")
-                    group = root
-                    if str(root.attrs.get("mode", "")).strip().lower() == "roi_only":
-                        for group_name in list(getattr(root, "group_keys", lambda: [])()):
-                            candidate = root[group_name]
-                            if roi_id and str(candidate.attrs.get("roi_id") or "") == str(roi_id):
-                                group = candidate
-                                break
-                            if roi_name and str(candidate.attrs.get("roi_name") or group_name) == str(roi_name):
-                                group = candidate
-                                break
-                    available_at_save = list(group.array_keys()) if hasattr(group, "array_keys") else list(group.keys())
-                except Exception:
-                    print(f"[Step1] failed to inspect HQ source zarr:\n{traceback.format_exc()}")
-            hq_meta = {
-                "hq_source_zarr": os.path.abspath(hq_source) if hq_source else "",
-                "multichannel_source_path": os.path.abspath(hq_source) if hq_source else "",
-                "raw_channel_source_path": os.path.abspath(raw_source) if raw_source else "",
-                "raw_ome_path": os.path.abspath(raw_source) if raw_source else "",
-                "roi_id": roi_id,
-                "roi_name": roi_name,
-                "roi_display_name": roi_name,
-                "hq_available_channels_at_save": available_at_save,
-                "hq_channels": parse_hq_channels(cpcfg.get("hq_channels") or []),
-                "hq_input_mode": cpcfg.get("hq_input_mode", "selected_channels_from_source"),
-                "step1_fusion_weights": step1_weights,
-            }
-            cpcfg.update(hq_meta)
-            cpcfg.setdefault("params", {}).update(hq_meta)
-            print(f"[Step1] HQ source zarr={hq_meta['hq_source_zarr']}")
-            print(f"[Step1] HQ roi_id={roi_id} roi_name={roi_name}")
-            print(f"[Step1] HQ selected channels={hq_meta['hq_channels']}")
-            print(f"[Step1] HQ available at save={available_at_save}")
         fp_method = ""
         if cpcfg is not None:
             # Block RM (§16.3-6): the file names the corrected product by a
@@ -11860,7 +11349,7 @@ class MainWindow(QMainWindow):
     # ── block RM: fuse runs (docs/v16_run_model_application.md §5, §8) ──
 
     _RM_KEY_DROP = ("config_hash", "source_path", "raw_ome_path",
-                    "background_correction_source", "hq_source_zarr", "created_at",
+                    "background_correction_source", "created_at",
                     "last_used")
     _RM_FCFG_DROP = ("saved_at", "output_dir", "ome_tiff", "config_hash", "artifact_kind")
 

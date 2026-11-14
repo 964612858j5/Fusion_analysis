@@ -225,8 +225,7 @@ def camp_source_policy_of(config):
 # ANYWHERE in its structure (top-level, source_policy, per-channel params, or a
 # nested per-channel metadata dict/list). Such a config must NOT be
 # runtime-authoritative (step2_ready) until the v14.5c/v14.5d resolver + Step2
-# runtime exist — see the hard-reject guard in
-# utils/channel_remap_config.validate_step2_remap_config.
+# runtime exist (that Step2 runtime was removed with HQ2 / CSD, Windows plan W2).
 #
 # Each marker key name is defined ONCE as a SOURCE_AWARE_KEY_* constant; the
 # registry is built from those constants. A meta-test

@@ -413,7 +413,6 @@ def test_step2_recovers_a_cell_both_tiles_drop_and_keeps_its_contract(tmp_path, 
                         dict(rp.PARAMS[kn.GUIDED], method=kn.GUIDED), rois=None)
     engine = PerTile((a, nuclei), worker=worker)
     monkeypatch.setattr(smw, "EngineProcess", engine)
-    monkeypatch.setattr(smw.SegmentMergeWorker, "_validate_mesmer_config", lambda s, *x, **k: None)
     got = rp._collect(worker)
     worker.run()
     assert got["error"] == [] and len(got["finished"]) == 1
@@ -551,7 +550,6 @@ def test_step2_drops_an_oversized_object_and_records_the_filter(tmp_path, monkey
     worker = rp._worker(tmp_path, rp._fused_zarr(tmp_path, rp._image()),
                         dict(rp.PARAMS[kn.GUIDED], method=kn.GUIDED), rois=None)
     monkeypatch.setattr(smw, "EngineProcess", kn._FakeEngine((cells, nuclei), worker=worker))
-    monkeypatch.setattr(smw.SegmentMergeWorker, "_validate_mesmer_config", lambda s, *a, **k: None)
     got = rp._collect(worker)
     worker.run()
     assert got["error"] == [] and len(got["finished"]) == 1

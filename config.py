@@ -33,8 +33,6 @@ INITIAL_GROUPS = {
 NUCLEUS_CONFIG = {"channel": "DAPI", "weight": 1.0}
 
 PHASE1_DIAMETERS = [20, 30, 40, 50, 70]
-PHASE2_FLOW      = [0.2, 0.4, 0.6]
-PHASE2_CELLPROB  = [-1.0, 0.0, 0.5, 1.0]
 # Cellpose 4.0.1+: model_type argument is ignored; only cpsam is used.
 DEFAULT_MODEL    = "cpsam"  # kept for JSON output only
 

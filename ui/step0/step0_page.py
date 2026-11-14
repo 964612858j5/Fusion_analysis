@@ -33,7 +33,7 @@ import pyqtgraph as pg
 from ...config import (
     OME_TIFF_FILE, OUTPUT_DIR, CHANNEL_NAME_MAP,
     INITIAL_GROUPS, NUCLEUS_CONFIG, PHASE1_DIAMETERS,
-    PHASE2_FLOW, PHASE2_CELLPROB, DEFAULT_MODEL,
+    DEFAULT_MODEL,
     PREVIEW_DOWNSAMPLE, OVERVIEW_DOWNSAMPLE,
     TOPHAT_RADIUS_DEFAULT, TOPHAT_RADIUS_RANGE,
     CUCIM_SIGMA_DEFAULT, CUCIM_SIGMA_RANGE,
@@ -59,9 +59,7 @@ from ...core.fusion_engine import FusionEngine
 from ...workers.geometry_persist_worker import GeometryPersistWorker
 from ...workers import preload_scheduler
 from ...workers.preload_scheduler import PreloadScheduler
-from ...workers.cellpose_worker import (
-    CellposeWorker, PreviewLoaderThread, run_cellpose_process,
-)
+from ...workers.cellpose_worker import PreviewLoaderThread
 from .overview_panel import OverviewPanel, TileSelectDialog, FullFusionWorker
 from .step0_explore_tab import Step0ExploreTab
 from .compare_strip import COMPARE_SOURCES, CompareStrip

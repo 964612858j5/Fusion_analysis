@@ -230,7 +230,6 @@ def test_manual_parameters_drop_the_hand_over(app, tmp_path, monkeypatch):
         raise _Stop()
 
     monkeypatch.setattr(s2, "SegmentMergeWorker", fake_worker)
-    monkeypatch.setattr(page, "_promote_step0_remap", lambda cfg: None)
     with pytest.raises(_Stop):
         page._run()
     assert pc.CONTRACT_KEY not in started["seg_config"]

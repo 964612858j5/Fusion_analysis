@@ -1,69 +1,38 @@
+"""utils/mesmer_utils: what the application keeps of Mesmer -- the run's
+metadata and the membrane channel list (Mesmer runs in the seg_runner engine)."""
 import json
-import os
-import tempfile
-import unittest
-
-import numpy as np
 
 from block01.utils.mesmer_utils import (
+    MESMER_NUCLEI,
     MESMER_WHOLE_CELL,
-    build_mesmer_input,
-    get_mesmer_device_status,
     mesmer_metadata,
+    parse_channel_list,
 )
 
 
-class TestMesmerBackend(unittest.TestCase):
-    def test_import_and_gpu_detection_do_not_crash(self):
-        status = get_mesmer_device_status("auto")
-        self.assertIn(status.device_used, ("gpu", "cpu"))
-        self.assertIsInstance(status.deepcell_available, bool)
-
-    def test_input_builder_two_channel_shape(self):
-        source = {
-            "DAPI": np.arange(100, dtype=np.float32).reshape(10, 10),
-            "CD45": np.ones((10, 10), dtype=np.float32) * 2,
-            "CD68": np.ones((10, 10), dtype=np.float32) * 3,
-        }
-        batch = build_mesmer_input(
-            source,
-            nuclear_channel="DAPI",
-            membrane_channels=["CD45", "CD68"],
-            weights={"CD45": 0.5, "CD68": 1.0},
-            normalize=True,
-        )
-        self.assertEqual(batch.shape, (1, 10, 10, 2))
-        self.assertEqual(batch.dtype, np.float32)
-
-    def test_missing_deepcell_status_is_graceful(self):
-        status = get_mesmer_device_status("cpu")
-        if not status.tensorflow_available:
-            self.assertIn("TensorFlow import failed", status.error)
-        elif not status.deepcell_available:
-            self.assertIn("DeepCell/Mesmer is not installed", status.error)
-
-    def test_metadata_write(self):
-        status = get_mesmer_device_status("cpu")
-        meta = mesmer_metadata(
-            MESMER_WHOLE_CELL,
-            {"nuclear_channel": "DAPI", "membrane_channels": ["CD45"]},
-            status,
-            output_mask_path="/tmp/mask.ome.tiff",
-            runtime_seconds=1.2,
-        )
-        with tempfile.TemporaryDirectory() as td:
-            path = os.path.join(td, "segmentation_meta.json")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(meta, f)
-            with open(path, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-        self.assertEqual(loaded["method"], MESMER_WHOLE_CELL)
-        self.assertEqual(loaded["output_mask_path"], "/tmp/mask.ome.tiff")
-
-    def test_mask_shape_contract_without_deepcell(self):
-        image = np.zeros((12, 8), dtype=np.uint32)
-        self.assertEqual(image.shape, (12, 8))
+def test_metadata_round_trips_through_json(tmp_path):
+    meta = mesmer_metadata(
+        MESMER_WHOLE_CELL,
+        {"nuclear_channel": "DAPI", "membrane_channels": "CD45; CD68"},
+        None,
+        output_mask_path="/tmp/mask.ome.tiff",
+        runtime_seconds=1.2,
+    )
+    path = tmp_path / "segmentation_meta.json"
+    path.write_text(json.dumps(meta), encoding="utf-8")
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    assert loaded["method"] == MESMER_WHOLE_CELL
+    assert loaded["output_mask_path"] == "/tmp/mask.ome.tiff"
+    assert loaded["whole_cell_mask_path"] == "/tmp/mask.ome.tiff"
+    assert loaded["membrane_channels"] == ["CD45", "CD68"]
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_nuclei_has_no_whole_cell_mask():
+    meta = mesmer_metadata(MESMER_NUCLEI, {}, None, output_mask_path="/x.tif")
+    assert meta["whole_cell_mask_path"] == ""
+
+
+def test_parse_channel_list():
+    assert parse_channel_list(None) == []
+    assert parse_channel_list("A, B;C") == ["A", "B", "C"]
+    assert parse_channel_list(["A", " ", "B"]) == ["A", "B"]

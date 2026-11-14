@@ -134,29 +134,10 @@ def _window(app, tmp_path):
     return w
 
 
-def _launched(w, monkeypatch):
-    """Capture what a job would be started with, without starting one."""
-    seen = {}
-
-    class _Proc:
-        def __init__(self, target=None, args=(), daemon=None):
-            seen["args"] = args[0]
-            self.alive = True
-
-        def start(self):
-            seen["started"] = True
-
-        def is_alive(self):
-            return self.alive
-
-    from block01.ui import main_window as mw
-    monkeypatch.setattr(mw.mp, "Process", _Proc)
-    monkeypatch.setattr(mw.mp, "Queue", lambda: object())
-    monkeypatch.setattr(mw.mp, "Event", lambda: object())
-    monkeypatch.setattr(w._proc_poll_timer, "start", lambda *a, **k: None)
-    monkeypatch.setattr(type(w.search), "set_running", lambda *a, **k: None)
-    monkeypatch.setattr(type(w.search), "update_progress", lambda *a, **k: None)
-    return seen
+def _stamped(w, **params):
+    """A result's params as a run returns them: stamped with the committed
+    fusion settings' hash (what every Step1 run records)."""
+    return dict(params, fusion_settings_hash=w._committed_fusion_settings()["hash"])
 
 
 def test_a_fresh_window_has_nothing_committed(app, tmp_path):
@@ -168,33 +149,6 @@ def test_a_fresh_window_has_nothing_committed(app, tmp_path):
     finally:
         w.close()
 
-
-@pytest.mark.parametrize("what", ["phase1", "phase2", "patch_preview", "save"])
-def test_every_job_refuses_while_the_settings_are_unsaved(app, tmp_path,
-                                                          monkeypatch, what,
-                                                          _no_modal_dialogs):
-    w = _window(app, tmp_path)
-    try:
-        seen = _launched(w, monkeypatch)
-        started = []
-        monkeypatch.setattr(type(w), "_start_fusion_worker",
-                            lambda self, *a, **k: started.append(a))
-        w._p2_params = {"method": "cellpose_wholecell_fusion", "diameter": 30}
-
-        if what == "phase1":
-            w._run_p1([None])
-        elif what == "phase2":
-            w._run_p2({"method": "cellpose_wholecell_fusion", "params": {}})
-        elif what == "patch_preview":
-            w._run_direct_patch_preview({"method": "mesmer_whole_cell"})
-        else:
-            _chosen(w)
-            w._save()
-
-        assert "args" not in seen and started == []
-        assert any("Unsaved fusion changes" in str(a) for a in _no_modal_dialogs)
-    finally:
-        w.close()
 
 
 def test_saving_the_settings_clears_the_warning(app, tmp_path):
@@ -215,103 +169,12 @@ def test_saving_the_settings_clears_the_warning(app, tmp_path):
         w.close()
 
 
-def test_a_running_job_keeps_the_settings_it_started_with(app, tmp_path,
-                                                          monkeypatch):
-    w = _window(app, tmp_path)
-    try:
-        seen = _launched(w, monkeypatch)
-        _enable(w, "CD3", True)
-        w.config._rows["CD3"].spin.setValue(0.5)
-        assert w._commit_fusion_settings() is True
-        committed = w._committed_fusion_settings()["hash"]
-
-        w._run_p1([None])
-        assert seen.get("started") is True
-        started_with = json.dumps(seen["args"]["groups"], sort_keys=True)
-
-        # The user keeps working while it runs.
-        w.config._rows["CD3"].spin.setValue(0.9)
-        _enable(w, "CD8", True)
-
-        assert json.dumps(seen["args"]["groups"], sort_keys=True) == started_with
-        assert w._committed_fusion_settings()["hash"] == committed
-        assert w._fusion_settings_dirty() is True
-    finally:
-        w.close()
 
 
-def test_the_next_job_is_refused_until_it_is_saved_again(app, tmp_path,
-                                                         monkeypatch,
-                                                         _no_modal_dialogs):
-    w = _window(app, tmp_path)
-    try:
-        seen = _launched(w, monkeypatch)
-        _enable(w, "CD3", True)
-        w.config._rows["CD3"].spin.setValue(0.5)
-        w._commit_fusion_settings()
-        first = w._committed_fusion_settings()["hash"]
-
-        w.config._rows["CD3"].spin.setValue(0.9)
-        seen.pop("started", None)
-        w._run_p1([None])
-        assert "started" not in seen
-
-        assert w._commit_fusion_settings() is True
-        second = w._committed_fusion_settings()["hash"]
-        assert second != first
-
-        w._run_p1([None])
-        assert seen.get("started") is True
-        weights = {c: v for d in seen["args"]["groups"].values()
-                   for c, v in d.items()}
-        assert weights["CD3"] == pytest.approx(0.9)
-    finally:
-        w.close()
 
 
-def test_an_unticked_channel_never_reaches_a_job(app, tmp_path, monkeypatch):
-    """Untick is what keeps a channel out of a job.
-
-    This test used to weigh CD8 and expect the weight alone to keep it out.
-    Since the 2026-09-16 ruling a weight IS a decision to use the channel, so
-    the state it describes no longer exists: CD8 is weighted, therefore
-    enlisted, and it is UNTICKED here to make it absent -- which is what the
-    job must honour.
-    """
-    w = _window(app, tmp_path)
-    try:
-        seen = _launched(w, monkeypatch)
-        _enable(w, "CD3", True)
-        w.config._rows["CD3"].spin.setValue(0.5)
-        w.config._rows["CD8"].spin.setValue(0.7)      # a weight enlists it...
-        _enable(w, "CD8", False)                      # ...and this takes it out
-        w._commit_fusion_settings()
-
-        w._run_p1([None])
-
-        channels = {c for d in seen["args"]["groups"].values() for c in d}
-        assert channels == {"CD3"}
-    finally:
-        w.close()
 
 
-def test_a_channel_weighted_but_never_ticked_now_reaches_the_job(app, tmp_path,
-                                                                 monkeypatch):
-    """The other side of the same ruling, stated as a job-level fact."""
-    w = _window(app, tmp_path)
-    try:
-        seen = _launched(w, monkeypatch)
-        _enable(w, "CD3", True)
-        w.config._rows["CD3"].spin.setValue(0.5)
-        w.config._rows["CD8"].spin.setValue(0.7)      # weighted only
-        w._commit_fusion_settings()
-
-        w._run_p1([None])
-
-        channels = {c for d in seen["args"]["groups"].values() for c in d}
-        assert channels == {"CD3", "CD8"}
-    finally:
-        w.close()
 
 
 def test_a_failed_save_leaves_the_previous_snapshot_standing(app, tmp_path,
@@ -398,50 +261,8 @@ def test_a_matching_snapshot_is_adopted(app, tmp_path):
         w.close()
 
 
-def test_a_job_is_built_from_the_snapshot_not_from_the_panel(app, tmp_path,
-                                                             monkeypatch):
-    """The gate keeps the two in step in normal use; this pins the reason the
-    gate is not the whole answer. Even with the panel already moved on, the
-    job that starts is the one the user saved."""
-    w = _window(app, tmp_path)
-    try:
-        seen = _launched(w, monkeypatch)
-        _enable(w, "CD3", True)
-        w.config._rows["CD3"].spin.setValue(0.5)
-        w._commit_fusion_settings()
-
-        # The panel moves on, and a job starts anyway (the gate is bypassed
-        # here on purpose: what is under test is where the numbers come from).
-        w.config._rows["CD3"].spin.setValue(0.9)
-        _enable(w, "CD8", True)
-        w.config._rows["CD8"].spin.setValue(0.8)
-        w._launch_worker([(0, (0, 32, 0, 32), {"diameter": 30})])
-
-        weights = {c: v for d in seen["args"]["groups"].values()
-                   for c, v in d.items()}
-        assert weights == {"CD3": pytest.approx(0.5)}
-    finally:
-        w.close()
 
 
-def test_a_job_uses_the_mapping_that_was_frozen_with_it(app, tmp_path,
-                                                        monkeypatch):
-    w = _window(app, tmp_path)
-    try:
-        seen = _launched(w, monkeypatch)
-        mapping = {"CD3": {"min": 0.0, "max": 1.0, "gamma": 1.0}}
-        monkeypatch.setattr(type(w), "_display_mapping",
-                            lambda self, *a, **k: mapping)
-        _enable(w, "CD3", True)
-        w.config._rows["CD3"].spin.setValue(0.5)
-        w._commit_fusion_settings()
-
-        mapping["CD3"] = {"min": 0.0, "max": 0.2, "gamma": 1.0}
-        w._launch_worker([(0, (0, 32, 0, 32), {"diameter": 30})])
-
-        assert seen["args"]["channel_remap_params"]["CD3"]["max"] == 1.0
-    finally:
-        w.close()
 
 
 def test_the_fused_zarr_uses_the_mapping_that_was_saved_with_it(app, tmp_path,
@@ -484,20 +305,14 @@ def test_params_searched_on_other_settings_are_not_saved(app, tmp_path,
     is generated and no parameters go with it."""
     w = _window(app, tmp_path)
     try:
-        seen = _launched(w, monkeypatch)
         started = []
         monkeypatch.setattr(type(w), "_start_fusion_worker",
                             lambda self, *a, **k: started.append(a))
         _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
-        w._run_p1([None])
-        # What the worker returns: the params it was given, hash and all.
-        launched = seen["args"]["tasks"][0][2]
-        assert launched["fusion_settings_hash"] == w._committed_fusion_settings()["hash"]
-        # Selecting it in the result grid, the way a Phase 2 pick arrives.
-        w._on_param_sel(dict(launched, method="cellpose_wholecell_fusion",
-                             diameter=30, _phase=2))
+        w._on_param_sel(_stamped(w, method="cellpose_wholecell_fusion",
+                                 diameter=30, _phase=2))
         assert w._params_match_committed_settings() is True
 
         w.config._rows["CD3"].spin.setValue(0.9)
@@ -721,14 +536,12 @@ def test_an_old_result_selected_later_keeps_its_own_hash(app, tmp_path,
     Generate refuses it."""
     w = _window(app, tmp_path)
     try:
-        seen = _launched(w, monkeypatch)
         _enable(w, "CD3", True)
         w.config._rows["CD3"].spin.setValue(0.5)
         w._commit_fusion_settings()
         first = w._committed_fusion_settings()["hash"]
-        w._run_p1([None])
-        old_result = dict(seen["args"]["tasks"][0][2], _phase=2,
-                          method="cellpose_wholecell_fusion", diameter=30)
+        old_result = _stamped(w, _phase=2, method="cellpose_wholecell_fusion",
+                              diameter=30)
 
         w.config._rows["CD3"].spin.setValue(0.9)
         w._commit_fusion_settings()
@@ -755,7 +568,6 @@ def test_generate_leaves_step0s_handoff_alone_and_the_settings_restorable(
 
     w = _window(app, tmp_path)
     try:
-        seen = _launched(w, monkeypatch)
         monkeypatch.setattr(mw, "OUTPUT_DIR", str(tmp_path))
         monkeypatch.setattr(mw, "OME_TIFF_FILE", w.loader.filepath)
         reached = []
@@ -771,9 +583,7 @@ def test_generate_leaves_step0s_handoff_alone_and_the_settings_restorable(
         w.config._rows["CD3"].spin.setValue(0.5)
         assert w._commit_fusion_settings() is True
         saved_hash = w._committed_fusion_settings()["hash"]
-        w._run_p1([None])
-        result = dict(seen["args"]["tasks"][0][2], _phase=2,
-                      method="cellpose_wholecell_fusion", diameter=30)
+        result = _stamped(w, _phase=2, method="cellpose_wholecell_fusion", diameter=30)
         w._on_param_sel(result)
         _chosen(w)
 

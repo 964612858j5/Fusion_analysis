@@ -512,34 +512,6 @@ def test_site_preseg_done(tmp_path, monkeypatch, real):
     real("pre-segmentation: the run's .done not written", "OSError: done marker")
 
 
-def test_site_remap_provenance(tmp_path, real):
-    from block01.workers.segment_merge_worker import SegmentMergeWorker
-    from test_step2_remap_integration import _aligned_config
-    path = tmp_path / "remap.json"
-    path.write_text(json.dumps(_aligned_config()))
-    stub = types.SimpleNamespace(
-        seg_config={"channel_remap_config_path": str(path), "allow_preview_remap": True,
-                    "hq_channels": ["CD45", "CK19"]},
-        _manual_remap_enabled=False, _remap_provenance={},
-        _write_remap_provenance=_boom(OSError("run dir")))
-    SegmentMergeWorker._resolve_channel_remap(stub)
-    assert stub._manual_remap_enabled is True, "the run goes on"
-    real("Step2: remap provenance not written", "OSError: run dir")
-
-
-def test_site_source_aware_remap_provenance(monkeypatch, real):
-    import test_worker_source_aware_prepare as sap
-    d = sap._descriptor(kind="corrected_zarr")
-    sap._patch_resolver(monkeypatch, lambda requests, **k: sap._PC(
-        {c: sap._RS("corrected_zarr", "/data/corrected.zarr", "ROI_1", (200, 200))
-         for c in requests}, "homogeneous_corrected"))
-    stub = sap._stub(d)
-    stub._write_remap_provenance = _boom(OSError("run dir"))
-    sap._prep(stub)
-    assert stub._manual_remap_enabled is True
-    real("Step2: remap provenance not written", "OSError: run dir")
-
-
 @pytest.mark.parametrize("call, where", [
     (lambda p: prov.register_corrected_channels(p, p, p, p),
      "provenance: corrected channels not registered"),

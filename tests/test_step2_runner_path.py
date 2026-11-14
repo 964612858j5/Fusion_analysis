@@ -321,20 +321,6 @@ def test_the_runner_gets_step1s_input_for_the_method(app, tmp_path, monkeypatch,
         np.testing.assert_array_equal(arr, want)
 
 
-def test_a_mesmer_hand_over_opens_no_channel_group(app, tmp_path, monkeypatch):
-    """The file's input_mode is the normaliser's default "selected_channels";
-    a hand-over still reads the fused tile only."""
-    from block01.workers.segment_merge_worker import SegmentMergeWorker as Wk
-    cfg = _contract_config(tmp_path, "mesmer_nuclear_guided", identity=tpc.IDENT["mesmer"])
-    assert cfg.get("input_mode") == "selected_channels"
-    monkeypatch.setattr(Wk, "_open_hq_channel_group",
-                        lambda self, *a, **k: pytest.fail("a channel group was opened"))
-    worker = _worker(tmp_path, _fused_zarr(tmp_path, _image()), cfg)
-    worker._contract = preseg_contract.validate(worker.seg_config)
-    assert worker._validate_mesmer_config() is None
-    assert worker.seg_config["mesmer_input_source"] == "fused_zarr"
-
-
 # ── refusals ──────────────────────────────────────────────────────────
 
 def _seg_engine(worker):

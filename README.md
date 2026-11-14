@@ -56,9 +56,6 @@ The pipeline wraps multiple instance-segmentation backends behind a unified conf
 - **Mesmer (DeepCell)** — whole-cell / nuclear / nuclear-guided segmentation tuned for tissue imaging
   with membrane markers.
 
-> ⚠️ The **HQ / HQ2 / CDS** cytoplasm-carving backends are **experimental and not yet validated** —
-> not recommended for production output. Use Cellpose whole-cell for routine analysis.
-
 See **Appendix A** of the user manual for backend selection guidance.
 
 ---

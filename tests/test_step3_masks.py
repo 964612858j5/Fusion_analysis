@@ -225,7 +225,6 @@ def test_the_choice_rule(tmp_path):
     ("cellpose_nuclei_expansion", "primary", None),
     ("stardist_nuclei_expansion", "primary", None),
     ("mesmer_nuclear_guided", "primary", "nuclei"),
-    ("cellpose_nuclei_hq", "primary", "nuclei"),
 ])
 def test_masks_are_classified_by_method(tmp_path, method, cell, nucleus):
     rdir = _workspace(tmp_path)

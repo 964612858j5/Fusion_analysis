@@ -26,9 +26,6 @@ OVERVIEW_LONG_SIDE = 4096
 from ..utils.segmentation_config import (
     CELLPOSE_NUCLEI_DAPI,
     CELLPOSE_NUCLEI_EXPANSION,
-    CELLPOSE_NUCLEI_CSD,
-    CELLPOSE_NUCLEI_HQ,
-    CELLPOSE_NUCLEI_HQ2,
     CELLPOSE_WHOLECELL_FUSION,
     CELLPOSE_WHOLECELL_NUCLEI,
     HYBRID_CELLPOSE_STARDIST,
@@ -40,25 +37,15 @@ from ..utils.segmentation_config import (
     STARDIST_NUCLEI_EXPANSION,
     available_segmentation_methods,
     get_segmentation_method_config,
-    RetiredMethodError,
-    is_retired_method,
     normalize_segmentation_config,
-    retired_method_message,
 )
 from ..utils.segmentation_params import (
     PARAM_INDEX,
     params_index_path,
 )
 from ..utils.tile_strategy import suggest_tile_strategy
-from ..core.provenance import write_json_atomic
 from ..utils.roi_project import mark_roi_step
-from ..workers.hq_marker_segmentation import (
-    CONSENSUS_MODES,
-    parse_channel_weights,
-    parse_hq_channels,
-    resolve_hq_channels,
-    validate_hq_channels,
-)
+from ..utils.mesmer_utils import parse_channel_list
 from ..workers.segment_merge_worker import SegmentMergeWorker
 from ..core import preseg_contract
 from ..seg_runner import engines as seg_engines
@@ -73,7 +60,6 @@ def _gpu_on(value):
     """A config's use_gpu (a bool, or an old Mesmer 'auto'/'gpu'/'cpu')."""
     return str(value if value is not None else True).strip().lower() not in {
         "0", "false", "no", "off", "cpu"}
-from ..core.io_loader import OMETIFFLoader
 from .step_frame import FRAME_TAB_QSS, StepFrame, StepFrameMetrics, free_tab_bar
 
 # ══════════════════════════════════════════════════════════════════════
@@ -263,9 +249,6 @@ class Step2Page(QWidget):
         self._after_pending_context = None
         # Block RM: each region's fused product in the chosen fuse run.
         self._region_fused_paths = {}
-        self._last_remap_status = ""     # v14.5d: last Step0-remap applied/not-applied msg
-        self._source_aware_attached = False       # a runtime descriptor was attached
-        self._source_aware_summary = ""           # "N marker(s), <mixture>"
         self._suggested_tile_strategy = {}
 
         self._build_ui()
@@ -292,16 +275,6 @@ class Step2Page(QWidget):
         # Block A6: a running run's record is drawn again when the page is
         # back on its context (or the older-run line shown when it is not).
         self._refresh_run_view()
-
-    def _auto_remap_config_path(self):
-        """Path of the Step0 Channel Remap config for this ROI, or '' if none.
-        Marker segmentation (HQ/HQ2/CSD) auto-applies it (see get_seg_config)."""
-        rd = getattr(self, "_roi_dir", "") or ""
-        if rd:
-            p = os.path.join(rd, "settings", "step0", "step0_channel_remap.json")   # block RM
-            if os.path.exists(p):
-                return p
-        return ""
 
     def _sync_output_dir_from_zarr_path(self, zarr_path):
         """Use the ROI step2 directory when the input zarr comes from ROI step1."""
@@ -530,9 +503,7 @@ class Step2Page(QWidget):
         inl.addWidget(self._zarr_info)
         rl.addWidget(inp_box)
 
-        # Manual channel remap box removed: the Step0 saved remap is applied
-        # automatically — whole-cell/DAPI via the Step1 fused input, marker
-        # methods (HQ/HQ2/CSD) via _auto_remap_config_path() in get_seg_config.
+        # The Step0 saved remap reaches Step2 through the Step1 fused input.
 
         # Tile grid
         tile_box = QGroupBox('Tile Grid (for segmentation)')
@@ -790,358 +761,6 @@ class Step2Page(QWidget):
         self._sd_expand.setValue(8)
         r, self._sd_expand_label, _ = _param_row('expansion_distance:', self._sd_expand)
         cpl.addLayout(r)
-
-        self._hq_channels = QtWidgets.QLineEdit()
-        self._hq_channels.setPlaceholderText('PanCK;CD45;CD68')
-        self._hq_channels.setStyleSheet('font-size:11px;')
-        r, self._hq_channels_label, _ = _param_row('hq_channels:', self._hq_channels)
-        cpl.addLayout(r)
-
-        self._hq_input_mode = QComboBox()
-        self._hq_input_mode.addItem('selected_channels_from_source', 'selected_channels_from_source')
-        self._hq_input_mode.addItem('step1_weighted_fusion', 'step1_weighted_fusion')
-        self._hq_input_mode.addItem('hybrid', 'hybrid')
-        r, self._hq_input_mode_label, _ = _param_row('hq input mode:', self._hq_input_mode)
-        cpl.addLayout(r)
-
-        self._hq_radius = QDoubleSpinBox()
-        self._hq_radius.setRange(1, 200)
-        self._hq_radius.setSingleStep(1)
-        self._hq_radius.setValue(12)
-        r, self._hq_radius_label, _ = _param_row('max_cell_radius:', self._hq_radius)
-        cpl.addLayout(r)
-
-        self._hq_norm_low = QDoubleSpinBox()
-        self._hq_norm_low.setRange(0.0, 50.0)
-        self._hq_norm_low.setSingleStep(0.5)
-        self._hq_norm_low.setValue(1.0)
-        r, self._hq_norm_low_label, _ = _param_row('norm percentile low:', self._hq_norm_low)
-        cpl.addLayout(r)
-
-        self._hq_norm_high = QDoubleSpinBox()
-        self._hq_norm_high.setRange(50.0, 100.0)
-        self._hq_norm_high.setSingleStep(0.5)
-        self._hq_norm_high.setValue(99.5)
-        r, self._hq_norm_high_label, _ = _param_row('norm percentile high:', self._hq_norm_high)
-        cpl.addLayout(r)
-
-        self._hq_consensus = QComboBox()
-        for mode in CONSENSUS_MODES:
-            self._hq_consensus.addItem(mode, mode)
-        r, self._hq_consensus_label, _ = _param_row('consensus mode:', self._hq_consensus)
-        cpl.addLayout(r)
-
-        self._hq_weights = QtWidgets.QLineEdit()
-        self._hq_weights.setPlaceholderText('optional: PanCK=1;CD45=0.8;CD68=1')
-        self._hq_weights.setStyleSheet('font-size:11px;')
-        r, self._hq_weights_label, _ = _param_row('channel weights:', self._hq_weights)
-        cpl.addLayout(r)
-
-        self._hq_min_signal = QDoubleSpinBox()
-        self._hq_min_signal.setRange(0.0, 1.0)
-        self._hq_min_signal.setSingleStep(0.01)
-        self._hq_min_signal.setValue(0.08)
-        r, self._hq_min_signal_label, _ = _param_row('min signal threshold:', self._hq_min_signal)
-        cpl.addLayout(r)
-
-        self._hq_widgets = [
-            self._hq_channels_label, self._hq_channels,
-            self._hq_input_mode_label, self._hq_input_mode,
-            self._hq_radius_label, self._hq_radius,
-            self._hq_norm_low_label, self._hq_norm_low,
-            self._hq_norm_high_label, self._hq_norm_high,
-            self._hq_consensus_label, self._hq_consensus,
-            self._hq_weights_label, self._hq_weights,
-            self._hq_min_signal_label, self._hq_min_signal,
-        ]
-        self._hq2_widgets = []
-
-        def _hq2_row(label, widget):
-            r, l, w = _param_row(label, widget)
-            cpl.addLayout(r)
-            self._hq2_widgets.extend([l, w])
-            return w
-
-        self._hq2_base_section = QLabel('HQ2: HQ proposal inputs')
-        self._hq2_base_section.setStyleSheet(f'color:{_TK["accent"]};font-size:11px;font-weight:bold;padding-top:4px;')
-        cpl.addWidget(self._hq2_base_section)
-        self._hq2_widgets.append(self._hq2_base_section)
-
-        self._hq2_channels = _hq2_row('hq2 hq_channels:', QtWidgets.QLineEdit())
-        self._hq2_channels.setPlaceholderText('CD68;CD206;CD45')
-        self._hq2_channels.setStyleSheet('font-size:11px;')
-
-        self._hq2_input_mode = _hq2_row('hq2 input mode:', QComboBox())
-        self._hq2_input_mode.addItem('selected_channels_from_source', 'selected_channels_from_source')
-        self._hq2_input_mode.addItem('step1_weighted_fusion', 'step1_weighted_fusion')
-        self._hq2_input_mode.addItem('hybrid', 'hybrid')
-
-        self._hq2_radius = _hq2_row('hq2 max cell radius:', QDoubleSpinBox())
-        self._hq2_radius.setRange(1, 300)
-        self._hq2_radius.setSingleStep(1)
-        self._hq2_radius.setValue(18)
-
-        self._hq2_norm_low = _hq2_row('hq2 norm pct low:', QDoubleSpinBox())
-        self._hq2_norm_low.setRange(0.0, 50.0)
-        self._hq2_norm_low.setSingleStep(0.5)
-        self._hq2_norm_low.setValue(1.0)
-
-        self._hq2_norm_high = _hq2_row('hq2 norm pct high:', QDoubleSpinBox())
-        self._hq2_norm_high.setRange(50.0, 100.0)
-        self._hq2_norm_high.setSingleStep(0.5)
-        self._hq2_norm_high.setValue(99.5)
-
-        self._hq2_consensus = _hq2_row('hq2 level1 consensus:', QComboBox())
-        for mode in CONSENSUS_MODES:
-            self._hq2_consensus.addItem(mode, mode)
-
-        self._hq2_weights = _hq2_row('hq2 channel weights:', QtWidgets.QLineEdit())
-        self._hq2_weights.setPlaceholderText('optional: CD68=1;CD206=1;CD45=0.8')
-        self._hq2_weights.setStyleSheet('font-size:11px;')
-
-        self._hq2_min_signal = _hq2_row('hq2 min signal:', QDoubleSpinBox())
-        self._hq2_min_signal.setRange(0.0, 1.0)
-        self._hq2_min_signal.setSingleStep(0.01)
-        self._hq2_min_signal.setValue(0.08)
-
-        self._hq2_section = QLabel('HQ2: ImageJ-style proposal')
-        self._hq2_section.setStyleSheet(f'color:{_TK["accent"]};font-size:11px;font-weight:bold;padding-top:4px;')
-        cpl.addWidget(self._hq2_section)
-        self._hq2_widgets.append(self._hq2_section)
-
-        self._hq2_imagej_blur = _hq2_row('imagej blur sigma:', QDoubleSpinBox())
-        self._hq2_imagej_blur.setRange(0.0, 10.0)
-        self._hq2_imagej_blur.setSingleStep(0.1)
-        self._hq2_imagej_blur.setValue(1.0)
-
-        self._hq2_bg_radius = _hq2_row('imagej background radius:', QtWidgets.QSpinBox())
-        self._hq2_bg_radius.setRange(0, 300)
-        self._hq2_bg_radius.setValue(20)
-
-        self._hq2_threshold_method = _hq2_row('imagej threshold:', QComboBox())
-        for mode in ('adaptive', 'otsu', 'percentile'):
-            self._hq2_threshold_method.addItem(mode, mode)
-
-        self._hq2_threshold_percentile = _hq2_row('threshold percentile:', QDoubleSpinBox())
-        self._hq2_threshold_percentile.setRange(0.0, 100.0)
-        self._hq2_threshold_percentile.setValue(75.0)
-
-        self._hq2_min_object = _hq2_row('imagej min object:', QtWidgets.QSpinBox())
-        self._hq2_min_object.setRange(0, 100000)
-        self._hq2_min_object.setValue(20)
-
-        self._hq2_closing = _hq2_row('imagej closing radius:', QtWidgets.QSpinBox())
-        self._hq2_closing.setRange(0, 50)
-        self._hq2_closing.setValue(2)
-
-        self._hq2_opening = _hq2_row('imagej opening radius:', QtWidgets.QSpinBox())
-        self._hq2_opening.setRange(0, 50)
-        self._hq2_opening.setValue(1)
-
-        self._hq2_core_mode = _hq2_row('core mode:', QComboBox())
-        for mode in ('weighted_support', 'intersection', 'majority_support'):
-            self._hq2_core_mode.addItem(mode, mode)
-
-        self._hq2_min_core = _hq2_row('min core area:', QtWidgets.QSpinBox())
-        self._hq2_min_core.setRange(0, 100000)
-        self._hq2_min_core.setValue(8)
-
-        self._hq2_signal_mode = _hq2_row('signal map mode:', QComboBox())
-        for mode in ('per_cell_best_channel', 'max', 'weighted_max'):
-            self._hq2_signal_mode.addItem(mode, mode)
-
-        self._hq2_min_cont_signal = _hq2_row('min continuous signal:', QDoubleSpinBox())
-        self._hq2_min_cont_signal.setRange(0.0, 1.0)
-        self._hq2_min_cont_signal.setSingleStep(0.01)
-        self._hq2_min_cont_signal.setValue(0.08)
-
-        self._hq2_max_expansion = _hq2_row('max expansion radius:', QDoubleSpinBox())
-        self._hq2_max_expansion.setRange(0, 300)
-        self._hq2_max_expansion.setValue(25)
-
-        self._hq2_boundary_weight = _hq2_row('boundary gradient weight:', QDoubleSpinBox())
-        self._hq2_boundary_weight.setRange(0.0, 10.0)
-        self._hq2_boundary_weight.setSingleStep(0.05)
-        self._hq2_boundary_weight.setValue(0.25)
-
-        self._hq2_distance_weight = _hq2_row('distance penalty weight:', QDoubleSpinBox())
-        self._hq2_distance_weight.setRange(0.0, 10.0)
-        self._hq2_distance_weight.setSingleStep(0.01)
-        self._hq2_distance_weight.setValue(0.02)
-
-        self._hq2_neighbor_weight = _hq2_row('neighbor nucleus penalty:', QDoubleSpinBox())
-        self._hq2_neighbor_weight.setRange(0.0, 10.0)
-        self._hq2_neighbor_weight.setSingleStep(0.05)
-        self._hq2_neighbor_weight.setValue(0.15)
-
-        self._hq2_irregular = _hq2_row('allow irregular shape:', QCheckBox('True'))
-        self._hq2_irregular.setChecked(True)
-
-        self._hq2_macrophage_channels = _hq2_row('macrophage channels:', QtWidgets.QLineEdit('CD68;CD206'))
-        self._hq2_macrophage_channels.setStyleSheet('font-size:11px;')
-
-        self._hq2_macrophage_radius = _hq2_row('macrophage max radius:', QDoubleSpinBox())
-        self._hq2_macrophage_radius.setRange(0, 500)
-        self._hq2_macrophage_radius.setValue(35)
-
-        self._hq2_macrophage_signal = _hq2_row('macrophage min signal:', QDoubleSpinBox())
-        self._hq2_macrophage_signal.setRange(0.0, 1.0)
-        self._hq2_macrophage_signal.setSingleStep(0.01)
-        self._hq2_macrophage_signal.setValue(0.08)
-
-        self._csd_widgets = []
-        def _csd_row(label, widget):
-            r, l, w = _param_row(label, widget)
-            cpl.addLayout(r)
-            self._csd_widgets.extend([l, w])
-            return w
-
-        self._csd_section = QLabel('CDS: constrained donut segmentation')
-        self._csd_section.setStyleSheet(f'color:{_TK["accent"]};font-size:11px;font-weight:bold;padding-top:4px;')
-        cpl.addWidget(self._csd_section)
-        self._csd_widgets.append(self._csd_section)
-
-        self._csd_channels = _csd_row('csd hq_channels:', QtWidgets.QLineEdit())
-        self._csd_channels.setPlaceholderText('CD68;CD206;CD45')
-        self._csd_channels.setStyleSheet('font-size:11px;')
-
-        self._csd_input_mode = _csd_row('csd input mode:', QComboBox())
-        self._csd_input_mode.addItem('selected_channels_from_source', 'selected_channels_from_source')
-        self._csd_input_mode.addItem('hybrid', 'hybrid')
-
-        self._csd_donut_size = _csd_row('donut size:', QDoubleSpinBox())
-        self._csd_donut_size.setRange(5, 200)
-        self._csd_donut_size.setSingleStep(5)
-        self._csd_donut_size.setValue(18)
-
-        self._csd_minimal_radius = _csd_row('minimal radius:', QDoubleSpinBox())
-        self._csd_minimal_radius.setRange(0, 30)
-        self._csd_minimal_radius.setSingleStep(1)
-        self._csd_minimal_radius.setValue(3)
-
-        self._csd_max_radius = _csd_row('max cell radius:', QDoubleSpinBox())
-        self._csd_max_radius.setRange(5, 200)
-        self._csd_max_radius.setSingleStep(5)
-        self._csd_max_radius.setValue(18)
-
-        self._csd_shrink = _csd_row('shrink pixels:', QDoubleSpinBox())
-        self._csd_shrink.setRange(0, 30)
-        self._csd_shrink.setSingleStep(1)
-        self._csd_shrink.setValue(2)
-
-        self._csd_strong_threshold = _csd_row('strong threshold:', QDoubleSpinBox())
-        self._csd_strong_threshold.setRange(0.0, 1.0)
-        self._csd_strong_threshold.setSingleStep(0.01)
-        self._csd_strong_threshold.setValue(0.12)
-
-        self._csd_hotspot_threshold = _csd_row('hotspot threshold:', QDoubleSpinBox())
-        self._csd_hotspot_threshold.setRange(0.0, 10.0)
-        self._csd_hotspot_threshold.setSingleStep(0.1)
-        self._csd_hotspot_threshold.setValue(1.5)
-
-        self._csd_gi_kernel = _csd_row('Gi kernel:', QDoubleSpinBox())
-        self._csd_gi_kernel.setRange(3, 51)
-        self._csd_gi_kernel.setSingleStep(2)
-        self._csd_gi_kernel.setValue(7)
-
-        self._csd_gi_bg_kernel = _csd_row('Gi bg kernel:', QDoubleSpinBox())
-        self._csd_gi_bg_kernel.setRange(7, 151)
-        self._csd_gi_bg_kernel.setSingleStep(2)
-        self._csd_gi_bg_kernel.setValue(31)
-
-        self._csd_max_ratio = _csd_row('max ratio:', QDoubleSpinBox())
-        self._csd_max_ratio.setRange(1.0, 50.0)
-        self._csd_max_ratio.setSingleStep(0.5)
-        self._csd_max_ratio.setValue(8.0)
-
-        self._csd_lymph_ratio = _csd_row('lymph ratio:', QDoubleSpinBox())
-        self._csd_lymph_ratio.setRange(1.0, 20.0)
-        self._csd_lymph_ratio.setSingleStep(0.5)
-        self._csd_lymph_ratio.setValue(4.0)
-
-        self._csd_large_ratio = _csd_row('large cell ratio:', QDoubleSpinBox())
-        self._csd_large_ratio.setRange(1.0, 50.0)
-        self._csd_large_ratio.setSingleStep(0.5)
-        self._csd_large_ratio.setValue(12.0)
-
-        self._csd_support_weight = _csd_row('support weight:', QDoubleSpinBox())
-        self._csd_support_weight.setRange(0.0, 10.0)
-        self._csd_support_weight.setSingleStep(0.1)
-        self._csd_support_weight.setValue(1.0)
-
-        self._csd_weak_weight = _csd_row('weak support weight:', QDoubleSpinBox())
-        self._csd_weak_weight.setRange(0.0, 10.0)
-        self._csd_weak_weight.setSingleStep(0.1)
-        self._csd_weak_weight.setValue(0.5)
-
-        self._csd_distance_weight = _csd_row('distance penalty:', QDoubleSpinBox())
-        self._csd_distance_weight.setRange(0.0, 1.0)
-        self._csd_distance_weight.setSingleStep(0.01)
-        self._csd_distance_weight.setDecimals(3)
-        self._csd_distance_weight.setValue(0.03)
-
-        self._csd_gradient_weight = _csd_row('gradient weight:', QDoubleSpinBox())
-        self._csd_gradient_weight.setRange(0.0, 5.0)
-        self._csd_gradient_weight.setSingleStep(0.05)
-        self._csd_gradient_weight.setValue(0.25)
-
-        self._csd_low_pct = _csd_row('constraint low %:', QDoubleSpinBox())
-        self._csd_low_pct.setRange(0.0, 10.0)
-        self._csd_low_pct.setSingleStep(0.1)
-        self._csd_low_pct.setValue(0.5)
-
-        self._csd_high_pct = _csd_row('constraint high %:', QDoubleSpinBox())
-        self._csd_high_pct.setRange(90.0, 100.0)
-        self._csd_high_pct.setSingleStep(0.1)
-        self._csd_high_pct.setValue(99.5)
-
-        self._csd_constraint_mode = _csd_row('constraint mode:', QComboBox())
-        for label, value in (
-            ('per cell best channel', 'per_cell_best_channel'),
-            ('max', 'max'),
-            ('weighted max', 'weighted_max'),
-            ('none', 'none'),
-        ):
-            self._csd_constraint_mode.addItem(label, value)
-
-        self._csd_weak_z = _csd_row('weak local z:', QDoubleSpinBox())
-        self._csd_weak_z.setRange(0.0, 5.0)
-        self._csd_weak_z.setSingleStep(0.05)
-        self._csd_weak_z.setValue(0.75)
-
-        self._csd_weak_area = _csd_row('weak min area:', QDoubleSpinBox())
-        self._csd_weak_area.setRange(0, 500)
-        self._csd_weak_area.setSingleStep(1)
-        self._csd_weak_area.setValue(8)
-
-        self._csd_hotspot_conn = _csd_row('hotspot connectivity:', QDoubleSpinBox())
-        self._csd_hotspot_conn.setRange(4, 8)
-        self._csd_hotspot_conn.setSingleStep(4)
-        self._csd_hotspot_conn.setValue(8)
-
-        self._csd_local_contrast = _csd_row('local contrast:', QCheckBox())
-        self._csd_local_contrast.setChecked(False)
-
-        self._csd_local_radius = _csd_row('local contrast radius:', QDoubleSpinBox())
-        self._csd_local_radius.setRange(3, 100)
-        self._csd_local_radius.setSingleStep(1)
-        self._csd_local_radius.setValue(15)
-
-        self._csd_engine = _csd_row('cytoplasm engine:', QComboBox())
-        self._csd_engine.addItem('lean_carve', 'lean_carve')
-        self._csd_engine.addItem('cds2', 'cds2')
-        self._csd_engine.addItem('outside_in', 'outside_in')
-        self._csd_engine.addItem('flood_fill', 'flood_fill')
-        self._csd_engine.currentIndexChanged.connect(self._on_csd_engine_changed)
-
-        self._csd_fusion_mode = _csd_row('fusion mode:', QComboBox())
-        for _fm in ('union', 'vote'):
-            self._csd_fusion_mode.addItem(_fm, _fm)
-
-        self._csd_tau = _csd_row('outside-in tau (z):', QDoubleSpinBox())
-        self._csd_tau.setRange(0.0, 10.0)
-        self._csd_tau.setSingleStep(0.05)
-        self._csd_tau.setValue(0.5)
 
         self._mesmer_widgets = []
         def _mesmer_row(label, widget):
@@ -1546,101 +1165,6 @@ class Step2Page(QWidget):
             self._sync_output_dir_from_zarr_path(path)
             self._load_zarr_info()
 
-    # ── v13.1 manual channel remap controls ───────────────────────────
-    def _build_remap_box(self):
-        """Experimental Step2 manual channel remap controls (v13.1 Phase 5c.1).
-
-        Empty path = unchanged v13 behavior. A source-aligned config applies the
-        remap to the segmentation signal path only (never h5ad/expression).
-        Exposes channel_remap_config_path, allow_preview_remap and
-        remap_gate_mode so users can enable the remap runtime without editing
-        JSON by hand.
-        """
-        box = QGroupBox('Manual channel remap (v13.1 experimental)')
-        box.setStyleSheet(self._box_style('#d19a66'))
-        lay = QVBoxLayout(box)
-
-        # 1) config file picker: path + Browse + Clear
-        pr = QHBoxLayout()
-        pr.addWidget(QLabel('Channel remap config:'))
-        self._remap_config_edit = QtWidgets.QLineEdit()
-        self._remap_config_edit.setPlaceholderText(
-            'channel_remap_config.json (leave empty to disable)')
-        self._remap_config_edit.setStyleSheet('font-size:11px;')
-        self._remap_config_edit.textChanged.connect(self._update_remap_status)
-        pr.addWidget(self._remap_config_edit, stretch=1)
-        btn_remap = QPushButton('Browse')
-        btn_remap.setFixedWidth(64)
-        btn_remap.clicked.connect(self._browse_remap_config)
-        pr.addWidget(btn_remap)
-        btn_clear = QPushButton('Clear')
-        btn_clear.setFixedWidth(56)
-        btn_clear.clicked.connect(self._clear_remap_config)
-        pr.addWidget(btn_clear)
-        lay.addLayout(pr)
-
-        # 2) allow_preview_remap checkbox (default False)
-        self._allow_preview_remap = QCheckBox(
-            'Allow preview remap config (experimental)')
-        self._allow_preview_remap.setChecked(False)
-        self._allow_preview_remap.setToolTip(
-            'Required to run a preview_only / step2_ready=false remap config. '
-            'Without this, Step2 rejects a preview config with a clear message.')
-        self._allow_preview_remap.toggled.connect(self._update_remap_status)
-        lay.addWidget(self._allow_preview_remap)
-
-        # 3) remap_gate_mode combo (HCC default: remap_and_gi)
-        gr = QHBoxLayout()
-        gr.addWidget(QLabel('Remap gate mode:'))
-        self._remap_gate_mode = QComboBox()
-        for _m in ('remap', 'remap_and_gi', 'gi'):
-            self._remap_gate_mode.addItem(_m, _m)
-        # Default to the HCC recommendation; only written when a config is set.
-        self._remap_gate_mode.setCurrentIndex(
-            max(0, self._remap_gate_mode.findData('remap_and_gi')))
-        self._remap_gate_mode.setToolTip(
-            'remap: manual Min/Max/Gamma replaces the signal gate. '
-            'remap_and_gi: remap gate AND local-z gate. '
-            'gi: legacy local-z gate (config loaded but gate unchanged).')
-        self._remap_gate_mode.currentIndexChanged.connect(self._update_remap_status)
-        gr.addWidget(self._remap_gate_mode, stretch=1)
-        lay.addLayout(gr)
-
-        self._remap_status_lbl = QLabel('Remap: off')
-        self._remap_status_lbl.setStyleSheet(f'color:{_TK["text3"]};font-size:10px;')
-        self._remap_status_lbl.setWordWrap(True)
-        lay.addWidget(self._remap_status_lbl)
-        self._update_remap_status()
-        return box
-
-    def _clear_remap_config(self):
-        self._remap_config_edit.clear()
-        self._update_remap_status()
-
-    def _update_remap_status(self, *_):
-        if not hasattr(self, '_remap_status_lbl'):
-            return
-        path = self._remap_config_edit.text().strip()
-        if not path:
-            self._remap_status_lbl.setText('Remap: off')
-            self._remap_status_lbl.setStyleSheet(f'color:{_TK["text3"]};font-size:10px;')
-            return
-        allow = self._allow_preview_remap.isChecked()
-        gate = self._remap_gate_mode.currentData() or 'remap'
-        preview_note = ('preview allowed' if allow
-                        else 'preview NOT allowed (preview config will be rejected)')
-        self._remap_status_lbl.setText(
-            f'Remap: config selected, {preview_note}, gate={gate}')
-        self._remap_status_lbl.setStyleSheet(
-            'color:%s;font-size:10px;' % ('#9c6' if allow else '#f0b020'))
-
-    def _browse_remap_config(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, 'Select channel_remap_config.json', OUTPUT_DIR,
-            'Channel remap config (*.json);;All files (*)')
-        if path:
-            self._remap_config_edit.setText(os.path.abspath(path))
-
     def _browse_seg_params(self):
         dlg = QFileDialog(self, 'Select segmentation_params directory or index JSON', OUTPUT_DIR)
         dlg.setOption(QFileDialog.DontUseNativeDialog, True)
@@ -1702,13 +1226,6 @@ class Step2Page(QWidget):
             methods = index.get("methods") or {}
             if not methods:
                 raise ValueError('segmentation_params_index.json has no methods.')
-            # Retired methods (plan §1) are not offered.
-            retired_active = index.get("active_method") if is_retired_method(
-                index.get("active_method")) else None
-            methods = {m: v for m, v in methods.items() if not is_retired_method(m)}
-            if not methods:
-                raise RetiredMethodError('segmentation_params_index.json lists only methods '
-                                         'that are no longer available in Block01.')
             self._seg_params_index = index
             self._seg_params_dir = os.path.dirname(index_path)
             self._seg_params_edit.setText(index_path)
@@ -1730,12 +1247,6 @@ class Step2Page(QWidget):
             finally:
                 self._loading_index_selection = False
 
-            if retired_active:
-                # said even when quiet: the saved choice is not the one used
-                QMessageBox.information(
-                    self, 'Step2', f"{retired_method_message(retired_active)} Its saved "
-                    f"parameters are not used; {self._method_display_name(active_method)} "
-                    "is selected instead.")
             ok = True
             if apply_active:
                 ok = self._apply_index_method(active_method, active_file, silent=silent)
@@ -1744,7 +1255,7 @@ class Step2Page(QWidget):
                 print(f"[Step2] index={index_path}")
             return ok
         except Exception as e:
-            if not silent or isinstance(e, RetiredMethodError):
+            if not silent:
                 QMessageBox.warning(self, 'Error', str(e))
             else:
                 print(f'[Step2] failed to load segmentation params index: {e}')
@@ -1816,7 +1327,7 @@ class Step2Page(QWidget):
             print(f"[Step2] param_file={path}")
             return True
         except Exception as e:
-            if not silent or isinstance(e, RetiredMethodError):
+            if not silent:
                 QMessageBox.warning(self, 'Error', str(e))
             else:
                 print(f'[Step2] failed to load segmentation params: {e}')
@@ -2133,10 +1644,8 @@ class Step2Page(QWidget):
         method = self._method_combo.currentData() if hasattr(self, "_method_combo") else CELLPOSE_WHOLECELL_FUSION
         cfg = self.get_seg_config() if hasattr(self, "_method_combo") else {}
         channel_count = 2
-        if method in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
-            channel_count = max(2, len(parse_hq_channels(cfg.get("hq_channels") or [])) + 1)
-        elif method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
-            channel_count = max(2, len(parse_hq_channels(cfg.get("membrane_channels") or [])) + 1)
+        if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
+            channel_count = max(2, len(parse_channel_list(cfg.get("membrane_channels") or [])) + 1)
         suggestion = suggest_tile_strategy(
             self._full_h,
             self._full_w,
@@ -3171,21 +2680,10 @@ class Step2Page(QWidget):
         return True, {"params_hash": params_hash, "input_hash": input_hash,
                       "confirmed_at": time.strftime("%Y-%m-%d %H:%M:%S")}
 
-    def _on_csd_engine_changed(self):
-        """cds2 ignores constraint_mode -> force it to 'none' and grey it out."""
-        is_cds2 = (self._csd_engine.currentData() == 'cds2')
-        self._csd_constraint_mode.setEnabled(not is_cds2)
-        if is_cds2:
-            self._csd_constraint_mode.setCurrentIndex(max(0, self._csd_constraint_mode.findData('none')))
-        elif self._csd_constraint_mode.currentData() == 'none':
-            self._csd_constraint_mode.setCurrentIndex(max(0, self._csd_constraint_mode.findData('per_cell_best_channel')))
-
     def _check_method_offered(self, method):
-        """Raise ValueError unless `method` is one the method box offers: a
-        retired method (plan §1) or any other unlisted one is refused, never
-        silently replaced by the method on screen."""
-        if is_retired_method(method):
-            raise RetiredMethodError(retired_method_message(method))
+        """Raise ValueError unless `method` is one the method box offers: an
+        unlisted one is refused, never silently replaced by the method on
+        screen."""
         if self._method_combo.findData(method) < 0:
             raise ValueError(f"Unknown segmentation method: {method}")
 
@@ -3206,81 +2704,6 @@ class Step2Page(QWidget):
         self._sd_prob.setValue(-1.0 if p.get('prob_thresh') is None else float(p.get('prob_thresh')))
         self._sd_nms.setValue(-1.0 if p.get('nms_thresh') is None else float(p.get('nms_thresh')))
         self._sd_expand.setValue(float(p.get('expand_distance', 8) or 0))
-        self._hq_channels.setText(";".join(parse_hq_channels(p.get("hq_channels") or [])))
-        idx = self._hq_input_mode.findData(p.get("hq_input_mode", "selected_channels_from_source"))
-        self._hq_input_mode.setCurrentIndex(max(0, idx))
-        self._hq_radius.setValue(float(p.get("max_cell_radius", 12) or 12))
-        self._hq_norm_low.setValue(float(p.get("normalization_percentile_low", 1.0)))
-        self._hq_norm_high.setValue(float(p.get("normalization_percentile_high", 99.5)))
-        idx = self._hq_consensus.findData(p.get("consensus_mode", "adaptive_best_channel"))
-        self._hq_consensus.setCurrentIndex(max(0, idx))
-        weights = p.get("channel_weights") or {}
-        self._hq_weights.setText(";".join(f"{k}={v}" for k, v in weights.items()))
-        self._hq_min_signal.setValue(float(p.get("min_signal_threshold", 0.08)))
-        self._hq2_channels.setText(";".join(parse_hq_channels(p.get("hq_channels") or [])))
-        idx = self._hq2_input_mode.findData(p.get("hq_input_mode", "selected_channels_from_source"))
-        self._hq2_input_mode.setCurrentIndex(max(0, idx))
-        self._hq2_radius.setValue(float(p.get("max_cell_radius", 18) or 18))
-        self._hq2_norm_low.setValue(float(p.get("normalization_percentile_low", 1.0)))
-        self._hq2_norm_high.setValue(float(p.get("normalization_percentile_high", 99.5)))
-        idx = self._hq2_consensus.findData(p.get("consensus_mode", "adaptive_best_channel"))
-        self._hq2_consensus.setCurrentIndex(max(0, idx))
-        self._hq2_weights.setText(";".join(f"{k}={v}" for k, v in weights.items()))
-        self._hq2_min_signal.setValue(float(p.get("min_signal_threshold", 0.08)))
-        self._hq2_imagej_blur.setValue(float(p.get("imagej_blur_sigma", 1.0)))
-        self._hq2_bg_radius.setValue(int(p.get("imagej_background_radius", 20) or 0))
-        idx = self._hq2_threshold_method.findData(p.get("imagej_threshold_method", "adaptive"))
-        self._hq2_threshold_method.setCurrentIndex(max(0, idx))
-        self._hq2_threshold_percentile.setValue(float(p.get("imagej_threshold_percentile", 75.0)))
-        self._hq2_min_object.setValue(int(p.get("imagej_min_object_size", 20) or 0))
-        self._hq2_closing.setValue(int(p.get("imagej_closing_radius", 2) or 0))
-        self._hq2_opening.setValue(int(p.get("imagej_opening_radius", 1) or 0))
-        idx = self._hq2_core_mode.findData(p.get("core_mode", "weighted_support"))
-        self._hq2_core_mode.setCurrentIndex(max(0, idx))
-        self._hq2_min_core.setValue(int(p.get("min_core_area", 8) or 0))
-        idx = self._hq2_signal_mode.findData(p.get("signal_map_mode", "per_cell_best_channel"))
-        self._hq2_signal_mode.setCurrentIndex(max(0, idx))
-        self._hq2_min_cont_signal.setValue(float(p.get("min_continuous_signal", 0.08)))
-        self._hq2_max_expansion.setValue(float(p.get("max_expansion_radius", 25)))
-        self._hq2_boundary_weight.setValue(float(p.get("boundary_gradient_weight", 0.25)))
-        self._hq2_distance_weight.setValue(float(p.get("distance_penalty_weight", 0.02)))
-        self._hq2_neighbor_weight.setValue(float(p.get("neighbor_nucleus_penalty_weight", 0.15)))
-        self._hq2_irregular.setChecked(bool(p.get("allow_irregular_shape", True)))
-        self._hq2_macrophage_channels.setText(str(p.get("macrophage_channels", "CD68;CD206") or ""))
-        self._hq2_macrophage_radius.setValue(float(p.get("macrophage_max_radius", 35)))
-        self._hq2_macrophage_signal.setValue(float(p.get("macrophage_min_signal", 0.08)))
-        self._csd_channels.setText(";".join(parse_hq_channels(p.get("hq_channels") or [])))
-        idx = self._csd_input_mode.findData(p.get("hq_input_mode", "selected_channels_from_source"))
-        self._csd_input_mode.setCurrentIndex(max(0, idx))
-        self._csd_donut_size.setValue(float(p.get("donut_size", 18) or 18))
-        self._csd_minimal_radius.setValue(float(p.get("minimal_radius", 3) or 0))
-        self._csd_max_radius.setValue(float(p.get("max_cell_radius", p.get("donut_size", 18)) or 18))
-        self._csd_shrink.setValue(float(p.get("shrink_pixels", p.get("nucleus_shrink", 2)) or 0))
-        self._csd_strong_threshold.setValue(float(p.get("strong_support_threshold", 0.12) or 0))
-        self._csd_hotspot_threshold.setValue(float(p.get("weak_hotspot_threshold", 1.5) or 0))
-        self._csd_gi_kernel.setValue(float(p.get("gi_kernel_size", 7) or 7))
-        self._csd_gi_bg_kernel.setValue(float(p.get("gi_background_kernel_size", 31) or 31))
-        self._csd_max_ratio.setValue(float(p.get("max_cell_to_nucleus_ratio", 8.0) or 8.0))
-        self._csd_lymph_ratio.setValue(float(p.get("lymphocyte_max_cell_to_nucleus_ratio", 4.0) or 4.0))
-        self._csd_large_ratio.setValue(float(p.get("large_cell_max_cell_to_nucleus_ratio", 12.0) or 12.0))
-        self._csd_support_weight.setValue(float(p.get("support_weight", 1.0) or 0))
-        self._csd_weak_weight.setValue(float(p.get("weak_support_weight", 0.5) or 0))
-        self._csd_distance_weight.setValue(float(p.get("distance_penalty_weight", 0.03) or 0))
-        self._csd_gradient_weight.setValue(float(p.get("boundary_gradient_weight", 0.25) or 0))
-        self._csd_low_pct.setValue(float(p.get("constraint_low_percentile", 0.5) or 0))
-        self._csd_high_pct.setValue(float(p.get("constraint_high_percentile", 99.5) or 99.5))
-        idx = self._csd_constraint_mode.findData(p.get("constraint_mode", "per_cell_best_channel"))
-        self._csd_constraint_mode.setCurrentIndex(max(0, idx))
-        self._csd_weak_z.setValue(float(p.get("weak_local_z_threshold", 0.75) or 0))
-        self._csd_weak_area.setValue(float(p.get("weak_min_component_area", 8) or 0))
-        self._csd_hotspot_conn.setValue(float(p.get("weak_hotspot_connectivity", 8) or 8))
-        self._csd_local_contrast.setChecked(bool(p.get("local_contrast_enabled", False)))
-        self._csd_local_radius.setValue(float(p.get("local_contrast_radius", 15) or 15))
-        idx = self._csd_engine.findData(p.get("cytoplasm_engine", "lean_carve"))
-        self._csd_engine.setCurrentIndex(max(0, idx))
-        idx = self._csd_fusion_mode.findData(p.get("fusion_mode", "union"))
-        self._csd_fusion_mode.setCurrentIndex(max(0, idx))
-        self._csd_tau.setValue(float(p.get("outside_in_z_threshold", 0.5) or 0.5))
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             maxima = p.get("maxima_threshold")
             interior = p.get("interior_threshold")
@@ -3315,80 +2738,6 @@ class Step2Page(QWidget):
         self._sd_prob.setValue(-1.0 if cfg.get('prob_thresh') is None else float(cfg.get('prob_thresh')))
         self._sd_nms.setValue(-1.0 if cfg.get('nms_thresh') is None else float(cfg.get('nms_thresh')))
         self._sd_expand.setValue(float(cfg.get('expand_distance', 8) or 0))
-        self._hq_channels.setText(";".join(parse_hq_channels(cfg.get("hq_channels") or [])))
-        idx = self._hq_input_mode.findData(cfg.get("hq_input_mode", "selected_channels_from_source"))
-        self._hq_input_mode.setCurrentIndex(max(0, idx))
-        self._hq_radius.setValue(float(cfg.get("max_cell_radius", 12) or 12))
-        self._hq_norm_low.setValue(float(cfg.get("normalization_percentile_low", 1.0)))
-        self._hq_norm_high.setValue(float(cfg.get("normalization_percentile_high", 99.5)))
-        idx = self._hq_consensus.findData(cfg.get("consensus_mode", "adaptive_best_channel"))
-        self._hq_consensus.setCurrentIndex(max(0, idx))
-        self._hq_weights.setText("")
-        self._hq_min_signal.setValue(float(cfg.get("min_signal_threshold", 0.08)))
-        self._hq2_channels.setText(";".join(parse_hq_channels(cfg.get("hq_channels") or [])))
-        idx = self._hq2_input_mode.findData(cfg.get("hq_input_mode", "selected_channels_from_source"))
-        self._hq2_input_mode.setCurrentIndex(max(0, idx))
-        self._hq2_radius.setValue(float(cfg.get("max_cell_radius", 18) or 18))
-        self._hq2_norm_low.setValue(float(cfg.get("normalization_percentile_low", 1.0)))
-        self._hq2_norm_high.setValue(float(cfg.get("normalization_percentile_high", 99.5)))
-        idx = self._hq2_consensus.findData(cfg.get("consensus_mode", "adaptive_best_channel"))
-        self._hq2_consensus.setCurrentIndex(max(0, idx))
-        self._hq2_weights.setText("")
-        self._hq2_min_signal.setValue(float(cfg.get("min_signal_threshold", 0.08)))
-        self._hq2_imagej_blur.setValue(float(cfg.get("imagej_blur_sigma", 1.0)))
-        self._hq2_bg_radius.setValue(int(cfg.get("imagej_background_radius", 20) or 0))
-        idx = self._hq2_threshold_method.findData(cfg.get("imagej_threshold_method", "adaptive"))
-        self._hq2_threshold_method.setCurrentIndex(max(0, idx))
-        self._hq2_threshold_percentile.setValue(float(cfg.get("imagej_threshold_percentile", 75.0)))
-        self._hq2_min_object.setValue(int(cfg.get("imagej_min_object_size", 20) or 0))
-        self._hq2_closing.setValue(int(cfg.get("imagej_closing_radius", 2) or 0))
-        self._hq2_opening.setValue(int(cfg.get("imagej_opening_radius", 1) or 0))
-        idx = self._hq2_core_mode.findData(cfg.get("core_mode", "weighted_support"))
-        self._hq2_core_mode.setCurrentIndex(max(0, idx))
-        self._hq2_min_core.setValue(int(cfg.get("min_core_area", 8) or 0))
-        idx = self._hq2_signal_mode.findData(cfg.get("signal_map_mode", "per_cell_best_channel"))
-        self._hq2_signal_mode.setCurrentIndex(max(0, idx))
-        self._hq2_min_cont_signal.setValue(float(cfg.get("min_continuous_signal", 0.08)))
-        self._hq2_max_expansion.setValue(float(cfg.get("max_expansion_radius", 25)))
-        self._hq2_boundary_weight.setValue(float(cfg.get("boundary_gradient_weight", 0.25)))
-        self._hq2_distance_weight.setValue(float(cfg.get("distance_penalty_weight", 0.02)))
-        self._hq2_neighbor_weight.setValue(float(cfg.get("neighbor_nucleus_penalty_weight", 0.15)))
-        self._hq2_irregular.setChecked(bool(cfg.get("allow_irregular_shape", True)))
-        self._hq2_macrophage_channels.setText(str(cfg.get("macrophage_channels", "CD68;CD206") or ""))
-        self._hq2_macrophage_radius.setValue(float(cfg.get("macrophage_max_radius", 35)))
-        self._hq2_macrophage_signal.setValue(float(cfg.get("macrophage_min_signal", 0.08)))
-        self._csd_channels.setText(";".join(parse_hq_channels(cfg.get("hq_channels") or [])))
-        idx = self._csd_input_mode.findData(cfg.get("hq_input_mode", "selected_channels_from_source"))
-        self._csd_input_mode.setCurrentIndex(max(0, idx))
-        self._csd_donut_size.setValue(float(cfg.get("donut_size", 18) or 18))
-        self._csd_minimal_radius.setValue(float(cfg.get("minimal_radius", 3) or 0))
-        self._csd_max_radius.setValue(float(cfg.get("max_cell_radius", cfg.get("donut_size", 18)) or 18))
-        self._csd_shrink.setValue(float(cfg.get("shrink_pixels", cfg.get("nucleus_shrink", 2)) or 0))
-        self._csd_strong_threshold.setValue(float(cfg.get("strong_support_threshold", 0.12) or 0))
-        self._csd_hotspot_threshold.setValue(float(cfg.get("weak_hotspot_threshold", 1.5) or 0))
-        self._csd_gi_kernel.setValue(float(cfg.get("gi_kernel_size", 7) or 7))
-        self._csd_gi_bg_kernel.setValue(float(cfg.get("gi_background_kernel_size", 31) or 31))
-        self._csd_max_ratio.setValue(float(cfg.get("max_cell_to_nucleus_ratio", 8.0) or 8.0))
-        self._csd_lymph_ratio.setValue(float(cfg.get("lymphocyte_max_cell_to_nucleus_ratio", 4.0) or 4.0))
-        self._csd_large_ratio.setValue(float(cfg.get("large_cell_max_cell_to_nucleus_ratio", 12.0) or 12.0))
-        self._csd_support_weight.setValue(float(cfg.get("support_weight", 1.0) or 0))
-        self._csd_weak_weight.setValue(float(cfg.get("weak_support_weight", 0.5) or 0))
-        self._csd_distance_weight.setValue(float(cfg.get("distance_penalty_weight", 0.03) or 0))
-        self._csd_gradient_weight.setValue(float(cfg.get("boundary_gradient_weight", 0.25) or 0))
-        self._csd_low_pct.setValue(float(cfg.get("constraint_low_percentile", 0.5) or 0))
-        self._csd_high_pct.setValue(float(cfg.get("constraint_high_percentile", 99.5) or 99.5))
-        idx = self._csd_constraint_mode.findData(cfg.get("constraint_mode", "per_cell_best_channel"))
-        self._csd_constraint_mode.setCurrentIndex(max(0, idx))
-        self._csd_weak_z.setValue(float(cfg.get("weak_local_z_threshold", 0.75) or 0))
-        self._csd_weak_area.setValue(float(cfg.get("weak_min_component_area", 8) or 0))
-        self._csd_hotspot_conn.setValue(float(cfg.get("weak_hotspot_connectivity", 8) or 8))
-        self._csd_local_contrast.setChecked(bool(cfg.get("local_contrast_enabled", False)))
-        self._csd_local_radius.setValue(float(cfg.get("local_contrast_radius", 15) or 15))
-        idx = self._csd_engine.findData(cfg.get("cytoplasm_engine", "lean_carve"))
-        self._csd_engine.setCurrentIndex(max(0, idx))
-        idx = self._csd_fusion_mode.findData(cfg.get("fusion_mode", "union"))
-        self._csd_fusion_mode.setCurrentIndex(max(0, idx))
-        self._csd_tau.setValue(float(cfg.get("outside_in_z_threshold", 0.5) or 0.5))
         if method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED):
             maxima = cfg.get("maxima_threshold")
             interior = cfg.get("interior_threshold")
@@ -3429,133 +2778,12 @@ class Step2Page(QWidget):
                         "overlap", "batch_size", "percentile_low", "percentile_high"):
                 params.pop(key, None)
                 data.pop(key, None)
-        if method == CELLPOSE_NUCLEI_HQ2:
-            hq_channels = parse_hq_channels(self._hq2_channels.text())
-            hq_input_mode = self._hq2_input_mode.currentData() or 'selected_channels_from_source'
-            max_cell_radius = self._hq2_radius.value()
-            norm_low = self._hq2_norm_low.value()
-            norm_high = self._hq2_norm_high.value()
-            consensus_mode = self._hq2_consensus.currentData() or 'adaptive_best_channel'
-            channel_weights = parse_channel_weights(self._hq2_weights.text(), hq_channels)
-            min_signal = self._hq2_min_signal.value()
-        elif method == CELLPOSE_NUCLEI_CSD:
-            hq_channels = parse_hq_channels(self._csd_channels.text())
-            hq_input_mode = self._csd_input_mode.currentData() or 'selected_channels_from_source'
-            max_cell_radius = params.get('max_cell_radius', 12)
-            norm_low = params.get('normalization_percentile_low', 1.0)
-            norm_high = params.get('normalization_percentile_high', 99.5)
-            consensus_mode = params.get('consensus_mode', 'adaptive_best_channel')
-            channel_weights = {}
-            min_signal = params.get('min_signal_threshold', 0.08)
-        elif method == CELLPOSE_NUCLEI_HQ:
-            hq_channels = parse_hq_channels(self._hq_channels.text())
-            hq_input_mode = self._hq_input_mode.currentData() or 'selected_channels_from_source'
-            max_cell_radius = self._hq_radius.value()
-            norm_low = self._hq_norm_low.value()
-            norm_high = self._hq_norm_high.value()
-            consensus_mode = self._hq_consensus.currentData() or 'adaptive_best_channel'
-            channel_weights = parse_channel_weights(self._hq_weights.text(), hq_channels)
-            min_signal = self._hq_min_signal.value()
-        else:
-            hq_channels = []
-            hq_input_mode = 'selected_channels_from_source'
-            max_cell_radius = params.get('max_cell_radius', 12)
-            norm_low = params.get('normalization_percentile_low', 1.0)
-            norm_high = params.get('normalization_percentile_high', 99.5)
-            consensus_mode = params.get('consensus_mode', 'adaptive_best_channel')
-            channel_weights = {}
-            min_signal = params.get('min_signal_threshold', 0.08)
         params.update({
             'model_name':         preseg_contract.STARDIST_MODEL,
             'prob_thresh':        None if self._sd_prob.value() < 0 else self._sd_prob.value(),
             'nms_thresh':         None if self._sd_nms.value() < 0 else self._sd_nms.value(),
             'expand_distance':    self._sd_expand.value(),
-            'hq_channels':        hq_channels,
-            'hq_input_mode':      hq_input_mode,
-            'max_cell_radius':    max_cell_radius,
-            'normalization_percentile_low': norm_low,
-            'normalization_percentile_high': norm_high,
-            'consensus_mode':     consensus_mode,
-            'channel_weights':    channel_weights,
-            'min_signal_threshold': min_signal,
-            'imagej_blur_sigma':  self._hq2_imagej_blur.value(),
-            'imagej_background_radius': self._hq2_bg_radius.value(),
-            'imagej_threshold_method': self._hq2_threshold_method.currentData() or 'adaptive',
-            'imagej_threshold_percentile': self._hq2_threshold_percentile.value(),
-            'imagej_min_object_size': self._hq2_min_object.value(),
-            'imagej_closing_radius': self._hq2_closing.value(),
-            'imagej_opening_radius': self._hq2_opening.value(),
-            'core_mode': self._hq2_core_mode.currentData() or 'weighted_support',
-            'min_core_area': self._hq2_min_core.value(),
-            'signal_map_mode': self._hq2_signal_mode.currentData() or 'per_cell_best_channel',
-            'min_continuous_signal': self._hq2_min_cont_signal.value(),
-            'max_expansion_radius': self._hq2_max_expansion.value(),
-            'boundary_gradient_weight': self._hq2_boundary_weight.value(),
-            'distance_penalty_weight': self._hq2_distance_weight.value(),
-            'neighbor_nucleus_penalty_weight': self._hq2_neighbor_weight.value(),
-            'allow_irregular_shape': self._hq2_irregular.isChecked(),
-            'macrophage_channels': self._hq2_macrophage_channels.text().strip(),
-            'macrophage_max_radius': self._hq2_macrophage_radius.value(),
-            'macrophage_min_signal': self._hq2_macrophage_signal.value(),
         })
-        if method == CELLPOSE_NUCLEI_CSD:
-            params.update({
-                'donut_size': self._csd_donut_size.value(),
-                'minimal_radius': self._csd_minimal_radius.value(),
-                'max_cell_radius': self._csd_max_radius.value(),
-                'shrink_pixels': self._csd_shrink.value(),
-                'strong_support_threshold': self._csd_strong_threshold.value(),
-                'weak_hotspot_threshold': self._csd_hotspot_threshold.value(),
-                'gi_kernel_size': self._csd_gi_kernel.value(),
-                'gi_background_kernel_size': self._csd_gi_bg_kernel.value(),
-                'gi_background_mode': 'local',
-                'max_cell_to_nucleus_ratio': self._csd_max_ratio.value(),
-                'lymphocyte_max_cell_to_nucleus_ratio': self._csd_lymph_ratio.value(),
-                'large_cell_max_cell_to_nucleus_ratio': self._csd_large_ratio.value(),
-                'support_weight': self._csd_support_weight.value(),
-                'weak_support_weight': self._csd_weak_weight.value(),
-                'distance_penalty_weight': self._csd_distance_weight.value(),
-                'boundary_gradient_weight': self._csd_gradient_weight.value(),
-                'constraint_low_percentile': self._csd_low_pct.value(),
-                'constraint_high_percentile': self._csd_high_pct.value(),
-                'constraint_mode': 'none' if self._csd_engine.currentData() == 'cds2' else (self._csd_constraint_mode.currentData() or 'per_cell_best_channel'),
-                'weak_local_z_threshold': self._csd_weak_z.value(),
-                'weak_min_component_area': self._csd_weak_area.value(),
-                'weak_hotspot_connectivity': self._csd_hotspot_conn.value(),
-                'local_contrast_enabled': self._csd_local_contrast.isChecked(),
-                'local_contrast_radius': self._csd_local_radius.value(),
-                'cytoplasm_engine': self._csd_engine.currentData() or 'lean_carve',
-                'fusion_mode': self._csd_fusion_mode.currentData() or 'union',
-                'outside_in_z_threshold': self._csd_tau.value(),
-            })
-        if method != CELLPOSE_NUCLEI_HQ2:
-            for key in (
-                'imagej_blur_sigma', 'imagej_background_radius', 'imagej_threshold_method',
-                'imagej_threshold_percentile', 'imagej_min_object_size',
-                'imagej_closing_radius', 'imagej_opening_radius', 'core_mode',
-                'min_core_area', 'signal_map_mode', 'min_continuous_signal',
-                'max_expansion_radius', 'neighbor_nucleus_penalty_weight',
-                'allow_irregular_shape', 'macrophage_channels',
-                'macrophage_max_radius', 'macrophage_min_signal',
-            ):
-                params.pop(key, None)
-        if method != CELLPOSE_NUCLEI_CSD:
-            for key in (
-                'donut_size', 'minimal_radius', 'shrink_pixels',
-                'strong_support_threshold', 'weak_hotspot_threshold',
-                'gi_kernel_size', 'gi_background_kernel_size', 'gi_background_mode',
-                'max_cell_to_nucleus_ratio', 'lymphocyte_max_cell_to_nucleus_ratio',
-                'large_cell_max_cell_to_nucleus_ratio',
-                'support_weight', 'weak_support_weight',
-                'distance_penalty_weight', 'neighbor_penalty_weight',
-                'boundary_gradient_weight', 'constraint_low_percentile',
-                'constraint_high_percentile', 'constraint_mode',
-                'weak_local_z_threshold', 'weak_min_component_area',
-                'weak_hotspot_connectivity', 'local_contrast_enabled',
-                'local_contrast_radius', 'cytoplasm_engine',
-                'fusion_mode', 'outside_in_z_threshold',
-            ):
-                params.pop(key, None)
         data.update({
             'method':             method,
             'params':             params,
@@ -3605,123 +2833,8 @@ class Step2Page(QWidget):
                 'nucleus_cellprob_threshold': self._nuc_prob.value(),
                 'nucleus_min_size':           self._nuc_minsize.value(),
             })
-        # The Step0 manual channel remap reaches Step2 via source-alignment
-        # PROMOTION at launch (_promote_step0_remap in _run), NEVER by attaching the
-        # raw Step0 preview config here. That preview config is Step2-incompatible by
-        # design (step0_page marks calibration alignment unverified) and the worker's
-        # validator would reject it — attaching it here was a crash regression.
-        # Promotion is HQ2/CSD-only: only those read raw_ome markers that match
-        # Step0's raw_ome calibration; plain HQ / Mesmer read corrected markers when
-        # a Step0 corrected zarr exists, so a raw-calibrated remap cannot be applied
-        # to them safely (needs the v14.5d source-aware runtime).
         cfg = normalize_segmentation_config(data)
-        if method in (CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
-            print(f"[HQ2-UI] collected params={cfg.get('params')}")
-            print(f"[HQ2-UI] worker config keys={sorted(cfg.keys())}")
         return cfg
-
-    def _set_remap_status(self, msg):
-        """Surface the Step0-remap outcome (applied / NOT applied — reason). Stored for
-        tests + printed; mirrored to the overview status label when present."""
-        self._last_remap_status = msg
-        print(f"[Step2] {msg}")
-        lbl = getattr(self, "_ov_status", None)
-        if lbl is not None:
-            try:
-                lbl.setText(msg)
-            except Exception:
-                pass
-
-    def _promote_step0_remap(self, seg_config):
-        """v14.5d B3d: attach a source-aware RUNTIME remap config so the worker applies
-        the Step0 remap per marker channel. Flag-gated
-        (ENABLE_STEP2_SOURCE_AWARE_REMAP_RUNTIME): OFF -> attach nothing, status
-        'NOT applied — runtime disabled'. HQ2/CSD + selected_channels_from_source +
-        full-image only. Every outcome sets an EXPLICIT status (applied / NOT applied —
-        reason); never a silent fallback. Mutates seg_config in place; never raises.
-        """
-        from ..utils.segmentation_config import (
-            is_hq2_csd_method, step2_source_aware_runtime_enabled)
-        # Reset per-launch + clear a stale source-aware runtime path from a prior run or a
-        # loaded param file, so a not-applied / flag-off launch NEVER hands a source-aware
-        # runtime config to the worker (legacy manual configs are left untouched).
-        self._source_aware_attached = False
-        self._source_aware_summary = ""
-        if str(seg_config.get("channel_remap_config_path") or "").endswith(
-                "channel_remap_config.step2ready.json"):
-            seg_config.pop("channel_remap_config_path", None)
-        method = seg_config.get("method")
-        if not is_hq2_csd_method(method):
-            return  # non-marker method: remap arrives via the Step1 fused input, or n/a
-        preview_path = self._auto_remap_config_path()
-        if not preview_path:
-            self._set_remap_status("Step0 remap: none saved for this ROI.")
-            return
-        if not step2_source_aware_runtime_enabled():
-            self._set_remap_status("Step0 remap NOT applied — source-aware runtime disabled.")
-            return
-        hq_mode = str(seg_config.get("hq_input_mode") or "")
-        if hq_mode != "selected_channels_from_source":
-            self._set_remap_status(
-                "Step0 remap NOT applied — requires selected_channels_from_source "
-                f"(got {hq_mode or 'n/a'}).")
-            return
-        if self._rois:
-            self._set_remap_status(
-                "Step0 remap NOT applied — ROI run (full-image only in v14.5d).")
-            return
-        if self._full_h <= 0 or self._full_w <= 0:
-            self._set_remap_status("Step0 remap NOT applied — unknown input geometry.")
-            return
-        try:
-            from ..utils.remap_promotion import (
-                project_marker_only_config, promote_source_aware_runtime_from_sources)
-            from ..core.io_loader import OMETIFFLoader
-            with open(preview_path, "r", encoding="utf-8") as f:
-                preview = json.load(f)
-            projected, prep = project_marker_only_config(
-                preview, seg_config.get("hq_channels") or [])
-            if projected is None:
-                self._set_remap_status(
-                    "Step0 remap NOT applied — "
-                    + "; ".join(prep.get("failures") or ["projection failed"]))
-                return
-            runtime, report = promote_source_aware_runtime_from_sources(
-                projected, step2_input_shape=[int(self._full_h), int(self._full_w)],
-                raw_channel_source_path=(seg_config.get("raw_channel_source_path")
-                                         or seg_config.get("raw_ome_path") or ""),
-                corrected_zarr_path=(seg_config.get("multichannel_source_path")
-                                     or seg_config.get("hq_source_zarr")
-                                     or seg_config.get("corrected_channels_zarr") or ""),
-                roi_id=str(seg_config.get("roi_id") or self._roi_id or ""),
-                requested_roi_names={str(n) for n in (seg_config.get("roi_name"),
-                                                      seg_config.get("roi_display_name")) if n},
-                abs_fn=os.path.abspath, loader_factory=OMETIFFLoader,
-                active_method=method)
-        except Exception as exc:
-            self._set_remap_status(f"Step0 remap NOT applied — error: {exc}")
-            return
-        if runtime is None:
-            self._set_remap_status(
-                "Step0 remap NOT applied — "
-                + "; ".join((report or {}).get("failures") or ["promotion refused"]))
-            return
-        out_dir = self._step2_dir or self._out_edit.text().strip() or OUTPUT_DIR
-        try:
-            os.makedirs(out_dir, exist_ok=True)
-            out_path = os.path.join(out_dir, "channel_remap_config.step2ready.json")
-            write_json_atomic(out_path, runtime)     # atomic: review fixes §4
-        except Exception as exc:
-            self._set_remap_status(f"Step0 remap NOT applied — write error: {exc}")
-            return
-        seg_config["channel_remap_config_path"] = out_path
-        n = len(runtime.get("channels") or {})
-        self._source_aware_attached = True
-        self._source_aware_summary = f"{n} marker(s), {runtime.get('source_mixture_mode')}"
-        # NOT "applied" yet — the worker still re-resolves + cross-checks the sources.
-        self._set_remap_status(
-            "Step0 remap: source-aware descriptor attached — awaiting worker validation "
-            f"({self._source_aware_summary}).")
 
     def _on_method_changed(self):
         method = self._method_combo.currentData() or CELLPOSE_WHOLECELL_FUSION
@@ -3731,13 +2844,10 @@ class Step2Page(QWidget):
         ):
             self._apply_method_defaults_to_ui(method)
         is_cellpose = method in (CELLPOSE_WHOLECELL_FUSION, CELLPOSE_WHOLECELL_NUCLEI,
-                                 HYBRID_CELLPOSE_STARDIST, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION, CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD)
+                                 HYBRID_CELLPOSE_STARDIST, CELLPOSE_NUCLEI_DAPI, CELLPOSE_NUCLEI_EXPANSION)
         is_stardist = method in (STARDIST_NUCLEI_DAPI, STARDIST_NUCLEI_EXPANSION,
                                  HYBRID_CELLPOSE_STARDIST)
         is_expansion = method in (CELLPOSE_NUCLEI_EXPANSION, STARDIST_NUCLEI_EXPANSION)
-        is_hq = method == CELLPOSE_NUCLEI_HQ
-        is_hq2 = method == CELLPOSE_NUCLEI_HQ2
-        is_csd = method == CELLPOSE_NUCLEI_CSD
         is_mesmer = method in (MESMER_WHOLE_CELL, MESMER_NUCLEI, MESMER_NUCLEAR_GUIDED)
         for w in (
             self._cp_model_label, self._cp_model_lbl,
@@ -3761,142 +2871,16 @@ class Step2Page(QWidget):
             w.setVisible(method in (CELLPOSE_WHOLECELL_NUCLEI, HYBRID_CELLPOSE_STARDIST))
         self._sd_expand_label.setVisible(is_expansion)
         self._sd_expand.setVisible(is_expansion)
-        for w in self._hq_widgets:
-            w.setVisible(is_hq)
-        for w in self._hq2_widgets:
-            w.setVisible(is_hq2)
-        for w in self._csd_widgets:
-            w.setVisible(is_csd)
         for w in self._mesmer_widgets:
             w.setVisible(is_mesmer)
         cfg = get_segmentation_method_config(method)
         self._method_hint.setText(
             f'{method} | input={cfg.get("input_type")} | output={cfg.get("output_type")}'
         )
-        preview_btn = getattr(self, "_btn_patch_preview", None)
         print("[Step2] method changed:", method)
-        print("[Step2] is_hq:", is_hq)
-        print("[Step2] hq widgets visible:", self._hq_channels.isVisible())
-        print("[HQ2-UI] method selected=", method)
-        print("[HQ2-UI] parameter widgets created=", bool(getattr(self, "_hq2_widgets", None)))
-        print("[HQ2-UI] parameter widgets visible=", self._hq2_channels.isVisible() if hasattr(self, "_hq2_channels") else False)
-        print("[HQ2-UI] patch preview enabled=", preview_btn.isEnabled() if preview_btn is not None else None)
         if getattr(self, "_full_h", 0):
             self._refresh_tile_suggestion(apply=getattr(self, "_auto_tile_strategy", None) is not None and self._auto_tile_strategy.isChecked())
             self._keep_stardist_tiles_safe()             # StarDist chosen: its tiles must fit (2026-10-25)
-
-    def _available_hq_channels(self):
-        candidates = []
-        cfg = self._seg_config or {}
-        requested = parse_hq_channels(cfg.get("hq_channels") or [])
-        first_available = []
-        for key in ("hq_source_zarr", "multichannel_source_path", "corrected_channels_zarr"):
-            if cfg.get(key):
-                candidates.append(cfg.get(key))
-        # Block RM (§5): the corrected product of the chosen input's chain.
-        from ..utils import run_store
-        correct = run_store.correct_run_of(os.path.dirname(os.path.abspath(self._zarr_path or ".")))
-        if correct:
-            candidates.append(os.path.join(correct, "corrected_channels.zarr"))
-        out_dir = self._step2_dir or self._out_edit.text().strip() or OUTPUT_DIR
-        candidates.extend([
-            os.path.join(out_dir, "corrected_channels.zarr"),
-            os.path.join(os.path.dirname(out_dir), "corrected_channels.zarr"),
-        ])
-        seen = set()
-        for path in candidates:
-            if not path or not os.path.exists(path):
-                continue
-            path = os.path.abspath(path)
-            if path in seen:
-                continue
-            seen.add(path)
-            root = zarr.open(path, mode="r")
-            mode = str(root.attrs.get("mode", "")).strip().lower()
-            if mode == "roi_only":
-                groups = list(getattr(root, "group_keys", lambda: [])())
-                if not groups and hasattr(root, "groups"):
-                    groups = [name for name, _group in root.groups()]
-                target = None
-                for group_name in groups:
-                    group = root[group_name]
-                    requested_roi_id = str(cfg.get("roi_id") or self._roi_id or "")
-                    requested_names = {
-                        str(v) for v in (
-                            cfg.get("roi_name"),
-                            cfg.get("roi_display_name"),
-                            self._roi_id,
-                        )
-                        if str(v or "").strip()
-                    }
-                    if requested_roi_id and str(group.attrs.get("roi_id") or "") == requested_roi_id:
-                        target = group
-                        break
-                    group_names = {
-                        str(group_name),
-                        str(group.attrs.get("roi_name") or ""),
-                        str(group.attrs.get("display_name") or ""),
-                        str(group.attrs.get("roi_display_name") or ""),
-                    }
-                    if requested_names and requested_names & {name for name in group_names if name}:
-                        target = group
-                        break
-                if target is not None:
-                    available = list(target.array_keys())
-                    if not first_available:
-                        first_available = available
-                    _resolved, missing, _warnings = resolve_hq_channels(requested, available)
-                    if not requested or not missing:
-                        return available
-                    print(
-                        "[Step2-HQ] corrected zarr missing requested channels; trying next source\n"
-                        f"  path={path}\n"
-                        f"  missing={missing}\n"
-                        f"  available={available}",
-                        flush=True,
-                    )
-                    continue
-                print(
-                    "[Step2] HQ channel source ROI group not matched\n"
-                    f"  path={path}\n"
-                    f"  requested_roi_id={cfg.get('roi_id') or self._roi_id or ''}\n"
-                    f"  requested_names={sorted(requested_names) if 'requested_names' in locals() else []}\n"
-                    f"  available_groups={groups}",
-                    flush=True,
-                )
-                continue
-            available = list(root.array_keys())
-            if not first_available:
-                first_available = available
-            _resolved, missing, _warnings = resolve_hq_channels(requested, available)
-            if not requested or not missing:
-                return available
-            print(
-                "[Step2-HQ] corrected zarr missing requested channels; trying next source\n"
-                f"  path={path}\n"
-                f"  missing={missing}\n"
-                f"  available={available}",
-                flush=True,
-            )
-
-        for path in (
-            cfg.get("raw_channel_source_path"),
-            cfg.get("raw_ome_path"),
-        ):
-            if not path or not os.path.exists(path):
-                continue
-            try:
-                available = OMETIFFLoader(path).channel_names()
-            except Exception as exc:
-                print(f"[Step2-HQ] failed to inspect raw OME channel source {path}: {exc}", flush=True)
-                continue
-            _resolved, missing, _warnings = resolve_hq_channels(requested, available)
-            if not requested or not missing:
-                print(f"[Step2-HQ] using raw OME channel source for HQ channels: {path}", flush=True)
-                return available
-            if not first_available:
-                first_available = available
-        return first_available
 
     # ── run / stop ────────────────────────────────────────────────────
 
@@ -4063,10 +3047,6 @@ class Step2Page(QWidget):
                     return
         seg_config = self.get_seg_config()
         lap("input and parameters")
-        if is_retired_method(seg_config.get("method")):
-            # Defence in depth (plan §1): no route runs a retired method.
-            QMessageBox.warning(self, 'Step2', retired_method_message(seg_config.get("method")))
-            return
         if self._region_fused_paths:                # block RM: the chosen fuse run's
             seg_config["region_fused_paths"] = dict(self._region_fused_paths)
 
@@ -4114,22 +3094,6 @@ class Step2Page(QWidget):
         else:
             # Manual parameters are the user's own, not a Step1 hand-over.
             seg_config.pop(preseg_contract.CONTRACT_KEY, None)
-        if seg_config.get("method") in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
-            channels = seg_config.get("hq_channels") or []
-            try:
-                available = self._available_hq_channels()
-                validate_hq_channels(channels, available)
-            except Exception as e:
-                QMessageBox.warning(self, 'Missing channels', str(e))
-                return
-            if len(channels) > 3:
-                QMessageBox.information(
-                    self,
-                    'HQ channel recommendation',
-                    'Cellpose nuclei + HQ/HQ2/CSD recommends 2-5 high-quality structural channels; '
-                    'using more than 3 channels can be slower and may dilute consensus.'
-                )
-
         lap("checks (with any question answered)")
         recovery_dir = None
         if self._rec_box.isChecked():
@@ -4175,11 +3139,6 @@ class Step2Page(QWidget):
         self._total_cells = 0
         self._cells_lbl.setText('Total cells detected: 0')
 
-        # Auto-apply the Step0 remap (HQ2/CSD) via source-aware promotion — AFTER the
-        # pre-checks (validate_hq_channels etc.) so a pre-check failure never leaves a
-        # stale "awaiting worker validation" status.
-        self._promote_step0_remap(seg_config)
-
         self._worker = SegmentMergeWorker(
             zarr_path        = self._zarr_path,
             seg_config       = seg_config,
@@ -4205,20 +3164,6 @@ class Step2Page(QWidget):
         seg_cfg = seg_config
         print(f"[Step2] segmentation method={seg_cfg.get('method')}")
         print(f"[Step2] input_type={seg_cfg.get('input_type')}")
-        if seg_cfg.get("method") in (CELLPOSE_NUCLEI_HQ, CELLPOSE_NUCLEI_HQ2, CELLPOSE_NUCLEI_CSD):
-            print(f"[Step2][HQ] loaded param_file path={param_file or '(manual)'}")
-            print(f"[Step2-HQ] hq_input_mode: {seg_cfg.get('hq_input_mode')}")
-            print(f"[Step2-HQ] requested hq_channels: {seg_cfg.get('hq_channels')}")
-            print(f"[Step2][HQ] seg_config hq_channels={seg_cfg.get('hq_channels')}")
-            print(
-                "[Step2][HQ] selected hq_source_zarr="
-                f"{seg_cfg.get('hq_source_zarr') or seg_cfg.get('multichannel_source_path') or '(auto)'}"
-            )
-            print(
-                "[Step2][HQ] requested roi="
-                f"id={seg_cfg.get('roi_id') or self._roi_id or ''} "
-                f"name={seg_cfg.get('roi_name') or seg_cfg.get('roi_display_name') or ''}"
-            )
         if self._roi_id:
             print(f"[Step2] roi_id={self._roi_id}")
             print(f"[Step2] output_base={self._step2_dir or self._out_edit.text().strip()}")
@@ -4292,38 +3237,6 @@ class Step2Page(QWidget):
             self._cells_lbl.setText(
                 f'Total cells detected: {self._total_cells:,}'
             )
-
-    def _mark_source_aware_applied(self):
-        """Flip the remap status to applied — only after the worker re-resolved +
-        cross-checked the sources and the run completed (called from _on_finished)."""
-        if getattr(self, "_source_aware_attached", False):
-            self._set_remap_status(
-                f"Step0 remap applied — {self._source_aware_summary} (worker validated).")
-
-    def _mark_source_aware_failed(self, msg):
-        """A worker error occurred. Distinguish whether the source-aware remap was
-        validated BEFORE the failure: the worker sets self._source_aware_per_channel
-        only after _prepare_source_aware_runtime re-resolves + cross-checks the sources.
-
-        - not prepared (per_channel empty) -> the remap ITSELF failed validation:
-          NOT applied — worker validation failed.
-        - prepared (per_channel present) -> the remap was validated + in use; a later
-          (Cellpose/GPU/tile) failure is downstream, so it stays applied:
-          applied — worker validated; segmentation failed.
-        """
-        if not getattr(self, "_source_aware_attached", False):
-            return
-        first = str(msg or "").strip().splitlines()[0] if msg else ""
-        prepared = bool(getattr(getattr(self, "_worker", None),
-                                "_source_aware_per_channel", None))
-        if prepared:
-            self._set_remap_status(
-                f"Step0 remap applied — {self._source_aware_summary} (worker validated); "
-                "segmentation failed" + (f": {first}" if first else "."))
-        else:
-            self._set_remap_status(
-                "Step0 remap NOT applied — worker validation failed"
-                + (f": {first}" if first else "."))
 
     def _run_identity(self):
         """Block A6 G2: the dataset generation (the window's display
@@ -4418,7 +3331,6 @@ class Step2Page(QWidget):
         self._skip_empty_cb.setEnabled(not self.__dict__.get("_cores_preview"))   # a cores run has no grid
         self.refresh_core_outlines()             # no highlight; the last Save's cores again
         self._sync_skip_buttons()
-        self._mark_source_aware_applied()
         runtime = {}
         try:
             if self._worker is not None and hasattr(self._worker, "runtime_summary"):
@@ -4488,9 +3400,6 @@ class Step2Page(QWidget):
             self.open_qc_requested.emit(output_dir)   # step3 auto-loads too
 
     def _on_error(self, msg):
-        # v14.5d: if the worker (which re-resolves + cross-checks the attached source-aware
-        # config) errors, flip the "awaiting worker validation" status to NOT applied.
-        self._mark_source_aware_failed(msg)
         self._mark_failed_cores(msg)
         self._run_grid_lbl.setVisible(False)
         self._run_active = False

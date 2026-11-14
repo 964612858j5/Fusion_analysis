@@ -640,21 +640,11 @@ def test_step15_per_channel_metadata_is_honest(app, tmp_path, monkeypatch):
         assert params["step2_pre_remap_source"] == "unknown", name
 
 
-def test_step15_config_passes_basic_but_rejected_by_step2(app, tmp_path, monkeypatch):
-    from block01.utils.channel_remap_config import (
-        validate_channel_remap_config, validate_step2_remap_config)
+def test_step15_config_passes_the_basic_validator(app, tmp_path, monkeypatch):
+    from block01.utils.channel_remap_config import validate_channel_remap_config
     cfg = _step15_saved_config(app, tmp_path, monkeypatch)
     # Well-formed: the basic validator accepts it (not malformed JSON).
     assert validate_channel_remap_config(cfg) == []
-    # Step2 runtime validation rejects it even with allow_preview_remap=True,
-    # and the rejection is about unverified source alignment, not structure.
-    errors, resolved = validate_step2_remap_config(cfg, allow_preview_remap=True)
-    assert errors and resolved == {}
-    blob = " ".join(errors).lower()
-    assert ("calibration_source_matches_step2" in blob
-            or "step2_pre_remap_source" in blob
-            or "source_alignment_mode" in blob)
-    assert "step2_compatible is false" in blob
 
 
 def test_step15_workbench_has_no_step3_button_text(app, tmp_path):

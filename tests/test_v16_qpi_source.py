@@ -174,8 +174,8 @@ def test_the_loader_reads_a_qptiff(qpi):
 
 
 def test_the_workers_open_a_qptiff_as_they_open_an_ome_tiff(qpi):
-    """`mesmer_worker.run_mesmer_patch_preview` / `cellpose_worker.run_cellpose_process`
-    build their loader exactly like this from the job's ``ome_path``."""
+    """A worker's loader (Step1 pre-segmentation's `run_job.open_loader`)
+    is built exactly like this from the job's ``ome_path``."""
     path, data = qpi
     lo = OMETIFFLoader(path, {}, correction_config=None)
     lo.set_corrected_zarr_store(None, {})
@@ -260,27 +260,7 @@ def test_workspaces_of_a_qptiff_are_found_by_slide_id_after_a_move(tmp_path, qpi
     assert [w.workspace_id for w in wsess.find_workspaces(proj, moved)[1]] == [ctx["roi_id"]]
 
 
-# ── downstream: channel store, HQ resolver, Step4 ───────────────────────
-
-def test_the_shared_channel_store_reads_through_the_loader(qpi):
-    from block01.utils.channel_cache import SharedChannelStore
-    path, data = qpi
-    store = SharedChannelStore()
-    try:
-        got = store.read_raw_ome(OMETIFFLoader(path), "CD3", 10, 60, 20, 90)
-        np.testing.assert_array_equal(got, data[1, 10:60, 20:90])
-    finally:
-        store.close()
-
-
-def test_the_hq_resolver_takes_a_qptiff_as_the_raw_source(qpi):
-    from block01.workers import hq_source_resolver as hq
-    out = hq.resolve_hq_marker_source(
-        requested_channels=["CD3", "CD8"], multichannel_source_path="",
-        raw_channel_source_path=qpi[0], roi_id="r", requested_roi_names=[],
-        loader_factory=OMETIFFLoader, source_mode=hq.SOURCE_MODE_RAW_ONLY)
-    assert out.kind == "raw_ome" and list(out.available_channels) == NAMES
-
+# ── downstream: Step4 ──────────────────────────────────────────────────
 
 def test_step4_quantifies_a_project_on_a_qptiff(tmp_path, monkeypatch):
     import test_quant_sources as tqs

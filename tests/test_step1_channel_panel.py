@@ -112,14 +112,11 @@ def test_the_right_column_no_longer_offers_a_channels_tab(app):
         w.close()
 
 
-def test_switching_to_the_patch_results_tab_is_a_no_op_now(app):
-    """Block E: the old tab is kept, off the screen; an old caller that asks
-    for it changes nothing."""
+def test_the_patch_results_tab_stays_off_the_screen(app):
+    """Block E: the old tab is kept, off the screen (nothing switches to it
+    since the in-process Phase 1 / Phase 2 were removed, Windows plan W2)."""
     w = _window(app)
     try:
-        before = w.right_tabs.currentWidget()
-        w._show_step1_patch_results_tab("test")
-        assert w.right_tabs.currentWidget() is before
         assert not w.right_tabs.isTabVisible(w.right_tabs.indexOf(w.patch_results_tab))
     finally:
         w.close()

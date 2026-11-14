@@ -67,26 +67,6 @@ def _end(thread, app):
 
 # ── Stop ─────────────────────────────────────────────────────────────────
 
-def test_stop_imports_no_torch(monkeypatch):
-    touched = []
-
-    class _Torch(types.ModuleType):
-        def __getattr__(self, name):
-            touched.append(name)
-            raise AttributeError(name)
-
-    monkeypatch.setitem(sys.modules, "torch", _Torch("torch"))
-    proc = types.SimpleNamespace(terminate=lambda: None, join=lambda timeout=None: None,
-                                 is_alive=lambda: False, kill=lambda: None)
-    search = types.SimpleNamespace(set_running=lambda on: None,
-                                   update_progress=lambda *a: None)
-    ns = types.SimpleNamespace(proc=proc, _proc_stopped=False, _proc_stop_flag=None,
-                               _cleanup_cellpose_process=lambda: None, search=search)
-    mw.MainWindow._stop(ns)
-    assert ns._proc_stopped is True
-    assert touched == [], f"Stop touched torch: {touched}"
-
-
 # ── the fusion job ───────────────────────────────────────────────────────
 
 def _fusion_ns(worker):

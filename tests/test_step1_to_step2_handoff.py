@@ -93,19 +93,6 @@ def test_entering_step2_autosyncs_input_data(window, tmp_path, method):
     assert os.path.exists(seg)
 
 
-# ── a Step1 index of a retired method: said once, not used ───────────────────
-def test_entering_step2_with_a_retired_method_says_so_once(window, tmp_path, monkeypatch):
-    from block01.qt.QtWidgets import QMessageBox
-    shown = []
-    for name in ("warning", "information"):
-        monkeypatch.setattr(QMessageBox, name, staticmethod(lambda *a, **k: shown.append(a[2])))
-    window.step1_output = _step1_output(tmp_path, "cellpose_nuclei_hq2")
-    window._go_to_step2()
-    assert window._stack.currentIndex() == 2
-    assert len(shown) == 1 and "no longer available" in shown[0]
-    assert window._step2._method_combo.currentData() != "cellpose_nuclei_hq2"
-
-
 # ── non-clobber: a manual override is preserved across re-entry ──────────────
 def test_manual_override_not_clobbered(window, tmp_path):
     window.step1_output = _step1_output(tmp_path, "cellpose_wholecell_fusion")

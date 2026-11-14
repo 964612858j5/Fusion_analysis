@@ -364,14 +364,13 @@ def test_the_parameter_file_names_the_corrected_product_relatively(app, tmp_path
     try:
         project = rs.project_dir_of(ws)
         c = _correct_run(ws)
-        cfg = {"method": "cellpose_nuclei_hq",
-               "hq_source_zarr": os.path.join(c, "corrected_channels.zarr"),
+        cfg = {"method": "mesmer_whole_cell",
                "multichannel_source_path": os.path.join(c, "corrected_channels.zarr"),
                "raw_ome_path": "/data/slide.ome.tif",
-               "params": {"hq_source_zarr": os.path.join(c, "corrected_channels.zarr")}}
+               "params": {"multichannel_source_path": os.path.join(c, "corrected_channels.zarr")}}
         stored = rs.to_records(cfg, project)
-        assert stored["hq_source_zarr"].startswith("rois/ws1/runs/correct_")
-        assert stored["params"]["hq_source_zarr"].startswith("rois/ws1/runs/correct_")
+        assert stored["multichannel_source_path"].startswith("rois/ws1/runs/correct_")
+        assert stored["params"]["multichannel_source_path"].startswith("rois/ws1/runs/correct_")
         assert stored["raw_ome_path"] == "/data/slide.ome.tif"
         path = os.path.join(ws, "settings", "segmentation_params", "p.json")
         os.makedirs(os.path.dirname(path))
@@ -379,7 +378,7 @@ def test_the_parameter_file_names_the_corrected_product_relatively(app, tmp_path
         from block01.workers.segment_merge_worker import SegmentMergeWorker
         ns = types.SimpleNamespace(param_file=path)
         got = SegmentMergeWorker._load_param_file_config(ns)
-        assert got["hq_source_zarr"] == os.path.join(c, "corrected_channels.zarr")
+        assert got["multichannel_source_path"] == os.path.join(c, "corrected_channels.zarr")
     finally:
         w.close()
 

@@ -149,8 +149,6 @@ def _guided_worker(tmp_path, monkeypatch, rois, **fake):
                         dict(rp.PARAMS[GUIDED], method=GUIDED), rois=rois)
     engine = _FakeEngine(truth[:2], worker=worker, **fake)
     monkeypatch.setattr(smw, "EngineProcess", engine)
-    monkeypatch.setattr(smw.SegmentMergeWorker, "_validate_mesmer_config",
-                        lambda self, *a, **k: None)
     return worker, truth
 
 
@@ -264,6 +262,11 @@ def test_nuclear_guided_keeps_paired_nuclei(app, tmp_path, monkeypatch, loop):
         assert meta["label_store"]["A"] == store
         region_meta = _meta(worker, "segmentation_meta_A.json")
         assert region_meta["label_store"] == store
+        # W2: the region's file keeps Mesmer's own metadata (the retired HQ
+        # branch once wrote method "cellpose_nuclei_hq" over it here)
+        assert region_meta["method"] == GUIDED
+        assert region_meta["display_name"] == "Mesmer nuclear-guided whole-cell"
+        assert not any(k.startswith("hq") for k in region_meta)
     _assert_step3_reads_it(worker, sfx, "A" if loop == "roi" else "Full WSI")
 
 
@@ -309,7 +312,6 @@ def test_a_recovered_run_has_no_nuclei_and_says_why(app, tmp_path, monkeypatch):
     for tile in TileScheduler(H, W, ROWS, COLS, HALO).tiles:
         y0, y1, x0, x1 = tile.read_bbox
         np.save(rec / f"tile_A_{tile.row}_{tile.col}.npy", cells[y0:y1, x0:x1])
-    monkeypatch.setattr(SegmentMergeWorker, "_validate_mesmer_config", lambda self, *a, **k: None)
     worker = SegmentMergeWorker(rp._fused_zarr(tmp_path, rp._image()),
                                 seg_config=dict(rp.PARAMS[GUIDED], method=GUIDED),
                                 n_rows=ROWS, n_cols=COLS, overlap_px=HALO,

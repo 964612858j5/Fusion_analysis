@@ -256,7 +256,6 @@ def step2(app, tmp_path, monkeypatch):
     monkeypatch.setattr(s2.QMessageBox, "critical",
                         lambda *a, **k: seen["boxes"].append(a[2]))
     p = s2.Step2Page()
-    monkeypatch.setattr(p, "_promote_step0_remap", lambda cfg: None)
     p._zarr_edit.setText(zp)
     p._load_zarr_info()
     p._set_param_source("manual")

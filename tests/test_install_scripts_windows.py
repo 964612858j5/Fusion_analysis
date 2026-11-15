@@ -98,3 +98,18 @@ def test_the_native_stderr_of_windows_powershell_is_not_fatal():
     for line in INSTALL.splitlines():
         if re.search(r"& \$\S+ .*2>", line) and "Native {" not in line:
             raise AssertionError(line)
+
+
+def test_the_shipped_toolbox_wheel_is_the_one_the_lock_names():
+    """W3-D5 (user ruling 2026-11-15): DeepCell-Toolbox ships with the
+    checkout; the installer keeps a working one, else installs this wheel,
+    and builds from source only with -BuildToolbox."""
+    import hashlib
+    lines = [l.split() for l in (REPO / "envs" / "windows" / "wheels.lock").read_text(encoding="utf-8").splitlines()
+             if l.strip() and not l.lstrip().startswith("#")]
+    entry = next(f for f in lines if f[:2] == ["0.12.1", "win_amd64"])
+    wheel = REPO / "envs" / "windows" / "wheels" / entry[2]
+    assert hashlib.sha256(wheel.read_bytes()).hexdigest() == entry[3]
+    body = _fn("EnsureToolbox")
+    assert body.index("present") < body.index("LockEntry $ToolboxLock")     # a working one is kept
+    assert 'elseif ($BuildToolbox)' in body and "Fail" in body

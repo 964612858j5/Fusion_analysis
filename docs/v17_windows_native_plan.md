@@ -459,8 +459,9 @@ stopped half-way and restarted finishes.
   compiled `compute_overlap`) and then does nothing; else it installs the
   `win_amd64` (cp310) wheel that ships with the checkout,
   `envs/windows/wheels/`, its digest in `envs/windows/wheels.lock`; with
-  `-BuildToolbox` (or while no wheel is committed yet) it builds from
-  source, which needs the MSVC tools step 1 checks. The wheel is built by
+  `-BuildToolbox` it builds from source, which needs the MSVC tools step
+  1 checks. The wheel (70 KB) was built by run 43726074232 and committed
+  with its digest (2026-11-15). The wheel is built by
   `.github/workflows/deepcell_toolbox_wheel.yml` (run by hand, an artifact
   only, nothing published) and committed after its digest is checked.
   Files: that workflow, `envs/windows/wheels.lock`, `envs/windows/wheels/`

@@ -4,4 +4,5 @@
 # part of Block01's Windows install, not a release of their own).
 # version  platform  file  sha256 -- built by .github/workflows/deepcell_toolbox_wheel.yml,
 # each digest checked against the downloaded build before it was written here.
-# Until a line is here the installer builds DeepCell-Toolbox (a C++ compiler).
+# Built by run 43726074232 (2026-11-15) and checked against its artifact.
+0.12.1 win_amd64 DeepCell_Toolbox-0.12.1-cp310-cp310-win_amd64.whl 1976f16db2c672535d4853054e84dbccf6ec7809f34ed4e11e00cbe1feecb33b

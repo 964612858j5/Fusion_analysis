@@ -9,9 +9,9 @@ Install FusionFlux (Block01) on Windows with one command
   -CheckOnly             step 1 only; nothing is written
   -NoGpu                 a CPU install even when an NVIDIA GPU is present
   -BuildCore             build the viewer core here instead of the prebuilt wheel
-  -BuildToolbox          build DeepCell-Toolbox from source instead of the prebuilt wheel
-                         (both -Build* need the Visual Studio C++ Build Tools; so does
-                         a checkout whose envs\windows\wheels.lock names no wheel yet)
+  -BuildToolbox          build DeepCell-Toolbox from source instead of the wheel that
+                         ships in envs\windows\wheels (both -Build* need the Visual
+                         Studio C++ Build Tools)
   -Models DIR            a folder with verified model copies, one sub-folder per
                          model (e.g. DIR\mesmer_multiplex_segmentation)
   -MesmerUrl URL         a mirror of the Mesmer archive (also BLOCK01_MESMER_URL;
@@ -211,12 +211,10 @@ function Preflight {
         else { Say "  GPU:      nvidia-smi did not answer: a CPU install" }
     } else { Say "  GPU:      no NVIDIA driver found: a CPU install (slower segmentation)" }
     if ($env:CUDA_PATH -and (Test-Path -LiteralPath $env:CUDA_PATH)) { $script:CudaPath = $env:CUDA_PATH }
-    $noToolboxWheel = -not (LockEntry $ToolboxLock "0.12.1" "win_amd64")
-    if ($BuildCore -or $BuildToolbox -or $noToolboxWheel) {
+    if ($BuildCore -or $BuildToolbox) {
         if (HaveMsvc) { Say "  C++ build tools: present" }
         else {
-            $why = if ($noToolboxWheel -and -not ($BuildCore -or $BuildToolbox)) { "this checkout names no prebuilt DeepCell-Toolbox wheel yet" } else { "needed by -BuildCore / -BuildToolbox" }
-            Say "  C++ build tools: MISSING ($why)"
+            Say "  C++ build tools: MISSING (needed by -BuildCore / -BuildToolbox)"
             Say "            install the free Visual Studio Build Tools:"
             Say "            https://visualstudio.microsoft.com/visual-cpp-build-tools/"
             Say "            and tick the workload 'Desktop development with C++'"
@@ -260,10 +258,11 @@ function EnsureToolbox {
         if ((Sha256Of $whl) -ne $entry.Sha) { Fail "$whl is not the expected file (its SHA-256 differs from envs\windows\wheels.lock)." "do not use it; restore it with git (git checkout -- envs/windows/wheels) and run again" }
         Say "DeepCell-Toolbox 0.12.1: installing the wheel that ships with this checkout"
         Run $script:Py @("-m", "pip", "install", "-q", "--no-deps", $whl)
-    } else {
-        # -BuildToolbox, or no prebuilt wheel named yet (step 1 checked the compiler)
-        Say "building DeepCell-Toolbox 0.12.1 from source"
+    } elseif ($BuildToolbox) {
+        Say "building DeepCell-Toolbox 0.12.1 from source (-BuildToolbox; step 1 checked the compiler)"
         Run $script:Py @("-m", "pip", "install", "-q", "--no-deps", "DeepCell-Toolbox==0.12.1")
+    } else {
+        Fail "envs\windows\wheels.lock names no DeepCell-Toolbox wheel for this checkout." "update the checkout (git pull), or run again with -BuildToolbox (needs the Visual Studio C++ Build Tools)"
     }
 }
 

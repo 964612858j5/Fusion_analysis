@@ -97,6 +97,10 @@ run() {  # run CMD... ; on failure stop with the command line
 
 sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
 
+# curl's progress: a bar on a terminal (the 1.2 GB Cellpose model takes
+# minutes -- backlog 23, 2026-11-15), silent otherwise (logs, CI)
+progress_args() { if [ -t 2 ]; then echo "-#"; else echo "-sS"; fi; }
+
 # download URL DEST SHA256 [extra curl args...]: to a temp name beside DEST,
 # verified, then moved into place; nothing is left on failure
 download() {
@@ -104,7 +108,7 @@ download() {
     local tmp="$dest.part.$$"
     mkdir -p "$(dirname "$dest")"
     rm -f -- "$dest".part.*                    # left by a run that was killed
-    if ! curl -fL --retry 3 --connect-timeout 20 -sS -o "$tmp" "$@" "$url"; then
+    if ! curl -fL --retry 3 --connect-timeout 20 "$(progress_args)" -o "$tmp" "$@" "$url"; then
         rm -f -- "$tmp"
         fail "could not download $url." "check the network connection (a proxy needs https_proxy set) and run the installer again" "curl $url"
     fi
@@ -579,7 +583,7 @@ verify_into_place() {
 try_download() {
     local url=$1 dest=$2 tmp="$2.part.$$"
     mkdir -p "$(dirname "$dest")"
-    if curl -fL --retry 2 --connect-timeout 20 -sS -o "$tmp" "$url"; then
+    if curl -fL --retry 2 --connect-timeout 20 "$(progress_args)" -o "$tmp" "$url"; then
         mv -f -- "$tmp" "$dest"; return 0
     fi
     rm -f -- "$tmp"; return 1

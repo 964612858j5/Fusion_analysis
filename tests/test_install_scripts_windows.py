@@ -113,3 +113,14 @@ def test_the_shipped_toolbox_wheel_is_the_one_the_lock_names():
     body = _fn("EnsureToolbox")
     assert body.index("present") < body.index("LockEntry $ToolboxLock")     # a working one is kept
     assert 'elseif ($BuildToolbox)' in body and "Fail" in body
+
+
+def test_model_downloads_show_their_progress():
+    """Backlog 23 (2026-11-15): the 1.2 GB Cellpose model took minutes with
+    nothing on screen. Windows: curl.exe's bar (PowerShell's own progress is
+    off: it slows the download); Linux: curl's bar on a terminal."""
+    fetch = _fn("Fetch")
+    assert "--progress-bar" in fetch and "Native {" in fetch
+    assert "Fetch $url" in _fn("Download") and "Fetch $url" in _fn("TryDownload")
+    assert 'progress_args() { if [ -t 2 ]; then echo "-#"; else echo "-sS"; fi; }' in SH
+    assert SH.count('"$(progress_args)"') == 2

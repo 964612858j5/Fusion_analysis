@@ -125,16 +125,31 @@ function Native([scriptblock]$block) {
 
 function Sha256Of([string]$path) { (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant() }
 
+# Fetch URL FILE -> "" or why not. curl.exe (Windows 10 1803+ ships it) shows
+# a progress bar -- the 1.2 GB Cellpose model takes minutes (backlog 23,
+# 2026-11-15) -- without the slowdown PowerShell's own progress costs;
+# Invoke-WebRequest, silent, where there is no curl.exe
+function Fetch([string]$url, [string]$file) {
+    $curl = Join-Path $env:SystemRoot "System32\curl.exe"
+    if (Test-Path -LiteralPath $curl) {
+        # its bar is written to stderr: harmless, never an error of this script
+        Native { & $curl -fL --retry 3 --connect-timeout 20 --progress-bar -o $file $url }
+        if ($LASTEXITCODE -eq 0) { return "" }
+        return "curl exit $LASTEXITCODE"
+    }
+    try { Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $file; return "" }
+    catch { return $_.Exception.Message }
+}
+
 # Download URL DEST SHA: to DEST.part, checked, then moved; nothing left on failure
 function Download([string]$url, [string]$dest, [string]$sha) {
     $tmp = "$dest.part"
     New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
     Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-    try {
-        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $tmp
-    } catch {
+    $why = Fetch $url $tmp
+    if ($why) {
         Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-        Fail "could not download $url ($($_.Exception.Message))." "check the network connection (a proxy: set HTTPS_PROXY) and run the installer again"
+        Fail "could not download $url ($why)." "check the network connection (a proxy: set HTTPS_PROXY) and run the installer again"
     }
     if ($sha) {
         $got = Sha256Of $tmp
@@ -149,14 +164,12 @@ function Download([string]$url, [string]$dest, [string]$sha) {
 # TryDownload URL DEST -> $true/$false (the Mesmer sources are tried in turn)
 function TryDownload([string]$url, [string]$dest) {
     New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
-    try {
-        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile "$dest.part"
-        Move-Item -LiteralPath "$dest.part" -Destination $dest -Force
-        return $true
-    } catch {
+    if (Fetch $url "$dest.part") {
         Remove-Item -LiteralPath "$dest.part" -Force -ErrorAction SilentlyContinue
         return $false
     }
+    try { Move-Item -LiteralPath "$dest.part" -Destination $dest -Force; return $true }
+    catch { Remove-Item -LiteralPath "$dest.part" -Force -ErrorAction SilentlyContinue; return $false }
 }
 
 function FreeGb([string]$path) {

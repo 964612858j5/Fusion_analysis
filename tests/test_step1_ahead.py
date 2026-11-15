@@ -222,6 +222,54 @@ def test_a_source_that_moved_is_rebuilt_ahead(app, monkeypatch):
         w.close()
 
 
+def test_regions_viewer_on_a_moved_source_is_rebuilt_ahead_too(app, monkeypatch):
+    """W2g (user ruling 2026-11-15): after a Step0 Save that removed the ROI,
+    entering Step 0.5 rebuilt its viewer on screen -- a visible flash. Its
+    paused viewer is rebuilt ahead, after Step1's, one piece per turn."""
+    mount = _Mount()
+    mount.host.stack = object()
+    mount.source_pending_while_paused = True
+    regions = _Mount()
+    regions.host.stack = object()
+    regions.source_pending_while_paused = True
+    w = _window(app, monkeypatch, mount)
+    real = w.__dict__.get("_regions_view")
+    try:
+        w._regions_view = SimpleNamespace(mount=regions)
+        w._step1_ahead_step()
+        assert mount.done == ["rebuild"] and regions.done == []    # Step1's first
+        w._step1_ahead_timer.stop()
+        w._step1_ahead_step()
+        assert regions.done == ["rebuild"] and mount.done == ["rebuild"]
+        _run(w)
+        assert regions.done == ["rebuild"]                          # once
+        assert mount.done[1:3] == ["camera1", "prepare"]            # then Step1 paints
+    finally:
+        w._regions_view = real
+        w.close()
+
+
+def test_a_regions_viewer_not_built_or_not_moved_is_left_alone(app, monkeypatch):
+    mount = _Mount()
+    mount.host.stack = object()
+    w = _window(app, monkeypatch, mount)
+    real = w.__dict__.get("_regions_view")
+    try:
+        for regions in (None, SimpleNamespace(mount=None)):
+            w._regions_view = regions
+            w._step1_ahead_step()
+            w._step1_ahead_timer.stop()
+        still = _Mount()
+        still.host.stack = object()                                 # nothing pending
+        w._regions_view = SimpleNamespace(mount=still)
+        w._stop_step1_ahead()
+        w._step1_ahead_step()
+        assert still.done == []
+    finally:
+        w._regions_view = real
+        w.close()
+
+
 @pytest.mark.parametrize("why,wait", [("a Step2 segmentation is running", True),
                                       ("Step0 is reading", True),
                                       ("Step0 is not on screen", False)])

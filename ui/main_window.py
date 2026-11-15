@@ -3197,6 +3197,18 @@ class MainWindow(QMainWindow):
                 mount.rebuild_paused()
             self._step1_ahead_next(self.STEP1_AHEAD_STEP_MS)
             return
+        # W2g (user ruling 2026-11-15): Regions' viewer too. A Step0 Save that
+        # moved the region left it paused on the old source; rebuilt on entry,
+        # the old picture was torn down on screen -- a visible flash. Rebuilt
+        # here, while Step0 is on screen, the entry finds the new source.
+        regions = getattr(self.__dict__.get("_regions_view"), "mount", None)
+        if (regions is not None and regions.host.stack is not None
+                and regions.source_pending_while_paused):
+            with perf_trace.span("regions.ahead.rebuild"):
+                rebuilt = regions.rebuild_paused()
+            if rebuilt:
+                self._step1_ahead_next(self.STEP1_AHEAD_STEP_MS)
+                return
         binding, layer = mount.gpu_binding, mount.gpu_layer
         if binding is None or not hasattr(binding, "prepare_ahead") \
                 or not hasattr(layer, "paint_ahead"):

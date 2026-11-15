@@ -371,6 +371,25 @@ class SegmentMergeWorker(QThread):
             areas, f"Step1 pre-segmentation run {contract['preseg_run_id']} "
                    f"combo {contract['combo_id']} ({primary})")
 
+    def _drop_merge_scratch(self, *paths):
+        """The merge's scratch memmaps (the cell mask, the DAPI) of a run
+        that succeeded -- its outputs and metadata written, not stopped:
+        nobody reads them, and they stayed in every finished run (1.43 GB on
+        the 2000 x 2000 laptop crop; backlog 23, user ruling 2026-11-15). A
+        stopped or failed run keeps them, as before. A file Windows still
+        holds open (a view not yet collected) is left and said, never a
+        failed run."""
+        for path in paths:
+            if not path or not os.path.exists(path):
+                continue
+            try:
+                os.remove(path)
+            except OSError as exc:
+                msg = f"[Step2] scratch file left in the run: {path} ({exc})"
+                print(msg)
+                if getattr(self, "_logger", None) is not None:
+                    self._logger.warning(msg)
+
     def _seam_begin(self, tiles, full_h, full_w, out_prefix, keeps_nuclei, nuclei_state=None,
                     zarr_path=None, judge=None):
         """Block N3: the region's seam merger for the engine methods. Its
@@ -2661,6 +2680,7 @@ class SegmentMergeWorker(QThread):
 
         del mmap_ro, dapi_mmap_ro
         gc.collect()
+        self.__dict__.setdefault("_merge_scratch", []).extend([mmap_path, dapi_mmap_path])  # removed on success
 
         meta = {
             'mode':            'roi',
@@ -2683,7 +2703,6 @@ class SegmentMergeWorker(QThread):
             'dapi_path':        self._abs(global_dapi_path),
             'tile_dir':        self._abs(tile_dir),
             'tiles_dir':        self._abs(tile_dir),
-            'mmap_path':       self._abs(mmap_path),
             'total_cells':     total_cells,
             'image_shape':      [full_h, full_w],
             'tile_grid':        None if self._cores_run() else [self.n_rows, self.n_cols],
@@ -2764,6 +2783,7 @@ class SegmentMergeWorker(QThread):
 
     def run(self):
         self._active_tile_scheduler = None
+        self._merge_scratch = []          # each region's scratch memmaps, kept until success
         try:
             self._logger, log_path = self._setup_logger()
             log = self._logger
@@ -2981,6 +3001,7 @@ class SegmentMergeWorker(QThread):
                 if getattr(self, "_channel_store", None) is not None:
                     self._channel_store.close()
                 self._close_active_tile_scheduler()
+                self._drop_merge_scratch(*self._merge_scratch)
                 self.job_finished.emit(self.output_dir, total_cells_all)
                 return
 
@@ -3440,6 +3461,7 @@ class SegmentMergeWorker(QThread):
 
             del mmap_ro, dapi_mmap_ro
             gc.collect()
+            self.__dict__.setdefault("_merge_scratch", []).extend([mmap_path, dapi_mmap_path])  # removed on success
             log.debug(f"[MEM final] {self._mem_snapshot()}")
 
             meta = {
@@ -3463,7 +3485,6 @@ class SegmentMergeWorker(QThread):
                 'dapi_path':      self._abs(global_dapi_path),
                 'tile_dir':       self._abs(tile_dir),
                 'tiles_dir':       self._abs(tile_dir),
-                'mmap_path':      self._abs(mmap_path),
                 'total_cells':    total_cells,
                 'image_shape':    [full_h, full_w],
                 'tile_grid':      None if self._cores_run() else [self.n_rows, self.n_cols],
@@ -3536,6 +3557,7 @@ class SegmentMergeWorker(QThread):
             if getattr(self, "_channel_store", None) is not None:
                 self._channel_store.close()
             self._close_active_tile_scheduler()
+            self._drop_merge_scratch(*self._merge_scratch)
             self.job_finished.emit(self.output_dir, total_cells)
 
         except Exception as exc:

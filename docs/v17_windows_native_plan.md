@@ -1,4 +1,4 @@
-# A native Windows version (backlog 23) — plan v0.5
+# A native Windows version (backlog 23) — plan v0.6
 
 Status: draft for the user (2026-11-13). Codex plan review round 1 FAIL
 (one P1: the SpatialData export script; four P2: file aliases, closed file
@@ -321,24 +321,153 @@ included (a development stage: no result made by them exists).
   `segmentation_meta_<roi>.json`; it now keeps Mesmer's metadata (test).
 * Tests only for the removed code are deleted; the others adapted.
 
-### Phase W3 — installer, launcher, Windows CI
+### Phase W3 — installer, launcher, Windows CI (v0.6, 2026-11-15)
 
-* `scripts/install_block01.ps1` (new): the equivalent of
-  `install_block01.sh` -- environment (micromamba, as on Linux / the Mac,
-  or a venv; §7 D2), the requirements, the viewer core wheel,
-  `.block01\install.env`, the package link as a `.pth` file (no symlink
-  rights needed), the models' locations.
-* `scripts/block01.cmd` / `block01.ps1` (new): the launcher
-  (`check_install`, the GPU check, the env variables of
-  `run_block01_mac.sh`, logs in `%USERPROFILE%\.block01`).
-* README / `docs/install_with_an_ai_agent.md`: the Windows section.
-* CI: `.github/workflows/block01_windows_tests.yml` (W0's) also
-  installs from scratch with the new installer and starts the app
-  offscreen (a smoke run); from here its test run gates the push.
-* Files: `scripts/install_block01.ps1`, `scripts/block01.cmd`,
-  `scripts/block01.ps1` (new), `README.md`,
-  `docs/install_with_an_ai_agent.md`, the workflow,
-  `tests/test_install_scripts.py` (the Windows scripts' static checks).
+What the laptop install showed (W1, W2, W2b-g): a source install works,
+done by hand in ~15 steps; three things changed since v0.5 --
+DeepCell's public Mesmer archive is gone (S3 403 since 2026-11-14; the
+DeepCell client needs an account token; the Hugging Face copy is gated),
+the Windows viewer-core wheel is published (core-v0.2.1, digest in
+`wheels.lock`), and TensorFlow stays (StarDist's shell). W3 turns the
+hand install into one command, with the Linux installer's rules: nothing
+it did not create is changed, every download is pinned and verified, a run
+that stopped half-way is redone, every refusal names the step and what to
+do.
+
+**`scripts/install_block01.ps1`** (new; PowerShell 5.1, which every
+Windows 10/11 has; no admin rights):
+1. checking this computer: Windows 10 22H2+ / 11 x64, free space under
+   the root (>= 25 GB; the root defaults to `%LOCALAPPDATA%\block01`),
+   the NVIDIA driver (`nvidia-smi`, CUDA 12 capable) -- none: a CPU
+   install, said; only with `-BuildCore` / `-BuildToolbox`, the MSVC C++
+   build tools (`vswhere` finds "Desktop development with C++"), else it
+   stops HERE naming the Visual Studio Build Tools download and the
+   workload to tick (decision W3-D5);
+2. micromamba: the pinned Windows release, SHA-256 checked, under the root;
+3. the environment `block01-<lock id>`: Python 3.10, then in order
+   `envs/ci/requirements-cpu.txt`, torch 2.5.1 + torchvision 0.20.1
+   (cu121 with a GPU, cpu without -- the pins the Windows CI installs), `envs/windows/requirements.txt`,
+   `--no-deps envs/windows/requirements-nodeps.txt` (the order W0-W2 ran),
+   DeepCell-Toolbox: kept when already working, else the wheel shipped in
+   `envs/windows/wheels/` (digest in `envs/windows/wheels.lock`; W3-D5)
+   instead of the sdist; a marker file when it
+   finished, so a half environment is redone;
+4. the viewer core: the `win_amd64` wheel of `wheels.lock`, downloaded
+   from the release and digest-checked; `-BuildCore` builds it instead
+   (needs Rust + the MSVC build tools, said when missing);
+5. the models under `<root>\models\<key>`, verified against
+   `envs/fusion_mesmer/models.json`: Cellpose-SAM and StarDist downloaded;
+   Mesmer from, in order, DeepCell's public archive (SPACEc's URL), the
+   lab's mirror (`-MesmerUrl`), a local copy (`-Models DIR` /
+   `-MesmerZip FILE`) -- each checked against the pinned digest; when
+   none works the install still finishes, Mesmer is reported as not
+   installed and its three methods say so when chosen (W3-D1); the
+   licence texts are shown and accepted once (`-AcceptModelLicences` for
+   scripts);
+   5b. the StarDist (and, when present, Mesmer) torch conversion;
+6. the package link: `<repo>\.block01\pkg\block01`, a directory junction
+   to the checkout (junctions need no admin rights, unlike the symlink W1
+   used); a junction already there that points elsewhere is refused, not
+   replaced. Nothing is written into the environment: the launcher puts
+   `<repo>\.block01\pkg` on `PYTHONPATH`, as `scripts/block01` does, so two
+   checkouts sharing one environment never import each other's code;
+7. self-test: `seg_runner.selftest` for every installed engine (GPU, then
+   with the GPU hidden), `model_manifest.py --verify` over the installed
+   models only (a new `--installed` option: an entry whose files are all
+   absent is reported "not installed", not a failure; a partly present one
+   still fails), the GPU background correction check, an offscreen start
+   of the app with its viewer core; with `-SkipModels` (CI) the engine
+   self-test and the model check are skipped and said so;
+8. the install record `<repo>\.block01\install.env` (prefix, root, model
+   variables, CUDA path), read by the launcher.
+
+**`scripts\block01.cmd`** (double-click) -> **`scripts\block01.ps1`**: refuses
+clearly when the record is missing / names another checkout / the
+environment or the junction is gone; sets the variables the installer
+recorded (model paths -- this also replaces models.json's POSIX roots on
+Windows -- KERAS_HOME, CUPY_CACHE_DIR, CUDA_PATH, the UTF-8 console);
+starts `python -m block01.main` in `<repo>\.block01\run`, its console output
+also to `<repo>\.block01\logs\block01-<date>.log`. The installer's last
+step puts a "FusionFlux" shortcut to `block01.cmd` on the desktop
+(W3-D3).
+
+**Docs**: README and `docs/install_with_an_ai_agent.md` get the Windows
+section (the one command, `-Models` for Mesmer, the launcher, what each
+refusal means).
+
+**CI** (`block01_windows_tests.yml`): the hand-written install steps are
+replaced by `install_block01.ps1 -NoGpu -SkipModels` and an offscreen
+start of the app; that install + start gates the push; the module run
+stays a report (29 modules still fail there, most for the CI's lack of
+models and GPU, decision W3-D4).
+
+**Tests**: `tests/test_install_scripts_windows.py` (new; the bash
+installers' module skips Windows) holds the PowerShell scripts' static
+checks (pins and digests, every step named, Mesmer's order, the junction and
+no `.pth`, the launcher's refusals, the shortcut), run on every system;
+`tests/test_install_scripts.py` covers the bash installer's new Mesmer
+order; the Windows CI runs the installer itself.
+
+**Files**: `scripts/install_block01.ps1`, `scripts/block01.ps1`,
+`scripts/block01.cmd` (new); `scripts/install_block01.sh` (W3-D2: the
+Mesmer order and `--mesmer-url`, skip when none works);
+`scripts/model_manifest.py` (`--installed`); `seg_runner/engines.py`
+(the missing-Mesmer message names the import command, text only);
+`.github/workflows/deepcell_toolbox_wheel.yml`, `envs/windows/wheels.lock`
+(new, W3-D5); `README.md`, `docs/install_with_an_ai_agent.md`,
+`.github/workflows/block01_windows_tests.yml`,
+`tests/test_install_scripts.py`, `tests/test_install_scripts_windows.py`
+and `tests/test_model_manifest_installed.py` (new), `tests/ci_cpu_modules.txt`.
+No other product code.
+
+**Acceptance on the laptop**: a fresh root and a fresh clone; one command
+with `-Models` pointing at the existing Mesmer copy; the launcher's
+double-click; the W2 checks (selftest GPU/CPU, one Step2 run per engine)
+on the installed app; a second installer run changes nothing; a run
+stopped half-way and restarted finishes.
+
+**The user's decisions (W3, 2026-11-15)**
+* W3-D1 Mesmer. SPACEc's download (spacec 0.1.2 and its current master,
+  `tools/_segmentation.py` `load_mesmer_model`) IS DeepCell's public S3
+  archive, the URL the installer already has -- 403 since 2026-11-14
+  (checked again 2026-11-15 from the Mac: us-west-1 301 -> us-west-2 403).
+  So the installer tries, in order: that URL (in case it returns); a
+  mirror (the lab's, built in; `-MesmerUrl` / `BLOCK01_MESMER_URL` for
+  another, per run -- not recorded); a local
+  copy (`-Models DIR` / `-MesmerZip FILE`). None works: Mesmer is skipped
+  and said, the rest installs. The weights never go into the repository
+  or a public release (DeepCell's licence; the user's earlier ruling).
+  The lab mirror (the user's Google Drive, 2026-11-15) is
+  `MultiplexSegmentation-9-mirror.tar.gz`, packed from the Mac's verified
+  copy (the same four files as models.json; the original archive was not
+  kept), so a mirror or local copy is checked FILE BY FILE against
+  models.json, not by the original archive's digest. A later import: the
+  installer run again with only the Mesmer source (`-MesmerOnly -MesmerUrl
+  URL` / `-Models DIR` / `-MesmerZip FILE`; Linux `--mesmer-only ...`)
+  verifies, converts (torch weights) and records it; the docs say so, and
+  so does the message Step2 shows when a Mesmer method is chosen without
+  the model (`seg_runner/engines.py`, its missing-model text only).
+* W3-D2 The Linux/Mac installer gets the same order and options
+  (`--mesmer-url`, `--models`, skip when none works):
+  `scripts/install_block01.sh` joins the file list.
+* W3-D3 The desktop shortcut is created on every install (refreshed if it
+  is ours, an unrelated file of that name is left and said).
+* W3-D4 CI: install + start gate the push; the module run stays a report.
+* W3-D5 DeepCell-Toolbox 0.12.1 (user ruling 2026-11-15: part of
+  Block01's Windows install, not a release of its own): the installer first
+  checks whether the environment already has it working (version and the
+  compiled `compute_overlap`) and then does nothing; else it installs the
+  `win_amd64` (cp310) wheel that ships with the checkout,
+  `envs/windows/wheels/`, its digest in `envs/windows/wheels.lock`; with
+  `-BuildToolbox` (or while no wheel is committed yet) it builds from
+  source, which needs the MSVC tools step 1 checks. The wheel is built by
+  `.github/workflows/deepcell_toolbox_wheel.yml` (run by hand, an artifact
+  only, nothing published) and committed after its digest is checked.
+  Files: that workflow, `envs/windows/wheels.lock`, `envs/windows/wheels/`
+  (new).
+* W3-D6 Step4's SpatialData environment on Windows: installed by the
+  installer too -- a separate block after W3 (its own plan: a Windows
+  lock for `envs/block01_spatialdata`).
 
 ### Phase W4 — a packaged application (optional, §7 D5)
 

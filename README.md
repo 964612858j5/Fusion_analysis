@@ -80,6 +80,21 @@ scripts/block01                     # start
 ```
 
 `bash scripts/install_block01.sh --check-only` only checks the computer.
+
+Windows 10 22H2 / 11 (64-bit; an NVIDIA GPU is used when present), in PowerShell
+from the checkout, no admin rights needed:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_block01.ps1   # once; adds a FusionFlux desktop shortcut
+scripts\block01.cmd                                                   # start (or the desktop shortcut)
+```
+
+Mesmer's model: DeepCell's public archive no longer answers (2026-11), so both
+installers also take a mirror or a copy you have (`-MesmerUrl URL` /
+`-MesmerZip FILE` / `-Models DIR` on Windows; `--mesmer-url`, `--mesmer-zip`,
+`--models` on Linux). Without one the install finishes without Mesmer; add it
+later with `scripts\install_block01.ps1 -MesmerOnly -MesmerZip FILE` (Linux:
+`bash scripts/install_block01.sh --mesmer-only --mesmer-zip FILE`).
 Installer details and the manual steps: [`envs/fusion_mesmer/README.md`](envs/fusion_mesmer/README.md).
 Installing with a coding agent: [`docs/install_with_an_ai_agent.md`](docs/install_with_an_ai_agent.md).
 

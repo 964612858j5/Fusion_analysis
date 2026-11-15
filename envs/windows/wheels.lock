@@ -1,0 +1,7 @@
+# Prebuilt Windows wheels that ship with this checkout, in envs/windows/wheels/,
+# and that scripts/install_block01.ps1 installs when the environment lacks them
+# (docs/v17_windows_native_plan.md W3, decision W3-D5; user ruling 2026-11-15:
+# part of Block01's Windows install, not a release of their own).
+# version  platform  file  sha256 -- built by .github/workflows/deepcell_toolbox_wheel.yml,
+# each digest checked against the downloaded build before it was written here.
+# Until a line is here the installer builds DeepCell-Toolbox (a C++ compiler).

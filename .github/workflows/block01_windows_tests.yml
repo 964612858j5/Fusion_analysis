@@ -19,6 +19,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # W3 (docs/v17_windows_native_plan.md, decision W3-D4): a fresh install
+  # with the user's installer, under Windows PowerShell 5.1 as on a lab PC,
+  # then its offscreen start check. This job GATES the push; the module run
+  # below stays a report.
+  windows-install:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install with scripts\install_block01.ps1 (no GPU, no models)
+        # (until envs\windows\wheels.lock names the prebuilt DeepCell-Toolbox
+        # wheel, the installer builds it; the runner has the C++ tools)
+        run: |
+          & .\scripts\install_block01.ps1 -NoGpu -SkipModels -Root "$env:RUNNER_TEMP\b01"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: A second run changes nothing and passes
+        run: |
+          & .\scripts\install_block01.ps1 -NoGpu -SkipModels -Root "$env:RUNNER_TEMP\b01"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: The launcher refuses another checkout's record clearly
+        run: |
+          $rec = ".block01\install.env"
+          Copy-Item $rec "$rec.bak"
+          (Get-Content $rec) -replace '^BLOCK01_CHECKOUT=.*$', 'BLOCK01_CHECKOUT=C:\elsewhere' | Set-Content $rec
+          $out = ("" | & powershell -NoProfile -ExecutionPolicy Bypass -File scripts\block01.ps1 2>&1 | Out-String)
+          Move-Item -Force "$rec.bak" $rec
+          Write-Host $out
+          if ($out -notmatch "names another checkout") { Write-Host "the launcher did not refuse"; exit 1 }
+          exit 0          # the refusal's own exit 1 was the expected answer
+      - name: The installer's console output
+        if: always()
+        run: Get-ChildItem .block01\run -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "== $($_.Name)"; Get-Content $_.FullName -Tail 40 }
+
   windows-report:
     runs-on: windows-latest
     timeout-minutes: 150

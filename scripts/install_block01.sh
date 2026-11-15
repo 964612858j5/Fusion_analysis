@@ -3,7 +3,17 @@
 #
 #   bash scripts/install_block01.sh [--root DIR] [--check-only] [--build-core]
 #                                   [--models DIR] [--accept-model-licences]
+#                                   [--mesmer-url URL] [--mesmer-zip FILE]
 #                                   [--no-spatialdata] [--older-qt]
+#   bash scripts/install_block01.sh --mesmer-only [--mesmer-url URL | --mesmer-zip FILE
+#                                   | --models DIR] [--accept-model-licences]
+#
+# Mesmer (backlog 23, 2026-11-15): DeepCell's public archive (SPACEc's URL)
+# has answered 403 since 2026-11-14. It is tried first; then a mirror
+# (--mesmer-url or BLOCK01_MESMER_URL, else the lab's), a local archive (--mesmer-zip) or
+# a folder (--models DIR/mesmer_multiplex_segmentation), each checked file
+# by file against models.json. None works: the install finishes without
+# Mesmer and says how to add it later (--mesmer-only).
 #
 # Linux x86_64 + NVIDIA, glibc 2.28 or newer. Below glibc 2.34 the interface
 # gets PySide6 6.9.3 (the last release built for it) in an environment of its
@@ -59,6 +69,13 @@ BUILD_CORE=0
 NO_SPATIALDATA=0
 OLDER_QT=0          # 1: PySide6 6.9.3 (glibc 2.28-2.33, or --older-qt)
 MODELS_IN=""
+# the lab's mirror (2026-11-15, the user's Google Drive): the Mac's verified copy,
+# repacked; checked file by file against models.json. --mesmer-url replaces it.
+MESMER_MIRROR_DEFAULT="https://drive.usercontent.google.com/download?id=1bsRETcNz6ritHEA00Ds9cAoffr48WnQi&export=download&confirm=t"
+MESMER_MIRROR="${BLOCK01_MESMER_URL:-$MESMER_MIRROR_DEFAULT}"   # a mirror of the Mesmer archive
+MESMER_ZIP=""                              # a local Mesmer archive (.tar.gz or .zip)
+MESMER_ONLY=0                              # 1: add Mesmer to an existing install, nothing else
+MESMER_MISSING=0                           # 1: no source worked; the install goes on without it
 ACCEPT_LICENCES=0
 STEP="start"
 CUDA_DIR=""
@@ -511,7 +528,7 @@ EOF
         ;;
         mesmer_multiplex_segmentation) cat <<'EOF'
   Mesmer model "MultiplexSegmentation" (100 MB) from DeepCell's public model storage
-    (deepcell-data.s3-us-west-1.amazonaws.com)
+    (deepcell-data.s3-us-west-1.amazonaws.com), a mirror or a copy you give
   Licence: non-commercial academic use only (DeepCell ASSET_LICENSE)
     https://github.com/vanvalenlab/deepcell-auth/blob/main/ASSET_LICENSE
   The PyTorch copy Block01 makes from it keeps the same licence; never share it.
@@ -557,6 +574,80 @@ verify_into_place() {
     rm -rf -- "$stage"
 }
 
+# try_download URL DEST: like `download` without a digest, but a failure is
+# returned, not fatal (the Mesmer sources are tried one after another)
+try_download() {
+    local url=$1 dest=$2 tmp="$2.part.$$"
+    mkdir -p "$(dirname "$dest")"
+    if curl -fL --retry 2 --connect-timeout 20 -sS -o "$tmp" "$url"; then
+        mv -f -- "$tmp" "$dest"; return 0
+    fi
+    rm -f -- "$tmp"; return 1
+}
+
+# mesmer_from_archive ARCHIVE STAGE: unpack ARCHIVE (.tar.gz or .zip) and put
+# the CONTENTS of its MultiplexSegmentation/ folder into STAGE; 1 if it has none
+mesmer_from_archive() {
+    local archive=$1 stage=$2
+    mkdir -p "$stage/x"
+    case "$archive" in
+        *.zip) "$PY" -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$archive" "$stage/x" || return 1 ;;
+        *)     tar -xzf "$archive" -C "$stage/x" || return 1 ;;
+    esac
+    local src; src=$(find "$stage/x" -type d -name MultiplexSegmentation | head -n1)
+    [ -n "$src" ] || return 1
+    cp -a "$src"/. "$stage"/
+    rm -rf -- "$stage/x"
+}
+
+# ensure_mesmer DIR: DeepCell's archive, the mirror, the local archive, the
+# --models folder -- the first that yields the four files of models.json is
+# moved into DIR; none: MESMER_MISSING=1, said, and the install goes on
+ensure_mesmer() {
+    local key=mesmer_multiplex_segmentation dir=$1 stage="$1.stage.$$" src
+    for src in official mirror zip folder; do
+        rm -rf -- "$stage"; mkdir -p "$stage"
+        case "$src" in
+            official)
+                say "model $key: trying DeepCell's public archive"
+                try_download "$MESMER_URL" "$stage/m.tar.gz" || { say "  not available"; continue; }
+                [ "$(sha256_of "$stage/m.tar.gz")" = "$MESMER_SHA256" ] || { say "  not the expected archive"; continue; }
+                mesmer_from_archive "$stage/m.tar.gz" "$stage" || continue
+                rm -f -- "$stage/m.tar.gz" ;;
+            mirror)
+                [ -n "$MESMER_MIRROR" ] || continue
+                say "model $key: trying the mirror $MESMER_MIRROR"
+                try_download "$MESMER_MIRROR" "$stage/m.tar.gz" || { say "  not available"; continue; }
+                mesmer_from_archive "$stage/m.tar.gz" "$stage" || { say "  no MultiplexSegmentation folder in it"; continue; }
+                rm -f -- "$stage/m.tar.gz" ;;
+            zip)
+                [ -n "$MESMER_ZIP" ] || continue
+                say "model $key: trying the archive $MESMER_ZIP"
+                [ -f "$MESMER_ZIP" ] || { say "  no such file"; continue; }
+                mesmer_from_archive "$MESMER_ZIP" "$stage" || { say "  no MultiplexSegmentation folder in it"; continue; } ;;
+            folder)
+                [ -n "$MODELS_IN" ] || continue
+                [ "$(model_state "$key" "$MODELS_IN/$key")" = ok ] || continue
+                say "model $key: copying the verified copy from $MODELS_IN/$key"
+                local f
+                while IFS= read -r f; do
+                    mkdir -p "$(dirname "$stage/$f")"
+                    cp -L -- "$MODELS_IN/$key/$f" "$stage/$f"
+                done < <(manifest_files "$key") ;;
+        esac
+        if [ "$(model_state "$key" "$stage")" = ok ]; then
+            verify_into_place "$key" "$stage" "$dir"
+            say "model $key: installed and verified"
+            return 0
+        fi
+        say "  its files do not match models.json; not used"
+    done
+    rm -rf -- "$stage"
+    MESMER_MISSING=1
+    warn "Mesmer is NOT installed: no source worked. Everything else is. To add it later:"
+    warn "  bash $REPO/scripts/install_block01.sh --mesmer-only --mesmer-zip FILE   (or --mesmer-url URL, --models DIR)"
+}
+
 fetch_model() {
     local key=$1 dir=$2
     local stage="$dir.stage.$$"
@@ -569,16 +660,6 @@ fetch_model() {
             local zsha; zsha=$("$PY" -c "import json,sys; e=json.load(open(sys.argv[1]))['models']['stardist_2D_versatile_fluo']; print([f['sha256'] for f in e['files'] if f['path'].endswith('.zip')][0])" "$MANIFEST")
             download "$STARDIST_URL" "$stage/2D_versatile_fluo.zip" "$zsha"
             run "$PY" -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$stage/2D_versatile_fluo.zip" "$stage" ;;
-        mesmer_multiplex_segmentation)
-            # the archive is checked before it is unpacked; every file again
-            # against models.json by verify_into_place
-            download "$MESMER_URL" "$stage/mesmer.tar.gz" "$MESMER_SHA256"
-            mkdir -p "$stage/x"
-            run tar -xzf "$stage/mesmer.tar.gz" -C "$stage/x"
-            [ -d "$stage/x/MultiplexSegmentation" ] || fail "the DeepCell archive has no MultiplexSegmentation folder." "report it"
-            # the CONTENTS of MultiplexSegmentation/ are the manifest entry's root
-            cp -a "$stage/x/MultiplexSegmentation"/. "$stage"/
-            rm -rf -- "$stage/x" "$stage/mesmer.tar.gz" ;;
     esac
     verify_into_place "$key" "$stage" "$dir"
 }
@@ -595,6 +676,11 @@ ensure_models() {
                 fail "model $key in $dir does not match models.json ($st); it is left untouched." \
                      "move that folder away (or use another --root) and run the installer again" ;;
         esac
+        if [ "$key" = mesmer_multiplex_segmentation ]; then
+            accept_licence "$key"
+            ensure_mesmer "$dir"
+            continue
+        fi
         if [ -n "$MODELS_IN" ] && [ "$(model_state "$key" "$MODELS_IN/$key")" = ok ]; then
             say "model $key: copying the verified copy from $MODELS_IN/$key"
             local stage="$dir.stage.$$" f
@@ -662,7 +748,7 @@ convert_stardist_weights() {
 check_selftest() {
     "$PY" -c '
 import json, sys
-want = {"cellpose", "stardist", "mesmer"}
+want = set(sys.argv[1:]) or {"cellpose", "stardist", "mesmer"}
 seen, bad = set(), []
 for line in sys.stdin:
     line = line.strip()
@@ -677,7 +763,12 @@ for line in sys.stdin:
 bad += sorted(want - seen)
 if bad:
     print("[install]   failed: " + ", ".join(bad)); sys.exit(1)
-'
+' "$@"
+}
+
+# the engines whose models are installed (Mesmer may be missing, 2026-11-15)
+installed_engines() {
+    if [ "$MESMER_MISSING" = 1 ]; then echo "cellpose stardist"; else echo "cellpose stardist mesmer"; fi
 }
 
 selftest() {
@@ -685,11 +776,14 @@ selftest() {
     app_env
     say "== 6. Self-test: one small task per segmentation engine =="
     local out
-    out=$(cd "$STATE_DIR/run" && PYTHONPATH="$REPO" "$PY" -m seg_runner.selftest 2>"$STATE_DIR/run/selftest.err") || true
+    local engines; engines=$(installed_engines)
+    # shellcheck disable=SC2086 -- the engine names are words
+    out=$(cd "$STATE_DIR/run" && PYTHONPATH="$REPO" "$PY" -m seg_runner.selftest $engines 2>"$STATE_DIR/run/selftest.err") || true
     printf '%s\n' "$out"
-    printf '%s\n' "$out" | check_selftest || fail "an engine failed its self-test (details above and in $STATE_DIR/run/selftest.err)." \
+    # shellcheck disable=SC2086
+    printf '%s\n' "$out" | check_selftest $engines || fail "an engine failed its self-test (details above and in $STATE_DIR/run/selftest.err)." \
           "read the error, fix the cause (often the GPU driver or CUDA) and run the installer again"
-    (cd "$STATE_DIR/run" && run "$PY" "$REPO/scripts/model_manifest.py" --verify)
+    (cd "$STATE_DIR/run" && run "$PY" "$REPO/scripts/model_manifest.py" --verify --installed)
     local gpu
     gpu=$(cd "$STATE_DIR/run" && PYTHONPATH="$STATE_DIR/pkg" "$PY" -c \
         'from block01.core import bg_correction as b; print("ok" if b.GPU_MORPH_AVAILABLE else "cpu", b.GPU_MORPH_SMOKE_TEST)' 2>"$STATE_DIR/run/gpucheck.err" | tail -n1 || echo "cpu (check failed: $STATE_DIR/run/gpucheck.err)")
@@ -737,7 +831,36 @@ write_record() {
     printf 'core %s\ntime %s\n' "$(core_version)" "$(date -Is)" > "$ENV_PREFIX/.block01_install_ok"
 }
 
-usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
+# --mesmer-only: add Mesmer to the install this checkout already has
+mesmer_only() {
+    STEP="adding Mesmer to the existing install"
+    local rec="$STATE_DIR/install.env"
+    [ -f "$rec" ] || fail "this checkout has no install yet ($rec is missing)." "run the installer without --mesmer-only first"
+    # shellcheck disable=SC1090
+    . "$rec"
+    ROOT=$BLOCK01_ROOT; ENV_PREFIX=$BLOCK01_PREFIX; PY="$ENV_PREFIX/bin/python"
+    [ -x "$PY" ] || fail "the environment $ENV_PREFIX is gone." "run the installer without --mesmer-only"
+    local key=mesmer_multiplex_segmentation dir; dir=$(model_dir "$key")
+    case "$(model_state "$key" "$dir")" in
+        ok) say "Mesmer is already installed and verified ($dir)" ;;
+        missing)
+            accept_licence "$key"
+            ensure_mesmer "$dir"
+            [ "$MESMER_MISSING" = 0 ] || fail "no Mesmer source worked (messages above)." \
+                "give a file with --mesmer-zip FILE, a link with --mesmer-url URL, or a folder with --models DIR" ;;
+        *) fail "$dir holds files that do not match models.json; they are left untouched." "move that folder away and run this again" ;;
+    esac
+    STEP="the Mesmer self-test"
+    app_env
+    local out
+    out=$(cd "$STATE_DIR/run" && PYTHONPATH="$REPO" "$PY" -m seg_runner.selftest mesmer 2>"$STATE_DIR/run/selftest.err") || true
+    printf '%s\n' "$out"
+    printf '%s\n' "$out" | check_selftest mesmer || fail "Mesmer failed its self-test (details above and in $STATE_DIR/run/selftest.err)." "read the error, fix the cause and run this again"
+    (cd "$STATE_DIR/run" && run "$PY" "$REPO/scripts/model_manifest.py" --verify --installed)
+    say "== Mesmer added. Start Block01 as before: $REPO/scripts/block01 =="
+}
+
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
 
 main() {
     while [ $# -gt 0 ]; do
@@ -747,12 +870,16 @@ main() {
             --build-core) BUILD_CORE=1; shift ;;
             --models) MODELS_IN=$(realpath -m "$2"); shift 2 ;;
             --accept-model-licences) ACCEPT_LICENCES=1; shift ;;
+            --mesmer-url) MESMER_MIRROR=$2; shift 2 ;;
+            --mesmer-zip) MESMER_ZIP=$(realpath -m "$2"); shift 2 ;;
+            --mesmer-only) MESMER_ONLY=1; shift ;;
             --no-spatialdata) NO_SPATIALDATA=1; shift ;;
             --older-qt) OLDER_QT=1; shift ;;
             -h|--help) usage; exit 0 ;;
             *) usage; exit 2 ;;
         esac
     done
+    if [ "$MESMER_ONLY" = 1 ]; then mesmer_only; exit 0; fi
     local t0; t0=$(date +%s)
     say "Block01 install: checkout $REPO, install root $ROOT"
     preflight
@@ -776,6 +903,10 @@ main() {
     write_record
     say "== Done in $(( $(date +%s) - t0 )) s. Start Block01 with: =="
     say "   $REPO/scripts/block01"
+    if [ "$MESMER_MISSING" = 1 ]; then
+        warn "Mesmer is not installed (its three methods are unavailable). Add it later with:"
+        warn "   bash $REPO/scripts/install_block01.sh --mesmer-only --mesmer-zip FILE"
+    fi
 }
 
 if [ -z "${BLOCK01_INSTALL_SOURCED:-}" ]; then

@@ -1,0 +1,60 @@
+# docs/v17_windows_native_plan.md W3 (decision W3-D5; user ruling 2026-11-15):
+# the Windows wheel of DeepCell-Toolbox 0.12.1 that ships WITH Block01
+# (envs/windows/wheels/, its digest in envs/windows/wheels.lock), so a Windows
+# install needs no C++ compiler (PyPI has only its source distribution; its
+# compute_overlap part is compiled, and Mesmer's pre/post-processing imports
+# it). Run by hand (workflow_dispatch): builds it on windows-latest for
+# CPython 3.10 with the environment's NumPy, tests it INSTALLED in a clean
+# venv and uploads it as an artifact; nothing is published. The wheel is then
+# committed with its digest, checked against the downloaded artifact.
+name: deepcell_toolbox_wheel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TOOLBOX: "0.12.1"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Build the wheel (against the environment's NumPy)
+        shell: bash
+        run: |
+          python -m pip install --upgrade "pip<27"
+          NP=$(grep -i '^numpy==' envs/ci/requirements-cpu.txt)
+          python -m pip install "$NP" "cython<3" wheel setuptools
+          python -m pip wheel --no-deps --no-build-isolation "DeepCell-Toolbox==$TOOLBOX" -w dist
+          ls dist
+      - name: Test the installed wheel in a clean venv
+        shell: bash
+        run: |
+          python -m venv clean
+          PY=clean/Scripts/python.exe
+          NP=$(grep -i '^numpy==' envs/ci/requirements-cpu.txt)
+          SP=$(grep -i '^scipy==' envs/ci/requirements-cpu.txt)
+          SK=$(grep -i '^scikit-image==' envs/ci/requirements-cpu.txt)
+          "$PY" -m pip install --no-deps dist/*.whl
+          "$PY" -m pip install "$NP" "$SP" "$SK" "scikit-learn==1.5.2" pandas
+          "$PY" - <<'PY'
+          import numpy as np
+          from deepcell_toolbox.compute_overlap import compute_overlap      # the compiled part
+          from deepcell_toolbox.deep_watershed import deep_watershed
+          from deepcell_toolbox.processing import histogram_normalization, percentile_threshold
+          boxes = np.array([[0, 0, 10, 10]], dtype=np.float64)
+          assert compute_overlap(boxes, boxes)[0, 0] == 1.0
+          print("deepcell_toolbox wheel: imports and computes")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-deepcell-toolbox
+          path: dist/*.whl
+

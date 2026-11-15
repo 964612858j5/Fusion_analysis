@@ -291,3 +291,5 @@ test_cuda_dlls.py
 test_small_screen_fit.py
 test_step0_save_question_frees_navigator.py
 test_step2_inputs_follow_the_region.py
+test_install_scripts_windows.py
+test_model_manifest_installed.py

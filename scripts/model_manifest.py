@@ -142,11 +142,18 @@ def set_content_digest(key, digest):
     print(f"recorded {key} content_sha256 {digest} in {MANIFEST}")
 
 
-def verify():
+def verify(installed_only=False):
+    """Every entry's files against the manifest. `installed_only`
+    (backlog 23, 2026-11-15: Mesmer may be left out of an install): an entry
+    none of whose files is present is reported NOT INSTALLED, not a problem;
+    one that is partly present still is."""
     data = json.loads(MANIFEST.read_text(encoding="utf-8"))
     bad = 0
     for key, entry in data["models"].items():
         base = pathlib.Path(model_root(entry))
+        if installed_only and not any((base / f["path"]).is_file() for f in entry["files"]):
+            print(f"NOT INSTALLED {key}: {base}")
+            continue
         for f in entry["files"]:
             p = base / f["path"]
             if not p.is_file():
@@ -173,5 +180,7 @@ if __name__ == "__main__":
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--write", action="store_true")
     g.add_argument("--verify", action="store_true")
+    ap.add_argument("--installed", action="store_true",
+                    help="with --verify: a model none of whose files is present is not a problem")
     args = ap.parse_args()
-    sys.exit(write() if args.write else verify())
+    sys.exit(write() if args.write else verify(installed_only=args.installed))

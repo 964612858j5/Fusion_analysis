@@ -124,6 +124,14 @@ def compare_identity(step1, current):
             "legacy_identity": legacy, "differences": differences}
 
 
+#: how to add Mesmer to an install that has none (the installers' --mesmer-only)
+MESMER_IMPORT_HINT = (
+    "Add it with the installer: on Windows `scripts\\install_block01.ps1 -MesmerOnly "
+    "-MesmerZip FILE` (or -MesmerUrl URL, -Models DIR); on Linux `bash "
+    "scripts/install_block01.sh --mesmer-only --mesmer-zip FILE` (or --mesmer-url URL, "
+    "--models DIR).")
+
+
 class ModelMissingError(RuntimeError):
     """The model the manifest names is not where it says (plan 7.10.3: no
     silent fall back to some other path)."""
@@ -447,8 +455,13 @@ class MesmerEngine:
         dev = torch_device()
         entry = manifest_entry(MESMER_TORCH_ENTRY)
         root = model_root(entry)
+        source = model_root(manifest_entry(entry["derived_from"]))
+        if not os.path.isfile(os.path.join(root, weights.WEIGHTS_FILE)) and not os.path.isdir(source):
+            # backlog 23 (2026-11-15): an install may leave Mesmer out (DeepCell's
+            # archive is gone); Step2 shows this text, so it says how to add it
+            raise ModelMissingError(f"Mesmer's model is not installed (no {source}). {MESMER_IMPORT_HINT}")
         # first use on this machine: made from the Keras model (plan §10)
-        prepare.ensure(root, model_root(manifest_entry(entry["derived_from"])),
+        prepare.ensure(root, source,
                        entry.get("content_sha256"), lambda m: print(m, file=sys.stderr, flush=True))
         path = os.path.join(model_path(MESMER_TORCH_ENTRY), weights.WEIGHTS_FILE)
         self.model_path = path

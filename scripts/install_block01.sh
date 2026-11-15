@@ -777,7 +777,7 @@ selftest() {
     say "== 6. Self-test: one small task per segmentation engine =="
     local out
     local engines; engines=$(installed_engines)
-    # shellcheck disable=SC2086 -- the engine names are words
+    # shellcheck disable=SC2086  # the engine names are words
     out=$(cd "$STATE_DIR/run" && PYTHONPATH="$REPO" "$PY" -m seg_runner.selftest $engines 2>"$STATE_DIR/run/selftest.err") || true
     printf '%s\n' "$out"
     # shellcheck disable=SC2086

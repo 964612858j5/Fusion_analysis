@@ -96,6 +96,11 @@ class RegionsViewerHost:
             return False
         mount = self._build()
         if mount.host.stack is not None:
+            from ...utils import perf_trace
+            # measurement only: does this entry rebuild (the W2g flash)?
+            if perf_trace.enabled():
+                perf_trace.mark("regions.entry", pending=bool(mount.source_pending_while_paused),
+                                moved=bool(mount.viewer.source_moved()))
             try:
                 mount.sync_source("handoff")
                 # the window's mode: a restore may have moved it unseen
@@ -147,13 +152,22 @@ class RegionsViewerHost:
         return False
 
     def sync(self, reason="handoff"):
-        """The handoff moved: rebind, and re-attach the overlay."""
+        """The handoff moved: rebind, and re-attach the overlay.
+
+        W2g (user ruling 2026-11-15): a viewer paused off screen is rebuilt
+        NOW, at the Save that moved its source, and stays paused -- rebuilt
+        on the next entry instead, the old picture was torn down on screen
+        (a visible flash)."""
+        from ...utils import perf_trace
         self.refused_for = None
         m = self.mount
         if m is None or m.host.stack is None:
             return False
         try:
             ok = bool(m.sync_source(reason))
+            if m.source_pending_while_paused:
+                with perf_trace.span("regions.sync.rebuild_paused"):
+                    ok = bool(m.rebuild_paused()) or ok
         except Exception as exc:                            # noqa: BLE001
             print(f"[Regions-Viewer] rebind failed: {exc}")
             m.restore_legacy()

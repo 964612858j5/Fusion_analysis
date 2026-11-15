@@ -465,7 +465,8 @@ def test_stop_ends_the_run_with_nothing_registered(app, tmp_path, when, loop):
         _wait_for(lambda: worker.isFinished())
         if when == "loading":
             # ended by the signal, not by the model finishing its load
-            assert time.monotonic() - t0 < 2.0
+            # (Windows ends the tree with taskkill: 2.11 s on the laptop, 2026-11-15)
+            assert time.monotonic() - t0 < (4.0 if os.name == "nt" else 2.0)
     finally:
         worker.wait(60000)
     assert got["finished"] == [] and got["error"] == ["Stopped by user."]

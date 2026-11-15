@@ -54,17 +54,18 @@ def _slide(path):
 
 def _workspace(tmp_path, bbox):
     """<proj>/rois/ws/{roi_manifest.json, settings/step1_fusion_settings.json,
-    step1/fused zarr} (block RM §4: saved settings live in settings/)."""
+    runs/fuse_*/fused zarr} (block RM §4: saved settings live in settings/,
+    the fused product in its fuse run)."""
     slide = _slide(tmp_path / "slide.ome.tif")
     ws = tmp_path / "proj" / "rois" / "ws"
-    (ws / "step1").mkdir(parents=True)
+    (ws / "runs" / "fuse_20260101_000000").mkdir(parents=True)
     (ws / "settings").mkdir(parents=True)
     json.dump({"roi_id": "ws", "source_ome": slide, "bbox_fullres": list(bbox)},
               open(ws / "roi_manifest.json", "w"))
     json.dump({"fusion_config": {"nucleus": {"channel": "DAPI", "weight": 1.0}}},
               open(ws / "settings" / "step1_fusion_settings.json", "w"))
     y0, y1, x0, x1 = bbox
-    zp = str(ws / "step1" / "fused_Full WSI.zarr")
+    zp = str(ws / "runs" / "fuse_20260101_000000" / "fused_Full WSI.zarr")
     z = zarr.open(zp, mode="w", shape=(y1 - y0, x1 - x0, 2), chunks=(256, 256, 2),
                   dtype=np.uint16)
     z[...] = 1

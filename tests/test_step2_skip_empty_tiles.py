@@ -277,6 +277,47 @@ def test_the_run_records_what_it_left_out(tmp_path, monkeypatch):
     assert params["skip_tiles"]["auto"] == empty
 
 
+def test_a_skipped_tile_with_tissue_gets_no_cells(tmp_path, monkeypatch):
+    """W2b (user ruling 2026-11-14): a cell whose centroid lies in a tile the
+    user skipped is dropped, although a segmented neighbour's overlap band
+    saw it; a cell centred in a segmented tile is kept whole."""
+    lab = _labels(3)
+    rows, cols, overlap = ROWS, COLS, 24          # a band wide enough to see whole cells
+    empty = _empty_tiles(lab, rows, cols, overlap)
+    tiles = TileScheduler(*lab.shape, rows, cols, overlap).tiles
+
+    def centred(mask, own):
+        y0, y1, x0, x1 = own
+        out = []
+        for v in np.unique(mask[mask > 0]):
+            yy, xx = np.nonzero(mask == v)
+            if y0 <= yy.mean() < y1 and x0 <= xx.mean() < x1:
+                out.append(int(v))
+        return out
+
+    w_off, zp_off = _worker(tmp_path, monkeypatch, lab, rows, cols, overlap, name="off")
+    _run(w_off, zp_off, "run")
+    off = np.asarray(zarr.open(os.path.join(w_off.output_dir, "global_mask.zarr"), mode="r"))
+    # a tissue tile with cells centred in it, next to a segmented tile
+    forced = next(k for k in range(rows * cols) if k not in empty
+                  and centred(off, tiles[k].own_bbox))
+    w, zp = _worker(tmp_path, monkeypatch, lab, rows, cols, overlap,
+                    skip=_plan(rows, cols, overlap, empty, [forced]), name="on")
+    _run(w, zp, "run")
+    on = np.asarray(zarr.open(os.path.join(w.output_dir, "global_mask.zarr"), mode="r"))
+    assert centred(on, tiles[forced].own_bbox) == []
+    store = json.load(open(os.path.join(w.output_dir, "segmentation_meta.json")))["label_store"]
+    assert store["seam_reconciliation"]["cells_dropped_in_skipped_tiles"] > 0
+    assert set(np.unique(on)) == set(range(int(on.max()) + 1))     # no empty id
+    # every cell kept is one the run without a plan has too, pixel for pixel
+    for v in np.unique(on[on > 0]):
+        m = on == v
+        ref = np.unique(off[m])
+        assert ref.size == 1 and ref[0] > 0 and np.array_equal(off == ref[0], m)
+    assert "cells_dropped_in_skipped_tiles" not in json.load(open(os.path.join(
+        w_off.output_dir, "segmentation_meta.json")))["label_store"]["seam_reconciliation"]
+
+
 @pytest.mark.parametrize("bad", [{"grid": [4, 4]}, {"overlap": 9}, {"auto": [99]}])
 def test_a_plan_for_another_grid_is_refused(tmp_path, monkeypatch, bad):
     """S10: fail-closed, before any output."""

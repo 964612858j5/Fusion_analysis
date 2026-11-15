@@ -34,6 +34,19 @@ _ENV = "BLOCK01_MESMER_TORCH_PATH"
 _STARDIST_ENV = "BLOCK01_STARDIST_TORCH_PATH"
 
 
+def _link(src, dst):
+    """`dst` names `src`: a symlink, or -- on Windows without the privilege
+    (WinError 1314) -- a hard link, or a copy across drives."""
+    try:
+        dst.symlink_to(src)
+    except OSError:
+        try:
+            os.link(src, dst)
+        except OSError:
+            import shutil
+            shutil.copyfile(src, dst)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _mesmer_weights_in_scratch(tmp_path_factory):
     entry = json.loads((_REPO / "envs" / "fusion_mesmer" / "models.json").read_text())[
@@ -42,7 +55,7 @@ def _mesmer_weights_in_scratch(tmp_path_factory):
     scratch = tmp_path_factory.mktemp("mesmer_torch")
     for f in entry["files"]:
         if (real / f["path"]).is_file():
-            (scratch / f["path"]).symlink_to(real / f["path"])
+            _link(real / f["path"], scratch / f["path"])
     old = os.environ.get(_ENV)
     os.environ[_ENV] = str(scratch)
     yield scratch
@@ -60,7 +73,7 @@ def _stardist_weights_in_scratch(tmp_path_factory):
     scratch = tmp_path_factory.mktemp("stardist_torch")
     for f in entry["files"]:
         if (real / f["path"]).is_file():
-            (scratch / f["path"]).symlink_to(real / f["path"])
+            _link(real / f["path"], scratch / f["path"])
     old = os.environ.get(_STARDIST_ENV)
     os.environ[_STARDIST_ENV] = str(scratch)
     yield scratch

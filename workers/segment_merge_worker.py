@@ -374,7 +374,9 @@ class SegmentMergeWorker(QThread):
     def _seam_begin(self, tiles, full_h, full_w, out_prefix, keeps_nuclei, nuclei_state=None,
                     zarr_path=None, judge=None):
         """Block N3: the region's seam merger for the engine methods. Its
-        spill folder is cleaned up with the run's partials whatever happens."""
+        spill folder is cleaned up with the run's partials whatever happens.
+        The tiles the user's plan skips get no cells (W2b): a cell whose
+        centroid lies in one is dropped."""
         if self.method not in METHOD_ENGINE:
             return None
         spill = os.path.join(self.output_dir, f".seam_candidates_{out_prefix or 'whole_image'}")
@@ -388,7 +390,8 @@ class SegmentMergeWorker(QThread):
         merger = seam_merge.SeamMerger((full_h, full_w), stiles, spill, with_nuclei=keeps_nuclei,
                                        table_sink=sink, table_chunk=self.TABLE_CHUNK,
                                        max_area=size["max_area_px"], judge=judge,
-                                       require_nucleus=self.method in self.CELLS_NEED_NUCLEUS)
+                                       require_nucleus=self.method in self.CELLS_NEED_NUCLEUS,
+                                       skipped=self._tile_skip_set())
         merger.size_filter = size
         print(f"[Step2] size filter {out_prefix or 'whole image'}: objects above "
               f"{size['max_area_px']:,} px are dropped ({size['rule']}; {size['source']})")

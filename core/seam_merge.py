@@ -337,7 +337,7 @@ class SeamMerger:
                  tau=SEAM_MERGE["duplicate_overlap_threshold"],
                  min_free=SEAM_MERGE["minimum_writable_fraction"],
                  table_sink=None, table_chunk=1 << 20, max_area=None, judge=None,
-                 require_nucleus=False):
+                 require_nucleus=False, skipped=()):
         """`judge(tile, local) -> {label: verdict row}` (F4-3): the Regions
         verdict of every object of a tile's read window, computed once per
         tile; with it, `_write` drops the rejected winners before they take
@@ -346,7 +346,12 @@ class SeamMerger:
         `require_nucleus` (docs/v17_cellpose_cell_nucleus_plan.md): a cell
         none of whose nuclei can be written (all would cross pixels another
         cell already took) is not written either -- before it takes an id,
-        so every written cell holds a nucleus and ids stay 1..N."""
+        so every written cell holds a nucleus and ids stay 1..N.
+
+        `skipped` (W2b, user ruling 2026-11-14): the indices of the tiles the
+        user's plan leaves out. A cell whose centroid lies in a skipped
+        tile's own region is not written -- a skipped tile has no cells,
+        although a segmented neighbour's overlap band saw them."""
         import os
         self.shape = tuple(region_shape)
         self.tiles = list(tiles)
@@ -375,6 +380,9 @@ class SeamMerger:
                       "oversized_objects_dropped": 0, "nuclei_dropped_oversized": 0}
         if self.require_nucleus:                 # only then: the legacy record is unchanged
             self.stats["cells_dropped_no_writable_nucleus"] = 0
+        self.skipped_own = [t.own for t in self.tiles if t.index in set(skipped)]
+        if self.skipped_own:                     # only then: the legacy record is unchanged
+            self.stats["cells_dropped_in_skipped_tiles"] = 0
         if judge is not None:                    # only with Regions: the legacy record is unchanged
             self.stats.update({f"regions_dropped_{r}": 0 for r in VERDICT_REASONS if r},
                               nuclei_dropped_regions=0)
@@ -457,6 +465,10 @@ class SeamMerger:
                 if nuc_crop is not None:
                     self.stats["nuclei_dropped_oversized"] += int(np.unique(
                         nuc_crop[nuc_crop > 0]).size)
+                continue
+            if self.skipped_own and any(y0 <= c.cy < y1 and x0 <= c.cx < x1
+                                        for y0, y1, x0, x1 in self.skipped_own):
+                self.stats["cells_dropped_in_skipped_tiles"] += 1
                 continue
             if is_seam(c, self.tiles):
                 seam.append(c)

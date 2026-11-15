@@ -1609,8 +1609,27 @@ class MainWindow(QMainWindow):
         # Land on the overlay: a fresh dataset shows DAPI and nothing else, so
         # the first tick changes the picture rather than nothing.
         self.set_preview_mode(STEP1_PREVIEW_OVERLAY, force=True)
+        self._stack_policies = {}             # page -> its own size policy
+        self._stack.currentChanged.connect(self._stack_fits_current_page)
         self._stack.setCurrentIndex(0)
+        self._stack_fits_current_page()
         self._set_step_active(0)
+
+    def _stack_fits_current_page(self, *_):
+        """The window's minimum size is the page on screen's, not the tallest
+        page's (W2b): a stacked widget asks every page, so one tall page
+        pushed every step's bottom row (Run / Stop / Save) off a 1080p
+        screen at 150% (1280 x 720 logical). A page not shown ignores its
+        size hint; the one shown keeps its own policy."""
+        policies = self._stack_policies
+        cur = self._stack.currentWidget()
+        for i in range(self._stack.count()):
+            page = self._stack.widget(i)
+            if page not in policies:
+                policies[page] = page.sizePolicy()
+            page.setSizePolicy(policies[page] if page is cur else QtWidgets.QSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Ignored))
+        self._stack.updateGeometry()
 
     @_perf("switch.go_step0")
     def _go_to_step0(self):

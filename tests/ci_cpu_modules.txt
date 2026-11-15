@@ -288,3 +288,4 @@ test_viewer_pause.py
 test_viewer_prototype.py
 test_wsi_cancel.py
 test_cuda_dlls.py
+test_small_screen_fit.py

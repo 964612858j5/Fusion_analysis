@@ -503,7 +503,7 @@ def test_a_killed_engine_fails_the_run_instead_of_an_empty_tile(app, tmp_path, l
     try:
         _wait_for(lambda: _in_flight(worker))
         pgid = worker._engine.proc.pid
-        os.kill(worker._engine.proc.pid, signal.SIGKILL)       # the engine child, not Step2
+        os.kill(worker._engine.proc.pid, getattr(signal, "SIGKILL", signal.SIGTERM))  # the engine child, not Step2 (Windows: TerminateProcess)
         _wait_for(lambda: worker.isFinished())
     finally:
         worker.wait(60000)

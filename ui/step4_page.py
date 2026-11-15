@@ -8,7 +8,7 @@ from ..qt import QtWidgets
 from ..qt import is_deleted, is_checked
 from ..qt.QtCore import QProcess, QTimer, Qt, Signal
 from ..qt.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QWidget, QScrollArea, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QProgressBar, QMessageBox, QFileDialog, QComboBox,
 )
 
@@ -548,7 +548,17 @@ class Step4Page(QWidget):
         frame = StepFrame(metrics, free_tab_bar, wide=True)
         self._frame = frame
         frame.set_title(title_bar)
-        frame.wide_layout.addLayout(column)
+        # The column scrolls when the window is short (W2b: 1080p at 150% is
+        # 720 logical px); the bottom slot's Stop / Extract stay in view.
+        holder = QWidget()
+        holder.setLayout(column)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setStyleSheet('QScrollArea{border:none;background:transparent;}')
+        scroll.setWidget(holder)
+        self._column_scroll = scroll
+        frame.wide_layout.addWidget(scroll)
         frame.bottom_layout.addLayout(nav)
         outer.addWidget(frame)
 

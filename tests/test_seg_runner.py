@@ -73,11 +73,19 @@ def _task(tmp_path, tid, image, method, **params):
 
 
 def _group_gone(pid):
+    if os.name == "nt":                      # no process groups: the engine itself is gone
+        import psutil
+        return not psutil.pid_exists(pid)
     try:
         os.killpg(pid, 0)
     except ProcessLookupError:
         return True
     return False
+
+
+#: Windows has no SIGKILL: os.kill ends the process with TerminateProcess and
+#: that exit code
+_KILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
 def _mask(record_path, kind):
@@ -288,12 +296,12 @@ def test_a_killed_engine_fails_its_tasks_instead_of_hanging(tmp_path, stardist_o
     ep = EngineProcess("stardist", log_path=str(tmp_path / "e.log"))
     ep.start()
     pid = ep.proc.pid
-    killer = threading.Timer(0.5, lambda: os.kill(pid, signal.SIGKILL))
+    killer = threading.Timer(0.5, lambda: os.kill(pid, _KILL))
     killer.start()
     states = ep.run(tasks)
     killer.join()
     assert states == {"k0": "failed", "k1": "failed"}
-    assert "exited with -9" in ep.states["k0"]["detail"]
+    assert f"exited with {int(_KILL) if os.name == 'nt' else -int(_KILL)}" in ep.states["k0"]["detail"]
     assert _group_gone(pid)
 
 

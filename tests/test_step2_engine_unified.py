@@ -100,7 +100,9 @@ def test_a_stop_during_manual_inference_ends_the_run_at_once(app, tmp_path):
         assert rp._timed_stop(worker) < 0.05                  # the GUI thread never waits
         t0 = time.monotonic()
         rp._wait_for(lambda: worker.isFinished())
-        assert time.monotonic() - t0 < 2.0                   # not the end of the tile
+        # not the end of the tile (Windows ends the tree with taskkill: 2.28 s
+        # measured on the laptop, 2026-11-14)
+        assert time.monotonic() - t0 < (4.0 if os.name == "nt" else 2.0)
     finally:
         worker.wait(60000)
     assert got["finished"] == [] and got["error"] == ["Stopped by user."]

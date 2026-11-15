@@ -46,7 +46,16 @@ def test_cellpose_on_the_mac_gpu_names_the_device(monkeypatch):
 
 def test_cellpose_on_the_cpu(monkeypatch):
     _fake(monkeypatch, False, True, cpu_only=True)
-    assert engines.cellpose_model_args() == {"gpu": False}
+    assert engines.cellpose_model_args() == {"gpu": False, "use_bfloat16": False}
+
+
+def test_cellpose_on_the_cpu_loads_float32_weights(monkeypatch):
+    """Use GPU off: the model really is float32 (bfloat16 has no fast CPU
+    path; W2b laptop diagnosis)."""
+    models = pytest.importorskip("cellpose.models")
+    _fake(monkeypatch, False, False, cpu_only=True)
+    net = models.CellposeModel(**engines.cellpose_model_args()).net
+    assert {p.dtype for p in net.parameters()} == {torch.float32}
 
 
 @pytest.mark.parametrize("dev, label", [("cuda", "gpu"), ("mps", "mps"), ("cpu", "cpu")])

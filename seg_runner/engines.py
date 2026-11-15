@@ -215,14 +215,17 @@ def torch_device():
 def cellpose_model_args():
     """`models.CellposeModel` keyword arguments for `torch_device()`. On CUDA
     exactly the call made before (`gpu=True`, Cellpose's own device check);
-    on the Mac's GPU the device named explicitly (it overrides `gpu`)."""
+    on the Mac's GPU the device named explicitly (it overrides `gpu`). On the
+    CPU float32 weights: Cellpose's default bfloat16 has no fast CPU path
+    (a 384x384 image took >15 min on one core of an i7-12700H; 58 s vs
+    5 s float32 on the Mac's CPU)."""
     import torch
     dev = torch_device()
     if dev == "cuda":
         return {"gpu": True}
     if dev == "mps":
         return {"gpu": True, "device": torch.device("mps")}
-    return {"gpu": False}
+    return {"gpu": False, "use_bfloat16": False}
 
 
 def _hide_tensorflow_gpu():

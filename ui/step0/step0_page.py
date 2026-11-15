@@ -12007,6 +12007,77 @@ class Step0Page(QWidget):
         finally:
             self._save_as_requested = False
 
+    def _main_window_holding_this_page(self):
+        """The QMainWindow whose content holds this page, or None."""
+        host = self.window()
+        if not isinstance(host, QtWidgets.QMainWindow):
+            return None
+        central = host.centralWidget()
+        return host if central is not None and central.isAncestorOf(self) else None
+
+    def _ask_holding_the_main_window(self, box):
+        """Ask a Save question and wait for the answer; the button clicked,
+        or None (closed unanswered).
+
+        User ruling 2026-11-15 (Windows acceptance, choice B): the question
+        holds the main window but NOT the floating Tissue Navigator, which
+        stays movable, minimizable and closable. A modal box cannot do that:
+        the navigator is a child window of the main window, so any modality
+        that holds the main window holds it too. So the box is not modal;
+        the main window's content is disabled and its close refused until
+        the answer. The navigator's ROI and patch edits are switched off
+        meanwhile: Save writes the geometry on screen when it publishes, so
+        the region asked about must be the region saved. A page outside a
+        main window asks modally, as before."""
+        from ...qt import is_deleted
+        host = self._main_window_holding_this_page()
+        if host is None:
+            box.exec()
+            return box.clickedButton()
+        central = host.centralWidget()
+        held = [w for w in (central, host.menuBar()) if w is not None]
+        was = [w.isEnabled() for w in held]
+
+        class _RefuseClose(QtCore.QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QtCore.QEvent.Close:
+                    event.ignore()
+                    return True
+                return False
+
+        guard = _RefuseClose(host)
+        host.installEventFilter(guard)
+        policy = self.navigator_edit_policy()
+        self.set_navigator_edit_policy(roi_policy="read_only", patch_editable=False)
+        box.setParent(host, box.windowFlags())
+        box.setWindowModality(Qt.NonModal)
+        loop = QtCore.QEventLoop()
+        box.finished.connect(loop.quit)
+        box.destroyed.connect(loop.quit)
+        for w in held:
+            w.setEnabled(False)
+        try:
+            box.show()
+            box.raise_()
+            box.activateWindow()
+            loop.exec()
+        finally:
+            if not is_deleted(host):
+                host.removeEventFilter(guard)
+                guard.deleteLater()
+            for w, on in zip(held, was):
+                if not is_deleted(w):
+                    w.setEnabled(on)
+            if not is_deleted(self):
+                self.set_navigator_edit_policy(
+                    roi_policy=policy.get("roi_policy", "full"),
+                    patch_editable=policy.get("patch_editable", True))
+        if is_deleted(box):
+            return None
+        clicked = box.clickedButton()
+        box.deleteLater()
+        return clicked
+
     def _ask_region_changed(self):
         """The analysis region differs from the current workspace's (user
         ruling 3a): suggest Save as, let the user overwrite.
@@ -12026,8 +12097,7 @@ class Step0Page(QWidget):
         overwrite = box.addButton("Overwrite this workspace", QMessageBox.DestructiveRole)
         box.addButton(QMessageBox.Cancel)
         box.setDefaultButton(save_as)
-        box.exec()
-        clicked = box.clickedButton()
+        clicked = self._ask_holding_the_main_window(box)
         if clicked is save_as:
             return "save_as"
         if clicked is overwrite:
@@ -12440,14 +12510,20 @@ class Step0Page(QWidget):
         shown = ", ".join(raw[:12])
         if len(raw) > 12:
             shown += f", … (+{len(raw) - 12} more)"
-        answer = QMessageBox.question(
-            self, "Channels saved as raw",
-            f"{len(raw)} channel{'s' if len(raw) != 1 else ''} will be saved "
-            f"WITHOUT background correction:\n\n{shown}\n\n"
-            "A channel is saved raw when it is assigned Original or has no "
-            "current computed result. Continue?",
-            QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Ok)
-        return answer == QMessageBox.Ok
+        text = (f"{len(raw)} channel{'s' if len(raw) != 1 else ''} will be saved "
+                f"WITHOUT background correction:\n\n{shown}\n\n"
+                "A channel is saved raw when it is assigned Original or has no "
+                "current computed result. Continue?")
+        if self._main_window_holding_this_page() is None:   # a page on its own
+            answer = QMessageBox.question(
+                self, "Channels saved as raw", text,
+                QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Ok)
+            return answer == QMessageBox.Ok
+        box = QMessageBox(QMessageBox.Question, "Channels saved as raw", text,
+                          QMessageBox.Ok | QMessageBox.Cancel, self)
+        box.setDefaultButton(QMessageBox.Ok)
+        clicked = self._ask_holding_the_main_window(box)
+        return clicked is not None and box.standardButton(clicked) == QMessageBox.Ok
 
     def _save_and_continue(self):
         if self.loader is None:

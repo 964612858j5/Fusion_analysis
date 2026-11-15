@@ -289,3 +289,4 @@ test_viewer_prototype.py
 test_wsi_cancel.py
 test_cuda_dlls.py
 test_small_screen_fit.py
+test_step0_save_question_frees_navigator.py

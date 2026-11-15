@@ -5754,6 +5754,17 @@ class MainWindow(QMainWindow):
         upstream = next((r for r in chain if run_store.kind_of(r) == "correct"), "") \
             or self._rm_current_correct_run()
         runs = list(reversed(run_store.list_runs(roi, "fuse", upstream))) if upstream else []
+        # User ruling 2026-11-15: a fuse run made for another region than the
+        # one Step0 now has (an Overwrite Save that moved or removed the ROI
+        # rewrites the correct run in place) is not an input any more.
+        current = self._rm_region_key(
+            (run_store.read_params(upstream).get("geometry") or {}).get("rois")) if upstream else None
+        stale = [r for r in runs if current is not None and self._rm_region_key(
+            (run_store.read_params(r).get("geometry") or {}).get("regions")) not in (None, current)]
+        runs = [r for r in runs if r not in stale]
+        if stale:
+            print(f"[Step2] {len(stale)} Step1 result(s) left out: made for another region "
+                  f"than Step0's current one")
         items = [self._rm_fuse_item(r) for r in runs]
         items = [i for i in items if i is not None]
         chosen = next((r for r in chain if run_store.kind_of(r) == "fuse"), "")
@@ -5806,6 +5817,25 @@ class MainWindow(QMainWindow):
             step2._zarr_edit.setText(item["zarr"])
             step2._load_zarr_info()
         step2.set_region_inputs(item["regions"])
+
+    @staticmethod
+    def _rm_region_key(regions):
+        """The analysis region a run records, comparable across run kinds:
+        each region's level-0 bbox and polygon (rounded to 0.1 px), names
+        left out (a rename moves no pixel). None when nothing is recorded --
+        a run older than the record, which is then not judged."""
+        if not isinstance(regions, list) or not regions:
+            return None
+        key = []
+        try:
+            for r in regions:
+                bbox = tuple(int(v) for v in (r.get("bbox_fullres") or []))
+                poly = r.get("polygon_fullres")
+                poly = tuple((round(float(x), 1), round(float(y), 1)) for x, y in poly) if poly else None
+                key.append((bbox, poly))
+        except (AttributeError, TypeError, ValueError):
+            return None                          # an unreadable record is not judged
+        return tuple(sorted(key, key=repr))
 
     @staticmethod
     def _rm_fuse_item(run_dir):

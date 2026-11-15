@@ -3192,8 +3192,10 @@ class Block01DisplayServices(QObject):
             if worker is None:
                 continue
             try:
+                # `done` only: neither worker has `failed` connected, and
+                # disconnecting it printed PySide6's "Failed to disconnect"
+                # warning at every close (backlog 23)
                 worker.done.disconnect()
-                worker.failed.disconnect()
             except Exception:                               # noqa: BLE001
                 pass
             try:

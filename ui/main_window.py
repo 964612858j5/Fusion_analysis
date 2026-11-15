@@ -7305,6 +7305,7 @@ class MainWindow(QMainWindow):
         view.show_images(False)
         view.keep_overlay_on_top()
         view.vb.sigRangeChanged.connect(self._on_montage_camera)
+        self._montage_camera_connected = view
         return True
 
     def _stop_montage_gpu(self):
@@ -7313,11 +7314,15 @@ class MainWindow(QMainWindow):
         self._montage_backend = None
         self._montage_plan = ([], [])
         view = self.__dict__.get("_preseg_montage")
-        if view is not None:
+        # only a connection that was made (backlog 23: a montage that never
+        # had the GPU layer printed PySide6's "Failed to disconnect" warning)
+        connected, self._montage_camera_connected = self.__dict__.get("_montage_camera_connected"), None
+        if connected is not None:
             try:
-                view.vb.sigRangeChanged.disconnect(self._on_montage_camera)
+                connected.vb.sigRangeChanged.disconnect(self._on_montage_camera)
             except (TypeError, RuntimeError):
                 pass
+        if view is not None:
             view.show_images(True)
         if layer is not None:
             try:

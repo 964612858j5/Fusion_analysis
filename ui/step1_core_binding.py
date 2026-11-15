@@ -386,10 +386,19 @@ class Step1CoreBinding(QtCore.QObject):
 
     # ── the controller's camera ───────────────────────────────────────
     def _connect_controller(self) -> None:
+        if self.__dict__.get("_controller_connected"):
+            return
         self.controller.interaction_event.connect(self._interaction_event)
         self.controller.gesture_quiet.connect(self._gesture_quiet)
+        self._controller_connected = True
 
     def _disconnect_controller(self) -> None:
+        # only what is connected: a pause then a dispose (or a fallback)
+        # disconnected twice, and PySide6 prints a "Failed to disconnect"
+        # warning for each (backlog 23, the laptop's console at close)
+        if not self.__dict__.get("_controller_connected"):
+            return
+        self._controller_connected = False
         for signal, slot in ((self.controller.interaction_event, self._interaction_event),
                              (self.controller.gesture_quiet, self._gesture_quiet)):
             try:

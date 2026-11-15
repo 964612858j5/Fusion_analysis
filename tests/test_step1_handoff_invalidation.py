@@ -343,3 +343,34 @@ def test_an_invalidation_returns_from_step1_5_too(app, tmp_path):
         assert w._step1_context_ready is False
     finally:
         w.close()
+
+
+def test_a_new_roi_keeps_regions_viewer_and_a_new_dataset_closes_it(app, tmp_path):
+    """W2g (user report 2026-11-15): an ROI edit is the SAME slide -- Regions'
+    whole-slide viewer stays (paused) and the next Save's handoff read
+    rebuilds its source; closed here, every later entry built it anew on
+    screen (a visible flash). Another dataset still closes it."""
+    w, step0_dir = _window(app, tmp_path)
+    real = w.__dict__.get("_regions_view")
+    closed = []
+
+    class _Host:
+        def close(self):
+            closed.append(True)
+            return True
+
+        def forget(self):
+            return None
+
+    try:
+        w._regions_view = _Host()
+        ov = w._step0._tissue_navigator_popup.overview
+        _draw_roi(ov)
+        _settle(w)
+        assert w._step1_context_ready is False                 # the handoff was invalidated
+        assert closed == []                                      # ...and the viewer kept
+        w._discard_step1_dataset_state()                         # a dataset switch's call
+        assert closed == [True]
+    finally:
+        w._regions_view = real
+        w.close()

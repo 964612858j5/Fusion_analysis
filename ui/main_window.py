@@ -3282,10 +3282,19 @@ class MainWindow(QMainWindow):
         shot = snapshot_from(dataset, camera, f"step{step}:{reason}")
         if shot is None:
             return False
+        # W2g: Step0's load fit, offered again after the layout settled, is
+        # taken only while that fit is still the last thing any step wrote
+        # -- after any user move a resize writes nothing (A7).
+        relayout = step == 0 and reason == "step0-load-relayout"
+        if relayout and not self.__dict__.get("_camera_load_fit_live"):
+            return False
         if step == 0:
             self._arm_step1_ahead("step0-camera")     # Step1 follows, once it rests
         owner = self._camera_owner
-        return owner.jump(step, shot) if jump else owner.user_navigated(step, shot)
+        written = owner.jump(step, shot) if jump else owner.user_navigated(step, shot)
+        if written:
+            self._camera_load_fit_live = step == 0 and reason in ("step0-load", "step0-load-relayout")
+        return written
 
     def _apply_owner_camera_to(self, step):
         """Put the user's camera on the step being ENTERED. Not read back:
@@ -3296,6 +3305,7 @@ class MainWindow(QMainWindow):
         if dataset and owner.dataset and owner.dataset != dataset:
             # ANOTHER SLIDE: the old coordinates are no place on it (U10).
             owner.reset_for_dataset(dataset)
+            self._camera_load_fit_live = False
         shot = owner.current(dataset)
         if shot is None:
             return False
@@ -3859,6 +3869,7 @@ class MainWindow(QMainWindow):
         owner = self.__dict__.get("_camera_owner")
         if owner is not None and new_slide and owner.dataset != new_slide:
             owner.reset_for_dataset(new_slide)
+            self._camera_load_fit_live = False
         if gen and gen <= self._dataset_gen_seen:
             return
         self._dataset_gen_seen = max(gen, self._dataset_gen_seen)
@@ -3944,7 +3955,10 @@ class MainWindow(QMainWindow):
         self.step0_done = False
         self._step1_context_ready = False
         self.step1_done = False
-        self._discard_step1_dataset_state(status_text=message)
+        # W2g (user report 2026-11-15): the SAME slide -- Regions' viewer
+        # stays (paused); the Save's handoff read rebuilds its source. Closed
+        # here, every later entry built it anew on screen: the flash.
+        self._discard_step1_dataset_state(status_text=message, close_regions_viewer=False)
         # Step2, Step3, Step4 and Step1.5 all consume this handoff too, so an
         # invalidation returns to Step0 from any of them, not only from Step1.
         self._return_to_step0(f"handoff invalidated ({reason})")
@@ -3954,7 +3968,8 @@ class MainWindow(QMainWindow):
     def _discard_step1_dataset_state(
             self,
             status_text="Dataset changed — Step1 is locked until the new Step0 "
-                        "handoff is loaded."):
+                        "handoff is loaded.",
+            close_regions_viewer=True):
         """Drop every Step1 fact that belonged to the previous dataset.
 
         Deliberately field-by-field rather than a blanket reset: the listed
@@ -4038,7 +4053,7 @@ class MainWindow(QMainWindow):
         # Step3's viewer draws the old dataset: closed, reopened on entry;
         # so does Regions' (its document is the old slide's too).
         self._close_step3_viewer()
-        if self.__dict__.get("_regions_view") is not None:
+        if close_regions_viewer and self.__dict__.get("_regions_view") is not None:
             self._regions_view.close()
         if self.__dict__.get("_step2_viewer") is not None:
             self._step2_viewer.reset()             # the old dataset's picture goes; reopened on entry

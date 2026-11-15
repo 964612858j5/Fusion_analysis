@@ -2488,6 +2488,19 @@ class Step0Page(QWidget):
         # (False only when the window refused it -- e.g. Step0 not on screen)
         return sink(camera, reason) is not False
 
+    RELAYOUT_REASON = "step0-load-relayout"
+
+    def _republish_load_seed(self):
+        """W2g (user report 2026-11-15): the first fit after a Load is
+        published while the window is still being laid out (0.231 screen
+        px per pixel on the laptop), and the ViewBox's resize then re-fits
+        the slide to the final size (0.256) -- which nobody wrote. Entering
+        Step 0.5 put the user at the stale 0.231 and Step0 followed: a
+        zoom-out on the first visit of a window only. A resize offers the
+        fit on screen; the window takes it only while the load's fit is
+        still the last thing ANY step wrote (`MainWindow._camera_write`)."""
+        self.publish_camera(self.RELAYOUT_REASON, jump=True)
+
     def _compare_camera(self):
         """The three panels' shared camera as `(cx, cy, scale)`, or None.
 
@@ -6147,6 +6160,8 @@ class Step0Page(QWidget):
             # user -- reaches the camera owner.
             stack.view.view_box.sigRangeChangedManually.connect(
                 lambda *_: self.publish_camera("step0-full"))
+            stack.view.view_box.sigResized.connect(
+                lambda *_: self._republish_load_seed())
         except (AttributeError, RuntimeError, TypeError):
             return
         stack._nav_rect_connected = True

@@ -42,8 +42,10 @@ jobs:
           NP=$(grep -i '^numpy==' envs/ci/requirements-cpu.txt)
           SP=$(grep -i '^scipy==' envs/ci/requirements-cpu.txt)
           SK=$(grep -i '^scikit-image==' envs/ci/requirements-cpu.txt)
+          CV=$(grep -i '^opencv-python-headless==' envs/ci/requirements-cpu.txt)
           "$PY" -m pip install --no-deps dist/*.whl
-          "$PY" -m pip install "$NP" "$SP" "$SK" "scikit-learn==1.5.2" pandas
+          # the imports deepcell_toolbox makes, at the environment's versions
+          "$PY" -m pip install "$NP" "$SP" "$SK" "$CV" "scikit-learn==1.5.2" pandas tqdm
           "$PY" - <<'PY'
           import numpy as np
           from deepcell_toolbox.compute_overlap import compute_overlap      # the compiled part

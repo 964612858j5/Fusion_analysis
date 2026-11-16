@@ -64,7 +64,7 @@ jobs:
   # 2026-11-16): the same wheel for Apple silicon, macOS 13 or newer,
   # committed in envs/macos/wheels/ with its digest in envs/macos/wheels.lock
   macos:
-    runs-on: macos-14
+    runs-on: macos-latest
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:

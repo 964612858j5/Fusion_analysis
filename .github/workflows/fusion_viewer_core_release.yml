@@ -95,7 +95,7 @@ jobs:
     # the Mac installer (docs/v17_mac_install_plan.md, user decision M3,
     # 2026-11-16): Apple silicon, macOS 13 or newer
     needs: version
-    runs-on: macos-14
+    runs-on: macos-latest
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:

@@ -1,0 +1,6 @@
+# Mesmer, installed with `pip install --no-deps` as on Windows and the
+# hand-made Mac environment: their declared dependencies pin TensorFlow GPU
+# versions this environment does not use. DeepCell-Toolbox is installed
+# before this file, from envs/macos/wheels (it has a compiled part).
+DeepCell==0.12.10
+DeepCell-Toolbox==0.12.1

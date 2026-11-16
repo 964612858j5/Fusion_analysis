@@ -1,0 +1,5 @@
+# DeepCell-Toolbox wheels that ship with this checkout for the Mac (docs/v17_mac_install_plan.md, user decision M3):
+# built by .github/workflows/deepcell_toolbox_wheel.yml (job macos, run 43804571743), tested installed
+# in a clean venv; the digest checked against the downloaded artifact.
+# version  platform  file  sha256
+0.12.1 macos_arm64 DeepCell_Toolbox-0.12.1-cp310-cp310-macosx_13_0_universal2.whl 97ce29698fb47fa14ad3d5e96f08df3db1d55cd91cb4171566ff49340ce40bf1

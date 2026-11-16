@@ -1,0 +1,23 @@
+# Mac environment (docs/v17_mac_install_plan.md; scripts/install_block01_mac.sh):
+# the engine set of the hand-made Mac environment (envs/block01_mac,
+# 2026-11-10), which envs/windows/requirements.txt copied -- here without
+# CuPy (no CUDA on a Mac; Step0's GPU correction uses PyTorch MPS).
+# Python 3.10, Apple silicon. Installed in order:
+#   1. pip install -r envs/ci/requirements-cpu.txt
+#   2. torch / torchvision from PyPI (their macOS arm64 wheels use MPS)
+#   3. pip install -r envs/macos/requirements.txt          (this file)
+#   4. DeepCell-Toolbox from envs/macos/wheels (envs/macos/wheels.lock)
+#   5. pip install --no-deps -r envs/macos/requirements-nodeps.txt
+cellpose==4.1.1
+segment-anything==1.0
+fastremap==1.21.0
+stardist==0.9.2
+csbdeep==0.8.2
+# StarDist's model shell only (the network runs in PyTorch)
+tensorflow==2.15.1
+keras==2.15.0
+ml-dtypes==0.3.2
+protobuf==4.25.9
+onnx==1.16.2
+# DeepCell imports it
+scikit-learn==1.5.2

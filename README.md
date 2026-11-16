@@ -89,10 +89,18 @@ powershell -ExecutionPolicy Bypass -File scripts\install_block01.ps1   # once; a
 scripts\block01.cmd                                                   # start (or the desktop shortcut)
 ```
 
-Mesmer's model: DeepCell's public archive no longer answers (2026-11), so both
+macOS 13 or newer on Apple silicon (the engines use the Mac's GPU), in Terminal
+from the checkout, no admin rights needed:
+
+```bash
+bash scripts/install_block01_mac.sh   # once; adds FusionFlux to ~/Applications
+scripts/block01                       # start (or FusionFlux in ~/Applications / Launchpad)
+```
+
+Mesmer's model: DeepCell's public archive no longer answers (2026-11), so the
 installers also take a mirror or a copy you have (`-MesmerUrl URL` /
 `-MesmerZip FILE` / `-Models DIR` on Windows; `--mesmer-url`, `--mesmer-zip`,
-`--models` on Linux). Without one the install finishes without Mesmer; add it
+`--models` on Linux and the Mac). Without one the install finishes without Mesmer; add it
 later with `scripts\install_block01.ps1 -MesmerOnly -MesmerZip FILE` (Linux:
 `bash scripts/install_block01.sh --mesmer-only --mesmer-zip FILE`).
 Installer details and the manual steps: [`envs/fusion_mesmer/README.md`](envs/fusion_mesmer/README.md).

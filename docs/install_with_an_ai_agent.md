@@ -80,3 +80,17 @@ checks). It ends by putting a FusionFlux shortcut on the desktop; the app
 starts with it or with `scripts\block01.cmd`, whose output also goes to
 `.block01\logs`. Step 4's SpatialData export has no Windows environment yet:
 ticking it asks for a Python with spatialdata.
+
+## Mac
+
+The same rules. The installer is `bash scripts/install_block01_mac.sh`, run
+in Terminal from the checkout; no admin rights. Apple silicon and macOS 13 or newer only (step 1
+says so on another Mac). Its options: `--check-only`, `--root DIR` (no space
+in it), `--models DIR`, `--mesmer-url URL`, `--mesmer-zip FILE`,
+`--mesmer-only`, `--accept-model-licences`, `--skip-models`. It needs no
+compiler: the viewer core and DeepCell-Toolbox come as prebuilt,
+digest-checked wheels. The self-test runs every engine on the Mac's GPU
+(MPS) and again on the CPU. It ends by putting FusionFlux into
+`~/Applications`; the app starts with it or with `scripts/block01`.
+Step 4's SpatialData export has no Mac environment from the installer yet:
+ticking it asks for a Python with spatialdata.

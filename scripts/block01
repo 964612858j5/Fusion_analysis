@@ -16,6 +16,8 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 STATE_DIR="$REPO/.block01"
 INSTALL_HINT="bash $REPO/scripts/install_block01.sh"
+# the Mac has its own installer (docs/v17_mac_install_plan.md); this launcher serves both
+[ "$(uname -s)" != Darwin ] || INSTALL_HINT="bash $REPO/scripts/install_block01_mac.sh"
 
 refuse() {
     printf '[block01] cannot start: %s\n[block01] what to do: %s\n' "$1" "$2" >&2

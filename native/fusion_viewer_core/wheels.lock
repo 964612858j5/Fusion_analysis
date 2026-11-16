@@ -3,3 +3,4 @@
 # each digest checked against the downloaded file before it was written here.
 0.2.1 linux fusion_viewer_core-0.2.1-cp310-abi3-manylinux_2_28_x86_64.whl 556cc9803ba2784ae76c5b1f5387d1c03bdf5b498ae55ae8ec218ef02346c4d8
 0.2.1 windows fusion_viewer_core-0.2.1-cp310-abi3-win_amd64.whl eeffef65d21d6bf68b8a85d59ddbbda58d322589603a629bf320d302c69e6263
+0.2.1 macos fusion_viewer_core-0.2.1-cp310-abi3-macosx_13_0_arm64.whl 9c3d93afe8d96a3dfc493800e38546077860d1efb7f23e58b2087b9fe75ee913

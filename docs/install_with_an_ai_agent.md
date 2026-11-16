@@ -84,7 +84,7 @@ ticking it asks for a Python with spatialdata.
 ## Mac
 
 The same rules. The installer is `bash scripts/install_block01_mac.sh`, run
-in Terminal from the checkout; no admin rights. Apple silicon and macOS 13 or newer only (step 1
+in Terminal from the checkout; no admin rights. Apple silicon and macOS 14 or newer only (step 1
 says so on another Mac). Its options: `--check-only`, `--root DIR` (no space
 in it), `--models DIR`, `--mesmer-url URL`, `--mesmer-zip FILE`,
 `--mesmer-only`, `--accept-model-licences`, `--skip-models`. It needs no

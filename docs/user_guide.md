@@ -54,39 +54,67 @@ Step 0          Step 1          Step 2          Step 3        Step 4
 
 ## 3. Installation and launch
 
-### 1. Install (only needed once)
+### 1. Get FusionFlux
 
-Linux x86_64 with an NVIDIA card. In a terminal, from the Block01 folder:
+Either download it: on the project's GitHub page open **Releases**, take the
+newest **FusionFlux** release (e.g. `FusionFlux 1.0.0`) and download
+**Source code (zip)**, then unzip it where it can stay (Finder or Windows
+Explorer). Or, with git: `git clone https://github.com/964612858j5/Fusion_analysis.git`.
 
-```bash
-bash scripts/install_block01.sh --check-only   # optional: only check this computer
-bash scripts/install_block01.sh
-```
+> The folder you unzipped (or cloned) **is** the program: the installer
+> records its install inside it (`.block01/`), so do not move or delete it
+> afterwards. (The `core-v…` releases are parts the installer downloads by
+> itself — not something to download by hand.)
 
-It checks the computer, installs the Python environment and the prebuilt
-viewer core, a second small environment for Step 4's SpatialData export
-(`--no-spatialdata` skips it), shows each segmentation model's licence and downloads it after
-you type `yes` (Mesmer comes from DeepCell's public model storage; no account or token is needed),
-tests the three engines and prints the start command. Everything goes under
-`~/.local/share/block01` (`--root DIR` to choose another place); nothing
-already on the computer is changed. If it stops, it says which step failed
-and what to do; running it again continues. Details:
-`envs/fusion_mesmer/README.md`. A coding agent (Claude Code, Codex) can do it
-for you with `docs/install_with_an_ai_agent.md`.
+### 2. Install (only needed once)
 
-### 2. Launch the software
+One command, run from that folder; no administrator rights are needed.
 
-```bash
-scripts/block01
-```
+| Computer | Command |
+|---|---|
+| **Windows** 10 22H2 / 11, 64-bit (an NVIDIA card is used when present) | in PowerShell: `powershell -ExecutionPolicy Bypass -File scripts\install_block01.ps1` |
+| **Mac** with Apple silicon, macOS 14 or newer | in Terminal: `bash scripts/install_block01_mac.sh` |
+| **Linux** x86_64 with an NVIDIA card | in a terminal: `bash scripts/install_block01.sh` |
+
+What you see: one line per step, which turns into `✓ <step>  <time>` when
+it is done (its `•` blinks while it works), and progress bars for the
+downloads. Near the start one card lists the segmentation models and their
+licences — Cellpose-SAM, StarDist and **Mesmer, which is for non-commercial
+academic use only** — and asks once: answer `y` to install them. Then it
+installs the Python environment (10-30 minutes the first time), the
+viewer core and the models, and ends with a self-test of the three engines
+(a small table: on the GPU and on the CPU) and `Done in …`.
+
+* Mesmer's model: DeepCell's public download is no longer available
+  (2026-11); the installer then takes the lab's mirror by itself. A copy you
+  have can be given with `--mesmer-zip FILE` (Windows `-MesmerZip FILE`).
+  If no source works the install still finishes, without Mesmer, and says
+  how to add it later.
+* Everything goes under one folder (Windows `%LOCALAPPDATA%\block01`, Mac and
+  Linux `~/.local/share/block01`; `--root DIR` / `-Root DIR` chooses
+  another); nothing already on the computer is changed. All the tools'
+  own messages go to a log, `.block01/logs/install-<time>.log`.
+* If it stops, it says which step failed, what to do and the end of the
+  log; running it again continues where it stopped (finished steps are
+  kept). A network that drops is retried by itself.
+* `--check-only` (`-CheckOnly`) only checks the computer.
+
+Details: `envs/fusion_mesmer/README.md`. A coding agent (Claude Code, Codex)
+can do it for you with `docs/install_with_an_ai_agent.md`.
+
+### 3. Launch the software
+
+* **Windows**: double-click **FusionFlux** on the desktop (or run `scripts\block01.cmd`).
+* **Mac**: open **FusionFlux** in `~/Applications` or Launchpad (or run `scripts/block01`).
+* **Linux**: `scripts/block01`.
 
 On success, a **dark-themed window** pops up titled `CODEX Pipeline | Fusion + Segmentation`, defaulting to Step 0.
 
 <!-- image placeholder: images/02_main_window_on_launch.png — a screenshot of the whole window right after opening, sitting on Step 0 -->
 
-### 3. Set up your config first (optional but recommended)
+### 4. Set up your config first (optional but recommended)
 
-The file `block01/config.py` holds a few commonly used default values. On first use, fill in your own data paths:
+The file `config.py` in the FusionFlux folder holds a few commonly used default values. On first use, fill in your own data paths:
 
 ```python
 OME_TIFF_FILE = ".../xxx.ome.tif"   # your raw multi-channel big image
@@ -187,11 +215,11 @@ Take the parameters tuned in Step 1 and **actually circle every single cell in t
 
 1. Confirm the inputs in **Input Data** (fusion image / parameter file, usually carried over automatically). You can click **Load zarr info & overview** to take a look.
 2. **Tile Grid**: set the tile size (how big each cell of the grid is). Smaller tiles use less GPU memory, but the seams need more care.
-3. **Segmentation Parameters**: confirm the parameters; you can also **Apply Selected Params** to reuse a previously chosen set. **GPU: Use GPU if available** runs Cellpose and Mesmer on an NVIDIA GPU, or on a Mac with Apple silicon (macOS 14 or newer) on the Mac's GPU; when neither is there, or the box is unticked, they run on the CPU (much slower). Results on GPU and CPU agree closely but not pixel for pixel.
+3. **Segmentation Parameters**: confirm the parameters; you can also **Apply Selected Params** to reuse a previously chosen set. **GPU: Use GPU if available** runs the segmentation engines (Cellpose, StarDist, Mesmer) on an NVIDIA GPU, or on a Mac with Apple silicon (macOS 14 or newer) on the Mac's GPU; when neither is there, or the box is unticked, they run on the CPU (much slower). Results on GPU and CPU agree closely but not pixel for pixel.
 4. Choose the **Output** location, then click **▶ Run Segmentation & Merge** to start. The progress bar shows which tile is being processed; in **Tile Status** the running tile is yellow and finished tiles are green. Changing **Rows / Cols** during a run does not change the run: the new grid is shown with no state (it would point at other parts of the image), and switching back to the run's grid (named under the tile line, `Running grid: …`) shows all its states again.
 5. To stop midway, click **⏹ Stop**; if it gets interrupted, **Recovery Mode** can resume merging from the saved intermediate files instead of starting over.
 
-**Skip tiles without tissue** (optional, off by default): tick it under **Tile Grid** to leave out the tiles that hold no tissue — they are not segmented, which saves time and memory on slides with a lot of empty glass. Tissue is found on a coarse (about 1/16) view of the slide's nucleus channel, and a tile is proposed only when its whole window, including the overlap, holds no tissue at all. Ticking the box skips nothing by itself: every tile starts segmented, the line under the buttons says how many tiles have no tissue, and **Skip all empty** skips them. A skipped tile is filled with translucent purple and has a thick purple border, in **Tile Status** and in the zoomable DAPI picture; a tile with tissue that you chose to skip is also hatched. During the run the running (yellow) and finished (green) borders are drawn over the purple. Click a tile to change it at once: a skipped tile goes back to being segmented; to skip a tile that does hold tissue you are asked first (its tissue share is shown) — a skipped tile has **no cells**: a cell whose centre lies in a skipped tile is left out, even where a segmented neighbour's overlap band saw it, and a cell centred in a segmented tile is kept whole. To change several tiles, hold **Shift**: while it is held nothing is applied and nothing is asked — **Shift**+click picks a tile (click it again to drop it) and **Shift**+drag picks a box of tiles (all to be skipped if the tile where you started was segmented, all restored if it was skipped). Picked tiles get a white frame and already show the result. When you let go of **Shift**, everything is applied at once, and you are asked one question listing the picked tiles that hold tissue (answer No and those stay segmented). **Skip all empty** applies the automatic proposal (your changes are cleared) and **Skip none** segments every tile. Changing Rows / Cols / Overlap makes a new proposal and starts again from nothing skipped. The run records which tiles were left out, and which of them you chose although they held tissue. The **Tile Status** picture is now sharper (up to 4096 px on its long side).
+**Skip tiles without tissue** (optional, off by default): tick it under **Tile Grid** to leave out the tiles that hold no tissue — they are not segmented, which saves time and memory on slides with a lot of empty glass. Tissue is found on a coarse (about 1/16) view of the slide's nucleus channel, and a tile is proposed only when its whole window, including the overlap, holds no tissue at all. Ticking the box first finds the tissue on the slide (`Finding tissue on the slide…`, a moment; the window stays usable), then the buttons appear. It skips nothing by itself: every tile starts segmented, the line under the buttons says how many tiles have no tissue, and **Skip all empty** skips them. A skipped tile is filled with translucent purple and has a thick purple border, in **Tile Status** and in the zoomable DAPI picture; a tile with tissue that you chose to skip is also hatched. During the run the running (yellow) and finished (green) borders are drawn over the purple. Click a tile to change it at once: a skipped tile goes back to being segmented; to skip a tile that does hold tissue you are asked first (its tissue share is shown) — a skipped tile has **no cells**: a cell whose centre lies in a skipped tile is left out, even where a segmented neighbour's overlap band saw it, and a cell centred in a segmented tile is kept whole. To change several tiles, hold **Shift**: while it is held nothing is applied and nothing is asked — **Shift**+click picks a tile (click it again to drop it) and **Shift**+drag picks a box of tiles (all to be skipped if the tile where you started was segmented, all restored if it was skipped). Picked tiles get a white frame and already show the result. When you let go of **Shift**, everything is applied at once, and you are asked one question listing the picked tiles that hold tissue (answer No and those stay segmented). **Skip all empty** applies the automatic proposal (your changes are cleared) and **Skip none** segments every tile. Changing Rows / Cols / Overlap makes a new proposal and starts again from nothing skipped. The run records which tiles were left out, and which of them you chose although they held tissue. The **Tile Status** picture is now sharper (up to 4096 px on its long side).
 
 **Engine changed since Step 1** (2026-09-29): when the segmentation behaviour or the model of the method has changed since the Step 1 result was made, a **Segmentation engine** warning lists what changed before the run — the Step 1 preview was made the old way, so the whole-image result may differ from it. **Run anyway** runs it and records the difference with the result; **Cancel** does not run. Nothing is asked when nothing changed, or for a Step 1 result from before this update (it is only recorded). Installing an unrelated package no longer counts as a change.
 
@@ -252,7 +280,7 @@ Time to **produce the table.** Step 4 goes through every cell of one Step 2 resu
    - **Statistics**: Mean, Sum, Std dev, Min, Max (all ticked by default). Under them, **Distribution (slow)**: Median, P90, P95, Gini — unticked; ticking one shows a list of markers, tick the few you need (e.g. FOXP3, Ki67). They need every pixel value of each cell, so they take a further pass per marker; `▶ Extract Features` stays disabled until at least one marker is ticked.
    - **Expression regions** (for the expression values): Whole cell (always), **Nucleus**, **Cytoplasm**. Nucleus = the pixels of the cell's own nuclei; cytoplasm = the rest of the cell. They are available (and ticked) when the result kept nuclei beside its cells (the expansion and nuclear-guided methods). Useful e.g. for transcription factors (FOXP3, Ki67 → nucleus) next to membrane markers (CD3 → whole cell / cytoplasm).
    - **Features**: Expression (always), Morphology (ticked), Nuclear summary (per cell: number of nuclei, their area in the cell, mean / largest nucleus, nuclear fraction, cytoplasm area).
-   - **Outputs**: h5ad (always), **CSV** (only when you tick it), **SpatialData** (only when you tick it). SpatialData is written by a Python that has the `spatialdata` package: the installer sets one up, so it just works. Only a checkout not installed with `scripts/install_block01.sh` (or installed with `--no-spatialdata`) asks, the first time you tick it, for such a Python (e.g. Step5's environment, `…/envs/fusion_test2/bin/python`) and remembers it.
+   - **Outputs**: h5ad (always), **CSV** (only when you tick it), **SpatialData** (only when you tick it). SpatialData is written by a Python that has the `spatialdata` package: the Linux installer sets one up, so there it just works. On Windows and the Mac (and on Linux with `--no-spatialdata`) ticking it the first time asks for such a Python (e.g. Step5's environment, `…/envs/fusion_test2/bin/python`) and remembers it.
    - An orange **Risk** line appears for a result made before Step 2's tile-seam fix (2026-09-27) when you measure nuclei / cytoplasm: a few nuclei on tile seams may lie partly outside their cell, so those cells' nucleus / cytoplasm values carry that error; the numbers are still produced and the provenance file counts the affected pixels. Re-run Step 2 to remove it.
 3. **Output dir** defaults to `<workspace>/step4/quantification_runs/<run>/<region>/`; you can change it. The line under it names the files and what `X` holds (e.g. `X = cell mean`). Click `▶ Extract Features`.
    - While it computes, the page is frozen: only **⏹ Stop** works. Closing the **Batch** window during a run stops the current sample first, then closes. A run you choose in Step 3 meanwhile is opened when the extraction ends (a line says so).
@@ -280,7 +308,7 @@ Time to **produce the table.** Step 4 goes through every cell of one Step 2 resu
 ## 5. Quickest path to get started (read this if you're in a hurry)
 
 ```
-1. scripts/block01                     # launch
+1. open FusionFlux (desktop / Applications) # launch
 2. Step 0: pick image → draw ROI → set DAPI as nucleus → remove background → pick a few preview patches → Process
 3. Step 1: adjust channel weights for clear outlines → choose method → try params with Phase1+Phase2 → save
 4. Step 2: confirm params → set tile size → Run, let it finish
@@ -296,7 +324,9 @@ Time to **produce the table.** Step 4 goes through every cell of one Step 2 resu
 
 | Problem | Likely cause / fix |
 |---------|--------------------|
-| `scripts/block01` says *cannot start* | It names the reason and the fix; usually: run `bash scripts/install_block01.sh` (again) |
+| FusionFlux says *cannot start* | It names the reason and the fix; usually: run your computer's installer again (`scripts\install_block01.ps1`, `scripts/install_block01_mac.sh` or `scripts/install_block01.sh`) |
+| The install stopped | Its last lines say which step and what to do; the full log is `.block01/logs/install-<time>.log`. Run the installer again: it continues where it stopped |
+| FusionFlux does not start after the folder was moved | The install is recorded in the folder; run the installer again from the new place |
 | Cells circled fuzzily / fused | Go back to Step 1 and tune channel weights and segmentation params; background may be under- or over-subtracted (Step 0) |
 | Out of GPU memory midway through Step 2 | Make the tiles smaller; confirm you're using the GPU, not the CPU |
 | Step 2 got interrupted — re-run? | Use Step 2's **Recovery Mode** to resume merging from saved intermediate files |
@@ -342,4 +372,4 @@ The software offers several algorithms for "circling cells". **Beginners can jus
 
 ---
 
-*Document version: v1 (2026-06-15). Images to be added; placeholders under `docs/images/`.*
+*Document version: FusionFlux 1.0.0 (2026-11-16): install on Windows, Mac and Linux. Images to be added; placeholders under `docs/images/`.*

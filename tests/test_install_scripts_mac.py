@@ -7,7 +7,7 @@ the models).
 * the same model sources and Mesmer digest as the Linux installer;
 * the screen of the other two installers: one line per step updated in
   place, the blinking bullet, one licence card, the tools in the log;
-* Apple silicon and macOS 13 checked first; no space in the install root;
+* Apple silicon and macOS 14 checked first; no space in the install root;
 * bash 3.2 (the Mac's own): no associative arrays, no GNU-only tools;
 * the launcher is the Linux one, which names the Mac installer on a Mac.
 """
@@ -77,7 +77,7 @@ def test_the_environment_is_the_mac_engine_set_without_cupy():
 def test_the_mac_is_checked_first():
     pre = _fn("preflight")
     assert '"$arch" != arm64' in pre and "Intel Mac" in pre
-    assert '-lt 13' in pre and "sw_vers -productVersion" in pre
+    assert '-lt 14' in pre and "sw_vers -productVersion" in pre
     assert 'case "$ROOT" in *" "*)' in pre
     assert 'ROOT="$HOME/.local/share/block01"' in MAC
 

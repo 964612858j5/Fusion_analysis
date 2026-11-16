@@ -10,7 +10,8 @@
 #                                       --mesmer-zip FILE | --models DIR]
 #                                       [--accept-model-licences]
 #
-# Apple silicon (arm64), macOS 13 or newer; the engines run on the Mac's GPU
+# Apple silicon (arm64), macOS 14 or newer (Cellpose on the Mac's GPU needs
+# it: bfloat16 on MPS, docs/v17_cellpose_mac_gpu_plan.md); the engines run on the Mac's GPU
 # (PyTorch MPS), the CPU when it is switched off. Everything goes under the
 # install root (default ~/.local/share/block01, as on Linux): the
 # environment, the models, the tools it downloads. It never modifies an
@@ -292,8 +293,8 @@ preflight() {
         problems="${problems}an Intel Mac ($arch) is not supported: PyTorch 2.5.1 has no macOS x86_64 build (Apple silicon only)
 "
     fi
-    if [ "${major:-0}" -lt 13 ] 2>/dev/null; then
-        problems="${problems}macOS $v is too old (macOS 13 or newer)
+    if [ "${major:-0}" -lt 14 ] 2>/dev/null; then
+        problems="${problems}macOS $v is too old (macOS 14 or newer: Cellpose on the Mac's GPU needs it)
 "
     fi
     chip=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "")
@@ -865,7 +866,7 @@ write_app() {
   <key>CFBundleExecutable</key><string>FusionFlux</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>$(core_version)</string>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>

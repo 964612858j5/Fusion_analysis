@@ -144,3 +144,8 @@ v0.2 continued (2026-11-16, the user's "同意" to commit, build and publish):
 * A fresh install on this Mac from the public release and the CI toolbox
   wheel (`--models` from the first test): 3 min 0 s, the self-test ok on the
   GPU and the CPU, the app start check ok.
+* macOS 14, not 13 (2026-11-16, found while updating the user guide):
+  Cellpose on the Mac's GPU needs bfloat16 on MPS, which PyTorch 2.5.1 has
+  from macOS 14 (docs/v17_cellpose_mac_gpu_plan.md); on macOS 13 the GPU
+  self-test would stop the install. The installer and the app bundle now
+  require macOS 14; the prebuilt wheels keep their macOS 13 tag (harmless).

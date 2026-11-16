@@ -62,14 +62,19 @@ See **Appendix A** of the user manual for backend selection guidance.
 
 ## Documentation
 
-Step-by-step user manuals (written to onboard non-specialists):
+Step-by-step user manual (written to onboard non-specialists):
 
-- **English** → [`docs/user_guide.md`](docs/user_guide.md)
-- **中文** → [`docs/用户指南.md`](docs/用户指南.md)
+- [`docs/user_guide.md`](docs/user_guide.md)
 
 ---
 
 ## Quick start
+
+Get FusionFlux: download **Source code (zip)** of the newest **FusionFlux** release
+(Releases, e.g. `FusionFlux 1.0.0`) and unzip it where it can stay, or `git clone`
+this repository. The folder is the program: the installer records its install in
+it (`.block01/`). The `core-v…` releases are parts the installers download
+themselves, not for direct download.
 
 Linux x86_64 with an NVIDIA GPU, glibc 2.28 or newer (below 2.34 the interface
 uses PySide6 6.9.3, chosen by the installer):
@@ -89,7 +94,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install_block01.ps1   # once; a
 scripts\block01.cmd                                                   # start (or the desktop shortcut)
 ```
 
-macOS 13 or newer on Apple silicon (the engines use the Mac's GPU), in Terminal
+macOS 14 or newer on Apple silicon (the engines use the Mac's GPU), in Terminal
 from the checkout, no admin rights needed:
 
 ```bash

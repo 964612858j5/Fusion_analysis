@@ -954,3 +954,14 @@ def test_the_self_test_is_a_table():
     r = _bash(INSTALL, "selftest_table $'cellpose\\tok\\tcpu'")
     assert r.stdout.split()[:2] == ["Self-test", "CPU"]
     assert '"$PY" -m seg_runner.selftest' in SH and "printf '%s\\n' \"$out\"\n" not in SH   # no JSON on screen
+
+
+def test_a_running_step_is_updated_in_place():
+    """The user's review (2026-11-15): a running step is one line, updated in
+    place; a note, a warning or a download's progress never ends it early."""
+    assert "out() { unpend; printf '%s\\n' \"$*\"; repend; }" in SH
+    assert "warn() { unpend;" in SH and "repend; log \"WARNING" in SH
+    fetch = SH[SH.index("fetch() {"):SH.index("# download URL DEST")]
+    assert "flush" not in fetch and "repend" in fetch
+    fail = SH[SH.index("fail() {"):SH.index("run() {")]
+    assert "unpend; PENDING=0" in fail

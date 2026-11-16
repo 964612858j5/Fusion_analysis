@@ -90,6 +90,7 @@ LOG=/dev/null
 STEP_LABEL=""          # the step on screen, for the ✗ line of a failure
 STEP_T0=0
 PENDING=0              # a "• step ..." line waiting for its result (terminal)
+PENDING_LINE=""        # its text: redrawn under anything printed meanwhile
 RESUMABLE=0            # 1 once past the checks: a rerun continues
 ui_init() {
     TTY=0; [ -t 1 ] && TTY=1
@@ -111,9 +112,14 @@ ui_init() {
 ui_init
 
 log() { printf '%s\n' "$*" >> "$LOG"; }
-# the pending "• step ..." line ends before anything else is printed
+# the pending "• step ..." line stays the last line on a terminal and is
+# updated in place (backlog 23, the user's review 2026-11-15): a line printed
+# meanwhile goes above it (interject), its result replaces it (step_done);
+# flush ends it only when another step starts without one
 flush() { if [ "$PENDING" = 1 ]; then printf '\n'; PENDING=0; fi; }
-out() { flush; printf '%s\n' "$*"; }
+unpend() { if [ "$PENDING" = 1 ]; then printf '\r\033[K'; fi; }
+repend() { if [ "$PENDING" = 1 ]; then printf '%s' "$PENDING_LINE"; fi; }
+out() { unpend; printf '%s\n' "$*"; repend; }
 fmt_secs() {
     local s=$1
     if [ "$s" -lt 60 ]; then echo "$s s"; else echo "$((s / 60)) min $((s % 60)) s"; fi
@@ -123,7 +129,7 @@ step_begin() {
     flush
     STEP_LABEL=$1; STEP_T0=$(date +%s)
     log "== $1"
-    if [ "$TTY" = 1 ]; then printf '  %s %s%s%s ...' "$G_RUN" "$1" "${2:+ }" "${2:-}"; PENDING=1
+    if [ "$TTY" = 1 ]; then PENDING_LINE=$(printf '  %s %s%s%s ...' "$G_RUN" "$1" "${2:+ }" "${2:-}"); printf '%s' "$PENDING_LINE"; PENDING=1
     else printf '  %s %s%s%s ...\n' "$G_RUN" "$1" "${2:+ }" "${2:-}"; fi
 }
 # step_done [DETAIL]: "  ✓ LABEL  DETAIL" (default: the time it took)
@@ -141,10 +147,10 @@ step_quiet() { flush; STEP_LABEL=$1; log "== $1"; }
 step_skip() { out "  - $1  ${C_DIM}$2${C_0}"; log "skipped: $1  $2"; }
 sub_ok() { out "    ${C_OK}${G_OK}${C_0} $1  ${C_DIM}$2${C_0}"; log "ok: $1  $2"; }
 note() { out "    ${C_DIM}$*${C_0}"; log "$*"; }
-warn() { flush; printf '  %s! %s%s\n' "$C_WARN" "$*" "$C_0" >&2; log "WARNING: $*"; }
+warn() { unpend; printf '  %s! %s%s\n' "$C_WARN" "$*" "$C_0" >&2; repend; log "WARNING: $*"; }
 # fail REASON HINT [COMMAND]: the step, what to do, the end of the log
 fail() {
-    flush
+    unpend; PENDING=0
     {
         [ -n "$STEP_LABEL" ] && printf '  %s%s %s%s\n' "$C_BAD" "$G_BAD" "$STEP_LABEL" "$C_0"
         printf '%sSTOPPED at: %s%s\n' "$C_BAD" "$STEP" "$C_0"
@@ -190,7 +196,6 @@ draw_progress() {
 FETCH_WAITS=(2 5 10)
 fetch() {
     local url=$1 part=$2 name=$3 size=${4:-0} attempt rc pid
-    flush
     for attempt in 1 2 3 4; do
         log "curl $url (attempt $attempt)"
         # curl's own --retry covers what -f makes exit 22 (408, 429, 5xx)
@@ -200,7 +205,7 @@ fetch() {
             while kill -0 "$pid" 2>/dev/null; do draw_progress "$name" "$part" "$size"; sleep 0.3; done
         fi
         rc=0; wait "$pid" || rc=$?
-        [ "$TTY" = 1 ] && printf '\r\033[K'
+        [ "$TTY" = 1 ] && { printf '\r\033[K'; repend; }
         [ "$rc" = 0 ] && return 0
         case "$rc" in
             33) rm -f -- "$part" ;;                        # no resume there: from 0

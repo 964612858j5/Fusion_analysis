@@ -112,13 +112,21 @@ if ($script:Fancy) {
 }
 $script:LogFile = ""
 $script:Label = ""
+# the running step's "* label ..." line (a console only): it stays the last
+# line and is updated in place (the user's review, 2026-11-15) -- a line
+# printed meanwhile goes above it, the download's progress takes its place,
+# its result replaces it
+$script:Pending = ""
+function Width { try { return [math]::Max(40, [Console]::WindowWidth - 1) } catch { return 79 } }
+function Unpend { if ($script:Pending) { Write-Host ("`r" + "".PadRight((Width)) + "`r") -NoNewline } }
+function Repend { if ($script:Pending) { Write-Host $script:Pending -ForegroundColor DarkGray -NoNewline } }
 
 function Log([string]$text) {
     if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $text -Encoding UTF8 }
 }
-function Say([string]$text) { Write-Host $text; Log $text }
-function Dim([string]$text) { Write-Host $text -ForegroundColor DarkGray; Log $text }
-function Warn([string]$text) { Write-Host "  ! $text" -ForegroundColor Yellow; Log "WARNING: $text" }
+function Say([string]$text) { Unpend; Write-Host $text; Repend; Log $text }
+function Dim([string]$text) { Unpend; Write-Host $text -ForegroundColor DarkGray; Repend; Log $text }
+function Warn([string]$text) { Unpend; Write-Host "  ! $text" -ForegroundColor Yellow; Repend; Log "WARNING: $text" }
 function Took([datetime]$t0) {
     $s = [int]((Get-Date) - $t0).TotalSeconds
     if ($s -lt 60) { return "$s s" }
@@ -131,11 +139,13 @@ function Begin([string]$label, [string]$note = "") {
     Log "== $label =="
     $line = "  $($script:Sym.run) $label"
     if ($note) { $line += " ($note)" }
-    Write-Host "$line ..." -ForegroundColor DarkGray
+    if ($script:Live) { Unpend; $script:Pending = "$line ..."; Repend }
+    else { Write-Host "$line ..." -ForegroundColor DarkGray }
 }
 function Done([string]$label = "", [string]$detail = "") {
     if (-not $label) { $label = $script:Label }
     if (-not $detail) { $detail = Took $script:StepT0 }
+    Unpend; $script:Pending = ""
     Write-Host "  $($script:Sym.ok) " -ForegroundColor Green -NoNewline
     Write-Host $label.PadRight(22) -NoNewline
     Write-Host $detail -ForegroundColor DarkGray
@@ -143,6 +153,7 @@ function Done([string]$label = "", [string]$detail = "") {
 }
 function Present([string]$label) { $script:Label = $label; Done $label "already installed" }
 function Fail([string]$text, [string]$hint = "", [string]$command = "") {
+    Unpend; $script:Pending = ""
     Write-Host ""
     if ($script:Label) { Write-Host "  $($script:Sym.bad) $($script:Label)" -ForegroundColor Red }
     Write-Host "STOPPED at: $($script:Step)" -ForegroundColor Red
@@ -198,10 +209,12 @@ function Progress([string]$name, [string]$file, [long]$size) {
         $bar = ([string]$script:Sym.full * $n) + ([string]$script:Sym.empty * (24 - $n))
         $line = "    {0}  {1} {2,3}%  {3}/{4} MB" -f $name.PadRight(13), $bar, [int](100 * $f), $mb, [math]::Round($size / 1MB)
     } else { $line = "    {0}  {1} MB" -f $name.PadRight(13), $mb }
-    Write-Host ("`r" + $line.PadRight(70)) -NoNewline
+    $w = Width
+    if ($line.Length -gt $w) { $line = $line.Substring(0, $w) }
+    Write-Host ("`r" + $line.PadRight($w)) -NoNewline
 }
 function ProgressClear([string]$name) {
-    if ($script:Live -and $name) { Write-Host ("`r" + "".PadRight(70) + "`r") -NoNewline }
+    if ($script:Live -and $name) { Write-Host ("`r" + "".PadRight((Width)) + "`r") -NoNewline; Repend }
 }
 
 # Fetch URL FILE [NAME SIZE] -> "" or why not. curl.exe (Windows 10 1803+
@@ -660,6 +673,7 @@ function EnsureMesmer([string]$dir) {
     }
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     $script:MesmerMissing = $true
+    Unpend; $script:Pending = ""
     Warn "Mesmer: no source worked; the install goes on without it (add it later with -MesmerOnly)"
 }
 
@@ -697,7 +711,7 @@ function EnsureModels {
         if ($st -ne "missing") { Fail "model $key in $dir does not match models.json ($st); it is left untouched." "move that folder away (or use another -Root) and run the installer again" }
         AcceptLicence $key
         $script:Label = $Pretty[$key]
-        if ($key -eq "mesmer_multiplex_segmentation") { EnsureMesmer $dir; continue }
+        if ($key -eq "mesmer_multiplex_segmentation") { Begin "Mesmer"; EnsureMesmer $dir; continue }
         if ($Models -and (ModelState $key (Join-Path $Models $key)) -eq "ok") {
             Log "model ${key}: copying the verified copy from $Models\$key"
             $stage = "$dir.stage"
@@ -711,6 +725,7 @@ function EnsureModels {
             Done $Pretty[$key] "copied from $Models, verified"
             continue
         }
+        Begin $Pretty[$key]
         FetchModel $key $dir
         Done $Pretty[$key] "downloaded and verified ($(Took $script:StepT0))"
     }
@@ -798,6 +813,7 @@ function SelftestEngines([string[]]$engines, [string]$label) {
 
 # the self-test as a table: one row per engine, one column per device
 function SelftestTable([string[]]$engines, $gpu, $cpu) {
+    Unpend; $script:Pending = ""
     $names = @{ cellpose = "Cellpose"; stardist = "StarDist"; mesmer = "Mesmer" }
     $cols = @()
     if ($gpu) { $cols += , @("GPU", $gpu) }
@@ -956,7 +972,7 @@ function MesmerOnlyInstall {
     if ($st -eq "ok") { Present "Mesmer" }
     elseif ($st -eq "missing") {
         AcceptLicence $key
-        $script:Label = "Mesmer"
+        Begin "Mesmer"
         EnsureMesmer $dir
         if ($script:MesmerMissing) { Fail "no Mesmer source worked (messages above)." "give a file with -MesmerZip FILE, a link with -MesmerUrl URL, or a folder with -Models DIR" }
     } else { Fail "$dir holds files that do not match models.json; they are left untouched." "move that folder away and run this again" }

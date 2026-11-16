@@ -190,3 +190,17 @@ def test_a_native_command_is_never_cut_short_by_select_first():
                 raise AssertionError(line)
     preflight = _fn("Preflight")
     assert "$code = $LASTEXITCODE" in preflight and "$code -eq 0" in preflight
+
+
+def test_a_running_step_is_updated_in_place():
+    """The user's review (2026-11-15): "• micromamba ..." and then
+    "✓ micromamba 3 s" on two lines; every running step is now one line,
+    replaced by its result; a line printed meanwhile goes above it."""
+    assert '$script:Pending = "$line ..."' in _fn("Begin")
+    assert 'Unpend; $script:Pending = ""' in _fn("Done") and 'Unpend; $script:Pending = ""' in _fn("Fail")
+    for name in ("Say", "Dim", "Warn"):
+        body = _fn(name)
+        assert body.index("Unpend") < body.index("Write-Host") < body.index("Repend"), name
+    assert "Repend" in _fn("ProgressClear")
+    assert 'Unpend; $script:Pending = ""' in _fn("SelftestTable")
+    assert "Begin $Pretty[$key]" in _fn("EnsureModels") and 'Begin "Mesmer"' in _fn("EnsureModels")

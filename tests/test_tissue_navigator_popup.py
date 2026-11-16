@@ -519,6 +519,16 @@ def test_the_popup_drops_the_info_row_the_lists_already_show(app):
     try:
         panel = popup.overview
         _with_real_roi_and_patches(app, panel)
+        # Room to spare, so the window keeps its height when the row comes
+        # back: at 620 px the popup's minimum (586 px on the Mac) sits just
+        # under the window, and with the Linux CI's taller fonts above it --
+        # Qt then grew the WINDOW for the row and the canvas grew with it
+        # (294 -> 303 px), which said nothing about the row (backlog 23,
+        # 2026-11-16: this test failed on every Linux CI run for that).
+        popup.resize(420, popup.minimumSizeHint().height() + 400)
+        for _ in range(8):
+            app.processEvents()
+        window_h = popup.height()
         assert not panel.status.isVisible()
         assert not panel._info_lbl.isVisible(), \
             "the duplicated info row is still between canvas and click"
@@ -552,6 +562,7 @@ def test_the_popup_drops_the_info_row_the_lists_already_show(app):
         for _ in range(6):
             app.processEvents()
         assert panel._info_lbl.isVisible()
+        assert popup.height() == window_h, "the window changed size: not like with like"
         assert panel.gview.viewport().height() < tall, (
             f"the row was costing the canvas nothing: "
             f"{panel.gview.viewport().height()} vs {tall}")

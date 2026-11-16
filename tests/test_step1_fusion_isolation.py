@@ -25,7 +25,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("block01.qt")
 
-from block01.qt import QtCore, QtWidgets  # noqa: E402
+from block01.qt import QtCore, QtTest, QtWidgets  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -298,7 +298,13 @@ def test_closing_the_window_leaves_no_running_thread_warning(app, tmp_path):
         w._start_fusion_worker(worker, job_name="fusion", n_rows=1, n_cols=1)
         w.close()
         assert worker.stop_called is True
-        assert worker.isRunning() is False
+        # stop() is cooperative: the thread ends when it next wakes, and a
+        # close that finds it still running is put off and retried every
+        # 0.5 s (MainWindow.closeEvent). Checking isRunning() at once raced
+        # that wake-up and failed now and then on the slower Linux CI
+        # (backlog 23, 2026-11-16) -- wait for it, as the window does.
+        assert worker.wait(5000), "the fusion thread did not end after stop()"
+        QtTest.QTest.qWait(700)                 # the window's retried close
         del worker
         for _ in range(20):
             QtWidgets.QApplication.processEvents()

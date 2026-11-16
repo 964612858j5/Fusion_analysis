@@ -172,7 +172,7 @@ fail() {
 blink() {
     local pid=$1 on=1 off="${PENDING_LINE/"$G_RUN"/${G_RUN//?/ }}"
     while kill -0 "$pid" 2>/dev/null; do
-        sleep 0.5
+        sleep 1
         if [ "$on" = 1 ]; then printf '\r%s' "$off"; on=0; else printf '\r%s' "$PENDING_LINE"; on=1; fi
     done
     [ "$on" = 1 ] || printf '\r%s' "$PENDING_LINE"

@@ -208,11 +208,11 @@ def test_a_running_step_is_updated_in_place():
 
 def test_the_running_bullet_blinks():
     """The user's review (2026-11-15): the bullet of a running step blinks.
-    The tools run in the background (Start-Process), waited for in 0.5 s
+    The tools run in the background (Start-Process), waited for in 1 s
     steps, each one toggling the bullet; their output still only in the log."""
     spawn = _fn("Spawn")
     assert "Start-Process" in spawn and "-RedirectStandardOutput $out -RedirectStandardError $err" in spawn
-    assert "while (-not $p.WaitForExit(500)) { Blink }" in spawn and "-WorkingDirectory" in spawn
+    assert "while (-not $p.WaitForExit(1000)) { Blink }" in spawn and "-WorkingDirectory" in spawn
     run = _fn("Run")
     assert "Spawn $exe $arguments" in run and "Add-Content -LiteralPath $script:LogFile" in run
     assert "Write-Host" not in run and "$code -ne 0" in run and "Fail" in run

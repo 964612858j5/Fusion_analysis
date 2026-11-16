@@ -192,7 +192,7 @@ function Spawn([string]$exe, [string[]]$arguments, [string]$out, [string]$err) {
     $p = Start-Process -FilePath $exe -ArgumentList $quoted -NoNewWindow -PassThru -WorkingDirectory (Get-Location).Path `
         -RedirectStandardOutput $out -RedirectStandardError $err
     $null = $p.Handle                              # (Windows PowerShell keeps ExitCode only so)
-    while (-not $p.WaitForExit(500)) { Blink }
+    while (-not $p.WaitForExit(1000)) { Blink }
     $p.WaitForExit()
     if (-not $script:BlinkOn) { Blink }            # the bullet back on
     return $p.ExitCode

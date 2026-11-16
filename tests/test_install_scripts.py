@@ -974,4 +974,4 @@ def test_the_running_bullet_blinks(tmp_path):
     run = SH[SH.index("run() {"):SH.index("sha256_of()")]
     assert 'blink "$pid"' in run and 'wait "$pid" || rc=$?' in run and "fail" in run
     blink = SH[SH.index("blink() {"):SH.index("run() {")]
-    assert "sleep 0.5" in blink and 'kill -0 "$pid"' in blink
+    assert "sleep 1\n" in blink and 'kill -0 "$pid"' in blink

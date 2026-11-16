@@ -194,6 +194,7 @@ class Step2Page(QWidget):
     fuse_chosen = Signal(str)
     fuse_delete_requested = Signal(str)
     _overview_ready = Signal(object)   # (token, array or None, error)
+    _tissue_ready = Signal(object)     # (token, SlideTissue or None, error)
 
     # Tile status colours
     _COL_IDLE    = (80,  80,  80)
@@ -205,6 +206,8 @@ class Step2Page(QWidget):
         super().__init__(parent)
         self._ov_token = None
         self._overview_ready.connect(self._on_overview_ready, Qt.QueuedConnection)
+        self._tissue_token = None
+        self._tissue_ready.connect(self._on_tissue_ready, Qt.QueuedConnection)
         # The page frame (block A1b S3): the window hands over the one
         # `StepFrameMetrics` and a title bar built like Step3's; a page
         # standing on its own (the page-level tests) measures its own.
@@ -2140,6 +2143,7 @@ class Step2Page(QWidget):
         drops the user's own choices -- they named tiles of another grid."""
         self._box_cancel()
         if not self._skip_empty_cb.isChecked() or not self._zarr_path:
+            self._tissue_token = None             # a mask still being found is not wanted
             self._skip_plan = None
             self._skip_hint_lbl.setVisible(False)
             self._sync_skip_buttons()
@@ -2150,7 +2154,8 @@ class Step2Page(QWidget):
             bbox, slide, channel = tile_tissue.fused_region(self._zarr_path)
             key = (slide, channel)
             if key not in self._tissue_cache:
-                self._tissue_cache[key] = tile_tissue.SlideTissue(slide, channel)
+                self._find_tissue(key)
+                return
             plan = tile_tissue.tile_plan(
                 self._tissue_cache[key], (self._full_h, self._full_w), (bbox[0], bbox[2]),
                 self._rows_spin.value(), self._cols_spin.value(), self._overlap_spin.value())
@@ -2168,6 +2173,48 @@ class Step2Page(QWidget):
             plan["reset_note"] = 'The grid changed: your tile choices were reset.'
         self._skip_plan = plan
         self._skip_hint()
+
+    def _find_tissue(self, key):
+        """The slide's tissue mask, found OFF the GUI thread (backlog 23,
+        2026-11-15: reading the slide's ~16x level and building the mask
+        froze Step2 ~2 s on the Windows laptop before the buttons came). The
+        same pattern as the overview: a result no longer wanted is dropped;
+        the mask is kept in `_tissue_cache` either way."""
+        from ..core import tile_tissue
+        self._skip_plan = None
+        self._skip_hint_lbl.setText('Finding tissue on the slide…')
+        self._skip_hint_lbl.setVisible(True)
+        self._sync_skip_buttons()
+        if self._tissue_token is not None and self._tissue_token[0] == key:
+            return                                # already being found
+        token = self._tissue_token = (key, object())
+
+        def _work():
+            try:
+                result = (token, tile_tissue.SlideTissue(*key), None)
+            except Exception as exc:              # noqa: BLE001 -- shown, not raised
+                result = (token, None, exc)
+            self._tissue_ready.emit(result)
+
+        import threading
+        threading.Thread(target=_work, name="step2-tissue", daemon=True).start()
+
+    def _on_tissue_ready(self, result):
+        token, tissue, exc = result
+        if tissue is not None:
+            self._tissue_cache[token[0]] = tissue
+        if token is not self._tissue_token:
+            return                                # unticked, or another input since
+        self._tissue_token = None
+        if exc is not None:
+            self._skip_plan = None
+            self._skip_hint_lbl.setText(f'Skip unavailable: {exc}')
+            self._skip_hint_lbl.setVisible(True)
+            self._sync_skip_buttons()
+            return
+        if not self._run_active:
+            self._refresh_skip_plan(reset_note=False)
+            self._draw_tile_grid()
 
     def _on_tile_clicked(self, r, c):
         """Toggle one tile of the plan at once. Skipping a tile that holds

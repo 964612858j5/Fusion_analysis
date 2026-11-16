@@ -359,6 +359,18 @@ def _overview_loaded(p, timeout=20.0):
     assert not p._ov_status.text().startswith('Loading'), p._ov_status.text()
 
 
+def _tick_only(page, timeout=10.0):
+    """The option ticked; back once the slide's tissue mask, found off the
+    GUI thread, has reached the page."""
+    import time
+    page._skip_empty_cb.setChecked(True)
+    end = time.monotonic() + timeout
+    while page._tissue_token is not None and time.monotonic() < end:
+        QtWidgets.QApplication.processEvents()
+        time.sleep(0.005)
+    assert page._tissue_token is None, "the tissue mask never came"
+
+
 def _pen(p, k):
     nc = p._cols_spin.value()
     return p._tile_rects[divmod(k, nc)].pen.color().name()
@@ -367,7 +379,7 @@ def _pen(p, k):
 def test_the_option_is_off_by_default_and_ticking_it_skips_nothing(page):
     assert not page._skip_empty_cb.isChecked() and page.skip_tiles_config() is None
     assert "skip_tiles" not in page.get_seg_config()
-    page._skip_empty_cb.setChecked(True)
+    _tick_only(page)
     plan = page.skip_tiles_config()
     assert plan and plan["grid"] == [2, 6] and plan["auto"]            # proposed, not applied
     assert page._plan_skips() == set() and plan["user_kept"] == plan["auto"]
@@ -510,7 +522,7 @@ def _questions(page, monkeypatch, answer=True):
 def _tick(page):
     """The option ticked and its proposal applied (ticking alone skips
     nothing, plan §13)."""
-    page._skip_empty_cb.setChecked(True)
+    _tick_only(page)
     page._skip_all_empty_btn.click()
 
 
@@ -1235,3 +1247,35 @@ def test_shift_is_taken_from_the_press_itself_in_both_pictures(shown, zoom, monk
     _mouse(vp, "move", _zp(page, ov, 1, 5))
     _mouse(vp, "release", _zp(page, ov, 1, 5))
     assert page._box is None and page._plan_skips() == before
+
+
+def test_ticking_never_waits_for_the_tissue_mask(page, monkeypatch):
+    """Backlog 23 (laptop, 2026-11-15): ticking froze Step2 ~2 s before the
+    buttons came. The mask is found off the GUI thread: the tick returns at
+    once with a note, the buttons follow with the mask; unticked meanwhile,
+    the late mask changes nothing on screen (and is kept for the next tick)."""
+    import threading
+    real = tt.SlideTissue
+    gate, threads = threading.Event(), []
+
+    def slow(*a):
+        threads.append(threading.current_thread().name)
+        gate.wait(5)
+        return real(*a)
+    monkeypatch.setattr(tt, "SlideTissue", slow)
+    page._skip_empty_cb.setChecked(True)
+    assert page._skip_plan is None and not page._skip_btn_row.isVisible()
+    assert page._skip_hint_lbl.text() == 'Finding tissue on the slide…'
+    page._skip_empty_cb.setChecked(False)               # unticked before the mask came
+    gate.set()
+    import time
+    end = time.monotonic() + 10
+    while not page._tissue_cache and time.monotonic() < end:
+        QtWidgets.QApplication.processEvents()
+        time.sleep(0.005)
+    QtWidgets.QApplication.processEvents()
+    assert threads and threads[0] != threading.main_thread().name
+    assert page._tissue_cache and page._skip_plan is None and not page._skip_hint_lbl.isVisible()
+    calls = len(threads)
+    page._skip_empty_cb.setChecked(True)                # the kept mask: planned at once
+    assert len(threads) == calls and page._skip_plan is not None and page._skip_btn_row.isVisibleTo(page)

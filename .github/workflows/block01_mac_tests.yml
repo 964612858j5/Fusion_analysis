@@ -42,9 +42,11 @@ jobs:
           echo "$out"
           echo "$out" | grep -q "names another checkout" || { echo "the launcher did not refuse"; exit 1; }
       - name: The static checks of the installers
+        # the Python the installer just made (pytest is in its pins); the
+        # runner's Homebrew Python refuses pip installs (PEP 668)
         run: |
-          python3 -m pip install -q pytest
-          python3 -m pytest -q -p no:cacheprovider --noconftest tests/test_install_scripts_mac.py
+          . .block01/install.env
+          "$BLOCK01_PREFIX/bin/python" -m pytest -q -p no:cacheprovider --noconftest tests/test_install_scripts_mac.py
       - name: The install log
         if: always()
         run: |

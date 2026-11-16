@@ -218,3 +218,19 @@ def test_the_running_bullet_blinks():
     assert "Write-Host" not in run and "$code -ne 0" in run and "Fail" in run
     assert "Spawn $script:Py" in _fn("SelftestEngines")
     assert "if (-not $script:Pending) { return }" in _fn("Blink")
+
+
+def test_a_failed_mesmer_source_goes_straight_to_the_next():
+    """The laptop's install (2026-11-16): a bare `continue` inside PowerShell's
+    `switch` only leaves the switch, so a failed source's empty stage was
+    checked too and reported a second time. The loop is labelled."""
+    body = _fn("EnsureMesmer")
+    assert ':sources foreach ($src in @("official", "mirror", "zip", "folder"))' in body
+    inner = body.split("switch ($src)", 1)[1]
+    assert inner.count("continue sources") == 10
+    assert not re.search(r"continue(?! sources)\b", inner)
+
+
+def test_a_long_step_name_keeps_two_spaces():
+    """The laptop's install (2026-11-16): "GPU background correctionok"."""
+    assert "$label.PadRight([math]::Max(22, $label.Length + 2))" in _fn("Done")

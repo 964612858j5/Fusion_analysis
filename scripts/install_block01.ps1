@@ -147,7 +147,7 @@ function Done([string]$label = "", [string]$detail = "") {
     if (-not $detail) { $detail = Took $script:StepT0 }
     Unpend; $script:Pending = ""
     Write-Host "  $($script:Sym.ok) " -ForegroundColor Green -NoNewline
-    Write-Host $label.PadRight(22) -NoNewline
+    Write-Host $label.PadRight([math]::Max(22, $label.Length + 2)) -NoNewline   # two spaces at least
     Write-Host $detail -ForegroundColor DarkGray
     Log "OK $label -- $detail"
 }
@@ -653,38 +653,41 @@ function MesmerFromArchive([string]$archive, [string]$stage) {
 function EnsureMesmer([string]$dir) {
     $key = "mesmer_multiplex_segmentation"
     $stage = "$dir.stage"
-    foreach ($src in @("official", "mirror", "zip", "folder")) {
+    # `continue sources`: a bare `continue` inside the switch below only
+    # leaves the switch, and the empty stage was then checked and reported
+    # as "its files do not match" (the laptop's install, 2026-11-16)
+    :sources foreach ($src in @("official", "mirror", "zip", "folder")) {
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
         New-Item -ItemType Directory -Force -Path $stage | Out-Null
         $archive = Join-Path $stage "m.tar.gz"
         switch ($src) {
             "official" {
                 Log "Mesmer: trying DeepCell's public archive"
-                if (-not (TryDownload $MesmerUrlOfficial $archive "Mesmer")) { Dim "    DeepCell's archive is not available; trying the next source"; continue }
-                if ((Sha256Of $archive) -ne $MesmerSha) { Dim "    DeepCell's archive is not the expected file; trying the next source"; continue }
-                if (-not (MesmerFromArchive $archive $stage)) { continue }
+                if (-not (TryDownload $MesmerUrlOfficial $archive "Mesmer")) { Dim "    DeepCell's archive is not available; trying the next source"; continue sources }
+                if ((Sha256Of $archive) -ne $MesmerSha) { Dim "    DeepCell's archive is not the expected file; trying the next source"; continue sources }
+                if (-not (MesmerFromArchive $archive $stage)) { continue sources }
                 Remove-Item -LiteralPath $archive -Force
                 $from = "DeepCell's archive"
             }
             "mirror" {
                 $mirror = if ($MesmerUrl) { $MesmerUrl } else { $MesmerMirrorDefault }
                 Log "Mesmer: trying the mirror $mirror"
-                if (-not (TryDownload $mirror $archive "Mesmer")) { Dim "    the mirror is not available"; continue }
-                if (-not (MesmerFromArchive $archive $stage)) { Dim "    the mirror's file holds no MultiplexSegmentation folder"; continue }
+                if (-not (TryDownload $mirror $archive "Mesmer")) { Dim "    the mirror is not available"; continue sources }
+                if (-not (MesmerFromArchive $archive $stage)) { Dim "    the mirror's file holds no MultiplexSegmentation folder"; continue sources }
                 Remove-Item -LiteralPath $archive -Force
                 $from = if ($MesmerUrl) { "the mirror" } else { "the lab's mirror" }
             }
             "zip" {
-                if (-not $MesmerZip) { continue }
+                if (-not $MesmerZip) { continue sources }
                 Log "Mesmer: trying the archive $MesmerZip"
-                if (-not (Test-Path -LiteralPath $MesmerZip)) { Dim "    $MesmerZip does not exist"; continue }
-                if (-not (MesmerFromArchive ([IO.Path]::GetFullPath($MesmerZip)) $stage)) { Dim "    $MesmerZip holds no MultiplexSegmentation folder"; continue }
+                if (-not (Test-Path -LiteralPath $MesmerZip)) { Dim "    $MesmerZip does not exist"; continue sources }
+                if (-not (MesmerFromArchive ([IO.Path]::GetFullPath($MesmerZip)) $stage)) { Dim "    $MesmerZip holds no MultiplexSegmentation folder"; continue sources }
                 $from = $MesmerZip
             }
             "folder" {
-                if (-not $Models) { continue }
+                if (-not $Models) { continue sources }
                 $from = Join-Path $Models $key
-                if ((ModelState $key $from) -ne "ok") { continue }
+                if ((ModelState $key $from) -ne "ok") { continue sources }
                 Log "Mesmer: copying the verified copy from $from"
                 foreach ($f in ManifestFiles $key) {
                     $dst = Join-Path $stage $f

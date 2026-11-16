@@ -219,8 +219,13 @@ function Preflight {
     $smi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
     if ($NoGpu) { Say "  GPU:      not used (-NoGpu): a CPU install" }
     elseif ($smi) {
-        $name = Native { & nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>$null } | Select-Object -First 1
-        if ($LASTEXITCODE -eq 0 -and $name) { $script:Gpu = $true; Say "  GPU:      $name" }
+        # all its lines first: `| Select-Object -First 1` stops the pipeline
+        # before nvidia-smi exits, so $LASTEXITCODE was never set and a working
+        # GPU read as "did not answer" (laptop W3 acceptance, 2026-11-15)
+        $lines = @(Native { & nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>$null })
+        $code = $LASTEXITCODE
+        $name = $lines | Select-Object -First 1
+        if ($code -eq 0 -and $name) { $script:Gpu = $true; Say "  GPU:      $name" }
         else { Say "  GPU:      nvidia-smi did not answer: a CPU install" }
     } else { Say "  GPU:      no NVIDIA driver found: a CPU install (slower segmentation)" }
     if ($env:CUDA_PATH -and (Test-Path -LiteralPath $env:CUDA_PATH)) { $script:CudaPath = $env:CUDA_PATH }

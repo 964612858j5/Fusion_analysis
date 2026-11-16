@@ -124,3 +124,15 @@ def test_model_downloads_show_their_progress():
     assert "Fetch $url" in _fn("Download") and "Fetch $url" in _fn("TryDownload")
     assert 'progress_args() { if [ -t 2 ]; then echo "-#"; else echo "-sS"; fi; }' in SH
     assert SH.count('"$(progress_args)"') == 2
+
+
+def test_a_native_command_is_never_cut_short_by_select_first():
+    """Laptop W3 acceptance (2026-11-15): `& nvidia-smi ... | Select-Object
+    -First 1` stopped the pipeline before nvidia-smi exited, $LASTEXITCODE was
+    never set, and a working RTX 3060 made a CPU install."""
+    for text in (INSTALL, LAUNCH):
+        for line in text.splitlines():
+            if re.search(r"&\s+[\w$.-]+.*\|\s*Select-Object -First", line):
+                raise AssertionError(line)
+    preflight = _fn("Preflight")
+    assert "$code = $LASTEXITCODE" in preflight and "$code -eq 0" in preflight

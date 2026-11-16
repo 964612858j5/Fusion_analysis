@@ -173,16 +173,45 @@ function Fail([string]$text, [string]$hint = "", [string]$command = "") {
     }
     exit 1
 }
+# Blink: the running step's bullet on and off (the user's review,
+# 2026-11-15: a long step must look alive)
+$script:BlinkOn = $true
+function Blink {
+    if (-not $script:Pending) { return }
+    $script:BlinkOn = -not $script:BlinkOn
+    $line = $script:Pending
+    if (-not $script:BlinkOn) { $line = $line.Replace([string]$script:Sym.run, "".PadRight(([string]$script:Sym.run).Length)) }
+    Write-Host ("`r" + $line) -ForegroundColor DarkGray -NoNewline
+}
+
+# Spawn EXE ARGS OUT ERR -> exit code: a native command, started (in the
+# current folder, with this environment) and waited for while the bullet
+# blinks; its stdout and stderr into the files OUT and ERR
+function Spawn([string]$exe, [string[]]$arguments, [string]$out, [string]$err) {
+    $quoted = ($arguments | ForEach-Object { '"' + ("$_" -replace '"', '\"') + '"' }) -join " "
+    $p = Start-Process -FilePath $exe -ArgumentList $quoted -NoNewWindow -PassThru -WorkingDirectory (Get-Location).Path `
+        -RedirectStandardOutput $out -RedirectStandardError $err
+    $null = $p.Handle                              # (Windows PowerShell keeps ExitCode only so)
+    while (-not $p.WaitForExit(500)) { Blink }
+    $p.WaitForExit()
+    if (-not $script:BlinkOn) { Blink }            # the bullet back on
+    return $p.ExitCode
+}
+
 # Run EXE ARGS...: a native command, its output into the log; a non-zero exit
 # stops the install
 function Run([string]$exe, [string[]]$arguments, [string]$hint = "read the last lines of the log below, fix the cause and run the installer again (finished steps are kept)") {
     Log "> $exe $($arguments -join ' ')"
-    if ($script:LogFile) {
-        Native { & $exe @arguments 2>&1 | ForEach-Object { "$_" } | Add-Content -LiteralPath $script:LogFile -Encoding UTF8 }
-    } else {
-        Native { & $exe @arguments 2>&1 | Out-Null }
+    $tmp = [IO.Path]::GetTempFileName()
+    $code = Spawn $exe $arguments "$tmp.out" "$tmp.err"
+    foreach ($f in @("$tmp.out", "$tmp.err")) {
+        if (Test-Path -LiteralPath $f) {
+            if ($script:LogFile) { Get-Content -LiteralPath $f | Add-Content -LiteralPath $script:LogFile -Encoding UTF8 }
+            Remove-Item -LiteralPath $f -Force
+        }
     }
-    if ($LASTEXITCODE -ne 0) { Fail "a command failed (exit $LASTEXITCODE): $(Split-Path -Leaf $exe) $($arguments | Select-Object -First 4)" $hint "$exe $($arguments -join ' ')" }
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    if ($code -ne 0) { Fail "a command failed (exit $code): $(Split-Path -Leaf $exe) $($arguments | Select-Object -First 4)" $hint "$exe $($arguments -join ' ')" }
 }
 
 # Native { ... }: a native command whose stderr is redirected or captured --
@@ -803,7 +832,9 @@ function SelftestEngines([string[]]$engines, [string]$label) {
     try {
         $env:PYTHONPATH = $Repo
         $err = Join-Path $run "selftest.err"
-        $out = Native { & $script:Py -m seg_runner.selftest @engines 2> $err }
+        $outFile = Join-Path $run "selftest.out"
+        $null = Spawn $script:Py (@("-m", "seg_runner.selftest") + $engines) $outFile $err
+        $out = @(Get-Content -LiteralPath $outFile -ErrorAction SilentlyContinue)
     } finally { Pop-Location; Remove-Item env:PYTHONPATH -ErrorAction SilentlyContinue }
     Log "self-test $label"
     $out | ForEach-Object { Log "  $_" }

@@ -965,3 +965,13 @@ def test_a_running_step_is_updated_in_place():
     assert "flush" not in fetch and "repend" in fetch
     fail = SH[SH.index("fail() {"):SH.index("run() {")]
     assert "unpend; PENDING=0" in fail
+
+
+def test_the_running_bullet_blinks(tmp_path):
+    """The user's review (2026-11-15): while a step's command runs, its bullet
+    blinks; the command's output still goes only to the log, its failure
+    still stops the install."""
+    run = SH[SH.index("run() {"):SH.index("sha256_of()")]
+    assert 'blink "$pid"' in run and 'wait "$pid" || rc=$?' in run and "fail" in run
+    blink = SH[SH.index("blink() {"):SH.index("run() {")]
+    assert "sleep 0.5" in blink and 'kill -0 "$pid"' in blink

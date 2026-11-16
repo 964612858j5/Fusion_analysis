@@ -167,8 +167,27 @@ fail() {
     log "STOPPED at: $STEP: $1"
     exit 1
 }
+# blink PID: the running step's bullet on and off while PID runs (the
+# user's review, 2026-11-15: a long step must look alive)
+blink() {
+    local pid=$1 on=1 off="${PENDING_LINE/"$G_RUN"/${G_RUN//?/ }}"
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 0.5
+        if [ "$on" = 1 ]; then printf '\r%s' "$off"; on=0; else printf '\r%s' "$PENDING_LINE"; on=1; fi
+    done
+    [ "$on" = 1 ] || printf '\r%s' "$PENDING_LINE"
+}
 run() {  # run CMD... ; its output to the log; on failure stop with the command line
-    "$@" >> "$LOG" 2>&1 || fail "the command failed (exit $?)." "${RUN_HINT:-read the end of the log below; fix the cause and run the installer again}" "$*"
+    local rc=0
+    if [ "$PENDING" = 1 ]; then
+        "$@" >> "$LOG" 2>&1 &
+        local pid=$!
+        blink "$pid"
+        wait "$pid" || rc=$?
+    else
+        "$@" >> "$LOG" 2>&1 || rc=$?
+    fi
+    [ "$rc" = 0 ] || fail "the command failed (exit $rc)." "${RUN_HINT:-read the end of the log below; fix the cause and run the installer again}" "$*"
 }
 
 sha256_of() { sha256sum "$1" | cut -d' ' -f1; }

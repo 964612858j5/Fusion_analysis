@@ -139,7 +139,7 @@ def test_the_tools_print_into_the_log_not_on_screen():
     Every tool's output goes to .block01\\logs\\install-<time>.log; the last
     lines are shown only on failure."""
     run = _fn("Run")
-    assert "Add-Content -LiteralPath $script:LogFile" in run and "2>&1" in run and "Native {" in run
+    assert "Add-Content -LiteralPath $script:LogFile" in run and "Spawn $exe $arguments" in run
     assert "Write-Host" not in run
     assert "install-$(Get-Date -Format 'yyyyMMdd-HHmmss').log" in _fn("StartLog")
     fail = _fn("Fail")
@@ -204,3 +204,17 @@ def test_a_running_step_is_updated_in_place():
     assert "Repend" in _fn("ProgressClear")
     assert 'Unpend; $script:Pending = ""' in _fn("SelftestTable")
     assert "Begin $Pretty[$key]" in _fn("EnsureModels") and 'Begin "Mesmer"' in _fn("EnsureModels")
+
+
+def test_the_running_bullet_blinks():
+    """The user's review (2026-11-15): the bullet of a running step blinks.
+    The tools run in the background (Start-Process), waited for in 0.5 s
+    steps, each one toggling the bullet; their output still only in the log."""
+    spawn = _fn("Spawn")
+    assert "Start-Process" in spawn and "-RedirectStandardOutput $out -RedirectStandardError $err" in spawn
+    assert "while (-not $p.WaitForExit(500)) { Blink }" in spawn and "-WorkingDirectory" in spawn
+    run = _fn("Run")
+    assert "Spawn $exe $arguments" in run and "Add-Content -LiteralPath $script:LogFile" in run
+    assert "Write-Host" not in run and "$code -ne 0" in run and "Fail" in run
+    assert "Spawn $script:Py" in _fn("SelftestEngines")
+    assert "if (-not $script:Pending) { return }" in _fn("Blink")

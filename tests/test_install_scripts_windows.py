@@ -234,3 +234,20 @@ def test_a_failed_mesmer_source_goes_straight_to_the_next():
 def test_a_long_step_name_keeps_two_spaces():
     """The laptop's install (2026-11-16): "GPU background correctionok"."""
     assert "$label.PadRight([math]::Max(22, $label.Length + 2))" in _fn("Done")
+
+
+def test_the_spatialdata_environment():
+    """Step 4's SpatialData export on Windows (user ruling 2026-11-16): its own
+    environment, as on Linux -- conda-forge Python with Linux's conda extras,
+    then Linux's pip list (--no-deps), pip check, spatialdata imported; its
+    Python recorded for the app; -NoSpatialData skips it."""
+    body = _fn("EnsureSpatialData")
+    assert "if ($NoSpatialData)" in body and "[switch]$NoSpatialData" in INSTALL
+    assert '"--override-channels", "-c", "conda-forge") + $SdConda' in body
+    assert '$SdConda = @("python=3.10", "pip", "packaging=26.3", "wheel=0.48.0")' in INSTALL
+    assert '"--no-deps", "-r", (Join-Path $SdSpec "requirements-pip.txt")' in body
+    assert '@("-m", "pip", "check")' in body and "import spatialdata" in body
+    assert "is left untouched" in body and ".block01_env_ok" in body
+    main = _fn("Main")
+    assert main.index("EnsureEnvironment $mamba") < main.index("EnsureSpatialData $mamba") < main.index("EnsureCore")
+    assert "BLOCK01_SPATIALDATA_PYTHON=$(Join-Path $script:SdPrefix 'python.exe')" in _fn("WriteRecord")

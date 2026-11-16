@@ -41,6 +41,21 @@ jobs:
         run: |
           & .\scripts\install_block01.ps1 -NoGpu -SkipModels -Root "$env:RUNNER_TEMP\b01"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Step 4's SpatialData export with the installed SpatialData environment
+        # the export runs in the environment the installer made (step 3b); the
+        # tests run from the install's package link, as the app does
+        run: |
+          $rec = @{}
+          Get-Content .block01\install.env | ForEach-Object { if ($_ -match '^([^#=][^=]*)=(.*)$') { $rec[$Matches[1]] = $Matches[2] } }
+          if (-not $rec['BLOCK01_SPATIALDATA_PYTHON']) { Write-Host "the install recorded no SpatialData Python"; exit 1 }
+          $env:BLOCK01_SPATIALDATA_PYTHON = $rec['BLOCK01_SPATIALDATA_PYTHON']
+          $env:PYTHONPATH = (Resolve-Path .block01\pkg).Path
+          $env:QT_QPA_PLATFORM = "offscreen"
+          Push-Location .block01\pkg\block01\tests
+          & (Join-Path $rec['BLOCK01_PREFIX'] "python.exe") -m pytest -q -p no:cacheprovider test_spatialdata_export.py
+          $rc = $LASTEXITCODE
+          Pop-Location
+          exit $rc
       - name: The launcher refuses another checkout's record clearly
         run: |
           $rec = ".block01\install.env"

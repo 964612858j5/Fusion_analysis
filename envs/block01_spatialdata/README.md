@@ -8,6 +8,16 @@ Mesmer). `scripts/install_block01.sh` builds it as step 3b
 Python as `BLOCK01_SPATIALDATA_PYTHON` in `.block01/install.env`; the app
 uses it without asking. Plan: `docs/v17_spatialdata_env_install_plan.md`.
 
+Windows and the Mac (2026-11-16): `scripts/install_block01.ps1` and
+`scripts/install_block01_mac.sh` build the same environment as their step
+3b. There is no conda lock for them: conda-forge's `python=3.10 pip
+packaging=26.3 wheel=0.48.0` (what the Linux lock adds to Python), then the
+same `requirements-pip.txt` with `--no-deps` and `pip check`. Every pin has
+a Windows (win_amd64) and an Apple-silicon wheel except PIMS 0.7, which is
+pure Python and installs from its source on all three. Checked on this Mac
+(the export tests pass) and in the Windows and Mac install CI jobs, which
+run `tests/test_spatialdata_export.py` with the installed environment.
+
 * `conda-linux-64.lock` — explicit conda part (python 3.10, pip; conda-forge).
 * `requirements-pip.txt` — every pip package pinned, installed with
   `--no-deps`. setuptools is pinned to 81.0.0: `xarray_schema` (used by

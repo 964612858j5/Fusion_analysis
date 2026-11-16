@@ -12,6 +12,7 @@ on:
       - "scripts/install_block01_mac.sh"
       - "scripts/block01"
       - "envs/macos/**"
+      - "envs/block01_spatialdata/**"
       - "envs/ci/requirements-cpu.txt"
       - "native/fusion_viewer_core/wheels.lock"
       - "tests/test_install_scripts_mac.py"
@@ -32,6 +33,13 @@ jobs:
         run: /bin/bash scripts/install_block01_mac.sh --skip-models --root "$RUNNER_TEMP/b01"
       - name: A second run changes nothing and passes
         run: /bin/bash scripts/install_block01_mac.sh --skip-models --root "$RUNNER_TEMP/b01"
+      - name: Step 4's SpatialData export with the installed SpatialData environment
+        run: |
+          . .block01/install.env
+          [ -n "${BLOCK01_SPATIALDATA_PYTHON:-}" ] || { echo "the install recorded no SpatialData Python"; exit 1; }
+          cd .block01/pkg/block01/tests
+          PYTHONPATH="$GITHUB_WORKSPACE/.block01/pkg" QT_QPA_PLATFORM=offscreen \
+            "$BLOCK01_PREFIX/bin/python" -m pytest -q -p no:cacheprovider test_spatialdata_export.py
       - name: The launcher refuses another checkout's record clearly
         run: |
           rec=.block01/install.env

@@ -73,13 +73,14 @@ PowerShell from the checkout (`powershell -ExecutionPolicy Bypass -File
 scripts\install_block01.ps1`); no admin rights. Its options are the Linux
 ones in PowerShell form: `-CheckOnly`, `-Root DIR`, `-Models DIR`,
 `-MesmerUrl URL`, `-MesmerZip FILE`, `-MesmerOnly`, `-AcceptModelLicences`,
-`-NoGpu`. It needs no compiler: the viewer core and DeepCell-Toolbox come as
+`-NoGpu`, `-NoSpatialData`. It needs no compiler: the viewer core and DeepCell-Toolbox come as
 prebuilt, digest-checked wheels (`-BuildCore` / `-BuildToolbox` build them
 instead and then need the Visual Studio C++ Build Tools, which step 1
 checks). It ends by putting a FusionFlux shortcut on the desktop; the app
 starts with it or with `scripts\block01.cmd`, whose output also goes to
-`.block01\logs`. Step 4's SpatialData export has no Windows environment yet:
-ticking it asks for a Python with spatialdata.
+`.block01\logs`. Like Linux it also makes Step 4's SpatialData environment
+(about 1.2 GB; `-NoSpatialData` skips it only if the user says they do not
+need it).
 
 ## Mac
 
@@ -87,10 +88,11 @@ The same rules. The installer is `bash scripts/install_block01_mac.sh`, run
 in Terminal from the checkout; no admin rights. Apple silicon and macOS 14 or newer only (step 1
 says so on another Mac). Its options: `--check-only`, `--root DIR` (no space
 in it), `--models DIR`, `--mesmer-url URL`, `--mesmer-zip FILE`,
-`--mesmer-only`, `--accept-model-licences`, `--skip-models`. It needs no
+`--mesmer-only`, `--accept-model-licences`, `--skip-models`,
+`--no-spatialdata`. It needs no
 compiler: the viewer core and DeepCell-Toolbox come as prebuilt,
 digest-checked wheels. The self-test runs every engine on the Mac's GPU
 (MPS) and again on the CPU. It ends by putting FusionFlux into
 `~/Applications`; the app starts with it or with `scripts/block01`.
-Step 4's SpatialData export has no Mac environment from the installer yet:
-ticking it asks for a Python with spatialdata.
+Like Linux it also makes Step 4's SpatialData environment (about 1.2 GB;
+`--no-spatialdata` skips it only if the user says they do not need it).

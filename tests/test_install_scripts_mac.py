@@ -175,3 +175,25 @@ def test_the_lock_refuses_a_running_owner_and_takes_a_stale_one(tmp_path):
                        capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout.strip().isdigit() and r.stdout.strip() != "999999"
     assert not lock.exists()                      # removed again at exit
+
+
+def test_the_spatialdata_environment():
+    """Step 4's SpatialData export on the Mac (user ruling 2026-11-16): its own
+    environment, as on Linux; its Python recorded; --no-spatialdata skips it."""
+    body = _fn("ensure_spatialdata")
+    assert '[ "$NO_SPATIALDATA" = 1 ]' in body and "--no-spatialdata) NO_SPATIALDATA=1" in MAC
+    assert '--override-channels -c conda-forge $SD_CONDA' in body
+    assert 'SD_CONDA="python=3.10 pip packaging=26.3 wheel=0.48.0"' in MAC
+    assert '--no-deps -r "$SD_SPEC/requirements-pip.txt"' in body and "pip check" in body
+    assert "import spatialdata" in body and "is left untouched" in body
+    main = _fn("main")
+    assert main.index("ensure_environment") < main.index("ensure_spatialdata") < main.index("ensure_core")
+    assert "export BLOCK01_SPATIALDATA_PYTHON=%q" in _fn("write_record")
+
+
+def test_the_spatialdata_conda_extras_are_linuxs():
+    """The Mac and Windows conda part = the packages Linux's lock adds to
+    Python (pip's own list is shared)."""
+    lock = (REPO / "envs" / "block01_spatialdata" / "conda-linux-64.lock").read_text()
+    for name, version in (("packaging", "26.3"), ("wheel", "0.48.0"), ("python", "3.10")):
+        assert re.search(r"/%s-%s[.-]" % (name, re.escape(version)), lock), name

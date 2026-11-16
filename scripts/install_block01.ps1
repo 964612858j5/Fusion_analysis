@@ -19,6 +19,8 @@ Install FusionFlux (Block01) on Windows with one command
   -MesmerZip FILE        a local Mesmer archive (.tar.gz or .zip)
   -AcceptModelLicences   accept the model licences shown (for scripted installs)
   -SkipModels            no models and no engine self-test (the CI's install check)
+  -NoSpatialData         no SpatialData environment (Step 4's SpatialData export
+                         then asks for a Python with spatialdata)
   -MesmerOnly            add Mesmer to this checkout's existing install, nothing else
 
 Mesmer (2026-11-15): DeepCell's public archive (SPACEc's URL) answers 403
@@ -45,6 +47,7 @@ param(
     [string]$MesmerZip = "",
     [switch]$AcceptModelLicences,
     [switch]$SkipModels,
+    [switch]$NoSpatialData,
     [switch]$MesmerOnly
 )
 
@@ -95,6 +98,11 @@ $script:EnvPrefix = ""
 $script:Gpu = $false
 $script:CudaPath = ""
 $script:MesmerMissing = $false
+$script:SdPrefix = ""
+$SdSpec = Join-Path $Repo "envs\block01_spatialdata"
+# the conda part of the SpatialData environment: Linux's lock (conda-linux-64.lock)
+# has these on top of Python; the pip part is the same list on every system
+$SdConda = @("python=3.10", "pip", "packaging=26.3", "wheel=0.48.0")
 
 # ── output ────────────────────────────────────────────────────────────────
 # Backlog 23 (the user's review, 2026-11-15): only what matters reaches the
@@ -469,6 +477,56 @@ function EnsureEnvironment([string]$mamba) {
     Run $script:Py @("-m", "pip", "install", "-q", "--no-warn-script-location", "--no-deps", "-r", (Join-Path $Repo "envs\windows\requirements-nodeps.txt"))
     Set-Content -LiteralPath $ok -Value "finished $(Get-Date -Format s)"
     Done
+}
+
+# ── 3b. the SpatialData environment (Step 4's SpatialData export) ─────────
+# Its own small environment, as on Linux: spatialdata 0.5.0 needs NumPy 2,
+# the main environment stays on NumPy 1.26 for TensorFlow. The pip list is
+# Linux's (envs\block01_spatialdata\requirements-pip.txt, every package
+# pinned, --no-deps); its Python is recorded as BLOCK01_SPATIALDATA_PYTHON.
+function SdLockId {
+    $text = (Get-Content -Raw -LiteralPath (Join-Path $SdSpec "requirements-pip.txt")) + "`n" + ($SdConda -join " ")
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $bytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text))
+    return (($bytes | ForEach-Object { $_.ToString("x2") }) -join "").Substring(0, 8)
+}
+
+function EnsureSpatialData([string]$mamba) {
+    $script:Step = "3b. the SpatialData environment"
+    if ($NoSpatialData) {
+        Dim "  $($script:Sym.run) SpatialData environment  skipped (-NoSpatialData): Step 4 asks for a Python with spatialdata"
+        return
+    }
+    $prefix = Join-Path $Root "envs\block01_spatialdata-$(SdLockId)"
+    $py = Join-Path $prefix "python.exe"
+    $owner = "$prefix.owner"
+    $ok = Join-Path $prefix ".block01_env_ok"
+    $script:Label = "SpatialData environment"
+    if (Test-Path -LiteralPath $ok) {
+        Present "SpatialData environment"
+    } else {
+        if (Test-Path -LiteralPath $prefix) {
+            if (-not (Test-Path -LiteralPath $owner)) { Fail "$prefix exists and was not created by this installer; it is left untouched." "move it away, use another -Root, or skip it with -NoSpatialData" }
+            Log "SpatialData environment: an unfinished install, made again"
+            Remove-Item -LiteralPath $prefix -Recurse -Force
+        }
+        Begin "SpatialData environment" "for Step 4's export, 2-5 min"
+        New-Item -ItemType Directory -Force -Path (Split-Path $prefix) | Out-Null
+        Set-Content -LiteralPath $owner -Value "created by scripts\install_block01.ps1 $(Get-Date -Format s)"
+        $env:MAMBA_ROOT_PREFIX = Join-Path $Root "mamba"
+        Run $mamba (@("create", "-y", "-q", "-p", $prefix, "--override-channels", "-c", "conda-forge") + $SdConda)
+        Run $py @("-m", "pip", "install", "-q", "--no-warn-script-location", "--no-deps", "-r", (Join-Path $SdSpec "requirements-pip.txt"))
+        Run $py @("-m", "pip", "check") "report the log: the pinned SpatialData packages do not fit together on this computer (or install with -NoSpatialData)"
+        Set-Content -LiteralPath $ok -Value "finished $(Get-Date -Format s)"
+        Done
+    }
+    $err = Join-Path $Root "spatialdata.err"
+    $v = Native { & $py -I -c "import spatialdata; print(spatialdata.__version__)" 2> $err } | Select-Object -Last 1
+    if ($LASTEXITCODE -ne 0 -or -not "$v") {
+        Fail "spatialdata does not import in $prefix (its error: $err)." "run the installer again; if it repeats, report that file (or install with -NoSpatialData)"
+    }
+    Log "spatialdata $v in $prefix"
+    $script:SdPrefix = $prefix
 }
 
 # ── 4. the viewer core ────────────────────────────────────────────────────
@@ -951,6 +1009,7 @@ function WriteRecord {
     )
     foreach ($key in $ModelVar.Keys) { $lines += "$($ModelVar[$key])=$(ModelDir $key)" }
     if ($script:CudaPath) { $lines += "CUDA_PATH=$($script:CudaPath)" }
+    if ($script:SdPrefix) { $lines += "BLOCK01_SPATIALDATA_PYTHON=$(Join-Path $script:SdPrefix 'python.exe')" }
     Set-Content -LiteralPath "$rec.tmp" -Value $lines -Encoding UTF8
     Move-Item -LiteralPath "$rec.tmp" -Destination $rec -Force
     Set-Content -LiteralPath (Join-Path $script:EnvPrefix ".block01_install_ok") -Value "core $(CoreVersion)`ntime $(Get-Date -Format s)"
@@ -1059,6 +1118,7 @@ function Main {
     try {
         $mamba = EnsureMicromamba
         EnsureEnvironment $mamba
+        EnsureSpatialData $mamba
         EnsureCore
         EnsureLink
         if ($SkipModels) { Dim "  $($script:Sym.run) Models              skipped (-SkipModels)" }

@@ -1057,6 +1057,10 @@ function MesmerOnlyInstall {
     $script:Py = Join-Path $script:EnvPrefix "python.exe"
     if ($rec["CUDA_PATH"]) { $script:CudaPath = $rec["CUDA_PATH"] }
     if (-not (Test-Path -LiteralPath $script:Py)) { Fail "the environment $($script:EnvPrefix) is gone." "run the installer without -MesmerOnly" }
+    # the same lock as a full install into this root: both write its models
+    # (codex review of the Mac installer, 2026-11-16); released at exit
+    try { $script:MesmerLock = [IO.File]::Open((Join-Path $script:Root ".install.lock"), "OpenOrCreate", "ReadWrite", "None") }
+    catch { Fail "another install into $($script:Root) is running." "wait for it to finish, then run this again" }
     $key = "mesmer_multiplex_segmentation"
     $dir = ModelDir $key
     $st = ModelState $key $dir

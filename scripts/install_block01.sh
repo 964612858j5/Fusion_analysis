@@ -1115,6 +1115,10 @@ mesmer_only() {
     . "$rec"
     ROOT=$BLOCK01_ROOT; ENV_PREFIX=$BLOCK01_PREFIX; PY="$ENV_PREFIX/bin/python"
     [ -x "$PY" ] || fail "the environment $ENV_PREFIX is gone." "run the installer without --mesmer-only"
+    # the same lock as a full install into this root: both write its models
+    # (codex review of the Mac installer, 2026-11-16)
+    exec 9>"$ROOT/.install.lock"
+    flock -n 9 || fail "another install into $ROOT is running." "wait for it to finish, then run this again"
     local key=mesmer_multiplex_segmentation dir; dir=$(model_dir "$key")
     case "$(model_state "$key" "$dir")" in
         ok) step_ok Mesmer "already installed and verified" ;;

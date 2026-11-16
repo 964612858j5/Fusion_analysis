@@ -975,3 +975,11 @@ def test_the_running_bullet_blinks(tmp_path):
     assert 'blink "$pid"' in run and 'wait "$pid" || rc=$?' in run and "fail" in run
     blink = SH[SH.index("blink() {"):SH.index("run() {")]
     assert "sleep 1\n" in blink and 'kill -0 "$pid"' in blink
+
+
+def test_adding_mesmer_takes_the_install_lock():
+    """Codex review of the Mac installer (2026-11-16): --mesmer-only writes
+    the root's models too, so it takes the same lock as a full install."""
+    body = SH[SH.index("mesmer_only() {"):SH.index("usage()")]
+    assert 'exec 9>"$ROOT/.install.lock"' in body and "flock -n 9 ||" in body
+    assert body.index("flock -n 9") < body.index("ensure_mesmer")

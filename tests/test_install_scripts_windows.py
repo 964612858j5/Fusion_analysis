@@ -251,3 +251,11 @@ def test_the_spatialdata_environment():
     main = _fn("Main")
     assert main.index("EnsureEnvironment $mamba") < main.index("EnsureSpatialData $mamba") < main.index("EnsureCore")
     assert "BLOCK01_SPATIALDATA_PYTHON=$(Join-Path $script:SdPrefix 'python.exe')" in _fn("WriteRecord")
+
+
+def test_adding_mesmer_takes_the_install_lock():
+    """Codex review of the Mac installer (2026-11-16): -MesmerOnly writes the
+    root's models too, so it takes the same lock as a full install."""
+    body = _fn("MesmerOnlyInstall")
+    assert '[IO.File]::Open((Join-Path $script:Root ".install.lock")' in body and "is running" in body
+    assert body.index(".install.lock") < body.index("EnsureMesmer")

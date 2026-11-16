@@ -1,5 +1,5 @@
 # docs/v17_install_plan.md 1.2: the prebuilt viewer core. A tag
-# core-v<version> builds the Linux (manylinux_2_28) and Windows abi3 wheels
+# core-v<version> builds the Linux (manylinux_2_28), Windows and macOS arm64 abi3 wheels
 # from the committed Cargo.lock, tests each one INSTALLED in a clean venv,
 # and publishes both with SHA256SUMS as the GitHub Release core-v<version>.
 # workflow_dispatch is a dry run on any branch: build and test, never publish.
@@ -91,8 +91,40 @@ jobs:
           name: wheel-windows
           path: dist/*.whl
 
+  macos:
+    # the Mac installer (docs/v17_mac_install_plan.md, user decision M3,
+    # 2026-11-16): Apple silicon, macOS 13 or newer
+    needs: version
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+          targets: aarch64-apple-darwin
+      - name: Build the macOS arm64 abi3 wheel
+        run: |
+          python -m pip install "maturin>=1.15,<2"
+          maturin build --release --locked --target aarch64-apple-darwin -m native/fusion_viewer_core/Cargo.toml -o dist
+          ls dist
+      - name: Test the installed wheel in a clean venv
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/python -m pip install dist/*.whl numpy tifffile imagecodecs "numcodecs<0.16" pytest
+          /tmp/clean/bin/python -c "import fusion_viewer_core as c; v='${{ needs.version.outputs.version }}'; assert c.__version__ == v and c.CORE_API == 1, (c.__version__, c.CORE_API); print(c.__version__, c.CORE_API)"
+          cd tests && /tmp/clean/bin/python -m pytest -q -p no:cacheprovider --noconftest --rootdir=. test_v16_5_r1_ci.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-macos
+          path: dist/*.whl
+
   publish:
-    needs: [version, linux, windows]
+    needs: [version, linux, windows, macos]
     # only a pushed core-v* tag publishes; a manual run never does, even on a tag
     if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-24.04
@@ -110,9 +142,9 @@ jobs:
           V: ${{ needs.version.outputs.version }}
         run: |
           cd dist
-          [ "$(ls *.whl | wc -l)" -eq 2 ] || { echo "expected 2 wheels"; ls; exit 1; }
+          [ "$(ls *.whl | wc -l)" -eq 3 ] || { echo "expected 3 wheels"; ls; exit 1; }
           sha256sum *.whl > SHA256SUMS
           cat SHA256SUMS
           gh release create "core-v$V" *.whl SHA256SUMS --repo "$GITHUB_REPOSITORY" \
             --title "fusion_viewer_core $V" \
-            --notes "Prebuilt viewer core $V (CORE_API 1): Linux manylinux_2_28 x86_64 and Windows x86_64 abi3 wheels for CPython 3.10+. Installed by scripts/install_block01.sh only when the digest matches native/fusion_viewer_core/wheels.lock."
+            --notes "Prebuilt viewer core $V (CORE_API 1): Linux manylinux_2_28 x86_64, Windows x86_64 and macOS arm64 abi3 wheels for CPython 3.10+. Installed by scripts/install_block01.sh only when the digest matches native/fusion_viewer_core/wheels.lock."

@@ -60,3 +60,45 @@ jobs:
           name: wheel-deepcell-toolbox
           path: dist/*.whl
 
+  # the Mac installer (docs/v17_mac_install_plan.md, user decision M3,
+  # 2026-11-16): the same wheel for Apple silicon, macOS 13 or newer,
+  # committed in envs/macos/wheels/ with its digest in envs/macos/wheels.lock
+  macos:
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Build the wheel (against the environment's NumPy)
+        run: |
+          python -m pip install --upgrade "pip<27"
+          NP=$(grep -i '^numpy==' envs/ci/requirements-cpu.txt)
+          python -m pip install "$NP" "cython<3" wheel setuptools
+          python -m pip wheel --no-deps --no-build-isolation "DeepCell-Toolbox==$TOOLBOX" -w dist
+          ls dist
+      - name: Test the installed wheel in a clean venv
+        run: |
+          python -m venv /tmp/clean
+          PY=/tmp/clean/bin/python
+          NP=$(grep -i '^numpy==' envs/ci/requirements-cpu.txt)
+          SP=$(grep -i '^scipy==' envs/ci/requirements-cpu.txt)
+          SK=$(grep -i '^scikit-image==' envs/ci/requirements-cpu.txt)
+          CV=$(grep -i '^opencv-python-headless==' envs/ci/requirements-cpu.txt)
+          "$PY" -m pip install --no-deps dist/*.whl
+          "$PY" -m pip install "$NP" "$SP" "$SK" "$CV" "scikit-learn==1.5.2" pandas tqdm
+          "$PY" - <<'PY'
+          import numpy as np
+          from deepcell_toolbox.compute_overlap import compute_overlap      # the compiled part
+          from deepcell_toolbox.deep_watershed import deep_watershed
+          from deepcell_toolbox.processing import histogram_normalization, percentile_threshold
+          boxes = np.array([[0, 0, 10, 10]], dtype=np.float64)
+          assert compute_overlap(boxes, boxes)[0, 0] == 1.0
+          print("deepcell_toolbox wheel: imports and computes")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-deepcell-toolbox-macos
+          path: dist/*.whl

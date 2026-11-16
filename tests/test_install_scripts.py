@@ -207,7 +207,7 @@ def test_mesmer_comes_first_from_the_public_address_with_no_token(tmp_path):
     SHA-256 checked; no token is asked for; the licence is shown first."""
     r = _mesmer(tmp_path, working="https://deepcell-data.*")
     assert r.returncode == 0, r.stderr
-    assert "non-commercial" in r.stdout and "accepted with --accept-model-licences" in r.stdout
+    assert "NON-COMMERCIAL" in r.stdout and "accepted (--accept-model-licences)" in r.stdout
     assert ("TRY https://deepcell-data.s3-us-west-1.amazonaws.com/saved-models/"
             "MultiplexSegmentation-9.tar.gz") in r.stdout
     assert "VERIFY mesmer_multiplex_segmentation" in r.stdout and "MISSING=0" in r.stdout
@@ -231,7 +231,7 @@ def test_mesmer_from_a_local_archive(tmp_path):
     archive.write_bytes(b"x")
     r = _mesmer(tmp_path, extra=f'MESMER_ZIP="{archive}"\n')
     assert r.returncode == 0, r.stderr
-    assert "trying the archive" in r.stdout and "MISSING=0" in r.stdout
+    assert "from the archive" in r.stdout and "MISSING=0" in r.stdout
 
 
 def test_without_any_mesmer_source_the_install_goes_on_and_says_how_to_add_it(tmp_path):
@@ -265,8 +265,8 @@ ensure_models'''
     r = subprocess.run(argv, capture_output=True, text=True, input="no\n",
                        env=dict(os.environ, BLOCK01_INSTALL_SOURCED="1"), timeout=60)
     out = r.stdout + r.stderr
-    assert "non-commercial" in out and "FETCHED" not in out
-    assert "the licence was not accepted" in out
+    assert "NON-COMMERCIAL" in out and "FETCHED" not in out
+    assert "the licences were not accepted" in out
 
 
 def test_a_licence_needs_an_answer(tmp_path):
@@ -280,7 +280,7 @@ ensure_models'''
     assert r.returncode == 1 and "no terminal to ask" in r.stderr
     assert "BSD-3-Clause" in r.stdout and "FETCHED" not in r.stdout
     r = _bash(INSTALL, body.replace("ACCEPT_LICENCES=0", "ACCEPT_LICENCES=1"))
-    assert r.returncode == 0 and "FETCHED" in r.stdout and "accepted with --accept-model-licences" in r.stdout
+    assert r.returncode == 0 and "FETCHED" in r.stdout and "accepted (--accept-model-licences)" in r.stdout
 
 
 def test_models_from_a_folder_are_verified_and_copied_not_moved(tmp_path):
@@ -294,7 +294,7 @@ ORIGINAL_MODELS=(cellpose_cpsam)
 ensure_models'''
     r = _bash(INSTALL, body)
     assert r.returncode == 0, r.stderr
-    assert "copying the verified copy" in r.stdout
+    assert "copied from the verified copy" in r.stdout
     assert (root / "models" / "cellpose_cpsam" / "cpsam").read_bytes() == b"weights"
     assert (src / "cpsam").read_bytes() == b"weights"
 
@@ -336,8 +336,8 @@ def _engine(name, **kw):
 def test_the_self_test_needs_every_engine_ok_exit_0_and_a_device():
     noise = "a warning line"
     rc, out = _selftest([noise, _engine("cellpose", device="cuda:0"), _engine("stardist"), _engine("mesmer", device="gpu")])
-    assert rc == 0 and "cellpose: ok on cuda:0" in out and "mesmer: ok on gpu" in out
-    assert _selftest([_engine("cellpose"), _engine("stardist")])[1].endswith("failed: mesmer\n")
+    assert rc == 0 and "cellpose\tok\tcuda:0\n" in out and "mesmer\tok\tgpu\n" in out
+    assert _selftest([_engine("cellpose"), _engine("stardist")])[1].endswith("mesmer\tFAILED\t\n")
     assert _selftest([_engine("cellpose"), _engine("stardist", exit_code=1), _engine("mesmer")])[0] == 1
     assert _selftest([_engine("cellpose"), _engine("stardist", state="error"), _engine("mesmer")])[0] == 1
     assert _selftest([_engine("cellpose", device=""), _engine("stardist"), _engine("mesmer")])[0] == 1
@@ -407,7 +407,7 @@ def test_a_second_install_into_the_same_root_is_refused(tmp_path):
     tmp_path.joinpath(".install.lock").touch()
     with open(tmp_path / ".install.lock", "w") as held:
         fcntl.flock(held, fcntl.LOCK_EX)
-        body = f'''preflight() {{ :; }}
+        body = f'''preflight() {{ :; }}; models_to_license() {{ :; }}; STATE_DIR="{tmp_path}/state"
 ensure_micromamba() {{ echo GOT_PAST_THE_LOCK; }}
 main --root "{tmp_path}"'''
         r = _bash(INSTALL, body)
@@ -416,7 +416,7 @@ main --root "{tmp_path}"'''
 
 
 def test_install_caches_stay_under_the_root(tmp_path):
-    body = f'''preflight() {{ :; }}
+    body = f'''preflight() {{ :; }}; models_to_license() {{ :; }}; STATE_DIR="{tmp_path}/state"
 ensure_micromamba() {{ echo "PIP=$PIP_CACHE_DIR"; exit 0; }}
 main --root "{tmp_path}"'''
     assert f"PIP={tmp_path}/cache/pip" in _bash(INSTALL, body).stdout
@@ -649,12 +649,13 @@ def test_the_glibc_decides_the_qt_route(tmp_path, version, route):
     2.28) in an environment of their own; older is refused at the pre-check,
     not half-way through pip."""
     r = _preflight(tmp_path, 100, _LINUX % version, after='echo "ROUTE=$OLDER_QT $(env_prefix)"')
-    line = next(l for l in r.stdout.splitlines() if " glibc: " in l)   # "[install]   glibc:    2.31 ..."
-    assert line.split("glibc:", 1)[1].split()[0] == version, r.stdout
+    # the Computer line names the glibc; a note under it names an older Qt route
+    assert f"glibc {version}" in r.stdout or f"glibc: {version}" in r.stdout, r.stdout
+    line = next((l for l in r.stdout.splitlines() if "glibc: " in l), "")
     if route == "refused":
         assert "too old (2.28 or newer needed" in line and r.returncode == 1, r.stdout
         return
-    assert "too old" not in line and r.returncode == 0, r.stdout + r.stderr
+    assert "too old" not in r.stdout and r.returncode == 0, r.stdout + r.stderr
     if route == "6.9.3":
         assert "uses PySide6 6.9.3 (the last release built for this glibc)" in line
         assert f"ROUTE=1 {tmp_path}/envs/fusion_mesmer-qt69-abcdef12" in r.stdout
@@ -851,3 +852,105 @@ def test_the_missing_library_hint_names_epel_for_rhel(tmp_path):
     r = _bash(INSTALL, "check_system_libs", env={"PATH": f"{fake}:{os.environ['PATH']}"})
     assert r.returncode == 1 and "libxcb-cursor.so.0" in r.stdout
     assert "RHEL/Rocky: sudo dnf install" in r.stdout and "xcb-util-cursor, from EPEL" in r.stdout
+
+
+# ── the terminal output (backlog 23, user ruling 2026-11-15) ────────────────
+SH = INSTALL.read_text(encoding="utf-8")
+
+
+def test_tools_write_to_the_log_not_the_terminal(tmp_path):
+    """Every tool's own output (micromamba, pip, the helpers) goes to the
+    log; the terminal shows one line per step."""
+    log = tmp_path / "install.log"
+    r = _bash(INSTALL, f'LOG="{log}"; run sh -c "echo TOOL-OUT; echo TOOL-ERR >&2"; '
+                       'step_begin Thing; step_done "3 s"')
+    assert r.returncode == 0, r.stderr
+    assert "TOOL-" not in r.stdout + r.stderr
+    assert "TOOL-OUT" in log.read_text() and "TOOL-ERR" in log.read_text()
+    assert "[ok] Thing  3 s" in r.stdout                   # not a terminal: ASCII, no colour
+    assert "\033[" not in r.stdout and "✓" not in r.stdout
+    # a failure names the step, says what to do and shows the end of the log
+    r = _bash(INSTALL, f'LOG="{log}"; STEP="4. a step"; step_begin Thing; run sh -c "echo WHY-IT-BROKE; exit 3"')
+    assert r.returncode == 1
+    assert "[x] Thing" in r.stderr and "STOPPED at: 4. a step" in r.stderr and "what to do:" in r.stderr
+    assert "WHY-IT-BROKE" in r.stderr and f"log: {log}" in r.stderr
+
+
+def test_the_conda_part_is_conda_forge_only_and_pip_says_nothing_of_path():
+    creates = [l for l in SH.splitlines() if " create -y -q -p " in l]
+    assert len(creates) == 2 and all("--override-channels" in l for l in creates)
+    pips = [l for l in SH.splitlines() if "-m pip install" in l]
+    assert pips and all("--no-warn-script-location" in l for l in pips), pips
+
+
+def test_one_licence_card_for_every_model_to_install(tmp_path):
+    """One card, one answer, before anything is installed; a model already
+    there (or given with --models) is not on it; a model on the card is not
+    asked again."""
+    body = f'''ROOT="{tmp_path}"; ACCEPT_LICENCES=1
+echo "TODO=$(models_to_license | tr '\\n' ' ')"
+mkdir -p "$ROOT/models/cellpose_cpsam"; : > "$ROOT/models/cellpose_cpsam/cpsam"
+echo "TODO=$(models_to_license | tr '\\n' ' ')"
+confirm_licences $(models_to_license)
+echo AFTER; accept_licence mesmer_multiplex_segmentation; echo END'''
+    r = _bash(INSTALL, body)
+    assert r.returncode == 0, r.stderr
+    todo = [l for l in r.stdout.splitlines() if l.startswith("TODO=")]
+    assert todo == ["TODO=cellpose_cpsam stardist_2D_versatile_fluo mesmer_multiplex_segmentation ",
+                    "TODO=stardist_2D_versatile_fluo mesmer_multiplex_segmentation "]
+    assert r.stdout.count("Model licences") == 2                         # the card's title, the answer
+    card = r.stdout.split("AFTER")[0]
+    assert "StarDist" in card and "NON-COMMERCIAL" in card and "Cellpose-SAM" not in card
+    assert "accepted (--accept-model-licences)" in card
+    assert r.stdout.split("AFTER")[1].strip() == "END"                   # not asked again
+    assert "confirm_licences $(models_to_license)" in SH
+    assert SH.index("confirm_licences $(models_to_license)") < SH.index("    ensure_micromamba\n")
+
+
+def _fetch(tmp_path, codes, extra=""):
+    """`fetch` with curl replaced: it answers the exit codes in turn and
+    records its arguments; the waits are 0."""
+    body = f'''LOG="{tmp_path}/log"; FETCH_WAITS=(0 0 0)
+curl() {{ n=$(cat "{tmp_path}/n" 2>/dev/null || echo 0); echo $((n + 1)) > "{tmp_path}/n"
+         echo "ARGS $*" >> "{tmp_path}/args"; echo "curl: (99) its own words" >&2
+         codes=({" ".join(map(str, codes))}); rc=${{codes[$n]}}
+         [ "$rc" = 0 ] && echo data >> "${{10}}"; return "$rc"; }}
+{extra}
+fetch https://example.org/f "{tmp_path}/f.part" F && echo "RC=0" || echo "RC=$?"'''
+    r = _bash(INSTALL, body, cwd=tmp_path)
+    attempts = int((tmp_path / "n").read_text()) if (tmp_path / "n").exists() else 0
+    return r, attempts
+
+
+def test_downloads_retry_resume_and_keep_curl_quiet(tmp_path):
+    r, n = _fetch(tmp_path, [28, 56, 0])
+    assert "RC=0" in r.stdout and n == 3
+    assert "network problem (curl 28), retrying 2/4" in r.stdout
+    assert "network problem (curl 56), retrying 3/4" in r.stdout
+    assert "its own words" not in r.stdout + r.stderr                  # curl's words: the log only
+    assert "its own words" in (tmp_path / "log").read_text()
+    args = (tmp_path / "args").read_text().splitlines()
+    assert all("-C -" in a and "-sS" in a and "--retry 2" in a for a in args)   # resumed, silent
+    # an answer such as 404 / 403 is not retried; 4 network failures give up
+    for sub in ("a", "b"):
+        (tmp_path / sub).mkdir()
+    r, n = _fetch(tmp_path / "a", [22, 0])
+    assert "RC=22" in r.stdout and n == 1
+    r, n = _fetch(tmp_path / "b", [28, 28, 28, 28, 0])
+    assert "RC=28" in r.stdout and n == 4
+    # no range support (33): the part is dropped and fetched from 0
+    (tmp_path / "c").mkdir()
+    (tmp_path / "c" / "f.part").write_text("half")
+    r, n = _fetch(tmp_path / "c", [33, 0])
+    assert "RC=0" in r.stdout and n == 2 and (tmp_path / "c" / "f.part").read_text() == "data\n"
+    # no curl progress bar of its own anywhere
+    assert "--progress-bar" not in SH and '"-#"' not in SH and "progress_args" not in SH
+
+
+def test_the_self_test_is_a_table():
+    r = _bash(INSTALL, "selftest_table $'cellpose\\tok\\tcuda:0\\nstardist\\tok\\tgpu\\nmesmer\\tFAILED\\t'")
+    lines = [l.split() for l in r.stdout.splitlines()]
+    assert lines == [["Self-test", "GPU"], ["Cellpose", "ok"], ["StarDist", "ok"], ["Mesmer", "FAILED"]]
+    r = _bash(INSTALL, "selftest_table $'cellpose\\tok\\tcpu'")
+    assert r.stdout.split()[:2] == ["Self-test", "CPU"]
+    assert '"$PY" -m seg_runner.selftest' in SH and "printf '%s\\n' \"$out\"\n" not in SH   # no JSON on screen

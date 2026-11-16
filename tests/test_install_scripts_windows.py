@@ -117,13 +117,67 @@ def test_the_shipped_toolbox_wheel_is_the_one_the_lock_names():
 
 def test_model_downloads_show_their_progress():
     """Backlog 23 (2026-11-15): the 1.2 GB Cellpose model took minutes with
-    nothing on screen. Windows: curl.exe's bar (PowerShell's own progress is
-    off: it slows the download); Linux: curl's bar on a terminal."""
+    nothing on screen; then curl's own bar and retry warnings were noise (the
+    user's review). curl runs silent, its messages into the log; the progress
+    line is the installer's own, on a console only; up to 4 attempts, each
+    resuming the .part (-C -), only network failures retried, one line each."""
     fetch = _fn("Fetch")
-    assert "--progress-bar" in fetch and "Native {" in fetch
-    assert "Fetch $url" in _fn("Download") and "Fetch $url" in _fn("TryDownload")
-    assert 'progress_args() { if [ -t 2 ]; then echo "-#"; else echo "-sS"; fi; }' in SH
-    assert SH.count('"$(progress_args)"') == 2
+    assert '"-sS"' in fetch and "--progress-bar" not in fetch and '"--retry", "2"' in fetch
+    assert '"-C", "-"' in fetch and "$attempt -le 4" in fetch and "-RedirectStandardError $err" in fetch
+    assert 'Log "  curl: $_"' in fetch and 'Dim "    network problem (curl $code), retrying' in fetch
+    assert "Progress $name $file $size" in fetch
+    assert "if (-not $script:Live -or -not $name) { return }" in _fn("Progress")
+    assert "Fetch $url $tmp $name $size" in _fn("Download") and 'Fetch $url "$dest.part" $name' in _fn("TryDownload")
+    assert "ManifestSize $key" in _fn("FetchModel")
+    # Linux: the same rule (its own static tests cover the details)
+    assert "-C -" in SH
+
+
+def test_the_tools_print_into_the_log_not_on_screen():
+    """The user's review (2026-11-15): pip's PATH warnings, micromamba's
+    channel warning, the self-test's JSON and the internal details were noise.
+    Every tool's output goes to .block01\\logs\\install-<time>.log; the last
+    lines are shown only on failure."""
+    run = _fn("Run")
+    assert "Add-Content -LiteralPath $script:LogFile" in run and "2>&1" in run and "Native {" in run
+    assert "Write-Host" not in run
+    assert "install-$(Get-Date -Format 'yyyyMMdd-HHmmss').log" in _fn("StartLog")
+    fail = _fn("Fail")
+    assert "-Tail 20" in fail and "log: $($script:LogFile)" in fail
+    assert INSTALL.count('"--no-warn-script-location"') == INSTALL.count('"pip", "install"')
+    assert '"--override-channels", "-c", "conda-forge"' in _fn("EnsureEnvironment")
+    for name in ("EnsureLink", "EnsureToolbox", "ConvertStardist"):
+        assert "Say " not in _fn(name), name
+    self_test = _fn("SelftestEngines")
+    assert "Write-Host" not in self_test and 'Log "  $_"' in self_test
+    assert "SelftestTable $engines $gpu $cpu" in _fn("Selftest")
+
+
+def test_one_licence_card_before_the_long_steps():
+    """The user's review (2026-11-15): one card for every model about to be
+    installed, one answer, asked before the environment is built."""
+    main = _fn("Main")
+    assert main.index("LicenceCard") < main.index("EnsureMicromamba")
+    assert "NeedsInstall $_" in main and "-not $SkipModels" in main
+    card = _fn("LicenceCard")
+    assert "Accept all and install them? [y/N]" in card
+    assert '$answer -ne "y" -and $answer -ne "yes"' in card and "Fail" in card
+    assert "-AcceptModelLicences" in card and "IsInputRedirected" in card
+    assert "-ForegroundColor Yellow" in card                     # the non-commercial row
+    assert "if ($script:Accepted[$key]) { return }" in _fn("AcceptLicence")
+    assert "ConvertFrom-Json" in _fn("NeedsInstall")             # before Python exists
+    assert 'mesmer_multiplex_segmentation = @{ Size = "100 MB"; Text = "NON-COMMERCIAL' in INSTALL
+
+
+def test_symbols_only_where_they_render():
+    """Windows PowerShell's console may lack the glyphs; Windows Terminal has
+    them. The script itself stays ASCII (Windows PowerShell reads a file
+    without a BOM in the ANSI code page)."""
+    assert "$script:Fancy = $script:Live -and [bool]$env:WT_SESSION" in INSTALL
+    assert "[char]0x2713" in INSTALL                       # the glyphs made at run time
+    code = [l for l in INSTALL.splitlines() if not l.lstrip().startswith("#")]
+    bad = [l for l in code if any(ord(ch) > 127 for ch in l)]
+    assert not bad, bad
 
 
 def test_a_native_command_is_never_cut_short_by_select_first():

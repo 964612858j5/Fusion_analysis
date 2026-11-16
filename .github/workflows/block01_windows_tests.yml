@@ -53,7 +53,9 @@ jobs:
           exit 0          # the refusal's own exit 1 was the expected answer
       - name: The installer's console output
         if: always()
-        run: Get-ChildItem .block01\run -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "== $($_.Name)"; Get-Content $_.FullName -Tail 40 }
+        run: |
+          Get-ChildItem .block01\run -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "== $($_.Name)"; Get-Content $_.FullName -Tail 40 }
+          Get-ChildItem .block01\logs -Filter "install-*.log" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "== $($_.Name)"; Get-Content $_.FullName -Tail 80 }
 
   windows-report:
     runs-on: windows-latest

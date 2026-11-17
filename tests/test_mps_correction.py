@@ -342,3 +342,17 @@ def test_the_fusion_workers_follow_the_memory_rule_after_their_reserve(monkeypat
     monkeypatch.setattr(bp, "mem_available_bytes", lambda: None)
     assert w._unit_workers(100, 6, 50 << 20, reserve_bytes=reserve) == bp.choose_workers(
         os.cpu_count(), 100, None, per_tile_bytes=50 << 20)
+
+
+def test_off_a_mac_the_device_is_off_without_a_word(monkeypatch, capsys):
+    """Windows / Linux: no "[MPS] not used ..." line in the console (seen on
+    Windows, 2026-11-17), and torch is not imported for it."""
+    import sys
+    monkeypatch.delenv(M.ENV_SWITCH, raising=False)
+    monkeypatch.setattr(M, "_state", "unknown")
+    monkeypatch.setattr(M, "_error", "")
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert M.ensure_ready() is False
+    assert M.state() == "off"
+    out = capsys.readouterr()
+    assert "MPS" not in out.out + out.err

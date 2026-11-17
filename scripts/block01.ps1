@@ -79,5 +79,14 @@ if ($rec['BLOCK01_MESMER'] -eq "missing") {
 $log = Join-Path $logs ("block01-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".log")
 Write-Host "[block01] starting FusionFlux; its output also goes to $log"
 $ErrorActionPreference = "Continue"
-& $py -m block01.main @AppArgs 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log
+# The app writes UTF-8 (PYTHONIOENCODING) and PowerShell reads a program's
+# output in the console's encoding: GBK on a Chinese Windows garbled every
+# dash and ellipsis. Read it as UTF-8 for this run; the console gets its own back.
+$consoleEnc = $null
+try { $consoleEnc = [Console]::OutputEncoding; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
+try {
+    & $py -m block01.main @AppArgs 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log
+} finally {
+    if ($consoleEnc) { try { [Console]::OutputEncoding = $consoleEnc } catch { } }
+}
 exit $LASTEXITCODE

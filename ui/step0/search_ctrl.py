@@ -72,6 +72,9 @@ from ...utils.segmentation_config import (
 )
 from ...utils.mesmer_utils import parse_channel_list
 
+# how the Save names the backend a channel is computed on (compute_path)
+_BACKEND_WORDS = {"gpu": "the GPU (CUDA)", "mps": "the GPU (Apple MPS)", "cpu": "the CPU"}
+
 class SearchCtrlPanel(QWidget):
     """
     Step1's segmentation-method parameters (off the screen since block E,
@@ -1489,7 +1492,6 @@ class WsiCorrectionWorker(QThread):
 
                 for ch_name, method, param in channels:
                     progress_idx += 1
-                    print(f"[WsiCorrectionWorker] processing channel={ch_name} method={method}")
                     overlap = method_overlap(method, param)
                     # Block S0P: ONE backend for the whole channel, chosen
                     # here; a GPU failure part-way discards the channel and
@@ -1498,6 +1500,8 @@ class WsiCorrectionWorker(QThread):
                     path = compute_path(method)
                     # Block CG: ONE implementation for the whole channel too.
                     impl = compute_impl(method, path)
+                    print(f"[WsiCorrectionWorker] processing channel={ch_name} method={method} "
+                          f"on {_BACKEND_WORDS.get(path, path)}", flush=True)
                     while True:
                         # (the tiles follow the implementation: a channel
                         # recomputed with scipy goes back to 4096)

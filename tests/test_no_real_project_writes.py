@@ -34,7 +34,9 @@ from block01.utils.project_write_guard import RealProjectWriteRefused
 INSTALLED_AT_IMPORT = guard.is_installed()
 REAL_OUTPUT_DIR = guard.configured_output_dir()
 
-pytestmark = pytest.mark.skipif(
+#: `config.py` names no project by default (2026-11-17): these tests need one
+#: configured; the synthetic-project tests below run either way.
+needs_real = pytest.mark.skipif(
     not REAL_OUTPUT_DIR,
     reason="no real project configured, so there is nothing to protect")
 
@@ -55,7 +57,7 @@ def _listing(directory):
 
 #: What the real project looked like when this module was imported. Asserted
 #: unchanged at the end: this suite must leave no trace in it at all.
-REAL_LISTING_AT_IMPORT = _listing(REAL_OUTPUT_DIR)
+REAL_LISTING_AT_IMPORT = _listing(REAL_OUTPUT_DIR) if REAL_OUTPUT_DIR else {}
 
 
 @pytest.fixture
@@ -111,6 +113,7 @@ def test_the_guard_is_installed_before_any_test_module_is_imported():
     assert guard.is_installed()
 
 
+@needs_real
 def test_the_configured_output_dir_is_protected():
     roots = guard.real_project_roots()
     assert roots
@@ -125,6 +128,7 @@ def test_the_sandbox_and_tmp_path_are_not_protected(tmp_path):
     assert guard.under(pathlib.Path(guard.sandbox_dir()) / "x.json") is None
 
 
+@needs_real
 def test_the_raw_helpers_refuse_the_real_project():
     """The one bypass in the guard may not be pointed at real data.
 
@@ -239,7 +243,7 @@ def test_output_dir_is_redirected_everywhere_it_was_bound():
     from block01 import config
 
     sandbox = pathlib.Path(guard.sandbox_dir()).resolve()
-    real = pathlib.Path(REAL_OUTPUT_DIR).resolve()
+    real = pathlib.Path(REAL_OUTPUT_DIR).resolve() if REAL_OUTPUT_DIR else None
     assert pathlib.Path(config.OUTPUT_DIR).resolve() == sandbox
 
     late = importlib.import_module("block01.ui.main_window")
@@ -249,7 +253,7 @@ def test_output_dir_is_redirected_everywhere_it_was_bound():
         if not name.startswith("block01"):
             continue
         value = getattr(module, "OUTPUT_DIR", None)
-        if value:
+        if value and real is not None:
             assert pathlib.Path(str(value)).resolve() != real, name
 
 
@@ -300,6 +304,7 @@ def test_a_window_s_session_autosave_lands_in_the_redirect(tmp_path):
 
 # ── and the suite left no trace ───────────────────────────────────────
 
+@needs_real
 def test_this_module_left_the_real_project_exactly_as_it_found_it():
     """Runs last (alphabetically last is not a contract -- the listing is).
 

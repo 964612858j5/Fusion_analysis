@@ -2,14 +2,11 @@
 block01/config.py — User-editable configuration constants.
 """
 
-OME_TIFF_FILE = (
-    "/nvme0n1p1/2025.12.20_Final_17209_16_Slice4/Scan1/"
-    "2025.12.20_Final_17209_16_Slice4_Scan1.ome.tif"
-)
-OUTPUT_DIR = (
-    "/nvme0n1p1/2025.12.20_Final_17209_16_Slice4/Scan1/"
-    "pipeline_v2"
-)
+# No default slide and no default output folder: the GUI starts with both
+# fields empty and the user chooses them (the developer's old server paths
+# used to stand here and showed up in the GUI and the console).
+OME_TIFF_FILE = ""
+OUTPUT_DIR = ""
 
 CHANNEL_NAME_MAP    = {}   # {"OME raw name": "display name"}
 OVERVIEW_DOWNSAMPLE = 32

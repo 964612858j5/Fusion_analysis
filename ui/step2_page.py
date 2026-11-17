@@ -273,8 +273,9 @@ class Step2Page(QWidget):
         if self._step2_dir:
             os.makedirs(self._step2_dir, exist_ok=True)
             self._out_edit.setText(self._step2_dir)
-        print(f"[Step2] roi_id={self._roi_id}")
-        print(f"[Step2] output_base={self._step2_dir or self._out_edit.text().strip()}")
+        if self._roi_id:
+            print(f"[Step2] roi_id={self._roi_id}")
+            print(f"[Step2] output_base={self._step2_dir or self._out_edit.text().strip()}")
         # Block A6: a running run's record is drawn again when the page is
         # back on its context (or the older-run line shown when it is not).
         self._refresh_run_view()

@@ -139,6 +139,10 @@ def configured_output_dir():
     """
     if _state["roots"]:
         return str(_state["roots"][0])
+    if _state["installed"]:
+        # installed with nothing configured: config.OUTPUT_DIR now names the
+        # sandbox, which is not a real project
+        return ""
     try:
         from .. import config
     except Exception:

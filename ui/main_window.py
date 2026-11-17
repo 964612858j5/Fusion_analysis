@@ -1971,6 +1971,10 @@ class MainWindow(QMainWindow):
 
     @_perf("restore.log_step1_layout")
     def _log_step1_layout(self, where):
+        # A developer's layout probe: ~20 lines each time Step1 is laid out,
+        # the same lines over and over. Silent unless BLOCK01_LAYOUT_LOG=1.
+        if os.environ.get("BLOCK01_LAYOUT_LOG", "").strip() != "1":
+            return
         try:
             print(f"[Layout] {where} main window size={self.size().width()}x{self.size().height()}")
             print(f"[Layout] {where} main window minimumSize={self.minimumSize().width()}x{self.minimumSize().height()}")
@@ -4920,6 +4924,15 @@ class MainWindow(QMainWindow):
             return
         self._step1_session_timer.start(500)
 
+    def _say_step1_autosaved(self, where):
+        """Said once per place: Step1 autosaves on every change, and a dozen
+        identical "session autosaved" lines in a row told nobody anything."""
+        said = self.__dict__.setdefault("_step1_autosave_said", set())
+        if where in said:
+            return
+        said.add(where)
+        print("[Step1] session autosaved (later autosaves here are silent)")
+
     def _save_step1_session(self, failures=None):
         """Never raises (`_on_fusion_done` relies on it): a failure is
         reported and named in `failures` (a list, when given)."""
@@ -4951,7 +4964,7 @@ class MainWindow(QMainWindow):
                     draft["saved_at"] = old["saved_at"]      # nothing changed: the file stays as it is
                 sess = run_store.put_draft(sess, "step1", draft)
                 if run_store.save_session(roi, sess):
-                    print("[Step1] session autosaved")
+                    self._say_step1_autosaved(roi)
             except Exception as exc:                        # noqa: BLE001 -- never raises
                 error_hook.report(exc, "Step1 session not saved")
                 if failures is not None:
@@ -4963,7 +4976,7 @@ class MainWindow(QMainWindow):
             path = self._step1_session_path(out_dir)
             # atomic (review fixes §4): an autosave never truncates the session
             write_json_atomic(path, payload)
-            print("[Step1] session autosaved")
+            self._say_step1_autosaved(path)
         except Exception as exc:                            # noqa: BLE001 -- never raises
             error_hook.report(exc, "Step1 session not saved")
             if failures is not None:
@@ -11258,7 +11271,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Pre-segmentation result",
                                     f"The chosen result cannot be saved for Step2: {exc}.")
                 return
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        if OUTPUT_DIR:
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
         if self._corrected_zarr_mode == "roi_only" and not self._rois:
             QMessageBox.warning(
                 self, "ROI required",

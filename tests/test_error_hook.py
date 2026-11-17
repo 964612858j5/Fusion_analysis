@@ -162,3 +162,13 @@ def test_the_hook_never_raises(monkeypatch):
     monkeypatch.setattr(sys, "__excepthook__", lambda *a: seen.append(a[0]))
     eh.handle(ValueError, ValueError("x"), None, log=Broken())
     assert seen == [ValueError]
+
+
+def test_a_test_run_never_logs_into_the_users_errors_log():
+    """conftest points the log at the session sandbox: errors tests provoke
+    on purpose stay out of `~/.block01/logs/errors.log` (2026-11-14: 22
+    ProvenanceErrors from a Windows test run were found there)."""
+    from pathlib import Path
+    path = eh.log_path()
+    assert path != Path.home() / ".block01" / "logs" / "errors.log"
+    assert path.name == "errors.log"

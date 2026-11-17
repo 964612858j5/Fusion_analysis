@@ -559,7 +559,7 @@ class ImageZoomDialog(QtWidgets.QDialog):
         if t == QtCore.QEvent.Wheel:
             delta  = event.angleDelta().y()
             factor = 1.15 ** (delta / 120.0)
-            sp = self.gv.mapToScene(event.pos())
+            sp = self.gv.mapToScene(event.position().toPoint())
             ip = self.ii.mapFromScene(sp)
             cx, cy = ip.x(), ip.y()
             vr = self.vb.viewRange()

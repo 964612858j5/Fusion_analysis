@@ -4107,7 +4107,7 @@ class OverviewPanel(QWidget):
         if t == QtCore.QEvent.Wheel:
             delta  = event.angleDelta().y()
             factor = 1.15 ** (delta / 120.0)
-            sp = self.gview.mapToScene(event.pos())
+            sp = self.gview.mapToScene(event.position().toPoint())
             ip = self.vb.mapSceneToView(sp)     # overview pixels (see _ov_pos)
             cx, cy = ip.x(), ip.y()
             vr = self.vb.viewRange()

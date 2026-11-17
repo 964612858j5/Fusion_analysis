@@ -120,6 +120,13 @@ def pytest_configure(config):
     The patches are process-wide and stay until the process is gone.
     """
     _guard.install(_SANDBOX)
+    # Errors a test provokes on purpose are logged into the sandbox, not the
+    # user's `~/.block01/logs/errors.log` (a Windows test run left 22
+    # ProvenanceErrors there, 2026-11-14). Process-wide for the same reason.
+    import pathlib
+    from block01.utils import error_hook
+    sandbox_log = pathlib.Path(_SANDBOX) / ".block01" / "logs" / "errors.log"
+    error_hook.log_path = lambda: sandbox_log
 
 
 # ── Block A9 §38: GPU picture gates check the NEAREST picture ────────────────

@@ -95,6 +95,11 @@ def ensure_ready():
         return False
     if _state != "unknown":
         return _state == "ready"
+    if sys.platform != "darwin":
+        # MPS is the Mac's: elsewhere it is off without a word (and without
+        # importing torch); a Windows or Linux console has nothing to report.
+        _state, _error = "off", "not a Mac"
+        return False
     with _READY_LOCK:
         if _state != "unknown":
             return _state == "ready"

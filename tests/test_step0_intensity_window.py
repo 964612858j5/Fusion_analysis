@@ -19,6 +19,7 @@ with the background-correction module in one process.
 """
 
 import os
+import sys
 
 import numpy as np
 import pytest
@@ -242,8 +243,10 @@ def test_it_is_a_separate_top_level_window_not_the_navigator(app):
     assert win.parent() is page, "orphaned: it must be owned by the page"
     flags = win.windowFlags()
     for hint in (Qt.WindowMinimizeButtonHint, Qt.WindowMaximizeButtonHint,
-                 Qt.WindowCloseButtonHint, Qt.WindowStaysOnTopHint):
+                 Qt.WindowCloseButtonHint):
         assert flags & hint, hint
+    # on top of the main window: by the flag, or on Windows by ownership
+    assert bool(flags & Qt.WindowStaysOnTopHint) == (sys.platform != "win32")
     # It is NOT inside the Tissue Navigator (which stays navigation-only).
     nav = page._ensure_tissue_navigator()
     assert win.parentWidget() is not nav

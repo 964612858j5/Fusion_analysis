@@ -26,6 +26,7 @@ Synthetic projects in the test's temporary directory only.
 
 import importlib.util
 import os
+import sys
 
 import pytest
 
@@ -404,7 +405,7 @@ def test_the_results_window_can_be_minimized_and_follows_step3(app, tmp_path, mo
     try:
         flags = win.windowFlags()
         assert flags & Qt.WindowMinimizeButtonHint and (flags & Qt.WindowType_Mask) == Qt.Window
-        assert flags & Qt.WindowStaysOnTopHint
+        assert bool(flags & Qt.WindowStaysOnTopHint) == (sys.platform != "win32")   # owned on Windows
         sv._enter(rig, 3)
         w._step3_show_results()
         assert win.isVisible()

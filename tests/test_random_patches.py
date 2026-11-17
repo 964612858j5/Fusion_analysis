@@ -133,6 +133,8 @@ def test_a_shortfall_is_reported_not_made_up(mask):
 # ── the strip's entry ───────────────────────────────────────────────────────
 pytest.importorskip("block01.qt")
 from block01.qt import QtWidgets  # noqa: E402
+from block01.qt.QtCore import Qt  # noqa: E402
+from block01.ui.widgets.away_hider import floating_on_top_hint  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -147,16 +149,16 @@ def test_random_is_there_with_no_patch_and_asks_with_the_dialog_values(app, monk
     asked = []
     panel.random_requested.connect(lambda n, h, w: asked.append((n, h, w)))
 
-    def _accept(dlg):
-        dlg.count.setValue(3)
-        dlg.width_px.setValue(640)
-        dlg.height_px.setValue(384)
-        return QtWidgets.QDialog.Accepted
-    monkeypatch.setattr(pp.RandomPatchesDialog, "exec", _accept)
     try:
         assert panel._btn_random.isEnabled()
         panel._btn_random.click()
+        dlg = panel._random_dialog
+        dlg.count.setValue(3)
+        dlg.width_px.setValue(640)
+        dlg.height_px.setValue(384)
+        dlg.accept()
         assert asked == [(3, 384, 640)]
+        assert panel._random_dialog is None
         panel.set_random_busy(True)
         assert not panel._btn_random.isEnabled()
         panel.set_random_busy(False)
@@ -279,11 +281,33 @@ def test_random_patches_join_the_patch_list_everywhere(app, tmp_path):
         w.close()
 
 
+def test_the_random_dialog_leaves_the_floating_windows_usable(app):
+    """The Tissue Navigator and the Intensity window stay on top: a modal
+    Random dialog opened behind them locked the whole GUI (Windows,
+    2026-11-17). It is not modal, stays above them, and is opened once."""
+    from block01.ui.step1_presegmentation import patches_panel as pp
+    panel = pp.PatchesPanel()
+    panel.set_patches([])
+    try:
+        panel._btn_random.click()
+        dlg = panel._random_dialog
+        assert dlg.isVisible() and not dlg.isModal()
+        assert dlg.windowModality() == Qt.NonModal
+        assert dlg.windowFlags() & floating_on_top_hint() == floating_on_top_hint()
+        assert QtWidgets.QApplication.activeModalWidget() is None
+        panel._btn_random.click()                        # a second click: the same dialog
+        assert panel._random_dialog is dlg
+        dlg.reject()
+        assert panel._random_dialog is None
+    finally:
+        panel.close()
+
+
 def test_a_shortfall_is_announced(app, tmp_path, monkeypatch):
     w = _window(app, tmp_path)
     told = []
-    monkeypatch.setattr(QtWidgets.QMessageBox, "information",
-                        staticmethod(lambda *a, **k: told.append(a[2])))
+    monkeypatch.setattr(type(w), "_random_patches_notice",
+                        lambda self, text, warning=False: told.append(text))
     try:
         w._on_random_patches_requested(40, 1024, 1024)
         _finish_job(w)

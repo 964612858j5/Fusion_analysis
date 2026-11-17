@@ -144,3 +144,17 @@ def test_a_window_being_dragged_is_not_hidden(rig):
     hider._step_aside()
     assert not win.isVisible() and hider.hidden_by_us(win)
     _back(hider, state)
+
+
+def test_on_windows_the_floating_windows_are_owned_not_always_on_top(monkeypatch):
+    """Windows, 2026-11-17: an always-on-top Tissue Navigator covered every
+    dialog of the main window and a modal one locked the GUI. There the
+    owner relation keeps it above the main window; elsewhere the flag."""
+    import sys
+    from block01.ui.widgets import away_hider as ah
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert not ah.floating_on_top_hint() & Qt.WindowStaysOnTopHint
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert ah.floating_on_top_hint() == Qt.WindowStaysOnTopHint
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert ah.floating_on_top_hint() == Qt.WindowStaysOnTopHint

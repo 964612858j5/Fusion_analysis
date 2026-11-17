@@ -60,7 +60,7 @@ from ..workers.display_seed_worker import (
     DisplaySeedWorker, LowresReadWorker,
 )
 from ..workers.tissue_compose_worker import TissueComposeWorker
-from .widgets.away_hider import hide_when_away
+from .widgets.away_hider import floating_on_top_hint, hide_when_away
 from .widgets.tissue_navigator_popup import TissueNavigatorPopup
 
 # The frame clock. 33 ms is ~30 FPS and is the interval the Step1 patch
@@ -2562,7 +2562,7 @@ class Block01DisplayServices(QObject):
             | Qt.WindowMinimizeButtonHint
             | Qt.WindowMaximizeButtonHint
             | Qt.WindowCloseButtonHint
-            | Qt.WindowStaysOnTopHint,
+            | floating_on_top_hint(),
         )
         win.setWindowTitle("Intensity")
         hide_when_away(win)                        # on top: steps aside for other programs

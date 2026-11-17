@@ -22,6 +22,7 @@ from ...qt import QtWidgets
 from ...qt.QtCore import QPoint, QRect, QSize, Qt, Signal
 
 from ..theme import dialogs as theme_dialogs, widgets as theme_widgets
+from ..widgets.away_hider import floating_on_top_hint, hide_when_away
 from ..step0.roi_context_model import patch_color, patch_id, patch_name
 
 TILE_H = 24
@@ -362,10 +363,31 @@ class PatchesPanel(QtWidgets.QWidget):
             self.delete_selected_requested.emit(list(ids))
 
     def _ask_random(self):
+        """Not modal, and above the floating windows: the Tissue Navigator and
+        the Intensity window stay on top, so a modal dialog opened behind
+        them locked the whole GUI (Windows, 2026-11-17). They stay usable
+        while this is open; one dialog at a time."""
+        dlg = self.__dict__.get("_random_dialog")
+        if dlg is not None:
+            dlg.raise_()
+            dlg.activateWindow()
+            return
         dlg = RandomPatchesDialog(self)
-        if dlg.exec() == QtWidgets.QDialog.Accepted:
-            n, h, w = dlg.values()
-            self.random_requested.emit(n, h, w)
+        dlg.setWindowModality(Qt.NonModal)
+        if floating_on_top_hint():
+            dlg.setWindowFlags(dlg.windowFlags() | floating_on_top_hint())
+            hide_when_away(dlg)                  # on top: steps aside for other programs
+        dlg.accepted.connect(lambda: self.random_requested.emit(*dlg.values()))
+        dlg.finished.connect(lambda _result: self._random_dialog_closed(dlg))
+        self._random_dialog = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _random_dialog_closed(self, dlg):
+        if self.__dict__.get("_random_dialog") is dlg:
+            self._random_dialog = None
+        dlg.deleteLater()
 
     def _ask_rename(self, pid):
         tile = next((t for t in self._tiles if t.pid == pid), None)

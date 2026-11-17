@@ -31,6 +31,7 @@ from .step1_presegmentation.mask_layers import PALETTE
 from .step1_presegmentation.method_blocks import block_frame_qss
 from .step3_label_binding import CELL, DEFAULT_STYLES, KINDS, NUCLEUS
 from .step3_mask_bar import ElidedLabel, SwatchButton
+from .widgets.away_hider import floating_on_top_hint
 
 TICK_LABELS = {CELL: "Cells", NUCLEUS: "Nuclei"}
 NO_RESULTS_TEXT = "No segmentation results for this slide — run Step2"
@@ -165,7 +166,7 @@ class Step3ResultsWindow(QtWidgets.QWidget):
         # the parent alone would let the main window cover it. Hidden off
         # Step3 (main window `_step3_follow_page`).
         super().__init__(parent, Qt.Window | Qt.WindowMinimizeButtonHint
-                         | Qt.WindowCloseButtonHint | Qt.WindowStaysOnTopHint)
+                         | Qt.WindowCloseButtonHint | floating_on_top_hint())
         self.setWindowTitle("Segmentation results")
         # the window's own background only: a bare QWidget rule here reached
         # every button inside and took away the theme's hover (plan §10)

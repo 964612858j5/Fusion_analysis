@@ -127,6 +127,12 @@ def pytest_configure(config):
     from block01.utils import error_hook
     sandbox_log = pathlib.Path(_SANDBOX) / ".block01" / "logs" / "errors.log"
     error_hook.log_path = lambda: sandbox_log
+    # `config.py` names no slide (2026-11-17). Pages built on a synthetic
+    # loader take their dataset identity from that default, which used to be
+    # a (never present) server path; a path in the sandbox, never written,
+    # stands in for it. Set before any page module binds it.
+    from block01 import config
+    config.OME_TIFF_FILE = str(pathlib.Path(_SANDBOX) / "synthetic-slide.ome.tif")
 
 
 # ── Block A9 §38: GPU picture gates check the NEAREST picture ────────────────

@@ -76,7 +76,7 @@ from .block01_display import (
     _bring_to_front,
 )
 from .step0.config_panel import ConfigPanel
-from .widgets.away_hider import hide_when_away
+from .widgets.away_hider import floating_on_top_hint, hide_when_away
 from .step_frame import FRAME_TAB_QSS, StepFrame, StepFrameMetrics, free_tab_bar
 from . import step_frame, theme
 from .theme import widgets as theme_widgets
@@ -7848,7 +7848,7 @@ class MainWindow(QMainWindow):
     def _on_random_patches_requested(self, count, height, width):
         request, why = self._random_patches_request(count, height, width)
         if request is None:
-            QMessageBox.information(self, "Random patches", why)
+            self._random_patches_notice(why)
             return
         if self._random_patch_job.start(request):
             self._random_patch_in_roi = bool(request["region"])
@@ -7856,6 +7856,20 @@ class MainWindow(QMainWindow):
             self._preseg_patches.set_random_busy(True)
             print(f"[Step1] random patches: {count} x {height}x{width}px requested "
                   f"({'selected TMA cores' if request.get('cores') is not None else 'ROI polygon' if request['polygon'] else 'ROI bbox' if request['region'] else 'whole slide'})")
+
+    def _random_patches_notice(self, text, warning=False):
+        """A Random patches message that neither hides behind nor locks the
+        Tissue Navigator / Intensity windows (both stay on top)."""
+        box = QMessageBox(QMessageBox.Warning if warning else QMessageBox.Information,
+                          "Random patches", text, QMessageBox.Ok, self)
+        box.setWindowModality(Qt.NonModal)
+        if floating_on_top_hint():
+            box.setWindowFlags(box.windowFlags() | floating_on_top_hint())
+            hide_when_away(box)                  # on top: steps aside for other programs
+        box.setAttribute(Qt.WA_DeleteOnClose)
+        box.show()
+        box.raise_()
+        return box
 
     def _on_random_patches_done(self, answer):
         self._preseg_patches.set_random_busy(False)
@@ -7868,8 +7882,8 @@ class MainWindow(QMainWindow):
             return
         if answer.get("error"):
             print(f"[Step1] random patches failed:\n{answer['error']}")
-            QMessageBox.warning(self, "Random patches",
-                                "Random patches could not be generated; see the terminal.")
+            self._random_patches_notice("Random patches could not be generated; see the terminal.",
+                                        warning=True)
             return
         gen = answer["generation"]
         # The generation record goes to the terminal (user ruling, 2026-09-24).
@@ -7880,8 +7894,7 @@ class MainWindow(QMainWindow):
             where = ("inside the selected cores" if getattr(self, "_random_patch_in_cores", False) else
                      "inside the ROI" if getattr(self, "_random_patch_in_roi", False)
                      else "in the tissue")
-            QMessageBox.information(
-                self, "Random patches",
+            self._random_patches_notice(
                 f"Only {len(added)} of {gen.requested} patches could be placed {where} "
                 f"with at most 40% blank and no overlap. The rules were not loosened.")
 

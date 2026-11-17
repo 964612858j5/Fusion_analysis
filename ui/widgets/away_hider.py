@@ -24,6 +24,7 @@ again when the drag ended put the window back where the drag started
 moved within the last `MOVING_MS` is being dragged; the check waits again.
 """
 
+import sys
 import time
 
 from ...qt import QtCore, QtWidgets
@@ -135,6 +136,19 @@ def _hider():
         return None
     made = app.findChild(_AwayHider)
     return made if made is not None else _AwayHider(app)
+
+
+def floating_on_top_hint():
+    """The flag Block01's floating windows (Tissue Preview, Intensity,
+    Step3's results) are kept above the main window with.
+
+    Windows: none. A top-level window with a parent is OWNED by it there and
+    always stays above it, while a dialog opened later comes above both. With
+    the always-on-top flag every dialog of the main window -- a message, a
+    question, a file chooser -- opened BEHIND the floating window, and a
+    modal one then locked the whole GUI (2026-11-17). Elsewhere the flag
+    stays: X11 gives a plain Qt.Window no transient-for."""
+    return Qt.WindowType(0) if sys.platform == "win32" else Qt.WindowStaysOnTopHint
 
 
 def hide_when_away(win, allowed=None):

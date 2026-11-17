@@ -31,6 +31,7 @@ from ...qt import QtCore, QtWidgets
 from ...qt.QtCore import Qt
 
 from ..step0.overview_panel import OverviewPanel
+from .away_hider import floating_on_top_hint
 
 # Only this coordinate space is accepted — same tag the viewer emits. A rect in
 # any other space (e.g. a future global WSI space) is an explicit error here, not
@@ -57,7 +58,7 @@ class TissueNavigatorPopup(QtWidgets.QWidget):
             | Qt.WindowMinimizeButtonHint
             | Qt.WindowMaximizeButtonHint
             | Qt.WindowCloseButtonHint
-            | Qt.WindowStaysOnTopHint,
+            | floating_on_top_hint(),
         )
         self.setWindowTitle("Tissue Preview / ROI Navigator")
         self.setMinimumWidth(280)

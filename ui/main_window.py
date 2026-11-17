@@ -573,7 +573,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CODEX Pipeline  |  Fusion + Segmentation")
+        self.setWindowTitle("FusionFlux  |  Fusion + Segmentation")
         self.resize(1400, 900)
         self.setMinimumSize(900, 650)
 

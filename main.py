@@ -40,8 +40,12 @@ def main():
     # Block A9 §40: swaps that do not hold the GUI thread for the refresh
     from .ui.gpu_warmup import configure_surface_format
     configure_surface_format()
+    # FusionFlux's name and logo, not python's, in the taskbar / Dock
+    from .ui import app_identity
+    app_identity.before_application()
     from .utils import perf_dispatch
     app = perf_dispatch.make_application(sys.argv)
+    app_identity.apply(app)
     app.setStyle("Fusion")
     # An unexpected error is logged and said, not the end of the program
     # (docs/v17_error_guard_plan.md §1); before any worker starts.

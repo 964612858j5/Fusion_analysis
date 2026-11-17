@@ -58,7 +58,19 @@ main() {
     if [ "${1:-}" = "--desktop" ]; then write_desktop_entry; shift; fi
     export PYTHONPATH="$STATE_DIR/pkg"
     cd "$STATE_DIR/run"
-    exec "$BLOCK01_PREFIX/bin/python" -m block01.main "$@"
+    exec "$(python_named_fusionflux)" -m block01.main "$@"
+}
+
+# python_named_fusionflux -> the environment's Python; on a Mac through a
+# link called FusionFlux, since the Dock names a process after its file
+# (otherwise it says "python")
+python_named_fusionflux() {
+    local py="$BLOCK01_PREFIX/bin/python" link="$STATE_DIR/bin/FusionFlux"
+    if [ "$(uname -s)" = Darwin ] && mkdir -p "$STATE_DIR/bin" && ln -sfn "$py" "$link" 2>/dev/null; then
+        echo "$link"
+    else
+        echo "$py"
+    fi
 }
 
 if [ -z "${BLOCK01_LAUNCH_SOURCED:-}" ]; then

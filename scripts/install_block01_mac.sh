@@ -907,7 +907,8 @@ write_app() {
         warn "$APP_DIR exists and is not ours; it is left untouched (start with $REPO/scripts/block01)"
         return
     fi
-    mkdir -p "$APP_DIR/Contents/MacOS"
+    mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+    cp -f "$REPO/ui/icons/fusionflux.icns" "$APP_DIR/Contents/Resources/fusionflux.icns"
     cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -918,6 +919,7 @@ write_app() {
   <key>CFBundleIdentifier</key><string>org.block01.fusionflux</string>
   <key>CFBundleExecutable</key><string>FusionFlux</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>fusionflux</string>
   <key>CFBundleVersion</key><string>$(core_version)</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>

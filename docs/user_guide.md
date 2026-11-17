@@ -108,7 +108,7 @@ can do it for you with `docs/install_with_an_ai_agent.md`.
 * **Mac**: open **FusionFlux** in `~/Applications` or Launchpad (or run `scripts/block01`).
 * **Linux**: `scripts/block01`.
 
-On success, a **dark-themed window** pops up titled `CODEX Pipeline | Fusion + Segmentation`, defaulting to Step 0.
+On success, a **dark-themed window** pops up titled `FusionFlux | Fusion + Segmentation`, defaulting to Step 0.
 
 <!-- image placeholder: images/02_main_window_on_launch.png — a screenshot of the whole window right after opening, sitting on Step 0 -->
 

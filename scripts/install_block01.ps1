@@ -1032,6 +1032,7 @@ function WriteShortcut {
     $s.TargetPath = $target
     $s.WorkingDirectory = $Repo
     $s.Description = "FusionFlux (Block01)"
+    $s.IconLocation = "$(Join-Path $Repo 'ui\icons\fusionflux.ico'),0"
     $s.Save()
     Log "desktop shortcut: $lnk"
     Done "Desktop shortcut" "FusionFlux"

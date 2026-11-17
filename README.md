@@ -111,7 +111,7 @@ later with `scripts\install_block01.ps1 -MesmerOnly -MesmerZip FILE` (Linux:
 Installer details and the manual steps: [`envs/fusion_mesmer/README.md`](envs/fusion_mesmer/README.md).
 Installing with a coding agent: [`docs/install_with_an_ai_agent.md`](docs/install_with_an_ai_agent.md).
 
-The application opens on Step 0 (`FusionFlux | Fusion + Segmentation`); proceed Step 0 → 4 in the UI.
+The application opens on Step 0 (`FusionFlux`); proceed Step 0 → 4 in the UI.
 Default input/output paths can be preset in [`config.py`](config.py) (`OME_TIFF_FILE`, `OUTPUT_DIR`).
 
 ---

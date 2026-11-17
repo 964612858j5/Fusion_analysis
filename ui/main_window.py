@@ -573,7 +573,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FusionFlux  |  Fusion + Segmentation")
+        self.setWindowTitle("FusionFlux")
         self.resize(1400, 900)
         self.setMinimumSize(900, 650)
 

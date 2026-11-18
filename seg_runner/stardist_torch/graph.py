@@ -126,10 +126,10 @@ def forward(params, x):
     fails here instead of silently running half a network.
 
     Memory (plan v0.3 §2.5): the same operations as the plain graph, arranged
-    so fewer full-size tensors are alive at once -- the zero padding inside
-    the convolution instead of a padded copy, ReLU in place, a skip released
-    once it is concatenated, and the two full-resolution convolutions run in
-    row strips (an exact halo of `FULLRES_HALO` rows) pooled one by one."""
+    so fewer full-size tensors are alive at once -- ReLU in place, a skip
+    released once it is concatenated, and the two full-resolution
+    convolutions run in row strips (an exact halo of `FULLRES_HALO` rows)
+    pooled one by one."""
     if x.ndim != 4 or x.shape[1] != N_CHANNEL_IN:
         raise ValueError(f"expected (N, {N_CHANNEL_IN}, H, W), got {tuple(x.shape)}")
     if x.dtype != torch.float32:
@@ -138,7 +138,13 @@ def forward(params, x):
     def conv(name, h, kernel):
         w = params[f"{name}.weight"]
         b = params[f"{name}.bias"]
-        return F.conv2d(h, w, b, padding=(kernel[0] // 2, kernel[1] // 2))
+        if kernel[0] == 3:
+            # the explicit padded copy, as the plain graph: padding inside
+            # F.conv2d is the same arithmetic but picks other kernels -- not
+            # bit-identical on CUDA (laptop acceptance of b37de93). In the
+            # full-resolution layers the copy is only a strip's.
+            h = F.pad(h, (1, 1, 1, 1))
+        return F.conv2d(h, w, b)
 
     def block(name, h, kernel=KERNEL_SIZE):
         return F.relu_(conv(name, h, kernel))

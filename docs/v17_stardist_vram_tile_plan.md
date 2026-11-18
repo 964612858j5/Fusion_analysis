@@ -89,7 +89,7 @@ def stardist_cap_px(method, vram_gib, use_gpu) -> int:
 ### 2.5 A：省显存的网络写法（`seg_runner/stardist_torch/graph.py`）
 
 运算和原来完全一样，只是同一时刻在显存里的大张量少了：
-- 3×3 卷积的补零放进 `F.conv2d(padding=1)`，不再用 `F.pad` 另拷贝一份；
+- 3×3 卷积仍先 `F.pad` 再卷积（b37de93 曾改成 `F.conv2d(padding=1)`，数学上相同，但笔记本验收发现 CUDA 和 Windows CPU 上选了别的内核，不逐位相同，已改回）。全分辨率两层的补边拷贝只有一条那么大；
 - ReLU 原地计算（`F.relu_`）；
 - U-Net 的 skip 用完就释放（`skips.pop()`）；
 - 两层全分辨率卷积（`conv2d_1`、`conv2d_2`）按行分条计算，每条在图像内部上下各多读 2 行（两层 3×3 卷积正好需要 2 行），算完马上做 2×2 池化，只保留池化后的结果。
@@ -97,7 +97,7 @@ def stardist_cap_px(method, vram_gib, use_gpu) -> int:
   - 不能在末尾留下只有十几行的窄条：Mac 实测，MPS 对 18 行高的窄条会选别的内核，最后一位不同。
   - 原来的写法保留为 `graph.forward_reference`，产品不调用它，只给测试和 CUDA 实测脚本做对照。
 
-峰值估计（codex 与 Fable 的推算）：从约 388 B/px 降到约 165–200 B/px（瓶颈移到 `features` 层和输出头）。
+峰值估计（codex 与 Fable 的推算）：从约 388 B/px 降到约 165–200 B/px（瓶颈移到 `features` 层和输出头）。笔记本实测 b37de93（隐式补边）为 162.5 B/px；改回 `F.pad` 后估计约 195 B/px（`features` 的输入、补边副本和 128 通道输出同时存在），待复测。
 
 逐位相同的验证：
 - Mac：CPU 和 MPS 上 30 种尺寸（含真实权重、真实 DAPI）全部 `torch.equal`。
@@ -105,9 +105,10 @@ def stardist_cap_px(method, vram_gib, use_gpu) -> int:
 
 如果 CUDA 上不逐位相同，要先停下，由用户裁定：是只差浮点舍入，还是 `BEHAVIOR_VERSION["stardist"]` 要加 1（`seg_runner/engines.py:87`；Mesmer 改用 torch 时就因为舍入差异加过 1）。逐位相同则 identity 不变，Step1 的结果照常可以交给 Step2。
 
-### 2.6 C：hybrid 在 StarDist 之前释放 Cellpose 的缓存（`seg_runner/engines.py`）
+### 2.6 C：每次 StarDist 之前释放缓存（`seg_runner/engines.py`）
 
-- hybrid 跑完 Cellpose、开始 StarDist 之前，调用一次 `torch.cuda.empty_cache()`，只在 CUDA 已经初始化时调用。
+- 每次调用 StarDist 之前（在 CUDA 上），调用一次 `torch.cuda.empty_cache()`，只在 CUDA 已经初始化时调用。hybrid 的 Cellpose 用完的缓存也在这时释放。
+- 用户裁定 2026-11-18 把它从"只在 hybrid"扩展到所有 StarDist 调用。原因：笔记本验收 b37de93 时，StarDist 单独运行的预留显存到了 6.59 GiB，超过 6 GiB 物理显存（溢出到共享内存），实际分配只有约 2.4 GiB；做了释放的 hybrid 只有 3.5–3.7 GiB。
 - 它只把 torch 缓存着、已经不用的显存还给驱动，好让 cuDNN 为 StarDist 申请工作区（hybrid 那次 "unable to find an engine" 报错很可能就是这里不够）。
 - 活着的张量和权重都不动，结果不变。
 

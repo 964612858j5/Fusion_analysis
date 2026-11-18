@@ -376,6 +376,10 @@ class StardistEngine:
         cuda = str(self._model.keras_model.device).startswith("cuda")
         if cuda:
             import torch
+            # the cache other calls left (tiles of other sizes, the hybrid's
+            # Cellpose) back to the driver first: on a 6 GiB card it had
+            # grown past the card into shared memory (plan v0.3 §2.6)
+            release_cuda_cache()
             torch.cuda.reset_peak_memory_stats(self._model.keras_model.device)
         started = time.perf_counter()
         labels, _ = self._model.predict_instances(x, **kwargs)
@@ -401,9 +405,10 @@ def _stardist_diagnostic(network, shape, total_s, cuda):
 
 def release_cuda_cache():
     """Hand the CUDA memory torch keeps cached but no longer uses back to the
-    driver (plan v0.3 §2.6): between the hybrid's Cellpose and StarDist parts,
-    so cuDNN's own workspace for StarDist can be had. Live tensors and the
-    weights stay; results are unchanged. A no-op without CUDA."""
+    driver (plan v0.3 §2.6): before every StarDist call -- after the hybrid's
+    Cellpose part, and after tiles of other sizes -- so StarDist and cuDNN's
+    workspace fit the card. Live tensors and the weights stay; results are
+    unchanged. A no-op without CUDA."""
     torch = sys.modules.get("torch")
     if torch is not None and torch.cuda.is_available() and torch.cuda.is_initialized():
         torch.cuda.empty_cache()
@@ -588,7 +593,7 @@ def run(engine_obj, method, image, params):
         # nuclei-DAPI on the input's last channel
         image = np.asarray(image)
         result["cell"] = engine_obj.cellpose.predict(image, params)
-        release_cuda_cache()              # Cellpose's spent cache, before StarDist (plan v0.3 §2.6)
+        # (StarDist's predict hands Cellpose's spent cache back first, §2.6)
         result["nucleus"] = engine_obj.stardist.predict(
             np.ascontiguousarray(image[..., -1]), params)
     elif method in CELL_AND_NUCLEUS_METHODS:

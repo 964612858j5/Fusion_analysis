@@ -9,7 +9,8 @@ start-up, so a test without the application sheet sees the same sizes.
 
 Roles (closed set):
   panel   THE in-panel button: neutral grey (user ruling: option A)
-  run     the page's run action, green (#22AA55) -- the only green
+  run     the page's run action: Step0 Save / Load's inverted primary
+          colours (white on the dark theme; user ruling 2026-11-17)
   danger  Stop / Delete: red text and hairline
   ghost   tool rows over a viewer: no fill until hovered
   toggle  on/off: neutral, checked = active grey (no green, ruling 4)
@@ -27,8 +28,6 @@ _LIGHT_ACCENT = {
     "#98c379": "#3E9C45", "#e06c75": "#D13B47", "#d19a66": "#C2681F",
     "#56b6c2": "#1F8C9A", "#7dd3fc": "#1F7FB0",
 }
-_RUN = {"dark": ("#22AA55", "#2DBB66", "#1E9349"),
-        "light": ("#22AA55", "#1E9349", "#1A8040")}
 
 
 def t():
@@ -62,9 +61,10 @@ def button_qss(role, metrics="", cls="QPushButton"):
         disabled = (f"background:{k['layer1']};color:{k['disabled_text']};"
                     f"border:1px solid {k['border']};")
     elif role == "run":
-        fill, hov, prs = _RUN[k["name"]]
-        rest = f"background:{fill};color:#FFFFFF;border:none;{radius}"
-        hover, pressed, checked = f"background:{hov};", f"background:{prs};", ""
+        rest = f"background:{k['primary']};color:{k['on_primary']};border:none;{radius}"
+        hover = f"background:{k['primary_hover']};color:{k['on_primary']};"
+        pressed = f"background:{k['text3']};color:{k['on_primary']};"
+        checked = ""
         disabled = f"background:{k['layer3']};color:{k['disabled_text']};"
     elif role == "danger":
         d = k["danger"]

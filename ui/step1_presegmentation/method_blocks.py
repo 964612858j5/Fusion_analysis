@@ -202,7 +202,7 @@ class MethodsPanel(QtWidgets.QWidget):
         self.btn_stop = QtWidgets.QPushButton("Stop", self)
         for b, role in ((self.btn_run, "run"), (self.btn_stop, "danger")):
             b.setMinimumWidth(44)
-            # Run is a run action (green), Stop a danger one (ruling 3)
+            # Run is a run action (Save's white), Stop a danger one (ruling 3)
             theme_widgets.button(b, role, "font-size:11px;padding:3px 10px;")
             row_run.addWidget(b)
         row_run.addStretch(1)

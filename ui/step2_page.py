@@ -884,15 +884,17 @@ class Step2Page(QWidget):
         nav.addStretch()
         # REMOVE: redundant navigation button (use top-right Next only)
 
-        self._btn_run = QPushButton('▶  Run Segmentation && Merge')
+        self._btn_run = QPushButton('▶  Run Segmentation')
         theme_widgets.button(self._btn_run, "run",
                              "padding:7px 22px;font-size:13px;font-weight:bold;")
         self._btn_run.clicked.connect(self._run)
         nav.addWidget(self._btn_run)
 
-        self._btn_stop = QPushButton('⏹ Stop')
+        self._btn_stop = QPushButton('Stop')
         self._btn_stop.setEnabled(False)
-        theme_widgets.button(self._btn_stop, "danger", "padding:7px 14px;")
+        # Run's size beside it, in the danger colours (user ruling 2026-11-17)
+        theme_widgets.button(self._btn_stop, "danger",
+                             "padding:7px 14px;font-size:13px;font-weight:bold;")
         self._btn_stop.clicked.connect(self._stop)
         nav.addWidget(self._btn_stop)
 

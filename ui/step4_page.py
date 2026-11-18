@@ -509,18 +509,21 @@ class Step4Page(QWidget):
         # sample failed. Kept in code until it is rebuilt.
         self._batch_btn.setVisible(False)
 
-        self._btn_stop = QPushButton('⏹ Stop')
-        self._btn_stop.setEnabled(False)
-        theme_widgets.button(self._btn_stop, "danger", "padding:7px 14px;")
-        self._btn_stop.clicked.connect(self._stop)
-        nav.addWidget(self._btn_stop)
-
         self._btn_run = QPushButton('▶  Extract Features')
         theme_widgets.button(self._btn_run, "run",
                              "padding:7px 22px;font-size:13px;font-weight:bold;")
         self._btn_run.clicked.connect(self._run)
         self._btn_run.setEnabled(False)
         nav.addWidget(self._btn_run)
+
+        # Stop right of Extract, as on Step2; Run's size in the danger
+        # colours (user ruling 2026-11-17)
+        self._btn_stop = QPushButton('Stop')
+        self._btn_stop.setEnabled(False)
+        theme_widgets.button(self._btn_stop, "danger",
+                             "padding:7px 14px;font-size:13px;font-weight:bold;")
+        self._btn_stop.clicked.connect(self._stop)
+        nav.addWidget(self._btn_stop)
 
         self._assemble_frame(outer, root, nav)
         self._apply_job_to_scope(None)
@@ -531,7 +534,7 @@ class Step4Page(QWidget):
             title slot   `Step 4 — Cell Feature Extraction`
             tab row      blank
             merged slot  the page's one column, as before
-            bottom slot  stretch | Batch... | Stop | Extract
+            bottom slot  stretch | Batch... | Extract | Stop
         """
         title_bar = self._title_bar_in
         if title_bar is None:

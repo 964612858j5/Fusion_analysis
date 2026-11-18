@@ -275,3 +275,62 @@ def test_a_save_without_a_map_sheet_analyses_its_cores(app, env, monkeypatch, no
     with pytest.raises(A.AnalysisError, match="not attached to the cores in the last Regions Save"):
         A.build_snapshot(pd, sid, seg_channels=["DAPI"])
     page.shutdown()
+
+
+def _rows(page):
+    return [(r["kind"], r["id"]) for r in page.cores.table._rows]
+
+
+def test_a_core_has_one_row_before_and_after_numbering(app, env, monkeypatch, no_dialog):
+    """User ruling 2026-11-18: one row per core, whatever the numbering. A
+    map position no core holds is not listed while a found core still has
+    no number (it would be that core a second time); once all are
+    numbered, the positions left are listed (to mark them missing)."""
+    page = _without_map(app, env, monkeypatch)
+    page.cores.btn_map.click()                                              # map sheet, nothing numbered
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
+    d = page.holder.d
+    assert _rows(page) == [("core", u) for u in d["cores"]]
+    assert "5 map position(s) waiting for a core" in page.cores.table.counts.text()
+    labels = [r["label"] for r in page.cores.records() if r["donor"]]
+    uids = list(d["cores"])
+    for uid, label in zip(uids[:2], labels[:2]):
+        page.select(d["cores"][uid]["pieces"][0])
+        page.cores.bind_single(label)
+    rows = _rows(page)
+    assert len(rows) == N_CORES                                             # 2 numbered + 3 not yet
+    assert sorted(i for k, i in rows if k == "core") == sorted(uids[2:])
+    for uid, label in zip(uids[2:], labels[2:]):
+        page.select(d["cores"][uid]["pieces"][0])
+        page.cores.bind_single(label)
+    rows = _rows(page)
+    assert all(k == "position" for k, _ in rows)
+    assert len(rows) == f1_positions()                                      # the empty position is listed again
+    assert "waiting for a core" not in page.cores.table.counts.text()
+    page.shutdown()
+
+
+def test_a_position_with_no_core_is_listed_when_it_can_be_marked_missing(app, env, monkeypatch, no_dialog):
+    """A missing position is always listed; a position with a sample but no
+    core found comes back as a row once every found core is numbered."""
+    page = _without_map(app, env, monkeypatch)
+    page.cores.btn_map.click()
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
+    d = page.holder.d
+    recs = [r for r in page.cores.records() if r["donor"]]
+    for gone in list(d["cores"])[:2]:                                       # two cores never found
+        page.edit(D.delete_pieces, list(d["cores"][gone]["pieces"]))
+    uids = list(d["cores"])
+    missing, unfound = recs[-1]["position_key"], recs[-2]["position_key"]
+    page.edit(D.set_missing, missing, True, "")
+    rows = _rows(page)
+    assert ("position", missing) in rows                                    # listed while numbering is open
+    assert ("position", unfound) not in rows                                # waiting: counted only
+    assert sum(k == "core" for k, _ in rows) == len(uids)
+    for uid, r in zip(uids, recs):
+        page.select(d["cores"][uid]["pieces"][0])
+        page.cores.bind_single(r["label"])
+    rows = _rows(page)
+    assert all(k == "position" for k, _ in rows) and len(rows) == f1_positions()
+    assert ("position", unfound) in rows and ("position", missing) in rows
+    page.shutdown()

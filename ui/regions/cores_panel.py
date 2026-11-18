@@ -232,11 +232,22 @@ class CoresPanel(QWidget, CoresActions):
             return
         d = h.d
         held = {c["position_key"]: u for u, c in d["cores"].items() if c["position_key"]}
+        # One row per core (user ruling 2026-11-18): while a found core still
+        # has no number, a map position no core holds is not listed -- it
+        # would be the same core a second time -- only counted. Once every
+        # core is numbered, the positions left (no core found for them) are
+        # listed, so they can be marked missing; a missing one always is.
+        numbering_open = any(not c["position_key"] for c in d["cores"].values())
+        waiting = 0
         rows, n = [], {"numbered": 0, "review": 0, "open": 0, "missing": 0, "excluded": 0}
         for r in recs:
             key, occ = r["position_key"], bool(r["donor"])
             st = D.status_text(d, key, occ) if key in d["positions"] else ("未对应" if occ else "空位")
             uid = held.get(key)
+            if (numbering_open and uid is None
+                    and (d["positions"].get(key) or {}).get("observed") != "missing"):
+                waiting += occ
+                continue
             rows.append({"kind": "position", "id": key,
                          "run": d["positions"][key]["run"] if occ and key in d["positions"] else None,
                          "position": r["label"], "donor": r["donor"], "sample": r["sample"], "status": st,
@@ -270,6 +281,8 @@ class CoresPanel(QWidget, CoresActions):
         counts = (f"With samples {total}: numbered {n['numbered']}, to confirm {n['review']}, not numbered "
                   f"{n['open']}, missing {n['missing']}, excluded {n['excluded']}. "
                   f"Pieces: unassigned {free}, left out {dropped}.")
+        if waiting:
+            counts = (f"{waiting} map position(s) waiting for a core: number the cores found. " + counts)
         self.table.set_rows(rows, counts, h.read_only or not self.page.cores_editable())
 
     def _tissue(self, uid):

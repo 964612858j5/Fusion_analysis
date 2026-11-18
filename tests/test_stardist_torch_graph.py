@@ -127,3 +127,43 @@ def test_a_different_dtype_changes_the_digest_and_is_refused(tmp_path):
     assert weights.content_digest(stored) != digest      # the dtype is part of the content
     with pytest.raises(weights.WeightsError):
         weights.load(path, "cpu", digest)
+
+
+# ── plan v0.3 §2.5: the memory-lean forward equals the plain graph bit for bit ──
+
+def _devices():
+    devs = ["cpu"]
+    if torch.cuda.is_available():
+        devs.append("cuda")
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        devs.append("mps")
+    return devs
+
+
+def _blobs(h, w, seed=1):
+    """A normalised nucleus-like image: bright discs on a dim background."""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:h, 0:w]
+    img = rng.normal(0.05, 0.02, (h, w))
+    for _ in range(max(4, h * w // 4000)):
+        cy, cx, r = rng.uniform(0, h), rng.uniform(0, w), rng.uniform(4, 9)
+        img[(yy - cy) ** 2 + (xx - cx) ** 2 <= r * r] += rng.uniform(0.5, 1.0)
+    return img.astype(np.float32)
+
+
+@pytest.mark.parametrize("device", _devices())
+@pytest.mark.parametrize("shape", [(64, 64), (512, 96), (528, 80), (1104, 208), (1040, 80),
+                                   (2, 1104, 96)])            # (n, h, w): a batch of two
+def test_the_lean_forward_equals_the_plain_graph_bit_for_bit(device, shape):
+    """Strips (512 rows; 1104 = 2 strips + 80, 1040 = 2 strips + 16), padding
+    inside the convolution, ReLU in place and released skips change no
+    value: the heads are EQUAL, not close. Under the product's numerics."""
+    from block01.seg_runner.stardist_torch import numerics
+    params = {k: v.to(device) for k, v in _random_params(3)["tensors"].items()}
+    n, shape = (shape[0], shape[1:]) if len(shape) == 3 else (1, shape)
+    x = torch.from_numpy(np.stack([_blobs(*shape, seed=1 + i) for i in range(n)]))[:, None].to(device)
+    with numerics.numerics(device), torch.inference_mode():
+        want = graph.forward_reference(params, x)
+        got = graph.forward(params, x)
+    assert torch.equal(want[0], got[0]) and torch.equal(want[1], got[1])

@@ -733,6 +733,8 @@ class Step2Page(QWidget):
         # engine runs on the CPU (a broken GPU setup, or the user's choice).
         self._cp_gpu = QCheckBox('Use GPU if available')
         self._cp_gpu.setChecked(True)
+        # the GPU's memory limits StarDist's tiles: ticking it re-checks the grid
+        self._cp_gpu.toggled.connect(lambda _on: self._keep_stardist_tiles_safe())
         r, self._cp_gpu_label, _ = _param_row('GPU:', self._cp_gpu)
         cpl.addLayout(r)
 
@@ -1536,7 +1538,38 @@ class Step2Page(QWidget):
     #: distances per pixel); a 19640 x 7600 tile (~150 MP read) crashed the
     #: engine with std::bad_alloc on 2026-10-25 while ~65 MP tiles ran. Safe
     #: cap on one tile's READ area (own + overlap), below 2^31 / 32 elements.
+    #: On a CUDA GPU the card's memory lowers it (`_stardist_cap_px`,
+    #: docs/v17_stardist_vram_tile_plan.md).
     STARDIST_MAX_TILE_PX = 60_000_000
+
+    def _stardist_cap_px(self):
+        """This run's StarDist read-area limit: the host cap, lowered by the
+        CUDA card's memory when the GPU is ticked."""
+        from ..utils.step2_units import stardist_cap_px
+        gpu = self._cp_gpu.isChecked() if hasattr(self, "_cp_gpu") else False
+        method = self._method_combo.currentData() if hasattr(self, "_method_combo") else ""
+        return min(self.STARDIST_MAX_TILE_PX,
+                   stardist_cap_px(method, self._engine_vram_gib() if gpu else None, gpu))
+
+    def _stardist_cap_record(self):
+        """What the run configuration records about the limit (plan §2.2.4)."""
+        gpu = self._cp_gpu.isChecked()
+        vram = self._engine_vram_gib() if gpu else None
+        return {"stardist_cap_px": int(self._stardist_cap_px()),
+                "stardist_cap_source": {"use_gpu": bool(gpu),
+                                        "vram_gib": None if vram is None else round(float(vram), 2),
+                                        "how": Step2Page._engine_vram_how[0] if Step2Page._engine_vram_how else None}}
+
+    def _no_grid_fits_text(self):
+        return (f"no tile grid fits StarDist's limit ({self._cap_text()}) with an overlap of "
+                f"{self._overlap_spin.value()} px. Lower the overlap, untick Use GPU, or choose "
+                "another method.")
+
+    def _cap_text(self):
+        cap = self._stardist_cap_px()
+        vram = self._engine_vram_gib() if self._cp_gpu.isChecked() else None
+        gpu = f", {vram:.1f} GiB GPU" if vram and cap < self.STARDIST_MAX_TILE_PX else ""
+        return f"tiles ≤ {cap / 1e6:.0f} MP{gpu}"
 
     def _is_stardist(self):
         method = self._method_combo.currentData() if hasattr(self, "_method_combo") else None
@@ -1555,24 +1588,35 @@ class Step2Page(QWidget):
                 continue
         return shapes or [(int(self._full_h), int(self._full_w))]
 
-    def _largest_tile_px(self, n_rows, n_cols):
+    def _largest_tile_px(self, n_rows, n_cols, overlap=None):
         """The largest read window (own + overlap) of that grid over every
-        input of the run, in pixels."""
+        input of the run, in pixels; `overlap` None = the one on screen."""
         from ..utils.tile_scheduler import TileScheduler
+        ov = int(self._overlap_spin.value() if overlap is None else overlap)
         best = 0
         for h, w in self._run_input_shapes():
-            for t in TileScheduler(h, w, int(n_rows), int(n_cols), int(self._overlap_spin.value())).tiles:
+            for t in TileScheduler(h, w, int(n_rows), int(n_cols), ov).tiles:
                 best = max(best, (t.read_bbox[1] - t.read_bbox[0]) * (t.read_bbox[3] - t.read_bbox[2]))
         return best
 
-    def _stardist_safe_grid(self, n_rows, n_cols):
+    def _stardist_safe_grid(self, n_rows, n_cols, overlap=None):
         """(rows, cols): the given grid, split further (the longer tile side of
         the largest input first) until no tile's read window exceeds
-        STARDIST_MAX_TILE_PX."""
+        `_stardist_cap_px()`; None when no grid can, because the overlap
+        alone fills the limit (codex r2: a small card and a wide overlap)."""
         nr, nc = max(1, int(n_rows)), max(1, int(n_cols))
         h, w = max(self._run_input_shapes(), key=lambda s: s[0] * s[1])
-        while self._largest_tile_px(nr, nc) > self.STARDIST_MAX_TILE_PX:
-            if h / nr >= w / nc:
+        cap = self._stardist_cap_px()
+        ov = int(self._overlap_spin.value() if overlap is None else overlap)
+        least = 64                           # an own side below this is no tile worth running
+        # the smallest read window any grid can reach: an interior tile of
+        # `least` own pixels and the overlap on both sides (codex r2/r3)
+        if min(h, least + 2 * ov) * min(w, least + 2 * ov) > cap:
+            return None
+        while self._largest_tile_px(nr, nc, overlap) > cap:
+            if h / nr < least and w / nc < least:
+                return None
+            if (h / nr >= w / nc and h / nr >= least) or w / nc < least:
                 nr += 1
             else:
                 nc += 1
@@ -1602,19 +1646,22 @@ class Step2Page(QWidget):
         # when nothing changes; the grid on screen is the one checked)
         nr0, nc0 = self._rows_spin.value(), self._cols_spin.value()
         safe = self._stardist_safe_grid(nr0, nc0)
+        if safe is None:
+            QMessageBox.warning(self, "Tile grid", self._no_grid_fits_text())
+            return False
         if safe != (nr0, nc0):
             big = self._largest_tile_px(nr0, nc0) / 1e6
             answer = QMessageBox.question(
                 self, "Tile grid",
                 f"The tile grid {nr0}×{nc0} makes tiles of up to {big:.0f} MP. StarDist runs a whole "
                 f"tile at once and crashes on tiles this big.\n\nUse {safe[0]}×{safe[1]} instead "
-                f"(tiles ≤ {self.STARDIST_MAX_TILE_PX // 1_000_000} MP)?",
+                f"({self._cap_text()})?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
             if answer != QMessageBox.Yes:
                 return False
             self._set_grid(*safe)
         applied = (self._rows_spin.value(), self._cols_spin.value())
-        if self._largest_tile_px(*applied) > self.STARDIST_MAX_TILE_PX:   # never run it anyway
+        if self._largest_tile_px(*applied) > self._stardist_cap_px():   # never run it anyway
             QMessageBox.warning(self, "Tile grid",
                                 f"The tile grid {applied[0]}×{applied[1]} still makes tiles too big for "
                                 "StarDist; the run is not started.")
@@ -1629,14 +1676,18 @@ class Step2Page(QWidget):
             return False
         nr, nc = self._rows_spin.value(), self._cols_spin.value()
         safe = self._stardist_safe_grid(nr, nc)
+        if safe is None:                     # said here; the Run refuses it
+            self._tile_suggestion_lbl.setText(self._tile_suggestion_lbl.text().split("  ·  StarDist")[0]
+                                              + "  ·  StarDist: " + self._no_grid_fits_text())
+            return False
         if safe == (nr, nc):
             return False
         self._set_grid(*safe)
         self._tile_suggestion_lbl.setText(
             self._tile_suggestion_lbl.text() + f"  ·  StarDist: grid {nr}×{nc} → {safe[0]}×{safe[1]} "
-            f"(tiles ≤ {self.STARDIST_MAX_TILE_PX // 1_000_000} MP)")
+            f"({self._cap_text()})")
         print(f"[Step2] StarDist tile grid {nr}x{nc} -> {safe[0]}x{safe[1]} (tile read area cap "
-              f"{self.STARDIST_MAX_TILE_PX:,} px)")
+              f"{self._stardist_cap_px():,} px)")
         return True
 
     def _on_auto_tile_strategy_changed(self):
@@ -1659,6 +1710,16 @@ class Step2Page(QWidget):
             vram_gb=self._detect_vram_gb(),
             channel_count=channel_count,
         )
+        if self._is_stardist() and self.__dict__.get("_rows_spin") is not None:
+            # the suggestion sizes own areas only (no overlap, 20 % over):
+            # StarDist's must fit by their READ windows (plan §2.2.2)
+            nr, nc = self._stardist_safe_grid(suggestion["n_rows"], suggestion["n_cols"],
+                                              overlap=suggestion["overlap"]) \
+                or (suggestion["n_rows"], suggestion["n_cols"])      # none fits: the Run says so
+            if (nr, nc) != (suggestion["n_rows"], suggestion["n_cols"]):
+                th, tw = -(-int(self._full_h) // nr), -(-int(self._full_w) // nc)
+                suggestion = dict(suggestion, n_rows=nr, n_cols=nc, tile_h=th, tile_w=tw,
+                                  estimated_tile_mpx=th * tw / 1e6)
         self._suggested_tile_strategy = suggestion
         self._tile_suggestion_lbl.setText(
             f"Suggested: {suggestion['n_rows']}×{suggestion['n_cols']} grid "
@@ -1669,6 +1730,8 @@ class Step2Page(QWidget):
             self._cols_spin.blockSignals(True)
             self._overlap_spin.blockSignals(True)
             try:
+                self._rows_spin.setMaximum(max(self._rows_spin.maximum(), int(suggestion["n_rows"])))
+                self._cols_spin.setMaximum(max(self._cols_spin.maximum(), int(suggestion["n_cols"])))
                 self._rows_spin.setValue(int(suggestion["n_rows"]))
                 self._cols_spin.setValue(int(suggestion["n_cols"]))
                 self._overlap_spin.setValue(int(suggestion["overlap"]))
@@ -1716,6 +1779,54 @@ class Step2Page(QWidget):
                 except (OSError, subprocess.SubprocessError, ValueError, IndexError):
                     value = None
         cache.append(value)
+        return value
+
+    _engine_vram_cache = []      # (plan §2.3) asked once per process
+    _engine_vram_how = []
+
+    @staticmethod
+    def _engine_vram_gib():
+        """GiB of the CUDA card the segmentation engine will run on, or None
+        (no CUDA card: a Mac, no NVIDIA driver). The engine is a child with
+        this process's environment, so its `cuda:0` is torch's device 0 here
+        when torch is already loaded (never imported for this: block PA-5b).
+        Otherwise `nvidia-smi`: a UUID in CUDA_VISIBLE_DEVICES names the
+        card; with an index or nothing, CUDA's and nvidia-smi's numbering may
+        differ, so the SMALLEST visible card is taken (plan §2.3)."""
+        cache, how = Step2Page._engine_vram_cache, Step2Page._engine_vram_how
+        if cache:
+            return cache[0]
+        value, source = None, None
+        try:
+            import sys
+            torch = sys.modules.get("torch")
+            if torch is not None and torch.cuda.is_available():
+                value = torch.cuda.get_device_properties(0).total_memory / (1024.0 ** 3)
+                source = "torch device 0"
+        except Exception:                                   # noqa: BLE001
+            value = None
+        if value is None:
+            import os
+            import subprocess
+            visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+            first = None if visible is None else visible.split(",")[0].strip()
+            if first not in ("", "-1"):
+                cmd = ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"]
+                if first and first.upper().startswith(("GPU-", "MIG-")):
+                    cmd[1:1] = ["-i", first]
+                    source = f"nvidia-smi {first}"
+                else:
+                    source = "nvidia-smi, smallest visible card"
+                try:
+                    out = subprocess.run(cmd, capture_output=True, text=True, timeout=3).stdout
+                    # (an index is CUDA's numbering, not necessarily
+                    # nvidia-smi's: every card is a candidate -- codex r1)
+                    sizes = [float(v) / 1024.0 for v in out.split() if v.strip()]
+                    value = min(sizes) if sizes else None
+                except (OSError, subprocess.SubprocessError, ValueError):
+                    value = None
+        cache.append(value)
+        how.append(source if value is not None else None)
         return value
 
     @staticmethod
@@ -3127,6 +3238,12 @@ class Step2Page(QWidget):
         self._apply_cores_layout(count=len(frozen.get("cores") or []) if frozen and RA.has_cores(frozen) else 0)
         if not self._stardist_grid_ok_for_run():
             return
+        if self._is_stardist():
+            # decided now, on this machine -- never a loaded configuration's
+            seg_config.update(self._stardist_cap_record())
+        else:
+            for key in ("stardist_cap_px", "stardist_cap_source"):
+                seg_config.pop(key, None)
         identity_confirmation = None
         if source == "index":
             if not self._check_preseg_contract(seg_config):

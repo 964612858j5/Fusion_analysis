@@ -22,6 +22,8 @@ Ownership (keeping the patch centre of a HALO window) is the application's.
 import json
 import os
 import pathlib
+import sys
+import time
 
 # Which output each method produces (plan 7.2): "cell", "nucleus" or both.
 METHOD_OUTPUTS = {
@@ -371,8 +373,40 @@ class StardistEngine:
         x = stardist_input(image)
         if x is None:                     # nothing to normalise: no nucleus, no model call
             return np.zeros(np.shape(image)[:2], np.int32)
+        cuda = str(self._model.keras_model.device).startswith("cuda")
+        if cuda:
+            import torch
+            torch.cuda.reset_peak_memory_stats(self._model.keras_model.device)
+        started = time.perf_counter()
         labels, _ = self._model.predict_instances(x, **kwargs)
+        _stardist_diagnostic(self._model.keras_model, x.shape, time.perf_counter() - started, cuda)
         return labels
+
+
+def _stardist_diagnostic(network, shape, total_s, cuda):
+    """One line on the engine log per StarDist call (plan v0.3 §2.7): the
+    network pass and the rest (NMS, polygons) in seconds, and on CUDA the
+    peak memory of this call -- to size the tiles from measurements. Only
+    reports; nothing it reads changes the result."""
+    forward_s = float(getattr(network, "last_forward_s", 0.0) or 0.0)
+    line = (f"[stardist] tile {shape[0]}x{shape[1]}: network {forward_s:.2f} s, "
+            f"rest {max(0.0, total_s - forward_s):.2f} s")
+    if cuda:
+        import torch
+        gib = 1024.0 ** 3
+        line += (f", peak allocated {torch.cuda.max_memory_allocated(network.device) / gib:.2f} GiB, "
+                 f"reserved {torch.cuda.max_memory_reserved(network.device) / gib:.2f} GiB")
+    print(line, file=sys.stderr, flush=True)
+
+
+def release_cuda_cache():
+    """Hand the CUDA memory torch keeps cached but no longer uses back to the
+    driver (plan v0.3 §2.6): between the hybrid's Cellpose and StarDist parts,
+    so cuDNN's own workspace for StarDist can be had. Live tensors and the
+    weights stay; results are unchanged. A no-op without CUDA."""
+    torch = sys.modules.get("torch")
+    if torch is not None and torch.cuda.is_available() and torch.cuda.is_initialized():
+        torch.cuda.empty_cache()
 
 
 #: plan §15.4: percentile 99.8 - percentile 1 at or below this is "no contrast"
@@ -554,6 +588,7 @@ def run(engine_obj, method, image, params):
         # nuclei-DAPI on the input's last channel
         image = np.asarray(image)
         result["cell"] = engine_obj.cellpose.predict(image, params)
+        release_cuda_cache()              # Cellpose's spent cache, before StarDist (plan v0.3 §2.6)
         result["nucleus"] = engine_obj.stardist.predict(
             np.ascontiguousarray(image[..., -1]), params)
     elif method in CELL_AND_NUCLEUS_METHODS:

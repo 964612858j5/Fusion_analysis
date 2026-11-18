@@ -23,10 +23,36 @@ from .step2_tile import Step2Tile
 CAP_PX = {"stardist": 60_000_000, "mesmer": 35_000_000, "cellpose": 64_000_000}
 
 
-def engine_cap_px(method: str) -> int:
+#: StarDist on a CUDA GPU (docs/v17_stardist_vram_tile_plan.md §2.1): the
+#: network's peak per read pixel (the memory-lean graph, §2.5; provisional
+#: until measured on the laptop, §4), the share of the card planned for, and
+#: what stays taken besides the tile (CUDA context, weights, cuDNN workspace;
+#: the hybrid also keeps Cellpose's weights).
+STARDIST_BYTES_PER_PX = 200
+VRAM_USABLE = 0.75
+CUDA_RESERVE_GIB = 1.0
+HYBRID_RESERVE_GIB = 1.5
+STARDIST_MIN_CAP_PX = 1_000_000
+
+
+def stardist_cap_px(method: str, vram_gib, use_gpu: bool) -> int:
+    """One StarDist engine call's read area limit: the host-memory cap, and on
+    a CUDA card of `vram_gib` (None: unknown, or not CUDA) also what its
+    memory holds."""
+    cap = CAP_PX["stardist"]
+    if not use_gpu or not vram_gib:
+        return cap
+    reserve = CUDA_RESERVE_GIB + (HYBRID_RESERVE_GIB if "hybrid" in str(method or "").lower() else 0.0)
+    budget = (float(vram_gib) * VRAM_USABLE - reserve) * 1024.0 ** 3
+    return int(min(cap, max(STARDIST_MIN_CAP_PX, budget / STARDIST_BYTES_PER_PX)))
+
+
+def engine_cap_px(method: str, stardist_cap=None) -> int:
+    """`stardist_cap`: the run's StarDist limit (`stardist_cap_px` in the run
+    configuration, decided in the GUI); None = the host-memory cap."""
     m = str(method or "").lower()
     if "stardist" in m:                     # StarDist and the hybrid's StarDist part
-        return CAP_PX["stardist"]
+        return int(stardist_cap) if stardist_cap else CAP_PX["stardist"]
     if "mesmer" in m:
         return CAP_PX["mesmer"]
     return CAP_PX["cellpose"]
@@ -68,11 +94,12 @@ def split_grid(box, cap_px: int, overlap: int) -> Tuple[int, int]:
 
 
 def core_units(snapshot: Dict, region_bbox: Sequence[int], method: str, part_overlap: int,
-               out_prefix: str = "") -> List[Step2Tile]:
+               out_prefix: str = "", stardist_cap=None) -> List[Step2Tile]:
     """The units of a cores run over the region `region_bbox` (global
-    [y0, y1, x0, x1]), in the snapshot's core order; region-local boxes."""
+    [y0, y1, x0, x1]), in the snapshot's core order; region-local boxes.
+    `stardist_cap`: the run's StarDist limit (see `engine_cap_px`)."""
     gy0, gy1, gx0, gx1 = [int(v) for v in region_bbox]
-    cap = engine_cap_px(method)
+    cap = engine_cap_px(method, stardist_cap)
     units: List[Step2Tile] = []
     shape = tuple(int(v) for v in snapshot.get("slide_shape") or (gy1, gx1))
     for c in snapshot.get("cores") or []:

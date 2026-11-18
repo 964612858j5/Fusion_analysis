@@ -567,7 +567,8 @@ class SegmentMergeWorker(QThread):
             from ..utils.step2_units import core_units
             oy, ox = (int(bbox[0]), int(bbox[2])) if bbox else (0, 0)
             units = core_units(self._regions["snapshot"], [oy, oy + int(full_h), ox, ox + int(full_w)],
-                               self.method, self._part_overlap(), out_prefix)
+                               self.method, self._part_overlap(), out_prefix,
+                               stardist_cap=(self.seg_config or {}).get("stardist_cap_px"))
             if not units:
                 raise RuntimeError("none of the selected cores lies in this region")
             self.__dict__.setdefault("_units_meta", {})[out_prefix] = [

@@ -13,6 +13,8 @@ result is indexed as `(prob, dist)`. `input_shape`, `output_shape` and
 runs `graph.forward` on the device `torch_device()` picked, and hands the two
 heads back as NHWC float32. The spatial size halves because of the grid.
 """
+import time
+
 import numpy as np
 import torch
 
@@ -40,11 +42,16 @@ class TorchNetwork:
         if array.ndim != 4 or array.shape[-1] != graph.N_CHANNEL_IN:
             raise ValueError(f"expected (N, H, W, {graph.N_CHANNEL_IN}), got {array.shape}")
         tensor = torch.from_numpy(np.ascontiguousarray(array, dtype=np.float32))
+        started = time.perf_counter()
         tensor = tensor.permute(0, 3, 1, 2).to(self.device)
         with numerics.numerics(self.device):
             with torch.inference_mode():
                 prob, dist = graph.forward(self.params, tensor)
-        return [_nhwc(prob), _nhwc(dist)]
+        out = [_nhwc(prob), _nhwc(dist)]          # back on the host: the pass is done
+        #: seconds of the last pass, device copies included (the engine's
+        #: diagnostic line, plan v0.3 §2.7)
+        self.last_forward_s = time.perf_counter() - started
+        return out
 
 
 def _nhwc(tensor):

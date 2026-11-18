@@ -366,3 +366,16 @@ def test_the_finish_dialog_names_the_cores_and_a_grid_run_keeps_its_text(monkeyp
     assert grid._cores_finish_text() is None
     page.deleteLater()
     grid.deleteLater()
+
+
+def test_a_cores_run_splits_by_the_runs_stardist_cap():
+    """docs/v17_stardist_vram_tile_plan.md §2.2.3: the cap decided in the GUI
+    (a small GPU) reaches the cores run; without one, the host cap."""
+    snap = {"slide_shape": [8000, 8000],
+            "cores": [{"uid": "c1", "bbox": [0, 4000, 0, 4000]}]}
+    host = core_units(snap, [0, 8000, 0, 8000], "stardist_nuclei_expansion", 200)
+    small = core_units(snap, [0, 8000, 0, 8000], "stardist_nuclei_expansion", 200,
+                       stardist_cap=5_000_000)
+    assert len(host) == 1 and len(small) > 1
+    assert all((u.read_bbox[1] - u.read_bbox[0]) * (u.read_bbox[3] - u.read_bbox[2]) <= 5_000_000
+               for u in small)

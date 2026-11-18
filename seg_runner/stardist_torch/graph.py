@@ -110,11 +110,98 @@ def layer_names():
     return [name for name, _, _, _ in layer_specs()]
 
 
+#: Rows of the input the two full-resolution convolutions take at a time
+#: (docs/v17_stardist_vram_tile_plan.md v0.3 §2.5): their 32-channel output is
+#: the network's largest tensor, so it is never held for the whole tile --
+#: each strip is pooled at once. Even, so a strip starts on the pool's lattice.
+FULLRES_STRIP_ROWS = 512
+#: the rows a strip reads beyond each side: one per 3x3 convolution
+FULLRES_HALO = 2
+
+
 def forward(params, x):
     """The network: `x` is `(N, 1, H, W)` float32; returns `[prob, dist]`.
 
     Every parameter is looked up by name, so a missing or misshaped tensor
-    fails here instead of silently running half a network."""
+    fails here instead of silently running half a network.
+
+    Memory (plan v0.3 §2.5): the same operations as the plain graph, arranged
+    so fewer full-size tensors are alive at once -- the zero padding inside
+    the convolution instead of a padded copy, ReLU in place, a skip released
+    once it is concatenated, and the two full-resolution convolutions run in
+    row strips (an exact halo of `FULLRES_HALO` rows) pooled one by one."""
+    if x.ndim != 4 or x.shape[1] != N_CHANNEL_IN:
+        raise ValueError(f"expected (N, {N_CHANNEL_IN}, H, W), got {tuple(x.shape)}")
+    if x.dtype != torch.float32:
+        x = x.to(torch.float32)
+
+    def conv(name, h, kernel):
+        w = params[f"{name}.weight"]
+        b = params[f"{name}.bias"]
+        return F.conv2d(h, w, b, padding=(kernel[0] // 2, kernel[1] // 2))
+
+    def block(name, h, kernel=KERNEL_SIZE):
+        return F.relu_(conv(name, h, kernel))
+
+    h = _full_resolution_pooled(x, block)
+
+    skips = []
+    for n in range(N_DEPTH):
+        for i in range(N_CONV_PER_DEPTH):
+            h = block(f"down_level_{n}_no_{i}", h)
+        skips.append(h)
+        h = F.max_pool2d(h, POOL)
+
+    for i in range(N_CONV_PER_DEPTH - 1):
+        h = block(f"middle_{i}", h)
+    h = block(f"middle_{N_CONV_PER_DEPTH}", h)
+
+    for n in reversed(range(N_DEPTH)):
+        h = F.interpolate(h, scale_factor=POOL[0], mode="nearest")
+        h = torch.cat([h, skips.pop()], dim=1)          # skips[n]; released once used
+        for i in range(N_CONV_PER_DEPTH - 1):
+            h = block(f"up_level_{n}_no_{i}", h)
+        h = block(f"up_level_{n}_no_{N_CONV_PER_DEPTH}", h)
+
+    h = block("features", h)
+    prob = torch.sigmoid(conv("prob", h, (1, 1)))
+    dist = conv("dist", h, (1, 1))
+    return [prob, dist]
+
+
+def _full_resolution_pooled(x, block):
+    """conv2d_1 -> conv2d_2 -> the grid's max pool, over row strips of `x`.
+
+    A strip reads `FULLRES_HALO` extra rows on each side that lie inside the
+    image; those rows' outputs (computed against the strip's own zero
+    padding) are cut off before the pool, so every kept row equals the
+    whole-image result. At the image's own edge the zero padding IS the
+    image's, as in a single pass."""
+    height = x.shape[2]
+    if height <= FULLRES_STRIP_ROWS:
+        return F.max_pool2d(block("conv2d_2", block("conv2d_1", x)), GRID)
+    # strips of about equal height (even, on the pool's lattice): no sliver
+    # of a few rows at the end, which some backends compute with another
+    # kernel (measured on MPS: an 18-row strip differed in the last bit)
+    count = -(-height // FULLRES_STRIP_ROWS)
+    rows = -(-height // count)
+    rows += rows % 2
+    pooled = []
+    for y0 in range(0, height, rows):
+        y1 = min(height, y0 + rows)
+        a, b = max(0, y0 - FULLRES_HALO), min(height, y1 + FULLRES_HALO)
+        s = block("conv2d_2", block("conv2d_1", x[:, :, a:b].contiguous()))
+        pooled.append(F.max_pool2d(s[:, :, y0 - a:y1 - a], GRID))
+        del s
+    return torch.cat(pooled, dim=2)
+
+
+def forward_reference(params, x):
+    """The plain graph `forward` replaced (before plan v0.3): explicit padded
+    copies, ReLU out of place, the whole tile through the full-resolution
+    layers at once. Not used by the product; kept as the reference the
+    memory-lean `forward` must equal bit for bit (tests and
+    scripts/stardist_vram_probe.py)."""
     if x.ndim != 4 or x.shape[1] != N_CHANNEL_IN:
         raise ValueError(f"expected (N, {N_CHANNEL_IN}, H, W), got {tuple(x.shape)}")
     if x.dtype != torch.float32:
@@ -133,25 +220,21 @@ def forward(params, x):
     h = block("conv2d_1", x)
     h = block("conv2d_2", h)
     h = F.max_pool2d(h, GRID)
-
     skips = []
     for n in range(N_DEPTH):
         for i in range(N_CONV_PER_DEPTH):
             h = block(f"down_level_{n}_no_{i}", h)
         skips.append(h)
         h = F.max_pool2d(h, POOL)
-
     for i in range(N_CONV_PER_DEPTH - 1):
         h = block(f"middle_{i}", h)
     h = block(f"middle_{N_CONV_PER_DEPTH}", h)
-
     for n in reversed(range(N_DEPTH)):
         h = F.interpolate(h, scale_factor=POOL[0], mode="nearest")
         h = torch.cat([h, skips[n]], dim=1)
         for i in range(N_CONV_PER_DEPTH - 1):
             h = block(f"up_level_{n}_no_{i}", h)
         h = block(f"up_level_{n}_no_{N_CONV_PER_DEPTH}", h)
-
     h = block("features", h)
     prob = torch.sigmoid(conv("prob", h, (1, 1)))
     dist = conv("dist", h, (1, 1))

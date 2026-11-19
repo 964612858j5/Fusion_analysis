@@ -93,7 +93,7 @@ def test_parts_on_different_devices_refuse_to_start(monkeypatch):
 def test_identity_and_provenance_carry_both_parts(hybrid):
     from block01.seg_runner import runner
     ident = engines.behavior_identity("hybrid")
-    assert ident["engine"] == "hybrid" and ident["behavior_version"] == 1
+    assert ident["engine"] == "hybrid" and ident["behavior_version"] == 2
     assert ident["model_id"] == "cellpose_cpsam+stardist_2D_versatile_fluo"
     prov = runner.engine_provenance("hybrid", hybrid)
     assert prov["device"] == hybrid.device
@@ -181,7 +181,7 @@ def test_another_hybrid_behaviour_is_asked_and_cancel_stops(tmp_path, monkeypatc
         return 0
     monkeypatch.setattr(QtWidgets.QMessageBox, "exec", exec)
     assert page._confirm_engine_identity(page.get_seg_config()) == (False, None)
-    assert len(shown) == 1 and "hybrid" in shown[0] and "0 -> 1" in shown[0]
+    assert len(shown) == 1 and "hybrid" in shown[0] and "0 -> 2" in shown[0]
 
 
 def test_step2_runs_the_hybrid_and_keeps_no_cell_without_a_nucleus(tmp_path, monkeypatch):

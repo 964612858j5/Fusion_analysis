@@ -372,7 +372,7 @@ def test_the_run_records_the_torch_engine_and_its_artifact(tmp_path, monkeypatch
     assert [r["status"] for r in got] == ["ok"]
 
     identity = job.run["engines"]["stardist"]
-    assert identity["behavior_version"] == 2
+    assert identity["behavior_version"] == 3
     assert identity["model_id"] == "stardist_2D_versatile_fluo"
     assert job.run["devices"]["stardist"] == "cpu"
     assert got[0]["device"] == "cpu"

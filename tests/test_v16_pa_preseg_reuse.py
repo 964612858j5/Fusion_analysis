@@ -66,8 +66,9 @@ def test_another_engine_makes_it_run_again(tmp_path):
 
 
 def test_a_version_1_result_runs_again(tmp_path):
-    """The engine is behaviour 2 now (torch, user ruling 2026-11-10): a StarDist
-    result recorded as 1 is another behaviour, so Step1 runs it again."""
+    """The engine is behaviour 3 now (the memory-lean network, user ruling
+    2026-11-19): a StarDist result recorded as 1 is another behaviour, so
+    Step1 runs it again."""
     _, rec = _old_run(tmp_path, engine=dict(seg_engines.behavior_identity("stardist"),
                                             behavior_version=1))
     assert not _ok(rec)

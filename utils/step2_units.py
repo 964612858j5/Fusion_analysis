@@ -24,8 +24,8 @@ CAP_PX = {"stardist": 60_000_000, "mesmer": 35_000_000, "cellpose": 64_000_000}
 
 
 #: StarDist on a CUDA GPU (docs/v17_stardist_vram_tile_plan.md §2.1): the
-#: network's peak per read pixel (the memory-lean graph, §2.5; provisional
-#: until measured on the laptop, §4), the share of the card planned for, and
+#: network's peak per read pixel (the memory-lean graph, §2.5; measured 192.1
+#: B/px allocated on the 6 GiB laptop, 2026-11-19), the share of the card planned for, and
 #: what stays taken besides the tile (CUDA context, weights, cuDNN workspace;
 #: the hybrid also keeps Cellpose's weights).
 STARDIST_BYTES_PER_PX = 200

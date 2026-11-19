@@ -1,11 +1,15 @@
 # StarDist 的 tile 大小按显卡显存定（backlog 29）
 
-v0.3，2026-11-18。用户裁定：按显存自动调整；不用 stardist 内部切块（`n_tiles`）。
+v0.4，2026-11-19（v0.3，2026-11-18）。用户裁定：按显存自动调整；不用 stardist 内部切块（`n_tiles`）。
 v0.3（用户裁定 2026-11-18，"同意 A+C+D"，并要求 CUDA 实测逐位相同）：在 v0.2 的上限之外，
 - A：网络改为省显存的写法，结果逐位相同（§2.5）；
 - C：hybrid 在 StarDist 之前释放 Cellpose 用完的缓存（§2.6）；
 - D：每次调用 StarDist 写一行诊断（§2.7）。
 v0.2 的显存上限保留，作为最后一道保险，按 A 之后的峰值重算（§2.1）。
+v0.4（用户裁定 2026-11-19，"同意方案，1ulp用B"；方案经 codex astra low 审核）：
+- C 恢复为只在 hybrid 的 Cellpose 之后清缓存；另给 torch 的分配器设上限，为显卡的 85%（§2.6）；
+- CUDA 上分条可能差 1 ulp，接受，`BEHAVIOR_VERSION` stardist 2→3、hybrid 1→2（§2.5）；
+- 系数 200 不变（实测 192.1 B/px）。
 讨论依据：Fable 5.2 high 在 Mac 上的实测，以及 codex astra high 的分析（2026-11-18）。
 v0.1 经 codex astra low 第 1 轮审核，结论 FAIL：
 - Auto 建议只控制每块自己的面积，不控制读取窗口；
@@ -36,7 +40,7 @@ Windows 笔记本（RTX 3060 Laptop 6 GB，16 GB RAM），Full WSI 15437×16215�
 
 ## 2. 做法
 
-StarDist 引擎的数值不变：`n_tiles=None`，权重、归一化、阈值、fp32、cuDNN deterministic、不用 TF32 都不动。网络的运算顺序也不变，只是换了更省显存的写法（§2.5），输出必须和原写法逐位相同。Step2 外层网格允许的单块大小按显存定。外层切块、200 px 重叠和接缝合并都是现有功能，`docs/stardist_torch_plan.md` §2.4 的保证范围不变。
+StarDist 引擎的数值不变：`n_tiles=None`，权重、归一化、阈值、fp32、cuDNN deterministic、不用 TF32 都不动。网络的运算顺序也不变，只是换了更省显存的写法（§2.5），输出在 CPU 和 MPS 上和原写法逐位相同；CUDA 上可能差浮点舍入（v0.4，用户裁定接受，§2.5）。Step2 外层网格允许的单块大小按显存定。外层切块、200 px 重叠和接缝合并都是现有功能，`docs/stardist_torch_plan.md` §2.4 的保证范围不变。
 
 ### 2.1 一个函数决定 StarDist 单块上限
 
@@ -97,20 +101,26 @@ def stardist_cap_px(method, vram_gib, use_gpu) -> int:
   - 不能在末尾留下只有十几行的窄条：Mac 实测，MPS 对 18 行高的窄条会选别的内核，最后一位不同。
   - 原来的写法保留为 `graph.forward_reference`，产品不调用它，只给测试和 CUDA 实测脚本做对照。
 
-峰值估计（codex 与 Fable 的推算）：从约 388 B/px 降到约 165–200 B/px（瓶颈移到 `features` 层和输出头）。笔记本实测 b37de93（隐式补边）为 162.5 B/px；改回 `F.pad` 后估计约 195 B/px（`features` 的输入、补边副本和 128 通道输出同时存在），待复测。
+峰值：从约 388 B/px 降到 192.1 B/px（笔记本实测 2439b9f，按峰值已分配算；b37de93 的隐式补边为 162.5 B/px）。`STARDIST_BYTES_PER_PX = 200` 不变。
+注意：预留显存约为已分配的 2.3 倍（原写法约 1.0 倍），见 §2.6。
 
 逐位相同的验证：
 - Mac：CPU 和 MPS 上 30 种尺寸（含真实权重、真实 DAPI）全部 `torch.equal`。
-- CUDA：§4 的实测脚本。
+- CUDA（笔记本 RTX 3060，cuDNN 9.1，2439b9f）：实测脚本 1024²–3072² 真实权重全部逐位相同；但测试里 1040×80 稳定差 1 ulp（911/51200 个值，最大 5.96e-8）。不分条时相同，所以是 cuDNN 按条的形状选了另一种算法。
 
-如果 CUDA 上不逐位相同，要先停下，由用户裁定：是只差浮点舍入，还是 `BEHAVIOR_VERSION["stardist"]` 要加 1（`seg_runner/engines.py:87`；Mesmer 改用 torch 时就因为舍入差异加过 1）。逐位相同则 identity 不变，Step1 的结果照常可以交给 Step2。
+用户裁定 2026-11-19（B）：接受。`BEHAVIOR_VERSION["stardist"]` 2→3，hybrid 1→2（hybrid 的任一部分输出变了，它都要变）。Step1 用旧版本做的 StarDist 结果交给 Step2 时，会照常提示"行为已变"。测试：CPU 和 MPS 仍要求 `torch.equal`；CUDA 上要求两个输出都是有限值，并且和原写法的差在 1e-5 以内（错的 halo 或条偏移会差得多）。这只是这台机器上观察到的情况，不是普遍的 1 ulp 保证。
 
-### 2.6 C：每次 StarDist 之前释放缓存（`seg_runner/engines.py`）
+### 2.6 C：缓存与分配器上限（`seg_runner/engines.py`）
 
-- 每次调用 StarDist 之前（在 CUDA 上），调用一次 `torch.cuda.empty_cache()`，只在 CUDA 已经初始化时调用。hybrid 的 Cellpose 用完的缓存也在这时释放。
-- 用户裁定 2026-11-18 把它从"只在 hybrid"扩展到所有 StarDist 调用。原因：笔记本验收 b37de93 时，StarDist 单独运行的预留显存到了 6.59 GiB，超过 6 GiB 物理显存（溢出到共享内存），实际分配只有约 2.4 GiB；做了释放的 hybrid 只有 3.5–3.7 GiB。
-- 它只把 torch 缓存着、已经不用的显存还给驱动，好让 cuDNN 为 StarDist 申请工作区（hybrid 那次 "unable to find an engine" 报错很可能就是这里不够）。
-- 活着的张量和权重都不动，结果不变。
+- **释放缓存**：只在 hybrid 里，Cellpose 之后、StarDist 之前，调用一次 `torch.cuda.empty_cache()`（只在 CUDA 已初始化时）。它把 torch 缓存着、已经不用的显存还给驱动，好让 cuDNN 为 StarDist 申请工作区。活着的张量和权重不动，结果不变。
+  - 2439b9f 曾把它扩展到每次 StarDist 调用（用户裁定 2026-11-18），笔记本实测是负收益：每块都要重新申请并溢出，单独 StarDist 每块网络时间从约 0.7 s 变为 2.3–4.5 s，进程内存峰值从 3.8 GB 升到 6.9 GB，预留显存也没降（6.18–6.73 GiB）。v0.4 撤回。
+- **分配器上限**：引擎进程在 CUDA 上创建 StarDist 引擎时，调用一次 `torch.cuda.set_per_process_memory_fraction(0.85)`（`CUDA_MEMORY_FRACTION`）。
+  - 原因：省显存写法的预留显存约是已分配的 2.3 倍。在 Windows（WDDM）上，预留超过物理显存时不会报 OOM，而是借用系统内存，慢约 10 倍（实测脚本 3584² 0.40 s，4096² 预留 7.5 GiB 时 3.95 s）。
+  - 有了上限，分配器要越过它时，会先把缓存的空闲块还回去再重试（torch 2.5.1 源码，Windows 同样）。只影响何时还缓存，不改任何数值。
+  - 0.85 而不是 0.95：CUDA 上下文本身在分配器之外占 300–500 MiB，6 GiB 卡上 0.95 只留约 300 MiB（astra low 审核）。具体值以笔记本实测为准。
+  - 作用于整个引擎进程。hybrid 先建 StarDist 引擎，所以 Cellpose 也受同一上限约束，两部分都要验证。引擎只在单独的引擎进程里创建（`seg_runner/runner.py`），GUI 进程不受影响。
+  - 不保证"不溢出"和"每块回到 0.7 s"，要实测。仍有可能因活着的张量切出的碎块而 OOM，届时再看实测脚本的碎块统计。
+  - 暂不用 `garbage_collection_threshold`（只是补充）、`max_split_size_mb`（可能明显变慢）和 `expandable_segments`（Windows 不支持）。
 
 ### 2.7 D：诊断行（`seg_runner/engines.py`、`seg_runner/stardist_torch/network.py`）
 
@@ -149,12 +159,13 @@ def stardist_cap_px(method, vram_gib, use_gpu) -> int:
   - Cellpose 不受影响；
   - 按 core 运行时，拆分用记录下来的上限（`tests/test_step2_core_units.py`）。
 - **Mac**：相关 Step2 模块和 HEAD 对比。
-- **网络逐位相同**（`tests/test_stardist_torch_graph.py`）：每台机器上的每个设备（CPU，有就加 CUDA、MPS）、多种尺寸（含 2 条加零头的高度），`graph.forward` 与 `graph.forward_reference` 输出 `torch.equal`。
-- **CUDA 实测**（`scripts/stardist_vram_probe.py`，在笔记本上运行）：真实权重、真实 DAPI 窗口，1024²–3072² 两种写法比较是否逐位相同；3584²–4800² 只跑新写法，测峰值显存和 B/px，作为定 `STARDIST_BYTES_PER_PX` 的依据。
+- **网络与原写法一致**（`tests/test_stardist_torch_graph.py`）：每台机器上的每个设备（CPU，有就加 CUDA、MPS）、多种尺寸（含 2 条加零头的高度），`graph.forward` 与 `graph.forward_reference` 在 CPU 和 MPS 上 `torch.equal`；CUDA 上两个输出都是有限值，且差在 1e-5 以内（v0.4，§2.5）。
+- **CUDA 实测**（`scripts/stardist_vram_probe.py`，在笔记本上运行）：真实权重、真实 DAPI 窗口，1024²–3072² 两种写法比较是否逐位相同；3584²–4800² 只跑新写法，测峰值显存和 B/px，作为定 `STARDIST_BYTES_PER_PX` 的依据。v0.4 起默认和引擎一样设分配器上限（`--no-memory-limit` 不设），并记录碎块峰值（`inactive_split_bytes`）和分配重试次数。
 - **Windows 笔记本实测**（定系数）：本地 agent 在同一张 Full WSI 上跑 stardist_nuclei_expansion 和 hybrid。
   - 引擎在 CUDA 上时，每次调用 StarDist 前，在实际设备上执行 `reset_peak_memory_stats`；调用后把 `max_memory_allocated` 和 `max_memory_reserved` 写一行到 engine 日志。只是诊断输出，不清缓存，计算不变。
   - 用实测的 bytes/px 回填常量。
   - 判定标准：两种方法都跑完全图，没有 OOM。
+  - v0.4 追加：预留显存低于 6 GiB；单独 StarDist 每块网络时间回到约 1 s 以内；hybrid 的 Cellpose 部分在上限下不变慢、不 OOM。
 
 ## 5. 文件白名单
 
@@ -166,7 +177,8 @@ def stardist_cap_px(method, vram_gib, use_gpu) -> int:
 - `utils/step2_units.py`
 - `ui/step2_page.py`
 - `workers/segment_merge_worker.py`：只改两处，core 运行拆分时读取记录的上限，并把上限写进运行参数
-- `seg_runner/engines.py`：C 的一行释放，以及 D 的诊断行
+- `seg_runner/engines.py`：C 的一行释放和分配器上限，D 的诊断行，`BEHAVIOR_VERSION`（v0.4）
+- 固定版本号的测试（v0.4）：`tests/test_stardist_torch_engine.py`、`tests/test_stardist_torch_product.py`、`tests/test_preseg_run.py`、`tests/test_hybrid_cellpose_stardist.py`
 - `tests/test_step2_stardist_tile_cap.py`
 - `tests/test_step2_core_units.py`
 - `docs/user_guide.md`：Step2 tile 一节
@@ -177,3 +189,4 @@ def stardist_cap_px(method, vram_gib, use_gpu) -> int:
 - **估计偏高**：tile 更小，速度略慢；结果像手动换网格一样有细小差别（§3）。
 - **估计偏低**：仍可能 OOM。笔记本实测后修正系数。
 - **回退**：`stardist_cap_px` 直接返回 60 MP，就恢复今天的行为。
+- **分配器上限过低**：引擎 OOM，或分配反复重试变慢。回退：`CUDA_MEMORY_FRACTION` 调高，或删去 `limit_cuda_memory` 的调用。

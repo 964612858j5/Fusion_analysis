@@ -86,7 +86,12 @@ IDENTITY_VERSION = 2
 #: (docs/stardist_torch_plan.md); only the inference implementation changed.
 #: hybrid 1 (2026-11-10): the Cellpose and StarDist parts as their own engines
 #: run them; bump it whenever either part's output changes.
-BEHAVIOR_VERSION = {"cellpose": 1, "stardist": 2, "mesmer": 2, "hybrid": 1}
+#: stardist 3, hybrid 2 (user ruling 2026-11-19): the memory-lean network
+#: (docs/v17_stardist_vram_tile_plan.md §2.5) is bit-identical on CPU and MPS,
+#: but on CUDA cuDNN may pick another algorithm for a strip's shape -- seen as
+#: one unit in the last place on a narrow window -- so the results may differ
+#: at the level of floating-point rounding.
+BEHAVIOR_VERSION = {"cellpose": 1, "stardist": 3, "mesmer": 2, "hybrid": 2}
 #: The LOGICAL model of each engine (its `models.json` key). Mesmer's is the
 #: Keras model; the file it loads is that model's torch conversion, stored as
 #: `MESMER_TORCH_ENTRY` -- the same weights, so the same model identity.
@@ -298,6 +303,13 @@ class CellposeEngine:
 #: the directory of an installed StarDist model (config.json,
 #: thresholds.json, weights_best.h5); unset -> `from_pretrained` (~/.keras)
 STARDIST_DIR_ENV = "BLOCK01_STARDIST_MODEL_PATH"
+#: The share of the CUDA card torch's allocator may hold in a StarDist (or
+#: hybrid) engine process (plan v0.4 §2.6): past it, torch hands back its
+#: cached free blocks and retries, instead of growing past the card -- which
+#: on Windows does not fail but spills into system memory, ~10x slower
+#: (laptop acceptance of 2439b9f). Below 1.0 to leave room for the CUDA
+#: context and the display; measured on the 6 GiB laptop.
+CUDA_MEMORY_FRACTION = 0.85
 
 
 class StardistEngine:
@@ -337,6 +349,7 @@ class StardistEngine:
             model = StarDist2D.from_pretrained(model_name)
         model.keras_model = network.TorchNetwork(params, dev)     # the one swap
         self._model = model
+        self._memory_fraction = limit_cuda_memory(dev)
         self.model_path = path
         self._numerics = dict(numerics.NUMERICS)
         self._artifact = {"entry": STARDIST_TORCH_ENTRY, "sha256": _file_sha256(path),
@@ -355,6 +368,7 @@ class StardistEngine:
                 "stardist_backend": "torch", "stardist_numerics": dict(self._numerics),
                 "tf_gpu_physical": len(self._tf_gpu["physical_before"]),
                 "tf_gpu_hidden": not self._tf_gpu["logical_after"],
+                "cuda_memory_fraction": self._memory_fraction,
                 **_common_lib_versions()}
 
     def model_resolved_path(self):
@@ -376,10 +390,6 @@ class StardistEngine:
         cuda = str(self._model.keras_model.device).startswith("cuda")
         if cuda:
             import torch
-            # the cache other calls left (tiles of other sizes, the hybrid's
-            # Cellpose) back to the driver first: on a 6 GiB card it had
-            # grown past the card into shared memory (plan v0.3 §2.6)
-            release_cuda_cache()
             torch.cuda.reset_peak_memory_stats(self._model.keras_model.device)
         started = time.perf_counter()
         labels, _ = self._model.predict_instances(x, **kwargs)
@@ -403,12 +413,26 @@ def _stardist_diagnostic(network, shape, total_s, cuda):
     print(line, file=sys.stderr, flush=True)
 
 
+def limit_cuda_memory(dev):
+    """Cap what torch's allocator may hold on the CUDA card at
+    `CUDA_MEMORY_FRACTION` of it (plan v0.4 §2.6); process-wide, so in the
+    hybrid process Cellpose is held to the same budget. Returns the fraction
+    set, or None off CUDA. Changes no value: only when cached blocks are
+    handed back."""
+    if not str(dev).startswith("cuda"):
+        return None
+    import torch
+    torch.cuda.set_per_process_memory_fraction(CUDA_MEMORY_FRACTION, torch.device(dev))
+    return CUDA_MEMORY_FRACTION
+
+
 def release_cuda_cache():
     """Hand the CUDA memory torch keeps cached but no longer uses back to the
-    driver (plan v0.3 §2.6): before every StarDist call -- after the hybrid's
-    Cellpose part, and after tiles of other sizes -- so StarDist and cuDNN's
-    workspace fit the card. Live tensors and the weights stay; results are
-    unchanged. A no-op without CUDA."""
+    driver (plan v0.4 §2.6): between the hybrid's Cellpose and StarDist parts,
+    so cuDNN's own workspace for StarDist can be had. Not before every
+    StarDist call: on the laptop that made every tile allocate afresh and
+    spill (acceptance of 2439b9f). Live tensors and the weights stay; results
+    are unchanged. A no-op without CUDA."""
     torch = sys.modules.get("torch")
     if torch is not None and torch.cuda.is_available() and torch.cuda.is_initialized():
         torch.cuda.empty_cache()
@@ -593,7 +617,7 @@ def run(engine_obj, method, image, params):
         # nuclei-DAPI on the input's last channel
         image = np.asarray(image)
         result["cell"] = engine_obj.cellpose.predict(image, params)
-        # (StarDist's predict hands Cellpose's spent cache back first, §2.6)
+        release_cuda_cache()              # Cellpose's spent cache, before StarDist (plan v0.4 §2.6)
         result["nucleus"] = engine_obj.stardist.predict(
             np.ascontiguousarray(image[..., -1]), params)
     elif method in CELL_AND_NUCLEUS_METHODS:

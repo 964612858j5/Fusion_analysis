@@ -34,7 +34,7 @@ def test_the_engine_declares_the_torch_identity_and_its_artifact(tmp_path):
     ep.close()
 
     identity = hello["identity"]
-    assert identity["behavior_version"] == 2            # user ruling 2026-11-10
+    assert identity["behavior_version"] == 3            # user ruling 2026-11-19 (lean network)
     assert identity["model_id"] == "stardist_2D_versatile_fluo"
     assert hello["device"] == "cpu"                     # cpu_only
     provenance = hello["provenance"]
@@ -183,7 +183,7 @@ def test_a_version_1_step1_result_is_reported_as_another_behaviour():
     old = {"version": 2, "engine": "stardist", "behavior_version": 1,
            "model_id": "stardist_2D_versatile_fluo"}
     current = engines.behavior_identity("stardist")
-    assert current["behavior_version"] == 2
+    assert current["behavior_version"] == 3
     comparison = engines.compare_identity(old, current)
     assert comparison["engine_differs"] is False
-    assert comparison["differences"] == [["behavior_version", 1, 2]]
+    assert comparison["differences"] == [["behavior_version", 1, 3]]

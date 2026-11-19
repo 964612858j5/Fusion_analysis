@@ -6,9 +6,15 @@ For each window size it runs the real 2D_versatile_fluo weights through
   * `graph.forward`           -- the memory-lean graph it runs now,
 under the product's numerics (`stardist_torch/numerics.py`), and reports
   * whether both heads are EQUAL (torch.equal), and the largest difference;
-  * each pass's peak allocated / reserved CUDA memory and seconds;
+  * each pass's peak allocated / reserved CUDA memory and seconds, and the
+    peak of cached free pieces split off larger blocks (`inactive_split`:
+    what reserved holds beyond allocated because of fragmentation);
   * the lean pass's peak bytes per input pixel (what sizes Step2's tiles).
 Windows the reference cannot hold are run with the lean graph only.
+
+As the engine does, torch's allocator is capped at
+`engines.CUDA_MEMORY_FRACTION` of the card (plan v0.4 §2.6);
+`--no-memory-limit` measures without the cap.
 
 The input is a DAPI window of a real slide (`--ome`, channel `--channel`),
 normalised as the engine normalises (`engines.stardist_input`) and padded to a
@@ -17,6 +23,7 @@ multiple of 16 as stardist pads; without `--ome`, a synthetic nucleus image.
 Usage (the Block01 environment, from the repository root):
     python scripts/stardist_vram_probe.py --ome C:\\path\\slide.ome.tif
     python scripts/stardist_vram_probe.py --json probe.json
+    python scripts/stardist_vram_probe.py --no-memory-limit
 It reads only; it writes nothing but the optional `--json` report.
 """
 import argparse
@@ -73,6 +80,7 @@ def _run(fn, params, x, device):
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats(device)
     base = torch.cuda.memory_allocated(device)
+    retries_before = int(torch.cuda.memory_stats(device).get("num_alloc_retries", 0))   # cumulative counter
     torch.cuda.synchronize(device)
     t0 = time.perf_counter()
     with numerics.numerics(device), torch.inference_mode():
@@ -81,8 +89,12 @@ def _run(fn, params, x, device):
     took = time.perf_counter() - t0
     gib = 1024.0 ** 3
     peak = torch.cuda.max_memory_allocated(device)
+    stats = torch.cuda.memory_stats(device)
+    retries = int(stats.get("num_alloc_retries", 0)) - retries_before
     return out, {"seconds": round(took, 3), "peak_allocated_gib": round(peak / gib, 3),
                  "peak_reserved_gib": round(torch.cuda.max_memory_reserved(device) / gib, 3),
+                 "peak_inactive_split_gib": round(stats.get("inactive_split_bytes.all.peak", 0) / gib, 3),
+                 "alloc_retries": retries,
                  "bytes_per_px": round((peak - base) / float(x.shape[2] * x.shape[3]), 1)}
 
 
@@ -91,6 +103,8 @@ def main():
     ap.add_argument("--ome", help="an OME-TIFF slide; its middle window is used")
     ap.add_argument("--channel", type=int, default=0, help="the DAPI channel index (default 0)")
     ap.add_argument("--json", help="write the report here as JSON")
+    ap.add_argument("--no-memory-limit", action="store_true",
+                    help="do not cap torch's allocator as the engine does")
     args = ap.parse_args()
 
     import torch
@@ -102,11 +116,14 @@ def main():
     entry = engines.manifest_entry(engines.STARDIST_TORCH_ENTRY)
     path = pathlib.Path(engines.model_path(engines.STARDIST_TORCH_ENTRY)) / weights.WEIGHTS_FILE
     params = weights.load(str(path), device, entry.get("content_sha256"))["tensors"]
+    fraction = None if args.no_memory_limit else engines.limit_cuda_memory(device)
     props = torch.cuda.get_device_properties(0)
     report = {"device": props.name, "total_gib": round(props.total_memory / 1024.0 ** 3, 2),
               "torch": torch.__version__, "cudnn": torch.backends.cudnn.version(),
+              "memory_fraction": fraction,
               "input": args.ome or "synthetic", "windows": []}
-    print(f"{props.name}, {report['total_gib']} GiB, torch {torch.__version__}, cuDNN {report['cudnn']}")
+    print(f"{props.name}, {report['total_gib']} GiB, torch {torch.__version__}, cuDNN {report['cudnn']}, "
+          f"allocator cap {fraction or 'none'}")
 
     for h, w in IDENTITY_SIZES + LEAN_SIZES:
         x = _input(args, h, w, device)
@@ -135,7 +152,8 @@ def main():
         ident = row.get("bit_identical", "-")
         print(f"{h}x{w}: identical={ident} diff={row.get('max_abs_diff', '-')} "
               f"lean peak {row['lean']['peak_allocated_gib']} GiB ({row['lean']['bytes_per_px']} B/px, "
-              f"{row['lean']['seconds']} s)"
+              f"{row['lean']['seconds']} s), reserved {row['lean']['peak_reserved_gib']} GiB, "
+              f"split {row['lean']['peak_inactive_split_gib']} GiB, retries {row['lean']['alloc_retries']}"
               + (f" | reference peak {row['reference']['peak_allocated_gib']} GiB, "
                  f"{row['reference']['seconds']} s" if isinstance(row.get("reference"), dict) else ""),
               flush=True)

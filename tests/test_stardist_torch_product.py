@@ -152,7 +152,7 @@ def test_step2_runs_through_the_engine_and_records_the_device(app, tmp_path, wan
     engine_meta = meta["seg_engine"]
     assert engine_meta["engine"] == "stardist"
     assert engine_meta["device"] == label
-    assert engine_meta["identity"]["behavior_version"] == 2
+    assert engine_meta["identity"]["behavior_version"] == 3
     assert engine_meta["provenance"]["model_artifact"]["entry"] == engines.STARDIST_TORCH_ENTRY
     masks = [p for p in pathlib.Path(worker.output_dir).rglob("*mask*.zarr")]
     assert masks, "the run wrote no mask"

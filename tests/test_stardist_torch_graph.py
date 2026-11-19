@@ -156,9 +156,15 @@ def _blobs(h, w, seed=1):
 @pytest.mark.parametrize("shape", [(64, 64), (512, 96), (528, 80), (1104, 208), (1040, 80),
                                    (2, 1104, 96)])            # (n, h, w): a batch of two
 def test_the_lean_forward_equals_the_plain_graph_bit_for_bit(device, shape):
-    """Strips (512 rows; 1104 = 2 strips + 80, 1040 = 2 strips + 16), padding
-    inside the convolution, ReLU in place and released skips change no
-    value: the heads are EQUAL, not close. Under the product's numerics."""
+    """Strips (512 rows, balanced: 1104 = 3 x 368, 1040 = 348 + 348 + 344), ReLU in
+    place and released skips change no value: on CPU and MPS the heads are
+    EQUAL, not close. Under the product's numerics.
+
+    On CUDA cuDNN chooses its algorithm by the input's shape, and a strip's
+    shape is not the whole window's: the laptop (RTX 3060, cuDNN 9.1) gave
+    one unit in the last place on 1040x80 (user ruling 2026-11-19: accepted,
+    BEHAVIOR_VERSION stardist 3). There both heads must be finite and within
+    a rounding bound -- a wrong halo or strip offset is off by far more."""
     from block01.seg_runner.stardist_torch import numerics
     params = {k: v.to(device) for k, v in _random_params(3)["tensors"].items()}
     n, shape = (shape[0], shape[1:]) if len(shape) == 3 else (1, shape)
@@ -166,4 +172,9 @@ def test_the_lean_forward_equals_the_plain_graph_bit_for_bit(device, shape):
     with numerics.numerics(device), torch.inference_mode():
         want = graph.forward_reference(params, x)
         got = graph.forward(params, x)
-    assert torch.equal(want[0], got[0]) and torch.equal(want[1], got[1])
+    for w, g in zip(want, got):
+        assert w.shape == g.shape and bool(torch.isfinite(g).all())
+        if device == "cuda":
+            torch.testing.assert_close(g, w, rtol=1e-5, atol=1e-5)
+        else:
+            assert torch.equal(w, g)

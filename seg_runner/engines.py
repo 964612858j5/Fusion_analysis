@@ -422,7 +422,12 @@ def limit_cuda_memory(dev):
     if not str(dev).startswith("cuda"):
         return None
     import torch
-    torch.cuda.set_per_process_memory_fraction(CUDA_MEMORY_FRACTION, torch.device(dev))
+    # an INDEX: torch refuses a bare "cuda" device here (laptop acceptance of
+    # 8071c25: "Expected a torch.device with a specified index")
+    index = torch.device(dev).index
+    if index is None:
+        index = torch.cuda.current_device()
+    torch.cuda.set_per_process_memory_fraction(CUDA_MEMORY_FRACTION, index)
     return CUDA_MEMORY_FRACTION
 
 

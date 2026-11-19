@@ -27,6 +27,29 @@ def _have_weights():
         pytest.skip(str(exc))
 
 
+@pytest.mark.parametrize("dev,current,want", [("cuda", 0, 0), ("cuda", 1, 1), ("cuda:1", 0, 1),
+                                              ("cpu", 0, None), ("mps", 0, None)])
+def test_the_cuda_memory_cap_is_set_on_an_indexed_card(monkeypatch, dev, current, want):
+    """plan v0.4 §2.6: the engine's device is the bare "cuda", which torch's
+    `set_per_process_memory_fraction` refuses (laptop acceptance of 8071c25:
+    no StarDist engine started on CUDA). The fake runs torch's own device
+    check, so a bare "cuda" fails here as it did there."""
+    from torch.cuda._utils import _get_device_index
+    calls = []
+
+    def fake(fraction, device=None):
+        calls.append((fraction, _get_device_index(device)))   # raises on a bare "cuda"
+
+    monkeypatch.setattr(torch.cuda, "set_per_process_memory_fraction", fake)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: current)
+    got = engines.limit_cuda_memory(dev)
+    if want is None:
+        assert got is None and calls == []
+    else:
+        assert got == engines.CUDA_MEMORY_FRACTION
+        assert calls == [(engines.CUDA_MEMORY_FRACTION, want)]
+
+
 def test_the_engine_declares_the_torch_identity_and_its_artifact(tmp_path):
     _have_weights()
     ep = EngineProcess("stardist", log_path=str(tmp_path / "e.log"), cpu_only=True)

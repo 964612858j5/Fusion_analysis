@@ -44,12 +44,17 @@ check_install() {
     [ -z "$why" ] || refuse "its viewer core does not fit this code: $why" "$INSTALL_HINT"
 }
 
+# The menu entry: FusionFlux with the logo. Its file name is the app's
+# desktop file name (ui/app_identity.py, Wayland), StartupWMClass the X11
+# window class Qt takes from the application name (FusionFlux), so the dock
+# shows the logo, not python's. Replaces the block01.desktop written before.
 write_desktop_entry() {
     local dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
     mkdir -p "$dir"
-    printf '[Desktop Entry]\nType=Application\nName=Block01\nComment=Multiplex imaging analysis\nExec="%s"\nTerminal=false\nCategories=Science;\n' \
-        "$REPO/scripts/block01" > "$dir/block01.desktop"
-    echo "[block01] desktop entry written: $dir/block01.desktop"
+    printf '[Desktop Entry]\nType=Application\nName=FusionFlux\nComment=Multiplex imaging analysis\nExec="%s"\nIcon=%s\nStartupWMClass=FusionFlux\nTerminal=false\nCategories=Science;\n' \
+        "$REPO/scripts/block01" "$REPO/ui/icons/fusionflux_256.png" > "$dir/fusionflux.desktop"
+    rm -f "$dir/block01.desktop"
+    echo "[block01] desktop entry written: $dir/fusionflux.desktop"
 }
 
 main() {

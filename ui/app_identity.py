@@ -10,6 +10,9 @@ rendered from it.
 * macOS: the Dock names a bare executable after its file name; the launcher
   (scripts/block01) starts Python through a link called FusionFlux. The Dock
   icon is the application's window icon.
+* Linux: the dock matches a window to the menu entry `scripts/block01
+  --desktop` writes (fusionflux.desktop, with the logo): by the desktop file
+  name on Wayland, by the window class (the application name) on X11.
 """
 
 import sys
@@ -19,6 +22,7 @@ from ..qt import QtGui
 
 APP_NAME = "FusionFlux"
 APP_USER_MODEL_ID = "FusionFlux.Block01"
+DESKTOP_FILE = "fusionflux"            # scripts/block01 --desktop writes fusionflux.desktop
 ICON_DIR = Path(__file__).resolve().parent / "icons"
 
 
@@ -47,3 +51,5 @@ def apply(app):
     """Name the application and give every window the logo."""
     app.setApplicationName(APP_NAME)
     app.setWindowIcon(app_icon())
+    if sys.platform.startswith("linux"):
+        app.setDesktopFileName(DESKTOP_FILE)
